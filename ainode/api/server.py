@@ -26,6 +26,7 @@ from ainode.discovery.broadcast import (
     NodeAnnouncement,
 )
 from ainode.discovery.cluster import ClusterState
+from ainode.engine.sharding_routes import register_sharding_routes
 
 from ainode import __version__
 
@@ -94,6 +95,9 @@ def create_app(
 
     # --- Training routes -----------------------------------------------------
     setup_training_routes(app, manager)
+
+    # --- Sharding routes ----------------------------------------------------
+    register_sharding_routes(app)
 
     app.router.add_static("/static", get_static_path(), name="static")
 

@@ -206,9 +206,10 @@ const Topology = (() => {
   }
 
   function getNodeHeight(n) {
-    const base = CONFIG.nodeHeight;
-    if (hoveredNodeId === n.id) return base + CONFIG.hoverExpandHeight;
-    return base;
+    let h = CONFIG.nodeHeight;
+    if (n.data && n.data.shard_role) h += 22;
+    if (hoveredNodeId === n.id) h += CONFIG.hoverExpandHeight + (n.data && n.data.sharded_model ? 16 : 0);
+    return h;
   }
 
   function selectNode(id) {
@@ -262,11 +263,12 @@ const Topology = (() => {
         const b = graphNodes[j];
         const aOnline = a.data.status === 'online';
         const bOnline = b.data.status === 'online';
+        const bothSharded = !!(a.data.shard_role && b.data.shard_role);
         graphEdges.push({
           source: a,
           target: b,
           solid: aOnline && bOnline,
-          label: 'LAN',
+          label: bothSharded ? 'SHARD' : 'LAN',
         });
       }
     }
@@ -557,9 +559,23 @@ const Topology = (() => {
     ctx.font = '10px JetBrains Mono, Fira Code, monospace';
     ctx.fillText(memText + '  |  ' + modelText, x + 12, nameY + 34);
 
+    // Shard role badge (visible without hover)
+    if (d.shard_role) {
+      const badgeY = nameY + 50;
+      const badgeColor = d.shard_role === 'head' ? c.green : c.purple;
+      ctx.fillStyle = hexToRgba(badgeColor, 0.15);
+      roundRect(ctx, x + 10, badgeY - 2, nw - 20, 18, 4);
+      ctx.fill();
+      ctx.font = 'bold 9px Inter, -apple-system, sans-serif';
+      ctx.fillStyle = badgeColor;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(d.shard_role.toUpperCase() + ' | Layers ' + (d.shard_layers || 'all') + ' | ~' + (d.shard_memory_gb || '?') + ' GB', x + 14, badgeY + 1);
+    }
+
     // Hover expanded info
     if (isHovered) {
-      const expandY = nameY + 52;
+      const expandY = d.shard_role ? nameY + 72 : nameY + 52;
       ctx.fillStyle = hexToRgba(c.border, 0.5);
       ctx.fillRect(x + 12, expandY - 4, nw - 24, 1);
 
