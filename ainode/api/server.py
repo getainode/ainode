@@ -9,8 +9,9 @@ from aiohttp import web
 
 from ainode.core.config import NodeConfig
 from ainode.core.gpu import detect_gpu, GPUInfo
-from ainode.web.serve import get_index_html, get_static_path
+from ainode.web.serve import get_index_html, get_onboarding_html, get_static_path
 from ainode.models.api_routes import register_model_routes
+from ainode.onboarding.api_routes import register_onboarding_routes
 from ainode.auth.middleware import AuthConfig, auth_middleware
 from ainode.auth.api_routes import register_auth_routes
 
@@ -49,6 +50,7 @@ def create_app(
 
     # --- AINode routes -------------------------------------------------------
     app.router.add_get("/", handle_index)
+    app.router.add_get("/onboarding", handle_onboarding)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nodes", handle_nodes)
@@ -60,6 +62,9 @@ def create_app(
 
     # --- Model management routes ---------------------------------------------
     register_model_routes(app)
+
+    # --- Onboarding routes ---------------------------------------------------
+    register_onboarding_routes(app)
 
     # --- Auth management routes ----------------------------------------------
     register_auth_routes(app)
@@ -109,9 +114,21 @@ async def cors_middleware(request: web.Request, handler):
 # Web UI
 # =============================================================================
 
-async def handle_index(_request: web.Request) -> web.Response:
-    """Serve the embedded dashboard HTML."""
+async def handle_index(request: web.Request) -> web.Response:
+    """Serve the dashboard, or redirect to onboarding if not set up."""
+    config: NodeConfig = request.app["config"]
+    if not config.onboarded:
+        raise web.HTTPFound("/onboarding")
     html = get_index_html()
+    return web.Response(text=html, content_type="text/html")
+
+
+async def handle_onboarding(request: web.Request) -> web.Response:
+    """Serve the onboarding wizard. Redirect to dashboard if already onboarded."""
+    config: NodeConfig = request.app["config"]
+    if config.onboarded:
+        raise web.HTTPFound("/")
+    html = get_onboarding_html()
     return web.Response(text=html, content_type="text/html")
 
 

@@ -13,6 +13,12 @@ def get_index_html() -> str:
     return index.read_text()
 
 
+def get_onboarding_html() -> str:
+    """Return the onboarding wizard HTML."""
+    onboarding = TEMPLATES_DIR / "onboarding.html"
+    return onboarding.read_text()
+
+
 def get_static_path() -> Path:
     """Return the path to static assets directory."""
     return STATIC_DIR
