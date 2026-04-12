@@ -9,6 +9,7 @@ from ainode.discovery.broadcast import (
     NodeAnnouncement,
     NodeStatus,
     DiscoveredNode,
+    BroadcastSender,
     BroadcastListener,
     ONLINE_THRESHOLD,
     STALE_THRESHOLD,
@@ -171,3 +172,49 @@ class TestBroadcastListenerRegistry:
         assert node is not None
         assert node.announcement.node_name == "spark-1"
         assert listener.get_node("nonexistent") is None
+
+
+class TestBroadcastSenderAnnouncement:
+    """Tests for BroadcastSender announcement creation and updates."""
+
+    def test_sender_holds_announcement(self):
+        ann = _make_announcement(node_id="sender-1", model="llama-3")
+        sender = BroadcastSender(announcement=ann)
+        assert sender.announcement.node_id == "sender-1"
+        assert sender.announcement.model == "llama-3"
+
+    def test_sender_update_announcement(self):
+        ann = _make_announcement(status="starting")
+        sender = BroadcastSender(announcement=ann)
+        sender.update_announcement(status="serving", model="new-model")
+        assert sender.announcement.status == "serving"
+        assert sender.announcement.model == "new-model"
+
+    def test_sender_ignores_unknown_fields(self):
+        ann = _make_announcement()
+        sender = BroadcastSender(announcement=ann)
+        sender.update_announcement(nonexistent_field="value")
+        assert not hasattr(sender.announcement, "nonexistent_field")
+
+
+class TestListenerUpdatesClusterState:
+    """Tests that BroadcastListener feeds into ClusterState correctly."""
+
+    def test_listener_feeds_cluster_state(self):
+        from ainode.discovery.cluster import ClusterState
+        local_ann = _make_announcement(node_id="local-1")
+        cluster = ClusterState(local_announcement=local_ann)
+        listener = BroadcastListener(local_node_id="local-1")
+
+        # Simulate receiving a remote announcement
+        remote_ann = _make_announcement(node_id="remote-1", node_name="spark-2")
+        listener._process_announcement(remote_ann)
+
+        # Sync into cluster
+        cluster.update_from_discovered(listener.registry)
+
+        nodes = cluster.get_nodes()
+        node_ids = [n.node_id for n in nodes]
+        assert "local-1" in node_ids
+        assert "remote-1" in node_ids
+        assert len(nodes) == 2
