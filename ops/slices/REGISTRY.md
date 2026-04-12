@@ -4,7 +4,10 @@
 
 | Slice | Owner | Branch | Status | Linear |
 |-------|-------|--------|--------|--------|
-| engine-vllm | Threadmaster | codex/engine-vllm | IN PROGRESS | — |
+| engine-vllm | Threadmaster | codex/engine-vllm | MERGED TO DEV | — |
+| api-proxy | Agent (pane 1) | codex/api-proxy | IN PROGRESS | — |
+| cli-polish | Agent (pane 2) | codex/cli-polish | IN PROGRESS | — |
+| discovery-cluster | Agent (pane 3) | codex/discovery-cluster | IN PROGRESS | — |
 
 ## Completed Slices
 
