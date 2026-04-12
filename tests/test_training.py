@@ -20,12 +20,12 @@ class TestTrainingConfig:
     def test_valid_config(self):
         config = TrainingConfig(
             base_model="meta-llama/Llama-3.2-3B-Instruct",
-            dataset_path="/data/train.jsonl",
+            dataset_path="user/my-dataset",
         )
         assert config.validate() == []
 
     def test_missing_base_model(self):
-        config = TrainingConfig(base_model="", dataset_path="/data/train.jsonl")
+        config = TrainingConfig(base_model="", dataset_path="user/my-dataset")
         errors = config.validate()
         assert any("base_model" in e for e in errors)
 
@@ -36,49 +36,49 @@ class TestTrainingConfig:
 
     def test_invalid_method(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", method="qlora"
+            base_model="model", dataset_path="user/dataset", method="qlora"
         )
         errors = config.validate()
         assert any("method" in e for e in errors)
 
     def test_invalid_num_epochs(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", num_epochs=0
+            base_model="model", dataset_path="user/dataset", num_epochs=0
         )
         errors = config.validate()
         assert any("num_epochs" in e for e in errors)
 
     def test_invalid_batch_size(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", batch_size=-1
+            base_model="model", dataset_path="user/dataset", batch_size=-1
         )
         errors = config.validate()
         assert any("batch_size" in e for e in errors)
 
     def test_invalid_learning_rate(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", learning_rate=0
+            base_model="model", dataset_path="user/dataset", learning_rate=0
         )
         errors = config.validate()
         assert any("learning_rate" in e for e in errors)
 
     def test_invalid_lora_rank(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", lora_rank=0
+            base_model="model", dataset_path="user/dataset", lora_rank=0
         )
         errors = config.validate()
         assert any("lora_rank" in e for e in errors)
 
     def test_invalid_lora_alpha(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", lora_alpha=0
+            base_model="model", dataset_path="user/dataset", lora_alpha=0
         )
         errors = config.validate()
         assert any("lora_alpha" in e for e in errors)
 
     def test_invalid_max_seq_length(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="/data", max_seq_length=0
+            base_model="model", dataset_path="user/dataset", max_seq_length=0
         )
         errors = config.validate()
         assert any("max_seq_length" in e for e in errors)
@@ -94,7 +94,7 @@ class TestTrainingConfig:
         assert len(errors) >= 3
 
     def test_defaults(self):
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         assert config.method == "lora"
         assert config.num_epochs == 3
         assert config.batch_size == 4
@@ -104,10 +104,10 @@ class TestTrainingConfig:
         assert config.max_seq_length == 2048
 
     def test_to_dict(self):
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         d = config.to_dict()
         assert d["base_model"] == "m"
-        assert d["dataset_path"] == "/d"
+        assert d["dataset_path"] == "user/d"
         assert isinstance(d, dict)
 
     def test_from_dict(self):
@@ -138,7 +138,7 @@ class TestTrainingConfig:
 
 class TestTrainingJob:
     def test_initial_state(self):
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         assert job.status == JobStatus.PENDING
         assert job.progress == 0.0
@@ -149,12 +149,12 @@ class TestTrainingJob:
         assert len(job.job_id) == 12
 
     def test_custom_job_id(self):
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config, job_id="custom123")
         assert job.job_id == "custom123"
 
     def test_get_status(self):
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         status = job.get_status()
         assert status["job_id"] == job.job_id
@@ -164,7 +164,7 @@ class TestTrainingJob:
 
     def test_output_dir_default(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         assert "output" in job.config.output_dir
         assert job.job_id in job.config.output_dir
@@ -172,7 +172,7 @@ class TestTrainingJob:
     def test_output_dir_custom(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
         config = TrainingConfig(
-            base_model="m", dataset_path="/d", output_dir="/custom/out"
+            base_model="m", dataset_path="user/d", output_dir="/custom/out"
         )
         job = TrainingJob(config)
         assert job.config.output_dir == "/custom/out"
@@ -180,7 +180,7 @@ class TestTrainingJob:
     @pytest.mark.asyncio
     async def test_cancel_pending_job(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         assert job.status == JobStatus.PENDING
         await job.stop()
@@ -189,7 +189,7 @@ class TestTrainingJob:
 
     def test_parse_progress(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         line = 'AINODE_PROGRESS:{"epoch":2,"loss":0.45,"progress":66.7}'
         job._parse_progress(line)
@@ -199,14 +199,14 @@ class TestTrainingJob:
 
     def test_parse_progress_invalid_json(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         job._parse_progress("AINODE_PROGRESS:{invalid}")
         assert job.current_epoch == 0  # Unchanged
 
     def test_parse_progress_no_marker(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
-        config = TrainingConfig(base_model="m", dataset_path="/d")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
         job = TrainingJob(config)
         job._parse_progress("some random log line")
         assert job.current_epoch == 0  # Unchanged
@@ -218,7 +218,7 @@ class TestTrainingJob:
 
 
 class TestTrainingManager:
-    def _make_config(self, model="m", dataset="/d"):
+    def _make_config(self, model="m", dataset="user/d"):
         return TrainingConfig(base_model=model, dataset_path=dataset)
 
     def test_submit_job(self):

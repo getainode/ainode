@@ -78,7 +78,6 @@ async def handle_onboarding_complete(request: web.Request) -> web.Response:
         config.node_name = node_name
 
     if model:
-    if model:
         config.model = model
         # Set quantization for AWQ models
         if "awq" in model.lower():
