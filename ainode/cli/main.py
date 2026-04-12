@@ -3,10 +3,30 @@
 import argparse
 import sys
 import uuid
+import time
+import threading
+
+from rich.console import Console
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.text import Text
 
 from ainode import __version__
 from ainode.core.config import NodeConfig, ensure_dirs
 from ainode.core.gpu import gpu_summary, detect_gpu
+
+console = Console()
+
+
+def _tail_log(path, lines=10):
+    """Print the last N lines of a log file."""
+    try:
+        with open(path) as f:
+            all_lines = f.readlines()
+        for line in all_lines[-lines:]:
+            console.print(f"    {line.rstrip()}")
+    except Exception:
+        pass
 
 
 BANNER = """
@@ -46,30 +66,41 @@ def cmd_start(args):
     print()
 
     # Start vLLM engine
-    print(f"  Model: {config.model}")
-    print(f"  API:   http://localhost:{config.api_port}/v1")
-    print(f"  Web:   http://localhost:{config.web_port}")
-    print()
-    print("  Starting inference engine...")
+    console.print(f"  Model: {config.model}")
+    console.print(f"  API:   http://localhost:{config.api_port}/v1")
+    console.print(f"  Web:   http://localhost:{config.web_port}")
+    console.print()
 
     from ainode.engine.vllm_engine import VLLMEngine
 
     engine = VLLMEngine(config)
-    if engine.start():
-        print("  Engine started. Open your browser to get started.")
-        print()
-        print(f"  Powered by argentos.ai")
-        print()
-
-        # Keep running until interrupted
-        try:
-            engine.process.wait()
-        except KeyboardInterrupt:
-            print("\n  Shutting down...")
-            engine.stop()
-    else:
-        print("  Failed to start engine. Check logs in ~/.ainode/logs/")
+    if not engine.start():
+        console.print("  [red]Failed to start engine.[/red] Check logs in ~/.ainode/logs/")
         sys.exit(1)
+
+    # Wait for readiness with spinner and log tailing
+    with Live(Spinner("dots", text="Starting inference engine..."), console=console, transient=True):
+        ready = engine.wait_ready(timeout=300)
+
+    if not ready:
+        console.print("  [red]Engine failed to become ready within 5 minutes.[/red]")
+        if engine.log_path and engine.log_path.exists():
+            console.print(f"  Last log lines:")
+            _tail_log(engine.log_path, lines=10)
+        engine.stop()
+        sys.exit(1)
+
+    console.print("  [green]Engine ready.[/green] Open your browser to get started.")
+    console.print()
+    console.print("  Powered by argentos.ai")
+    console.print()
+
+    # Keep running until interrupted
+    try:
+        engine.process.wait()
+    except KeyboardInterrupt:
+        console.print("\n  Shutting down...")
+        engine.stop()
 
 
 def cmd_stop(args):
@@ -82,14 +113,29 @@ def cmd_stop(args):
 def cmd_status(args):
     """Show cluster status."""
     print(BANNER)
-    print(f"  GPU: {gpu_summary()}")
+    console.print(f"  GPU: {gpu_summary()}")
 
     config = NodeConfig.load()
-    print(f"  Node ID: {config.node_id or 'not configured'}")
-    print(f"  Model: {config.model}")
-    print(f"  API: http://localhost:{config.api_port}/v1")
-    print(f"  Email: {config.email or 'not set'}")
-    print()
+    console.print(f"  Node ID: {config.node_id or 'not configured'}")
+    console.print(f"  Model: {config.model}")
+    console.print(f"  API: http://localhost:{config.api_port}/v1")
+    console.print(f"  Email: {config.email or 'not set'}")
+    console.print()
+
+    # Engine health check
+    from ainode.engine.vllm_engine import VLLMEngine
+    engine = VLLMEngine(config)
+    health = engine.health_check()
+
+    if health["api_responding"]:
+        console.print("  Engine: [green]running[/green]")
+        if health["models_loaded"]:
+            console.print(f"  Models: {', '.join(health['models_loaded'])}")
+    elif health["process_alive"]:
+        console.print("  Engine: [yellow]starting[/yellow] (process alive, API not ready)")
+    else:
+        console.print("  Engine: [red]stopped[/red]")
+    console.print()
 
 
 def cmd_models(args):
