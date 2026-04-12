@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ainode"
+version = "0.1.0"
+description = "Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning in your browser."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Argentos AI", email = "hello@argentos.ai"},
+]
+keywords = ["nvidia", "gpu", "llm", "inference", "fine-tuning", "vllm", "local-ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pynvml>=11.5.0",
+    "psutil>=5.9.0",
+    "aiohttp>=3.9.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+engine = [
+    "vllm>=0.6.0",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+ainode = "ainode.cli.main:main"
+
+[project.urls]
+Homepage = "https://ainode.dev"
+Documentation = "https://ainode.dev/docs"
+Repository = "https://github.com/getainode/ainode"
+"Bug Tracker" = "https://github.com/getainode/ainode/issues"
+"Powered By" = "https://argentos.ai"
+
+[tool.setuptools.packages.find]
+include = ["ainode*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
