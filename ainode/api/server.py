@@ -10,6 +10,7 @@ from aiohttp import web
 from ainode.core.config import NodeConfig
 from ainode.core.gpu import detect_gpu, GPUInfo
 from ainode.web.serve import get_index_html, get_static_path
+from ainode.models.api_routes import register_model_routes
 
 __version__ = "0.1.0"
 
@@ -50,6 +51,9 @@ def create_app(
     app.router.add_get("/v1/models", proxy_to_vllm)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
+
+    # --- Model management routes ---------------------------------------------
+    register_model_routes(app)
 
     # --- Static files --------------------------------------------------------
     app.router.add_static("/static", get_static_path(), name="static")
