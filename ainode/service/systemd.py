@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 
 SERVICE_NAME = "ainode.service"
@@ -40,7 +39,7 @@ Environment=AINODE_HOME={ainode_home}
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths={ainode_home}
+ReadWritePaths={ainode_home} {home}/.cache/huggingface
 
 [Install]
 WantedBy={wanted_by}
@@ -85,6 +84,7 @@ def generate_unit_file(user_mode: bool = False) -> str:
     return UNIT_FILE_TEMPLATE.format(
         exec_start=f"{_ainode_bin()} start",
         ainode_home=_ainode_home(),
+        home=str(Path.home()),
         wanted_by=wanted_by,
     )
 
