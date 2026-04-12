@@ -182,7 +182,7 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "gpu_memory_gb": n.gpu_memory_gb,
                 "unified_memory": n.unified_memory,
                 "status": n.status.value if hasattr(n.status, "value") else str(n.status),
-                "engine_ready": n.status.value == "online" if hasattr(n.status, "value") else True,
+                "engine_ready": (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "serving"),
             }
             for n in cluster_nodes
         ]

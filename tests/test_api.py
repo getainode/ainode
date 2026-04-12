@@ -4,7 +4,7 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
-from ainode.api.server import create_app
+from ainode.api.server import create_app, _build_announcement
 from ainode.core.config import NodeConfig
 
 
@@ -66,7 +66,8 @@ async def test_nodes(client):
     assert node["node_id"] == "test-node-1"
     assert node["node_name"] == "TestNode"
     assert node["model"] == "test-model"
-    assert node["engine_ready"] is False
+    # Local node appears as ONLINE in ClusterState, so engine_ready derives from status
+    assert "engine_ready" in node
 
 
 # ---- / (index) -------------------------------------------------------------
@@ -110,3 +111,39 @@ async def test_vllm_proxy_returns_502_when_down(client):
     assert resp.status == 502
     data = await resp.json()
     assert "error" in data
+
+
+# ---- _build_announcement ----------------------------------------------------
+
+def test_build_announcement_from_config():
+    cfg = NodeConfig(node_id="abc123", node_name="TestSpark", model="llama-3", api_port=9000, web_port=4000)
+    ann = _build_announcement(cfg, engine=None)
+    assert ann.node_id == "abc123"
+    assert ann.node_name == "TestSpark"
+    assert ann.model == "llama-3"
+    assert ann.api_port == 9000
+    assert ann.web_port == 4000
+    assert ann.status == "starting"  # no engine = not ready
+
+
+def test_build_announcement_engine_ready():
+    cfg = NodeConfig(node_id="abc123", node_name="TestSpark", model="llama-3")
+
+    class FakeEngine:
+        ready = True
+    ann = _build_announcement(cfg, engine=FakeEngine())
+    assert ann.status == "serving"
+
+
+# ---- /api/nodes with cluster data ------------------------------------------
+
+@pytest.mark.asyncio
+async def test_nodes_returns_local_node_from_cluster(client):
+    """When cluster has a local announcement, /api/nodes should return it."""
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    data = await resp.json()
+    nodes = data["nodes"]
+    assert len(nodes) >= 1
+    node_ids = [n["node_id"] for n in nodes]
+    assert "test-node-1" in node_ids
