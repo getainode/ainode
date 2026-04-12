@@ -23,9 +23,6 @@ PID_FILE = AINODE_HOME / "ainode.pid"
 VLLM_LOG = LOGS_DIR / "vllm.log"
 
 
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
 
 def _banner():
     """Return a Rich Panel banner for AINode."""
@@ -50,18 +47,13 @@ def _banner():
     )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _write_pid():
-    """Write current PID to the PID file."""
     AINODE_HOME.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
 
 
 def _read_pid():
-    """Read PID from file, return int or None."""
     try:
         return int(PID_FILE.read_text().strip())
     except Exception:
@@ -69,7 +61,6 @@ def _read_pid():
 
 
 def _remove_pid():
-    """Remove the PID file."""
     try:
         PID_FILE.unlink(missing_ok=True)
     except Exception:
@@ -77,7 +68,6 @@ def _remove_pid():
 
 
 def _pid_alive(pid):
-    """Check if a PID is alive."""
     if pid is None:
         return False
     try:
@@ -88,17 +78,16 @@ def _pid_alive(pid):
 
 
 def _tail_log(path, lines=10):
-    """Return the last N lines of a log file."""
+    """Return the last N lines of a log file without reading the entire file."""
+    from collections import deque
     try:
         with open(path) as f:
-            all_lines = f.readlines()
-        return all_lines[-lines:]
+            return list(deque(f, maxlen=lines))
     except Exception:
         return []
 
 
 def _gpu_info_table(gpu):
-    """Build a Rich table for GPU info."""
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("key", style="bold cyan", no_wrap=True)
     table.add_column("value")
@@ -111,13 +100,10 @@ def _gpu_info_table(gpu):
     return table
 
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 def cmd_start(args):
     """Start AINode."""
-    from ainode.core.gpu import gpu_summary, detect_gpu
+    from ainode.core.gpu import detect_gpu
     console.print(_banner())
     ensure_dirs()
 
@@ -251,7 +237,7 @@ def cmd_stop(args):
 
 def cmd_status(args):
     """Show cluster status with Rich formatting."""
-    from ainode.core.gpu import gpu_summary, detect_gpu
+    from ainode.core.gpu import detect_gpu
     console.print(_banner())
 
     config = NodeConfig.load()
@@ -427,9 +413,6 @@ def cmd_logs(args):
         console.print()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def cmd_service(args):
     """Manage AINode systemd service."""
@@ -437,8 +420,6 @@ def cmd_service(args):
         install_service,
         enable_service,
         start_service,
-        stop_service,
-        disable_service,
         uninstall_service,
         status_service,
         get_journal_lines,

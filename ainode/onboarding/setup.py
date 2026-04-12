@@ -18,34 +18,29 @@ def run_onboarding(config: NodeConfig) -> NodeConfig:
 
         # Suggest a model based on memory
         if mem_gb >= 80:
-            suggested = "meta-llama/Llama-3.1-70B-Instruct-AWQ"
             suggestion_note = "70B (you have plenty of memory)"
         elif mem_gb >= 20:
-            suggested = "meta-llama/Llama-3.1-8B-Instruct"
             suggestion_note = "8B (good balance of quality and speed)"
         else:
-            suggested = "meta-llama/Llama-3.2-3B-Instruct"
             suggestion_note = "3B (fits your memory)"
         print(f"  Suggested model: {suggestion_note}\n")
     else:
         print("  No NVIDIA GPU detected. AINode will run in CPU mode.\n")
-        suggested = "meta-llama/Llama-3.2-3B-Instruct"
 
     # Step 2: Email (for updates and support)
     print("  Step 1/3 — Enter your email (for updates, optional)")
     email = input("  Email: ").strip()
     if email and _is_valid_email(email):
         config.email = email
-        _register_install(email, gpu)
     elif email:
         print("  Invalid email, skipping.\n")
 
     # Step 3: Model selection
-    print(f"\n  Step 2/3 — Choose your model")
-    print(f"  [1] Llama 3.2 3B  (quick start, ~6 GB)")
-    print(f"  [2] Llama 3.1 8B  (recommended, ~16 GB)")
-    print(f"  [3] Llama 3.1 70B (advanced, ~35 GB AWQ)")
-    print(f"  [4] Custom model")
+    print("\n  Step 2/3 — Choose your model")
+    print("  [1] Llama 3.2 3B  (quick start, ~6 GB)")
+    print("  [2] Llama 3.1 8B  (recommended, ~16 GB)")
+    print("  [3] Llama 3.1 70B (advanced, ~35 GB AWQ)")
+    print("  [4] Custom model")
     print()
 
     choice = input("  Choice [2]: ").strip() or "2"
@@ -68,7 +63,7 @@ def run_onboarding(config: NodeConfig) -> NodeConfig:
         config.model = models["2"]
 
     # Step 4: Node name
-    print(f"\n  Step 3/3 — Name this node (optional)")
+    print("\n  Step 3/3 — Name this node (optional)")
     name = input("  Node name [my-ainode]: ").strip() or "my-ainode"
     config.node_name = name
 
@@ -82,28 +77,3 @@ def run_onboarding(config: NodeConfig) -> NodeConfig:
 
 def _is_valid_email(email: str) -> bool:
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email))
-
-
-def _register_install(email: str, gpu=None):
-    """Send install registration to argentos.ai (non-blocking, best-effort)."""
-    try:
-        import urllib.request
-        import json
-
-        data = {
-            "email": email,
-            "gpu": gpu.name if gpu else "none",
-            "memory_gb": gpu.memory_total_mb // 1024 if gpu else 0,
-            "source": "ainode-onboarding",
-        }
-
-        # TODO: Set up registration endpoint at argentos.ai
-        # req = urllib.request.Request(
-        #     "https://argentos.ai/api/register",
-        #     data=json.dumps(data).encode(),
-        #     headers={"Content-Type": "application/json"},
-        #     method="POST",
-        # )
-        # urllib.request.urlopen(req, timeout=5)
-    except Exception:
-        pass  # Never block onboarding for telemetry

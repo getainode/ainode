@@ -124,7 +124,6 @@ def main() -> None:
         )
 
     dataset = dataset.map(tokenize_fn, batched=True, remove_columns=dataset.column_names)
-    dataset = dataset.rename_column("input_ids", "input_ids")
     # Set labels = input_ids for causal LM
     dataset = dataset.map(lambda x: {"labels": x["input_ids"]})
 

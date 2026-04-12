@@ -15,8 +15,7 @@ from ainode.onboarding.api_routes import register_onboarding_routes
 from ainode.auth.middleware import AuthConfig, auth_middleware
 from ainode.auth.api_routes import register_auth_routes
 
-__version__ = "0.1.0"
-
+from ainode import __version__
 
 def create_app(
     config: Optional[NodeConfig] = None,
@@ -34,7 +33,6 @@ def create_app(
     if config is None:
         config = NodeConfig()
 
-    # Load auth config from disk
     auth_config = AuthConfig.load()
 
     app = web.Application(middlewares=[cors_middleware, auth_middleware])
@@ -44,54 +42,36 @@ def create_app(
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
 
-    # --- Lifecycle -----------------------------------------------------------
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
 
-    # --- AINode routes -------------------------------------------------------
     app.router.add_get("/", handle_index)
     app.router.add_get("/onboarding", handle_onboarding)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nodes", handle_nodes)
 
-    # --- OpenAI-compatible proxy routes --------------------------------------
     app.router.add_get("/v1/models", proxy_to_vllm)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
 
-    # --- Model management routes ---------------------------------------------
     register_model_routes(app)
 
-    # --- Onboarding routes ---------------------------------------------------
     register_onboarding_routes(app)
 
-    # --- Auth management routes ----------------------------------------------
     register_auth_routes(app)
 
-    # --- Static files --------------------------------------------------------
     app.router.add_static("/static", get_static_path(), name="static")
 
     return app
 
-
-# =============================================================================
-# Lifecycle helpers
-# =============================================================================
-
 async def _on_startup(app: web.Application) -> None:
     app["client_session"] = aiohttp.ClientSession()
-
 
 async def _on_cleanup(app: web.Application) -> None:
     session: Optional[aiohttp.ClientSession] = app.get("client_session")
     if session and not session.closed:
         await session.close()
-
-
-# =============================================================================
-# Middleware
-# =============================================================================
 
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
@@ -109,11 +89,6 @@ async def cors_middleware(request: web.Request, handler):
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return resp
 
-
-# =============================================================================
-# Web UI
-# =============================================================================
-
 async def handle_index(request: web.Request) -> web.Response:
     """Serve the dashboard, or redirect to onboarding if not set up."""
     config: NodeConfig = request.app["config"]
@@ -121,7 +96,6 @@ async def handle_index(request: web.Request) -> web.Response:
         raise web.HTTPFound("/onboarding")
     html = get_index_html()
     return web.Response(text=html, content_type="text/html")
-
 
 async def handle_onboarding(request: web.Request) -> web.Response:
     """Serve the onboarding wizard. Redirect to dashboard if already onboarded."""
@@ -131,15 +105,9 @@ async def handle_onboarding(request: web.Request) -> web.Response:
     html = get_onboarding_html()
     return web.Response(text=html, content_type="text/html")
 
-
-# =============================================================================
-# AINode API endpoints
-# =============================================================================
-
 async def handle_health(_request: web.Request) -> web.Response:
     """Simple liveness probe."""
     return web.json_response({"status": "ok"})
-
 
 async def handle_status(request: web.Request) -> web.Response:
     """Return rich node status."""
@@ -173,7 +141,6 @@ async def handle_status(request: web.Request) -> web.Response:
         "api_port": config.api_port,
     })
 
-
 async def handle_nodes(request: web.Request) -> web.Response:
     """Return the list of known cluster nodes (stub: just this node)."""
     config: NodeConfig = request.app["config"]
@@ -192,11 +159,6 @@ async def handle_nodes(request: web.Request) -> web.Response:
         "engine_ready": engine_ready,
     }
     return web.json_response({"nodes": [node]})
-
-
-# =============================================================================
-# vLLM proxy
-# =============================================================================
 
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     """Forward the request to the local vLLM server and stream the response back."""
@@ -243,11 +205,6 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
             {"error": {"message": "vLLM engine not reachable", "type": "server_error"}},
             status=502,
         )
-
-
-# =============================================================================
-# Convenience runner
-# =============================================================================
 
 def run_server(config: Optional[NodeConfig] = None, engine=None) -> None:
     """Start the API server (blocking)."""
