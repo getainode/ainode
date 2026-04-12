@@ -1,5 +1,6 @@
 """vLLM engine wrapper — manages the vLLM inference server lifecycle."""
 
+import logging
 import subprocess
 import signal
 import os
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Optional, Callable
 from ainode.core.config import NodeConfig, LOGS_DIR
 from ainode.core.gpu import detect_gpu
+
+logger = logging.getLogger(__name__)
 
 
 class VLLMEngine:
@@ -112,7 +115,7 @@ class VLLMEngine:
         """Check if vLLM is healthy and responding.
 
         Works both when this instance owns the process and when checking
-        an externally-running vLLM server (e.g. from `ainode status`).
+        an externally-running vLLM server (e.g. from ``ainode status``).
         """
         import urllib.request
         import json
@@ -160,3 +163,76 @@ class VLLMEngine:
     @property
     def log_path(self) -> Optional[Path]:
         return self._log_file
+
+    # --- Distributed / Sharded Inference ---
+
+    def build_distributed_cmd(self, sharding_config) -> list[str]:
+        """Generate vLLM launch args for distributed inference."""
+        from ainode.engine.sharding import ShardingConfig
+
+        cmd = self.build_cmd()
+
+        if not isinstance(sharding_config, ShardingConfig):
+            return cmd
+
+        tp = sharding_config.tensor_parallel_size
+        pp = sharding_config.pipeline_parallel_size
+
+        if tp > 1:
+            cmd.extend(["--tensor-parallel-size", str(tp)])
+        if pp > 1:
+            cmd.extend(["--pipeline-parallel-size", str(pp)])
+
+        if sharding_config.model and sharding_config.model != self.config.model:
+            try:
+                model_idx = cmd.index("--model")
+                cmd[model_idx + 1] = sharding_config.model
+            except (ValueError, IndexError):
+                pass
+
+        return cmd
+
+    def launch_distributed(self, sharding_config) -> bool:
+        """Launch vLLM with distributed sharding via Ray."""
+        from ainode.engine.sharding import ShardingConfig
+
+        if self.process and self.process.poll() is None:
+            logger.warning("Engine already running, stop it first")
+            return False
+
+        if not isinstance(sharding_config, ShardingConfig):
+            logger.error("Invalid sharding config")
+            return False
+
+        cmd = self.build_distributed_cmd(sharding_config)
+        env = os.environ.copy()
+
+        if sharding_config.is_distributed:
+            if sharding_config.ray_head_address:
+                env["RAY_ADDRESS"] = sharding_config.ray_head_address
+            logger.info(
+                "Launching distributed vLLM: TP=%d PP=%d across %d nodes",
+                sharding_config.tensor_parallel_size,
+                sharding_config.pipeline_parallel_size,
+                len(sharding_config.nodes),
+            )
+        else:
+            env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+            logger.info("Launching single-node vLLM with TP=%d", sharding_config.tensor_parallel_size)
+
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        self._log_file = LOGS_DIR / "vllm.log"
+
+        self.process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        self._log_thread = threading.Thread(target=self._stream_logs, daemon=True)
+        self._log_thread.start()
+
+        return self.process.poll() is None

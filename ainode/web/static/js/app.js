@@ -17,6 +17,7 @@ const AINode = {
     abortController: null,
     historyVisible: true,
     streamMetrics: { ttft: null, tps: 0, tokenCount: 0, startTime: 0, firstTokenTime: 0 },
+    shardingStatus: null,
   },
 
   init() {
@@ -138,9 +139,10 @@ const AINode = {
   async fetchJSON(url) { try { const resp = await fetch(url); if (!resp.ok) return null; return await resp.json(); } catch(e) { return null; } },
 
   async refresh() {
-    const [status, nodes] = await Promise.all([this.fetchJSON('/api/status'), this.fetchJSON('/api/nodes')]);
+    const [status, nodes, sharding] = await Promise.all([this.fetchJSON('/api/status'), this.fetchJSON('/api/nodes'), this.fetchJSON('/api/sharding/status')]);
     this.state.status = status;
     this.state.nodes = nodes?.nodes || [];
+    this.state.shardingStatus = sharding;
     switch (this.state.currentView) {
       case 'dashboard': this.renderDashboard(); break;
       case 'chat': this.renderChatHeader(); break;
@@ -177,6 +179,15 @@ const AINode = {
         model: s.model || 'none',
         status: s.engine_ready ? 'online' : 'starting'
       }];
+      // Annotate topology nodes with sharding info
+      var shardInfo = this.state.shardingStatus && this.state.shardingStatus.active_sharding;
+      if (shardInfo && shardInfo.shard_map) {
+        topoNodes = topoNodes.map(function(n) {
+          var shard = shardInfo.shard_map[n.node_id];
+          if (shard) { n.shard_role = shard.role; n.shard_layers = shard.layers; n.shard_memory_gb = shard.estimated_memory_gb; n.sharded_model = shardInfo.model; }
+          return n;
+        });
+      }
       this.topology.update(topoNodes);
     }
 
@@ -378,13 +389,22 @@ const AINode = {
       sortSelect + '</div>' +
       '<div style="display:flex;gap:8px;margin-bottom:16px">' + filterPills + '</div>';
 
+    var totalClusterMem = nodes.reduce(function(s, n) { return s + (n.gpu_memory_gb || 0); }, 0);
+    var clusterNodeCount = nodes.length;
+
     html += models.map(function(model) {
       var isLoaded = loaded.includes(model.id);
       var fits = gpuMem >= model.sizeGb;
       var fitBadge = gpuMem > 0 ? (fits ? '<span class="model-badge" style="background:rgba(34,197,94,0.15);color:#22c55e">Fits GPU</span>' : '<span class="model-badge" style="background:rgba(239,68,68,0.15);color:#ef4444">Too large</span>') : '';
       var downloadBtn = !isLoaded ? '<button class="btn btn-sm btn-primary models-download-btn" data-model-id="' + self.esc(model.id) + '">Download</button>' : '';
       var statusBadge = isLoaded ? '<span class="model-badge loaded">Loaded</span>' : '<span class="model-badge available">Available</span>';
-      return '<div class="model-card" data-model-id="' + self.esc(model.id) + '"><div class="model-info"><div class="model-name">' + self.esc(model.id) + '</div><div class="model-meta">' + model.size + ' &middot; ' + self.esc(model.desc) + '</div></div><div class="model-status" style="display:flex;gap:8px;align-items:center">' + fitBadge + statusBadge + downloadBtn + '</div></div>';
+      var shardBtn = '';
+      if (!fits && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb) {
+        shardBtn = '<button class="btn btn-sm models-shard-btn" data-model-id="' + self.esc(model.id) + '" style="background:rgba(139,92,246,0.15);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3)">Shard Across Cluster</button>';
+      } else if (!fits && clusterNodeCount > 1) {
+        shardBtn = '<span class="model-badge" style="background:rgba(139,92,246,0.1);color:#8b5cf6;font-size:11px">Needs more nodes</span>';
+      }
+      return '<div class="model-card" data-model-id="' + self.esc(model.id) + '"><div class="model-info"><div class="model-name">' + self.esc(model.id) + '</div><div class="model-meta">' + model.size + ' &middot; ' + self.esc(model.desc) + '</div></div><div class="model-status" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + fitBadge + statusBadge + shardBtn + downloadBtn + '</div></div>';
     }).join('');
 
     if (models.length === 0) {
@@ -432,10 +452,33 @@ const AINode = {
       });
     });
 
+    // Bind shard buttons
+    container.querySelectorAll('.models-shard-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var modelId = btn.dataset.modelId;
+        btn.disabled = true; btn.textContent = 'Planning...';
+        fetch('/api/sharding/plan?model=' + encodeURIComponent(modelId)).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Shard Across Cluster'; return; }
+          var plan = data.plan, sm = plan.shard_map || {};
+          var h = '<div style="padding:12px;border:1px solid rgba(139,92,246,0.3);border-radius:8px;margin-top:8px;background:rgba(139,92,246,0.05)">';
+          h += '<div style="font-weight:600;margin-bottom:8px;color:#8b5cf6">Sharding Plan: ' + plan.strategy + '</div>';
+          h += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">World size: ' + plan.world_size + ' | TP: ' + plan.tensor_parallel_size + ' | PP: ' + plan.pipeline_parallel_size + ' | Memory: ' + plan.total_memory_required_gb + ' GB</div>';
+          Object.keys(sm).forEach(function(nid) { var s = sm[nid]; var rc = s.role === 'head' ? '#22c55e' : '#4a90d9'; h += '<div style="display:flex;justify-content:space-between;padding:6px 8px;margin:4px 0;background:rgba(255,255,255,0.03);border-radius:4px;font-size:12px"><span><span style="color:' + rc + ';font-weight:600">' + s.role.toUpperCase() + '</span> ' + self.esc(nid) + '</span><span style="color:var(--text-muted)">Layers ' + (s.layers || 'all') + ' | ~' + s.estimated_memory_gb + ' GB</span></div>'; });
+          h += '<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-sm btn-primary shard-launch-btn" data-model-id="' + self.esc(modelId) + '">Launch Sharded</button><button class="btn btn-sm btn-ghost shard-cancel-btn">Cancel</button></div></div>';
+          var card = btn.closest('.model-card'), ep = card.querySelector('.shard-preview'); if (ep) ep.remove();
+          var pe = document.createElement('div'); pe.className = 'shard-preview'; pe.innerHTML = h; card.appendChild(pe);
+          btn.disabled = false; btn.textContent = 'Shard Across Cluster';
+          pe.querySelector('.shard-launch-btn').addEventListener('click', function(ev) { ev.stopPropagation(); var lb = ev.target; lb.disabled = true; lb.textContent = 'Launching...'; fetch('/api/sharding/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelId }) }).then(function(r) { return r.json(); }).then(function(res) { if (res.error) { self.toast(res.error, 'error'); lb.disabled = false; lb.textContent = 'Launch Sharded'; } else { self.toast('Sharded model launching: ' + modelId, 'success'); self.refresh(); } }).catch(function(err) { self.toast('Error: ' + err.message, 'error'); lb.disabled = false; lb.textContent = 'Launch Sharded'; }); });
+          pe.querySelector('.shard-cancel-btn').addEventListener('click', function(ev) { ev.stopPropagation(); pe.remove(); });
+        }).catch(function(err) { self.toast('Error: ' + err.message, 'error'); btn.disabled = false; btn.textContent = 'Shard Across Cluster'; });
+      });
+    });
+
     // Bind expandable model details
     container.querySelectorAll('.model-card').forEach(function(card) {
       card.addEventListener('click', function(e) {
-        if (e.target.closest('.models-download-btn')) return;
+        if (e.target.closest('.models-download-btn') || e.target.closest('.models-shard-btn') || e.target.closest('.shard-preview')) return;
         var existing = card.querySelector('.model-details-expanded');
         if (existing) { existing.remove(); return; }
         var mid = card.dataset.modelId;
@@ -497,7 +540,7 @@ const AINode = {
   renderTrainingForm(container) {
     var models = this.trainingModels;
     var optionsHtml = models.map(m => '<option value="' + this.esc(m.id) + '">' + this.esc(m.name) + ' (' + m.size + ')</option>').join('');
-    container.innerHTML = '<div class="training-form-wrapper"><div class="training-form-header"><button class="btn btn-ghost" id="training-back-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>Back to Jobs</button><h2 class="training-form-title">New Training Job</h2></div><form id="training-form" class="training-form"><div class="form-section"><div class="form-section-title">Model</div><div class="form-group"><label class="form-label" for="train-model">Base Model</label><select id="train-model" class="form-select" required>' + optionsHtml + '</select></div><div class="form-group"><label class="form-label" for="train-model-custom">Custom Model ID (optional)</label><input type="text" id="train-model-custom" class="form-input" placeholder="e.g. org/my-model"></div></div><div class="form-section"><div class="form-section-title">Dataset</div><div class="form-group"><label class="form-label" for="train-dataset">Dataset Path</label><input type="text" id="train-dataset" class="form-input" placeholder="/path/to/dataset.jsonl" required></div></div><div class="form-section"><div class="form-section-title">Training Method</div><div class="form-group"><div class="method-toggle"><button type="button" class="method-btn active" data-method="lora"><div class="method-btn-title">LoRA</div><div class="method-btn-desc">Recommended. Trains adapter weights only.</div></button><button type="button" class="method-btn" data-method="full"><div class="method-btn-title">Full Fine-Tune</div><div class="method-btn-desc">Updates all model weights.</div></button></div><input type="hidden" id="train-method" value="lora"></div></div><div class="form-section"><div class="form-section-title collapsible" id="advanced-toggle"><span>Advanced Settings</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="6 9 12 15 18 9"/></svg></div><div class="advanced-settings collapsed" id="advanced-settings"><div class="form-grid"><div class="form-group"><label class="form-label">Epochs</label><input type="number" id="train-epochs" class="form-input" value="3" min="1" max="100"></div><div class="form-group"><label class="form-label">Batch Size</label><input type="number" id="train-batch" class="form-input" value="4" min="1" max="128"></div><div class="form-group"><label class="form-label">Learning Rate</label><input type="text" id="train-lr" class="form-input" value="2e-4"></div><div class="form-group"><label class="form-label">Max Seq Length</label><input type="number" id="train-seq-len" class="form-input" value="2048" min="128" max="32768" step="128"></div></div><div class="form-grid lora-settings" id="lora-settings"><div class="form-group"><label class="form-label">LoRA Rank</label><input type="number" id="train-lora-rank" class="form-input" value="16" min="1" max="256"></div><div class="form-group"><label class="form-label">LoRA Alpha</label><input type="number" id="train-lora-alpha" class="form-input" value="32" min="1" max="512"></div></div></div></div><div class="form-actions"><button type="button" class="btn btn-ghost" id="training-cancel-btn">Cancel</button><button type="submit" class="btn btn-primary btn-lg" id="training-submit-btn">Start Training</button></div></form></div>';
+    container.innerHTML = '<div class="training-form-wrapper"><div class="training-form-header"><button class="btn btn-ghost" id="training-back-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>Back to Jobs</button><h2 class="training-form-title">New Training Job</h2></div><form id="training-form" class="training-form"><div class="form-section"><div class="form-section-title">Model</div><div class="form-group"><label class="form-label" for="train-model">Base Model</label><select id="train-model" class="form-select" required>' + optionsHtml + '</select></div><div class="form-group"><label class="form-label" for="train-model-custom">Custom Model ID (optional)</label><input type="text" id="train-model-custom" class="form-input" placeholder="e.g. org/my-model"></div></div><div class="form-section"><div class="form-section-title">Dataset</div><div class="form-group"><label class="form-label" for="train-dataset">Dataset Path</label><input type="text" id="train-dataset" class="form-input" placeholder="my-dataset.jsonl" required><div class="form-hint">Place files in <code>~/.ainode/datasets/</code> and use the filename, or provide a full path under that directory. Supported formats: JSON, JSONL, CSV. Dataset fields: <code>text</code>, or <code>instruction</code>+<code>output</code>, or <code>prompt</code>+<code>completion</code>. You can also use a HuggingFace dataset name (e.g. <code>tatsu-lab/alpaca</code>).</div></div></div><div class="form-section"><div class="form-section-title">Training Method</div><div class="form-group"><div class="method-toggle"><button type="button" class="method-btn active" data-method="lora"><div class="method-btn-title">LoRA</div><div class="method-btn-desc">Recommended. Trains adapter weights only.</div></button><button type="button" class="method-btn" data-method="full"><div class="method-btn-title">Full Fine-Tune</div><div class="method-btn-desc">Updates all model weights.</div></button></div><input type="hidden" id="train-method" value="lora"></div></div><div class="form-section"><div class="form-section-title collapsible" id="advanced-toggle"><span>Advanced Settings</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="6 9 12 15 18 9"/></svg></div><div class="advanced-settings collapsed" id="advanced-settings"><div class="form-grid"><div class="form-group"><label class="form-label">Epochs</label><input type="number" id="train-epochs" class="form-input" value="3" min="1" max="100"></div><div class="form-group"><label class="form-label">Batch Size</label><input type="number" id="train-batch" class="form-input" value="4" min="1" max="128"></div><div class="form-group"><label class="form-label">Learning Rate</label><input type="text" id="train-lr" class="form-input" value="2e-4"></div><div class="form-group"><label class="form-label">Max Seq Length</label><input type="number" id="train-seq-len" class="form-input" value="2048" min="128" max="32768" step="128"></div></div><div class="form-grid lora-settings" id="lora-settings"><div class="form-group"><label class="form-label">LoRA Rank</label><input type="number" id="train-lora-rank" class="form-input" value="16" min="1" max="256"></div><div class="form-group"><label class="form-label">LoRA Alpha</label><input type="number" id="train-lora-alpha" class="form-input" value="32" min="1" max="512"></div></div></div></div><div class="form-actions"><button type="button" class="btn btn-ghost" id="training-cancel-btn">Cancel</button><button type="submit" class="btn btn-primary btn-lg" id="training-submit-btn">Start Training</button></div></form></div>';
     this.bindTrainingForm();
   },
 

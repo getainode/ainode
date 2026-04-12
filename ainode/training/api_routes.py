@@ -103,7 +103,7 @@ async def handle_get_logs(request: web.Request) -> web.Response:
 
     # Support ?tail=N to get only the last N log lines
     tail = request.query.get("tail")
-    logs = job.logs
+    logs = list(job.logs)
     if tail is not None:
         try:
             n = int(tail)
