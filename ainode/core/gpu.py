@@ -16,8 +16,14 @@ class GPUInfo:
     unified_memory: bool = False  # DGX Spark / GB10
 
 
-def detect_gpu() -> Optional[GPUInfo]:
+_gpu_cache: Optional[GPUInfo] = None
+
+
+def detect_gpu(use_cache: bool = True) -> Optional[GPUInfo]:
     """Detect NVIDIA GPU and return its capabilities."""
+    global _gpu_cache
+    if use_cache and _gpu_cache is not None:
+        return _gpu_cache
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -50,7 +56,7 @@ def detect_gpu() -> Optional[GPUInfo]:
 
         pynvml.nvmlShutdown()
 
-        return GPUInfo(
+        result = GPUInfo(
             name=name,
             memory_total_mb=memory_total,
             memory_free_mb=memory_free,
@@ -59,6 +65,8 @@ def detect_gpu() -> Optional[GPUInfo]:
             compute_capability=f"{major}.{minor}",
             unified_memory=unified,
         )
+        _gpu_cache = result
+        return result
     except Exception:
         return None
 

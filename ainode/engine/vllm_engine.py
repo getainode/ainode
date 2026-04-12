@@ -31,11 +31,13 @@ class VLLMEngine:
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", self.config.model,
-            "--host", self.config.host,
+            "--host", "127.0.0.1",
             "--port", str(self.config.api_port),
             "--gpu-memory-utilization", str(self.config.gpu_memory_utilization),
-            "--trust-remote-code",
-        ]
+            ]
+
+        if self.config.trust_remote_code:
+            cmd.append("--trust-remote-code")
 
         if self.config.max_model_len:
             cmd.extend(["--max-model-len", str(self.config.max_model_len)])
@@ -86,7 +88,7 @@ class VLLMEngine:
         if not self.process or not self.process.stdout:
             return
 
-        with open(self._log_file, "w") as log_f:
+        with open(self._log_file, "a") as log_f:
             for line in self.process.stdout:
                 log_f.write(line)
                 log_f.flush()

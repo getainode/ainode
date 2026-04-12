@@ -83,16 +83,22 @@ async def test_index_serves_html(client):
 # ---- CORS ------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_cors_headers(client):
-    resp = await client.get("/api/health")
-    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+async def test_cors_headers_localhost(client):
+    resp = await client.get("/api/health", headers={"Origin": "http://localhost:3000"})
+    assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+
+
+@pytest.mark.asyncio
+async def test_cors_headers_rejected(client):
+    resp = await client.get("/api/health", headers={"Origin": "http://evil.com"})
+    assert resp.headers.get("Access-Control-Allow-Origin") == ""
 
 
 @pytest.mark.asyncio
 async def test_cors_preflight(client):
-    resp = await client.options("/api/health")
+    resp = await client.options("/api/health", headers={"Origin": "http://127.0.0.1:3000"})
     assert resp.status == 204
-    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+    assert resp.headers.get("Access-Control-Allow-Origin") == "http://127.0.0.1:3000"
     assert "POST" in resp.headers.get("Access-Control-Allow-Methods", "")
 
 

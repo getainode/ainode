@@ -104,7 +104,9 @@ async def cors_middleware(request: web.Request, handler):
         except web.HTTPException as exc:
             resp = exc
 
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    origin = request.headers.get("Origin", "")
+    allowed = origin if origin.startswith(("http://localhost", "http://127.0.0.1")) else ""
+    resp.headers["Access-Control-Allow-Origin"] = allowed
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return resp

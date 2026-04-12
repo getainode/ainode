@@ -32,6 +32,7 @@ class NodeConfig:
     max_model_len: Optional[int] = None
     gpu_memory_utilization: float = 0.9
     quantization: Optional[str] = None  # awq, gptq, fp8, None
+    trust_remote_code: bool = False
 
     # Cluster
     cluster_enabled: bool = True

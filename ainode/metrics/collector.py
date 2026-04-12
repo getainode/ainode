@@ -2,7 +2,7 @@
 
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Optional
 
 
@@ -22,7 +22,7 @@ class MetricsCollector:
         self._requests_by_model: dict[str, int] = defaultdict(int)
 
         # Latency tracking (store raw values for percentile computation)
-        self._latencies: list[float] = []
+        self._latencies: deque[float] = deque(maxlen=10000)
 
         # Token tracking
         self._total_tokens: int = 0

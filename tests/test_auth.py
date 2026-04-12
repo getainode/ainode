@@ -87,19 +87,20 @@ class TestAuthConfig:
     def test_generate_key(self, auth_config):
         entry = auth_config.generate_key()
         assert len(entry["key"]) == 32
-        assert entry["id"] == entry["key"][:8]
+        assert len(entry["id"]) == 8
         assert len(auth_config.api_keys) == 1
+        assert "key_hash" in auth_config.api_keys[0]
 
     def test_enable_generates_key(self, auth_config):
         entry = auth_config.enable()
         assert auth_config.enabled is True
         assert len(auth_config.api_keys) == 1
-        assert entry["key"] in auth_config.valid_keys()
+        assert auth_config.validate_token(entry["key"])
 
     def test_enable_reuses_existing_key(self, auth_config):
         first = auth_config.generate_key()
         entry = auth_config.enable()
-        assert entry["key"] == first["key"]
+        assert entry["id"] == auth_config.api_keys[0]["id"]
         assert len(auth_config.api_keys) == 1
 
     def test_disable(self, auth_config):
@@ -119,12 +120,12 @@ class TestAuthConfig:
 
     def test_save_and_load(self, auth_config, tmp_auth_file):
         auth_config.enable()
-        key = auth_config.api_keys[0]["key"]
+        key_hash = auth_config.api_keys[0]["key_hash"]
 
         # Load from disk
         loaded = AuthConfig.load()
         assert loaded.enabled is True
-        assert loaded.api_keys[0]["key"] == key
+        assert loaded.api_keys[0]["key_hash"] == key_hash
 
     def test_load_missing_file(self, tmp_auth_file):
         cfg = AuthConfig.load()
