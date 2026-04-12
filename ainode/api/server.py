@@ -1,5 +1,7 @@
 """AINode API proxy server — aiohttp app that serves the web UI and proxies to vLLM."""
 
+import asyncio
+import logging
 import time
 from dataclasses import asdict
 from typing import Optional
@@ -18,9 +20,16 @@ from ainode.metrics.collector import MetricsCollector
 from ainode.metrics.api_routes import register_metrics_routes
 from ainode.training.engine import TrainingManager
 from ainode.training.api_routes import setup_training_routes
+from ainode.discovery.broadcast import (
+    BroadcastSender,
+    BroadcastListener,
+    NodeAnnouncement,
+)
 from ainode.discovery.cluster import ClusterState
 
 from ainode import __version__
+
+logger = logging.getLogger(__name__)
 
 def create_app(
     config: Optional[NodeConfig] = None,
@@ -44,7 +53,10 @@ def create_app(
     # Instantiate shared services
     collector = MetricsCollector()
     manager = TrainingManager()
-    cluster = ClusterState()
+
+    # Build local node announcement for discovery
+    announcement = _build_announcement(config, engine)
+    cluster = ClusterState(local_announcement=announcement)
 
     app["config"] = config
     app["auth_config"] = auth_config
@@ -54,6 +66,9 @@ def create_app(
     app["metrics_collector"] = collector
     app["training_manager"] = manager
     app["cluster_state"] = cluster
+    app["announcement"] = announcement
+    app["broadcast_sender"] = None
+    app["broadcast_listener"] = None
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -84,10 +99,114 @@ def create_app(
 
     return app
 
+
+def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
+    """Create a NodeAnnouncement from current node state."""
+    gpu: Optional[GPUInfo] = detect_gpu()
+    gpu_name = gpu.name if gpu else "CPU"
+    gpu_memory_gb = round(gpu.memory_total_mb / 1024, 1) if gpu else 0.0
+    unified_memory = gpu.unified_memory if gpu else False
+
+    engine_ready = False
+    if engine is not None:
+        engine_ready = getattr(engine, "ready", False)
+
+    return NodeAnnouncement(
+        node_id=config.node_id or "unknown",
+        node_name=config.node_name or "unknown",
+        gpu_name=gpu_name,
+        gpu_memory_gb=gpu_memory_gb,
+        unified_memory=unified_memory,
+        model=config.model or "",
+        status="serving" if engine_ready else "starting",
+        api_port=config.api_port,
+        web_port=config.web_port,
+    )
+
+
 async def _on_startup(app: web.Application) -> None:
     app["client_session"] = aiohttp.ClientSession()
 
+    config: NodeConfig = app["config"]
+    announcement: NodeAnnouncement = app["announcement"]
+    cluster: ClusterState = app["cluster_state"]
+
+    if config.cluster_enabled:
+        # Start broadcast sender
+        sender = BroadcastSender(
+            announcement=announcement,
+            discovery_port=config.discovery_port,
+        )
+        await sender.start()
+        app["broadcast_sender"] = sender
+        logger.info("Discovery sender started on port %d", config.discovery_port)
+
+        # Start broadcast listener
+        def on_node_found(ann: NodeAnnouncement):
+            logger.info("Discovered node %s (%s)", ann.node_id, ann.node_name)
+
+        def on_node_lost(node_id: str):
+            logger.info("Lost node %s", node_id)
+            cluster.remove_node(node_id)
+
+        listener = BroadcastListener(
+            local_node_id=announcement.node_id,
+            discovery_port=config.discovery_port,
+            on_node_found=on_node_found,
+            on_node_lost=on_node_lost,
+        )
+        await listener.start()
+        app["broadcast_listener"] = listener
+        logger.info("Discovery listener started on port %d", config.discovery_port)
+
+        # Start a periodic task to sync listener registry into ClusterState
+        app["_cluster_sync_task"] = asyncio.get_event_loop().create_task(
+            _cluster_sync_loop(app)
+        )
+
+
+async def _cluster_sync_loop(app: web.Application) -> None:
+    """Periodically sync the listener registry into ClusterState."""
+    try:
+        while True:
+            await asyncio.sleep(5)
+            listener: Optional[BroadcastListener] = app.get("broadcast_listener")
+            cluster: ClusterState = app["cluster_state"]
+            if listener:
+                cluster.update_from_discovered(listener.registry)
+                # Update sender announcement with current engine status
+                sender: Optional[BroadcastSender] = app.get("broadcast_sender")
+                engine = app.get("engine")
+                if sender and engine:
+                    engine_ready = getattr(engine, "ready", False)
+                    sender.update_announcement(
+                        status="serving" if engine_ready else "starting"
+                    )
+    except asyncio.CancelledError:
+        pass
+
+
 async def _on_cleanup(app: web.Application) -> None:
+    # Stop cluster sync task
+    sync_task = app.get("_cluster_sync_task")
+    if sync_task:
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            pass
+
+    # Stop discovery sender and listener
+    sender: Optional[BroadcastSender] = app.get("broadcast_sender")
+    if sender:
+        await sender.stop()
+        logger.info("Discovery sender stopped")
+
+    listener: Optional[BroadcastListener] = app.get("broadcast_listener")
+    if listener:
+        await listener.stop()
+        logger.info("Discovery listener stopped")
+
     session: Optional[aiohttp.ClientSession] = app.get("client_session")
     if session and not session.closed:
         await session.close()
@@ -182,7 +301,7 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "gpu_memory_gb": n.gpu_memory_gb,
                 "unified_memory": n.unified_memory,
                 "status": n.status.value if hasattr(n.status, "value") else str(n.status),
-                "engine_ready": n.status.value == "online" if hasattr(n.status, "value") else True,
+                "engine_ready": (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "serving"),
             }
             for n in cluster_nodes
         ]
