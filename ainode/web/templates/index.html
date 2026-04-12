@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AINode — Local AI Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-logo"><span>AI</span>Node</div>
+        <div class="sidebar-subtitle">Local AI Platform</div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-item active" data-view="dashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+          Dashboard
+        </div>
+        <div class="nav-item" data-view="chat">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+          </svg>
+          Chat
+        </div>
+        <div class="nav-item" data-view="models">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+            <line x1="12" y1="22.08" x2="12" y2="12"/>
+          </svg>
+          Models
+        </div>
+        <div class="nav-item" data-view="training">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/>
+          </svg>
+          Training
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        Powered by <a href="https://argentos.ai" target="_blank">argentos.ai</a>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- Dashboard View -->
+      <div id="view-dashboard" class="view">
+        <div class="page-header">
+          <div class="page-title">Dashboard</div>
+          <div class="page-desc">Cluster overview and node status</div>
+        </div>
+
+        <div id="dashboard-stats" class="grid-4" style="margin-bottom:24px">
+          <!-- Filled by JS -->
+        </div>
+
+        <div class="card-header" style="margin-bottom:12px">
+          <div class="card-title">Nodes</div>
+        </div>
+        <div id="dashboard-nodes" class="grid-3" style="margin-bottom:24px">
+          <!-- Filled by JS -->
+        </div>
+
+        <div id="dashboard-health">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+      <!-- Chat View -->
+      <div id="view-chat" class="view" style="display:none">
+        <div class="page-header">
+          <div class="page-title">Chat</div>
+          <div class="page-desc">Talk to your local models</div>
+        </div>
+
+        <div class="chat-container">
+          <select id="chat-model" class="chat-model-select">
+            <option>Loading models...</option>
+          </select>
+
+          <div id="chat-messages" class="chat-messages">
+            <div style="text-align:center; color:var(--text-muted); padding:60px 0">
+              Send a message to get started
+            </div>
+          </div>
+
+          <div class="chat-input-area">
+            <div class="chat-input-wrapper">
+              <textarea id="chat-input" class="chat-input" placeholder="Type a message..." rows="1"></textarea>
+              <button id="chat-send" class="chat-send">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Models View -->
+      <div id="view-models" class="view" style="display:none">
+        <div class="page-header">
+          <div class="page-title">Models</div>
+          <div class="page-desc">Browse and manage available models</div>
+        </div>
+
+        <div id="models-list">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+      <!-- Training View -->
+      <div id="view-training" class="view" style="display:none">
+        <div class="page-header">
+          <div class="page-title">Training</div>
+          <div class="page-desc">Fine-tune models on your hardware</div>
+        </div>
+
+        <div id="training-content">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
