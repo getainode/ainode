@@ -38,6 +38,12 @@ dependencies = [
 engine = [
     "vllm>=0.6.0",
 ]
+training = [
+    "torch>=2.0",
+    "transformers>=4.35",
+    "datasets>=2.14",
+    "peft>=0.6",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23.0",

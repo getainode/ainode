@@ -14,9 +14,13 @@ from ainode.models.api_routes import register_model_routes
 from ainode.onboarding.api_routes import register_onboarding_routes
 from ainode.auth.middleware import AuthConfig, auth_middleware
 from ainode.auth.api_routes import register_auth_routes
+from ainode.metrics.collector import MetricsCollector
+from ainode.metrics.api_routes import register_metrics_routes
+from ainode.training.engine import TrainingManager
+from ainode.training.api_routes import setup_training_routes
+from ainode.discovery.cluster import ClusterState
 
-__version__ = "0.1.0"
-
+from ainode import __version__
 
 def create_app(
     config: Optional[NodeConfig] = None,
@@ -34,64 +38,59 @@ def create_app(
     if config is None:
         config = NodeConfig()
 
-    # Load auth config from disk
     auth_config = AuthConfig.load()
 
     app = web.Application(middlewares=[cors_middleware, auth_middleware])
+    # Instantiate shared services
+    collector = MetricsCollector()
+    manager = TrainingManager()
+    cluster = ClusterState()
+
     app["config"] = config
     app["auth_config"] = auth_config
     app["engine"] = engine
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
+    app["metrics_collector"] = collector
+    app["training_manager"] = manager
+    app["cluster_state"] = cluster
 
-    # --- Lifecycle -----------------------------------------------------------
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
 
-    # --- AINode routes -------------------------------------------------------
     app.router.add_get("/", handle_index)
     app.router.add_get("/onboarding", handle_onboarding)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nodes", handle_nodes)
 
-    # --- OpenAI-compatible proxy routes --------------------------------------
     app.router.add_get("/v1/models", proxy_to_vllm)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
 
-    # --- Model management routes ---------------------------------------------
     register_model_routes(app)
 
-    # --- Onboarding routes ---------------------------------------------------
     register_onboarding_routes(app)
 
-    # --- Auth management routes ----------------------------------------------
     register_auth_routes(app)
 
-    # --- Static files --------------------------------------------------------
+    # --- Metrics routes ------------------------------------------------------
+    register_metrics_routes(app, collector)
+
+    # --- Training routes -----------------------------------------------------
+    setup_training_routes(app, manager)
+
     app.router.add_static("/static", get_static_path(), name="static")
 
     return app
 
-
-# =============================================================================
-# Lifecycle helpers
-# =============================================================================
-
 async def _on_startup(app: web.Application) -> None:
     app["client_session"] = aiohttp.ClientSession()
-
 
 async def _on_cleanup(app: web.Application) -> None:
     session: Optional[aiohttp.ClientSession] = app.get("client_session")
     if session and not session.closed:
         await session.close()
-
-
-# =============================================================================
-# Middleware
-# =============================================================================
 
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
@@ -111,11 +110,6 @@ async def cors_middleware(request: web.Request, handler):
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return resp
 
-
-# =============================================================================
-# Web UI
-# =============================================================================
-
 async def handle_index(request: web.Request) -> web.Response:
     """Serve the dashboard, or redirect to onboarding if not set up."""
     config: NodeConfig = request.app["config"]
@@ -123,7 +117,6 @@ async def handle_index(request: web.Request) -> web.Response:
         raise web.HTTPFound("/onboarding")
     html = get_index_html()
     return web.Response(text=html, content_type="text/html")
-
 
 async def handle_onboarding(request: web.Request) -> web.Response:
     """Serve the onboarding wizard. Redirect to dashboard if already onboarded."""
@@ -133,15 +126,9 @@ async def handle_onboarding(request: web.Request) -> web.Response:
     html = get_onboarding_html()
     return web.Response(text=html, content_type="text/html")
 
-
-# =============================================================================
-# AINode API endpoints
-# =============================================================================
-
 async def handle_health(_request: web.Request) -> web.Response:
     """Simple liveness probe."""
     return web.json_response({"status": "ok"})
-
 
 async def handle_status(request: web.Request) -> web.Response:
     """Return rich node status."""
@@ -175,45 +162,74 @@ async def handle_status(request: web.Request) -> web.Response:
         "api_port": config.api_port,
     })
 
-
 async def handle_nodes(request: web.Request) -> web.Response:
-    """Return the list of known cluster nodes (stub: just this node)."""
+    """Return the list of known cluster nodes."""
     config: NodeConfig = request.app["config"]
     engine = request.app["engine"]
-    engine_ready = False
-    if engine is not None:
-        engine_ready = getattr(engine, "ready", False)
+    cluster: ClusterState = request.app["cluster_state"]
 
-    node = {
-        "node_id": config.node_id,
-        "node_name": config.node_name,
-        "host": config.host,
-        "api_port": config.api_port,
-        "web_port": config.web_port,
-        "model": config.model,
-        "engine_ready": engine_ready,
-    }
-    return web.json_response({"nodes": [node]})
-
-
-# =============================================================================
-# vLLM proxy
-# =============================================================================
+    cluster_nodes = cluster.get_nodes(include_offline=False)
+    if cluster_nodes:
+        nodes_list = [
+            {
+                "node_id": n.node_id,
+                "node_name": n.node_name,
+                "host": "localhost",
+                "api_port": n.api_port,
+                "web_port": n.web_port,
+                "model": n.model,
+                "gpu_name": n.gpu_name,
+                "gpu_memory_gb": n.gpu_memory_gb,
+                "unified_memory": n.unified_memory,
+                "status": n.status.value if hasattr(n.status, "value") else str(n.status),
+                "engine_ready": n.status.value == "online" if hasattr(n.status, "value") else True,
+            }
+            for n in cluster_nodes
+        ]
+    else:
+        # Fallback: return this node
+        engine_ready = False
+        if engine is not None:
+            engine_ready = getattr(engine, "ready", False)
+        nodes_list = [{
+            "node_id": config.node_id,
+            "node_name": config.node_name,
+            "host": config.host,
+            "api_port": config.api_port,
+            "web_port": config.web_port,
+            "model": config.model,
+            "engine_ready": engine_ready,
+        }]
+    return web.json_response({"nodes": nodes_list})
 
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     """Forward the request to the local vLLM server and stream the response back."""
     config: NodeConfig = request.app["config"]
     session: aiohttp.ClientSession = request.app["client_session"]
+    collector: MetricsCollector = request.app["metrics_collector"]
     vllm_url = f"http://localhost:{config.api_port}{request.path}"
+
+    # Extract model name for metrics
+    model = config.model or "unknown"
+    body_bytes = None
+    if request.method == "POST":
+        body_bytes = await request.read()
+        try:
+            import json as _json
+            body_json = _json.loads(body_bytes)
+            model = body_json.get("model", model)
+        except Exception:
+            pass
 
     # Build upstream request kwargs
     kwargs: dict = {
         "headers": {k: v for k, v in request.headers.items()
                     if k.lower() not in ("host", "transfer-encoding")},
     }
-    if request.method == "POST":
-        kwargs["data"] = await request.read()
+    if body_bytes is not None:
+        kwargs["data"] = body_bytes
 
+    start_time = time.time()
     try:
         async with session.request(request.method, vllm_url, **kwargs) as upstream:
             # Detect SSE streaming
@@ -232,24 +248,25 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                 async for chunk in upstream.content.iter_any():
                     await resp.write(chunk)
                 await resp.write_eof()
+                latency_ms = (time.time() - start_time) * 1000
+                collector.record_request(model, latency_ms, error=False)
                 return resp
             else:
                 body = await upstream.read()
+                latency_ms = (time.time() - start_time) * 1000
+                collector.record_request(model, latency_ms, error=False)
                 return web.Response(
                     status=upstream.status,
                     body=body,
                     content_type=upstream.headers.get("Content-Type", "application/json"),
                 )
     except aiohttp.ClientError:
+        latency_ms = (time.time() - start_time) * 1000
+        collector.record_request(model, latency_ms, error=True)
         return web.json_response(
             {"error": {"message": "vLLM engine not reachable", "type": "server_error"}},
             status=502,
         )
-
-
-# =============================================================================
-# Convenience runner
-# =============================================================================
 
 def run_server(config: Optional[NodeConfig] = None, engine=None) -> None:
     """Start the API server (blocking)."""

@@ -3,7 +3,7 @@
 import os
 import json
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 AINODE_HOME = Path(os.environ.get("AINODE_HOME", Path.home() / ".ainode"))
@@ -46,7 +46,6 @@ class NodeConfig:
     telemetry: bool = False
 
     def save(self):
-        """Save config to disk."""
         AINODE_HOME.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2))
 
@@ -60,6 +59,5 @@ class NodeConfig:
 
 
 def ensure_dirs():
-    """Create AINode directories if they don't exist."""
     for d in [AINODE_HOME, MODELS_DIR, LOGS_DIR]:
         d.mkdir(parents=True, exist_ok=True)

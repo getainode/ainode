@@ -38,19 +38,7 @@ class MetricsCollector:
         tokens_generated: int = 0,
         error: bool = False,
     ) -> None:
-        """Record a completed inference request.
-
-        Parameters
-        ----------
-        model : str
-            Model name that served the request.
-        latency_ms : float
-            End-to-end latency in milliseconds.
-        tokens_generated : int
-            Number of tokens produced (0 if unknown).
-        error : bool
-            Whether the request resulted in an error.
-        """
+        """Record a completed inference request."""
         with self._lock:
             self._total_requests += 1
             self._requests_by_model[model] += 1
