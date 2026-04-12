@@ -88,11 +88,11 @@ def _pid_alive(pid):
 
 
 def _tail_log(path, lines=10):
-    """Return the last N lines of a log file."""
+    """Return the last N lines of a log file without reading the entire file."""
+    from collections import deque
     try:
         with open(path) as f:
-            all_lines = f.readlines()
-        return all_lines[-lines:]
+            return list(deque(f, maxlen=lines))
     except Exception:
         return []
 
