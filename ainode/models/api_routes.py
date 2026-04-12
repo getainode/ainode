@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from typing import Optional
 
@@ -62,7 +63,10 @@ async def handle_download_model(request: web.Request) -> web.Response:
 
     job_id = str(uuid.uuid4())
     jobs: dict = request.app["download_jobs"]
-    jobs[job_id] = {"model_id": model_id, "status": "downloading", "error": None}
+    jobs[job_id] = {"model_id": model_id, "status": "downloading", "error": None, "finished_at": None}
+
+    # Clean up old completed/failed jobs
+    _cleanup_old_jobs(jobs)
 
     loop = asyncio.get_event_loop()
     loop.create_task(_run_download(manager, model_id, job_id, jobs))
@@ -117,6 +121,15 @@ async def handle_recommended(request: web.Request) -> web.Response:
 
 # -- Background download task -------------------------------------------------
 
+_DOWNLOAD_JOB_MAX_AGE = 3600
+
+def _cleanup_old_jobs(jobs: dict) -> None:
+    now = time.time()
+    to_remove = [jid for jid, info in jobs.items() if info.get("finished_at") is not None and (now - info["finished_at"]) > _DOWNLOAD_JOB_MAX_AGE]
+    for jid in to_remove:
+        del jobs[jid]
+
+
 async def _run_download(
     manager: ModelManager,
     model_id: str,
@@ -131,3 +144,5 @@ async def _run_download(
     except Exception as exc:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(exc)
+    finally:
+        jobs[job_id]["finished_at"] = time.time()

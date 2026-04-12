@@ -67,11 +67,16 @@ async def handle_onboarding_complete(request: web.Request) -> web.Response:
 
     config: NodeConfig = request.app["config"]
 
-    node_name = body.get("node_name", "").strip()
+    node_name = body.get("node_name", "").strip()[:64]
+    email = body.get("email", "").strip()[:254]
+    model = body.get("model", "").strip()[:256]
+
+    if node_name and not node_name.replace("-", "").replace("_", "").replace(" ", "").isalnum():
+        return web.json_response({"error": "node_name contains invalid characters"}, status=400)
+
     if node_name:
         config.node_name = node_name
 
-    model = body.get("model", "").strip()
     if model:
         config.model = model
         # Set quantization for AWQ models
@@ -80,7 +85,6 @@ async def handle_onboarding_complete(request: web.Request) -> web.Response:
         else:
             config.quantization = None
 
-    email = body.get("email", "").strip()
     if email:
         config.email = email
 

@@ -24,7 +24,9 @@ def test_build_cmd_defaults():
     assert "meta-llama/Llama-3.2-3B-Instruct" in cmd
     assert "--port" in cmd
     assert "8000" in cmd
-    assert "--trust-remote-code" in cmd
+    assert "--trust-remote-code" not in cmd
+    assert "--host" in cmd
+    assert "127.0.0.1" in cmd
 
 
 def test_build_cmd_with_quantization():

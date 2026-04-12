@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import os
 import signal
@@ -59,6 +60,14 @@ class TrainingConfig:
 
         if not self.dataset_path or not self.dataset_path.strip():
             errors.append("dataset_path is required")
+        else:
+            ds = self.dataset_path.strip()
+            if ".." in ds:
+                errors.append("dataset_path must not contain '..'")
+            elif ds.startswith("/"):
+                datasets_dir = str(AINODE_HOME / "datasets")
+                if not ds.startswith(datasets_dir):
+                    errors.append(f"dataset_path absolute paths must be under {datasets_dir}")
 
         if self.method not in ("lora", "full"):
             errors.append(f"method must be 'lora' or 'full', got '{self.method}'")
@@ -80,6 +89,15 @@ class TrainingConfig:
 
         if self.max_seq_length < 1:
             errors.append("max_seq_length must be >= 1")
+
+        if self.output_dir is not None:
+            out = self.output_dir.strip()
+            if ".." in out:
+                errors.append("output_dir must not contain '..'")
+            elif out.startswith("/"):
+                allowed_prefix = str(AINODE_HOME / "training")
+                if not out.startswith(allowed_prefix):
+                    errors.append(f"output_dir absolute paths must be under {allowed_prefix}")
 
         return errors
 
@@ -104,7 +122,7 @@ class TrainingJob:
         self.current_loss: Optional[float] = None
         self.start_time: Optional[float] = None
         self.end_time: Optional[float] = None
-        self.logs: list[str] = []
+        self.logs: collections.deque[str] = collections.deque(maxlen=5000)
         self._process: Optional[subprocess.Popen] = None
         self._monitor_task: Optional[asyncio.Task] = None
 
