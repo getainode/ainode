@@ -520,24 +520,521 @@ body {
   border: 1px solid var(--accent);
 }
 
-/* Training section */
-.training-placeholder {
+/* --- Training Section --- */
+
+.training-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+
+.training-stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  flex: 1;
+}
+
+.training-stat-card {
+  padding: 16px;
+}
+
+.training-stat-card .stat-value {
+  font-size: 24px;
+}
+
+.training-empty {
   text-align: center;
   padding: 80px 20px;
   color: var(--text-muted);
 }
 
-.training-placeholder svg {
-  width: 64px;
-  height: 64px;
+.training-empty svg {
   margin-bottom: 16px;
   opacity: 0.3;
 }
 
-.training-placeholder h3 {
+.training-empty h3 {
   font-size: 18px;
   margin-bottom: 8px;
   color: var(--text-secondary);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+.btn-ghost:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.btn-danger {
+  background: var(--red);
+  color: white;
+  border-color: var(--red);
+}
+
+.btn-danger:hover {
+  background: #dc2626;
+}
+
+.btn-lg {
+  padding: 12px 28px;
+  font-size: 15px;
+}
+
+/* Job Cards */
+.training-jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.training-job-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.training-job-card:hover {
+  border-color: var(--border-active);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+
+.job-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.job-card-model {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.job-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.job-method-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--purple);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.job-card-id {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* Status badges */
+.job-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.job-status-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.job-status-badge.status-pending {
+  background: rgba(100, 116, 139, 0.15);
+  color: var(--text-secondary);
+}
+.job-status-badge.status-pending::before { background: var(--text-muted); }
+
+.job-status-badge.status-running {
+  background: var(--green-glow);
+  color: var(--green);
+}
+.job-status-badge.status-running::before {
+  background: var(--green);
+  animation: pulse 1.5s infinite;
+}
+
+.job-status-badge.status-completed {
+  background: rgba(74, 144, 217, 0.15);
+  color: var(--accent);
+}
+.job-status-badge.status-completed::before { background: var(--accent); }
+
+.job-status-badge.status-failed {
+  background: var(--red-glow);
+  color: var(--red);
+}
+.job-status-badge.status-failed::before { background: var(--red); }
+
+.job-status-badge.status-cancelled {
+  background: var(--yellow-glow);
+  color: var(--yellow);
+}
+.job-status-badge.status-cancelled::before { background: var(--yellow); }
+
+/* Job card progress */
+.job-card-progress { margin: 8px 0; }
+.training-progress-bar { height: 8px; }
+.training-progress-bar-lg { height: 12px; }
+.progress-fill.accent { background: var(--accent); }
+
+.training-progress-animated {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hover) 50%, var(--accent) 100%);
+  background-size: 200% 100%;
+  animation: progress-shimmer 2s infinite linear;
+}
+
+@keyframes progress-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.job-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+
+.job-card-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* Training Form */
+.training-form-wrapper { max-width: 720px; }
+
+.training-form-header { margin-bottom: 24px; }
+
+.training-form-header h2,
+.training-form-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-top: 12px;
+}
+
+.training-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-section { margin-bottom: 8px; }
+
+.form-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.form-section-title.collapsible {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+}
+
+.form-section-title.collapsible .chevron {
+  transition: transform 0.2s ease;
+}
+
+.form-section-title.collapsible.open .chevron {
+  transform: rotate(180deg);
+}
+
+.advanced-settings {
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.2s ease;
+  max-height: 600px;
+  opacity: 1;
+}
+
+.advanced-settings.collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+.form-group { margin-bottom: 16px; }
+
+.form-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.form-input,
+.form-select {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: var(--font-sans);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.form-input:focus,
+.form-select:focus {
+  border-color: var(--accent);
+}
+
+.form-input::placeholder {
+  color: var(--text-muted);
+}
+
+.form-select {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 36px;
+}
+
+.form-select option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.form-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 16px;
+}
+
+/* Method toggle */
+.method-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.method-btn {
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+}
+
+.method-btn:hover {
+  border-color: var(--border-active);
+}
+
+.method-btn.active {
+  border-color: var(--accent);
+  background: rgba(74, 144, 217, 0.08);
+}
+
+.method-btn-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.method-btn-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* Training Detail View */
+.training-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.training-detail-title h2 {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.training-detail-progress { margin-bottom: 24px; }
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.progress-pct {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+.progress-epoch {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.progress-stats {
+  display: flex;
+  gap: 24px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.training-detail-grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.training-config-card {
+  position: sticky;
+  top: 24px;
+}
+
+.training-right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Loss chart */
+.training-chart-card { min-height: 240px; }
+
+.loss-chart-container {
+  width: 100%;
+  height: 200px;
+}
+
+.loss-chart-container canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* Log viewer */
+.training-log-card { min-height: 300px; }
+
+.training-log-viewer {
+  max-height: 400px;
+  overflow-y: auto;
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 40px 0;
+}
+
+.log-line-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
 }
 
 /* Table */
@@ -589,12 +1086,18 @@ body {
 @media (max-width: 1024px) {
   .grid-4 { grid-template-columns: repeat(2, 1fr); }
   .grid-3 { grid-template-columns: repeat(2, 1fr); }
+  .training-detail-grid { grid-template-columns: 1fr; }
+  .training-config-card { position: static; }
+  .training-stat-row { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 768px) {
   .sidebar { display: none; }
   .main { margin-left: 0; }
   .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
+  .training-header { flex-direction: column; }
+  .training-stat-row { grid-template-columns: repeat(2, 1fr); }
+  .form-grid, .method-toggle { grid-template-columns: 1fr; }
 }
 
 /* Loading skeleton */
