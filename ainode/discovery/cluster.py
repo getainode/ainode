@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from ainode.discovery.broadcast import (
@@ -96,15 +96,12 @@ class ClusterState:
             )
 
     def add_node(self, node: ClusterNode):
-        """Add or update a node directly."""
         self._nodes[node.node_id] = node
 
     def remove_node(self, node_id: str):
-        """Remove a node from the cluster."""
         self._nodes.pop(node_id, None)
 
     def get_node(self, node_id: str) -> Optional[ClusterNode]:
-        """Get info for a specific node."""
         return self._nodes.get(node_id)
 
     def get_nodes(self, include_offline: bool = False) -> List[ClusterNode]:

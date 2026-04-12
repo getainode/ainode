@@ -160,8 +160,37 @@ const AINode = {
     var onlineNodes = nodes.filter(n => n.status === 'online').length;
     var modelsLoaded = s.models_loaded?.length || 0;
     document.getElementById('dashboard-stats').innerHTML = '<div class="card"><div class="stat-value">' + (onlineNodes || 1) + '</div><div class="stat-label">Nodes Online</div></div><div class="card"><div class="stat-value">' + (totalGPUs || 1) + '</div><div class="stat-label">GPUs</div></div><div class="card"><div class="stat-value">' + (totalMem || (s.gpu?.memory_gb || 0)) + ' GB</div><div class="stat-label">Total Memory</div></div><div class="card"><div class="stat-value">' + modelsLoaded + '</div><div class="stat-label">Models Loaded</div></div>';
+
+    // Initialize topology visualization
+    if (!this.topology) {
+      var canvas = document.getElementById('topology-canvas');
+      if (canvas && typeof Topology !== 'undefined') {
+        this.topology = new Topology(canvas);
+      }
+    }
+    if (this.topology) {
+      var topoNodes = nodes.length > 0 ? nodes : [{
+        node_id: s.node_id || 'local',
+        node_name: s.node_name || 'This Node',
+        gpu_name: s.gpu?.name || 'GPU',
+        gpu_memory_gb: s.gpu?.memory_gb || 0,
+        model: s.model || 'none',
+        status: s.engine_ready ? 'online' : 'starting'
+      }];
+      this.topology.update(topoNodes);
+    }
+
     this.renderNodes(nodes, s);
     this.renderClusterHealth(s);
+    this.renderMonitoring();
+
+    // Set up metrics polling (separate from main polling)
+    if (!this._metricsInterval) {
+      var self = this;
+      this._metricsInterval = setInterval(function() {
+        if (self.state.currentView === 'dashboard') self.renderMonitoring();
+      }, 3000);
+    }
   },
 
   renderNodes(nodes, status) {
@@ -303,22 +332,122 @@ const AINode = {
   },
 
   // --- Models View ---
+  modelsFilter: 'all',
+  modelsSearch: '',
+  modelsSort: 'recommended',
+
   renderModels() {
     var container = document.getElementById('models-list');
     if (!container) return;
     var s = this.state.status, loaded = s?.models_loaded || [], self = this;
+    var gpuMem = s?.gpu?.memory_total_mb ? s.gpu.memory_total_mb / 1024 : 0;
     var recommended = [
-      { id: 'meta-llama/Llama-3.2-3B-Instruct', size: '~6 GB', desc: 'Quick start, fast inference' },
-      { id: 'meta-llama/Llama-3.1-8B-Instruct', size: '~16 GB', desc: 'Recommended for most tasks' },
-      { id: 'meta-llama/Llama-3.1-70B-Instruct-AWQ', size: '~35 GB', desc: 'High quality, needs 40+ GB' },
-      { id: 'Qwen/Qwen2.5-72B-Instruct', size: '~40 GB', desc: 'Great for coding + multilingual' },
-      { id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', size: '~14 GB', desc: 'Reasoning specialist' },
-      { id: 'mistralai/Mistral-7B-Instruct-v0.3', size: '~14 GB', desc: 'Fast, general purpose' },
+      { id: 'meta-llama/Llama-3.2-3B-Instruct', size: '~6 GB', sizeGb: 6, desc: 'Quick start, fast inference', recommended: true },
+      { id: 'meta-llama/Llama-3.1-8B-Instruct', size: '~16 GB', sizeGb: 16, desc: 'Recommended for most tasks', recommended: true },
+      { id: 'meta-llama/Llama-3.1-70B-Instruct-AWQ', size: '~35 GB', sizeGb: 35, desc: 'High quality, needs 40+ GB', recommended: false },
+      { id: 'Qwen/Qwen2.5-72B-Instruct', size: '~40 GB', sizeGb: 40, desc: 'Great for coding + multilingual', recommended: false },
+      { id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', size: '~14 GB', sizeGb: 14, desc: 'Reasoning specialist', recommended: true },
+      { id: 'mistralai/Mistral-7B-Instruct-v0.3', size: '~14 GB', sizeGb: 14, desc: 'Fast, general purpose', recommended: false },
     ];
-    container.innerHTML = recommended.map(function(model) {
-      var isLoaded = loaded.includes(model.id);
-      return '<div class="model-card"><div class="model-info"><div class="model-name">' + self.esc(model.id) + '</div><div class="model-meta">' + model.size + ' &middot; ' + model.desc + '</div></div><div class="model-status">' + (isLoaded ? '<span class="model-badge loaded">Loaded</span>' : '<span class="model-badge available">Available</span>') + '</div></div>';
+
+    // Apply search filter
+    var query = (this.modelsSearch || '').toLowerCase();
+    var models = recommended.filter(function(m) {
+      if (query && m.id.toLowerCase().indexOf(query) === -1 && m.desc.toLowerCase().indexOf(query) === -1) return false;
+      var isLoaded = loaded.includes(m.id);
+      if (self.modelsFilter === 'downloaded' && !isLoaded) return false;
+      if (self.modelsFilter === 'available' && isLoaded) return false;
+      if (self.modelsFilter === 'recommended' && !m.recommended) return false;
+      return true;
+    });
+
+    // Apply sort
+    if (this.modelsSort === 'size-asc') models.sort(function(a, b) { return a.sizeGb - b.sizeGb; });
+    else if (this.modelsSort === 'size-desc') models.sort(function(a, b) { return b.sizeGb - a.sizeGb; });
+    else if (this.modelsSort === 'name') models.sort(function(a, b) { return a.id.localeCompare(b.id); });
+
+    var filterPills = ['all', 'downloaded', 'available', 'recommended'].map(function(f) {
+      var active = self.modelsFilter === f ? ' btn-primary' : ' btn-ghost';
+      return '<button class="btn btn-sm models-filter-pill' + active + '" data-filter="' + f + '">' + f.charAt(0).toUpperCase() + f.slice(1) + '</button>';
     }).join('');
+
+    var sortSelect = '<select class="form-select" id="models-sort" style="width:auto;font-size:12px;padding:4px 8px"><option value="recommended"' + (this.modelsSort === 'recommended' ? ' selected' : '') + '>Recommended</option><option value="size-asc"' + (this.modelsSort === 'size-asc' ? ' selected' : '') + '>Size (small first)</option><option value="size-desc"' + (this.modelsSort === 'size-desc' ? ' selected' : '') + '>Size (large first)</option><option value="name"' + (this.modelsSort === 'name' ? ' selected' : '') + '>Name</option></select>';
+
+    var html = '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px">' +
+      '<input type="text" id="models-search" class="form-input" placeholder="Search models..." value="' + this.esc(this.modelsSearch) + '" style="flex:1;min-width:200px">' +
+      sortSelect + '</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:16px">' + filterPills + '</div>';
+
+    html += models.map(function(model) {
+      var isLoaded = loaded.includes(model.id);
+      var fits = gpuMem >= model.sizeGb;
+      var fitBadge = gpuMem > 0 ? (fits ? '<span class="model-badge" style="background:rgba(34,197,94,0.15);color:#22c55e">Fits GPU</span>' : '<span class="model-badge" style="background:rgba(239,68,68,0.15);color:#ef4444">Too large</span>') : '';
+      var downloadBtn = !isLoaded ? '<button class="btn btn-sm btn-primary models-download-btn" data-model-id="' + self.esc(model.id) + '">Download</button>' : '';
+      var statusBadge = isLoaded ? '<span class="model-badge loaded">Loaded</span>' : '<span class="model-badge available">Available</span>';
+      return '<div class="model-card" data-model-id="' + self.esc(model.id) + '"><div class="model-info"><div class="model-name">' + self.esc(model.id) + '</div><div class="model-meta">' + model.size + ' &middot; ' + self.esc(model.desc) + '</div></div><div class="model-status" style="display:flex;gap:8px;align-items:center">' + fitBadge + statusBadge + downloadBtn + '</div></div>';
+    }).join('');
+
+    if (models.length === 0) {
+      html += '<div style="text-align:center;padding:24px;color:var(--text-muted)">No models match your filters.</div>';
+    }
+
+    container.innerHTML = html;
+
+    // Bind search
+    var searchInput = document.getElementById('models-search');
+    if (searchInput) searchInput.addEventListener('input', function() { self.modelsSearch = searchInput.value; self.renderModels(); });
+
+    // Bind sort
+    var sortSel = document.getElementById('models-sort');
+    if (sortSel) sortSel.addEventListener('change', function() { self.modelsSort = sortSel.value; self.renderModels(); });
+
+    // Bind filter pills
+    container.querySelectorAll('.models-filter-pill').forEach(function(btn) {
+      btn.addEventListener('click', function() { self.modelsFilter = btn.dataset.filter; self.renderModels(); });
+    });
+
+    // Bind download buttons
+    container.querySelectorAll('.models-download-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var modelId = btn.dataset.modelId;
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+        fetch('/api/models/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_id: modelId })
+        }).then(function(resp) { return resp.json(); }).then(function(data) {
+          if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Download'; return; }
+          btn.textContent = 'Downloading...';
+          // Poll download progress
+          var pollId = setInterval(function() {
+            fetch('/api/models/download/status?model_id=' + encodeURIComponent(modelId)).then(function(r) { return r.json(); }).then(function(st) {
+              if (st.status === 'completed') { clearInterval(pollId); self.toast('Model downloaded: ' + modelId, 'success'); self.refresh(); }
+              else if (st.status === 'failed') { clearInterval(pollId); self.toast('Download failed', 'error'); btn.disabled = false; btn.textContent = 'Download'; }
+              else if (st.progress != null) { btn.textContent = Math.round(st.progress) + '%'; }
+            }).catch(function() { clearInterval(pollId); btn.disabled = false; btn.textContent = 'Download'; });
+          }, 2000);
+        }).catch(function(err) { self.toast('Error: ' + err.message, 'error'); btn.disabled = false; btn.textContent = 'Download'; });
+      });
+    });
+
+    // Bind expandable model details
+    container.querySelectorAll('.model-card').forEach(function(card) {
+      card.addEventListener('click', function(e) {
+        if (e.target.closest('.models-download-btn')) return;
+        var existing = card.querySelector('.model-details-expanded');
+        if (existing) { existing.remove(); return; }
+        var mid = card.dataset.modelId;
+        var model = recommended.find(function(m) { return m.id === mid; });
+        if (!model) return;
+        var detail = document.createElement('div');
+        detail.className = 'model-details-expanded';
+        detail.style.cssText = 'padding:12px 0 0;border-top:1px solid rgba(255,255,255,0.08);margin-top:12px;font-size:13px;color:var(--text-muted)';
+        detail.innerHTML = '<div><strong>Model ID:</strong> ' + self.esc(model.id) + '</div><div><strong>Memory Required:</strong> ' + model.size + '</div><div><strong>Description:</strong> ' + self.esc(model.desc) + '</div>' + (gpuMem > 0 ? '<div><strong>GPU Fit:</strong> ' + (gpuMem >= model.sizeGb ? 'Yes (' + Math.round(gpuMem) + ' GB available)' : 'No (need ' + model.sizeGb + ' GB, have ' + Math.round(gpuMem) + ' GB)') + '</div>' : '');
+        card.appendChild(detail);
+      });
+    });
   },
 
   // --- Training View ---
@@ -443,6 +572,59 @@ const AINode = {
     ctx.fillStyle = gradient; ctx.beginPath(); data.forEach((d, i) => { var x = toX(d.progress), y = toY(d.loss); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
     ctx.lineTo(toX(data[data.length - 1].progress), h - pad.bottom); ctx.lineTo(toX(data[0].progress), h - pad.bottom); ctx.closePath(); ctx.fill();
     var last = data[data.length - 1]; ctx.fillStyle = '#4a90d9'; ctx.beginPath(); ctx.arc(toX(last.progress), toY(last.loss), 4, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#0a0e17'; ctx.lineWidth = 2; ctx.stroke();
+  },
+
+  // --- Monitoring Gauges ---
+  async renderMonitoring() {
+    var container = document.getElementById('dashboard-monitoring');
+    if (!container) return;
+    var data = await this.fetchJSON('/api/metrics');
+    if (!data) return;
+    var gpu = data.gpu || {};
+    var req = data.requests || {};
+    var gpuUtil = gpu.utilization_percent || 0;
+    var memUsed = gpu.memory_used_mb || 0;
+    var memTotal = gpu.memory_total_mb || 1;
+    var temp = gpu.temperature_c || 0;
+    var memPct = Math.round((memUsed / memTotal) * 100);
+
+    container.innerHTML =
+      '<div class="card" style="text-align:center;padding:16px">' + this.renderArcGauge('gpu-util', 'GPU Utilization', gpuUtil, 100, '%') + '</div>' +
+      '<div class="card" style="text-align:center;padding:16px">' + this.renderArcGauge('mem-ring', 'Memory', memPct, 100, '%') + '<div style="font-size:11px;color:var(--text-muted);margin-top:4px">' + Math.round(memUsed / 1024) + ' / ' + Math.round(memTotal / 1024) + ' GB</div></div>' +
+      '<div class="card" style="text-align:center;padding:16px">' + this.renderArcGauge('temp-bar', 'Temperature', temp, 100, 'C') + '</div>' +
+      '<div class="card" style="padding:16px"><div style="font-weight:600;margin-bottom:8px">Requests</div>' +
+      '<div style="font-size:13px;color:var(--text-muted)">Total: <strong>' + (req.total || 0) + '</strong></div>' +
+      '<div style="font-size:13px;color:var(--text-muted)">Errors: <strong>' + (req.errors || 0) + '</strong></div>' +
+      '<div style="font-size:13px;color:var(--text-muted)">p50: <strong>' + ((req.latency_ms || {}).p50 || 0) + ' ms</strong></div>' +
+      '<div style="font-size:13px;color:var(--text-muted)">p95: <strong>' + ((req.latency_ms || {}).p95 || 0) + ' ms</strong></div>' +
+      '<div style="font-size:13px;color:var(--text-muted)">tok/s: <strong>' + (req.tokens_per_second || 0) + '</strong></div></div>';
+  },
+
+  renderArcGauge(id, label, value, max, unit) {
+    var pct = Math.min(value / max, 1);
+    var r = 40, cx = 50, cy = 50, sw = 8;
+    var circ = 2 * Math.PI * r;
+    var dashOffset = circ * (1 - pct * 0.75);
+    var color = unit === 'C' ? this.tempColor(value) : this.gaugeColor(pct * 100);
+    return '<svg viewBox="0 0 100 100" width="100" height="100">' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="' + sw + '" stroke-dasharray="' + (circ * 0.75) + ' ' + (circ * 0.25) + '" stroke-linecap="round" transform="rotate(135 ' + cx + ' ' + cy + ')"/>' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="' + sw + '" stroke-dasharray="' + (circ * 0.75 - dashOffset) + ' ' + (dashOffset + circ * 0.25) + '" stroke-linecap="round" transform="rotate(135 ' + cx + ' ' + cy + ')"/>' +
+      '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" fill="white" font-size="16" font-weight="600">' + Math.round(value) + '</text>' +
+      '<text x="' + cx + '" y="' + (cy + 16) + '" text-anchor="middle" fill="#64748b" font-size="9">' + unit + '</text>' +
+      '</svg>' +
+      '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + label + '</div>';
+  },
+
+  gaugeColor(pct) {
+    if (pct > 90) return '#ef4444';
+    if (pct > 70) return '#f59e0b';
+    return '#22c55e';
+  },
+
+  tempColor(celsius) {
+    if (celsius > 85) return '#ef4444';
+    if (celsius > 70) return '#f59e0b';
+    return '#22c55e';
   },
 
   esc(str) { var div = document.createElement('div'); div.textContent = str || ''; return div.innerHTML; },

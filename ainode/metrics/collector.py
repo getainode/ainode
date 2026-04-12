@@ -2,8 +2,8 @@
 
 import threading
 import time
-from collections import defaultdict
-from typing import Any, Optional
+from collections import defaultdict, deque
+from typing import Any
 
 
 class MetricsCollector:
@@ -21,8 +21,8 @@ class MetricsCollector:
         self._error_count: int = 0
         self._requests_by_model: dict[str, int] = defaultdict(int)
 
-        # Latency tracking (store raw values for percentile computation)
-        self._latencies: list[float] = []
+        # Latency tracking (bounded to prevent unbounded growth)
+        self._latencies: deque[float] = deque(maxlen=10000)
 
         # Token tracking
         self._total_tokens: int = 0
@@ -38,19 +38,7 @@ class MetricsCollector:
         tokens_generated: int = 0,
         error: bool = False,
     ) -> None:
-        """Record a completed inference request.
-
-        Parameters
-        ----------
-        model : str
-            Model name that served the request.
-        latency_ms : float
-            End-to-end latency in milliseconds.
-        tokens_generated : int
-            Number of tokens produced (0 if unknown).
-        error : bool
-            Whether the request resulted in an error.
-        """
+        """Record a completed inference request."""
         with self._lock:
             self._total_requests += 1
             self._requests_by_model[model] += 1
