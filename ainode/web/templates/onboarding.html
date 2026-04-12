@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AINode — Setup</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <style>
+    /* Onboarding-specific styles */
+    .onboarding-shell {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .wizard {
+      width: 100%;
+      max-width: 640px;
+      position: relative;
+    }
+
+    /* Progress bar */
+    .progress-track {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 32px;
+    }
+
+    .progress-segment {
+      flex: 1;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      transition: background 0.4s ease;
+    }
+
+    .progress-segment.done {
+      background: var(--accent);
+    }
+
+    .progress-segment.active {
+      background: var(--accent);
+      animation: pulse 1.5s infinite;
+    }
+
+    /* Step container */
+    .step {
+      display: none;
+      animation: fadeSlideIn 0.35s ease;
+    }
+
+    .step.active {
+      display: block;
+    }
+
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .step-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+
+    .step-title {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .step-desc {
+      color: var(--text-secondary);
+      font-size: 15px;
+      line-height: 1.6;
+      margin-bottom: 32px;
+    }
+
+    /* Logo */
+    .brand {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    .brand-logo {
+      font-size: 48px;
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin-bottom: 4px;
+    }
+
+    .brand-logo span { color: var(--accent); }
+
+    .brand-tagline {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    /* Form elements */
+    .field {
+      margin-bottom: 20px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    .field input[type="text"],
+    .field input[type="email"] {
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      color: var(--text-primary);
+      font-size: 15px;
+      font-family: var(--font-sans);
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    .field input:focus {
+      border-color: var(--accent);
+    }
+
+    .field input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .field .hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Model cards */
+    .model-pick {
+      background: var(--bg-card);
+      border: 2px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .model-pick:hover {
+      border-color: var(--border-active);
+    }
+
+    .model-pick.selected {
+      border-color: var(--accent);
+      background: rgba(74, 144, 217, 0.08);
+    }
+
+    .model-pick.disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .model-pick .radio {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+
+    .model-pick.selected .radio {
+      border-color: var(--accent);
+    }
+
+    .model-pick.selected .radio::after {
+      content: '';
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .model-pick .model-details {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .model-pick .model-pick-name {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .model-pick .model-pick-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    .model-pick .model-pick-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .model-pick .fit-badge {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      flex-shrink: 0;
+    }
+
+    .fit-badge.fits {
+      background: var(--green-glow);
+      color: var(--green);
+      border: 1px solid var(--green);
+    }
+
+    .fit-badge.no-fit {
+      background: var(--red-glow);
+      color: var(--red);
+      border: 1px solid var(--red);
+    }
+
+    /* GPU info bar */
+    .gpu-bar {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .gpu-bar .gpu-icon {
+      color: var(--green);
+      font-size: 18px;
+    }
+
+    .gpu-bar .gpu-label {
+      color: var(--text-secondary);
+    }
+
+    .gpu-bar .gpu-value {
+      color: var(--text-primary);
+      font-weight: 600;
+      font-family: var(--font-mono);
+    }
+
+    /* Summary */
+    .summary-table {
+      width: 100%;
+      margin-bottom: 32px;
+    }
+
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .summary-row:last-child {
+      border-bottom: none;
+    }
+
+    .summary-key {
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+
+    .summary-val {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 32px;
+    }
+
+    .btn {
+      padding: 12px 28px;
+      border-radius: var(--radius-sm);
+      font-size: 15px;
+      font-weight: 600;
+      font-family: var(--font-sans);
+      cursor: pointer;
+      border: none;
+      transition: all 0.15s ease;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      flex: 1;
+    }
+
+    .btn-primary:hover { background: var(--accent-hover); }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
+
+    .btn-link {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      cursor: pointer;
+      padding: 8px 0;
+      text-decoration: underline;
+      font-family: var(--font-sans);
+    }
+
+    .btn-link:hover { color: var(--text-secondary); }
+
+    /* Launch animation */
+    .launch-spinner {
+      display: none;
+      text-align: center;
+      padding: 40px 0;
+    }
+
+    .launch-spinner.visible { display: block; }
+
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 16px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .launch-text {
+      color: var(--text-secondary);
+      font-size: 15px;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 40px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="onboarding-shell">
+    <div class="wizard">
+      <!-- Progress -->
+      <div class="progress-track">
+        <div class="progress-segment active" data-step="1"></div>
+        <div class="progress-segment" data-step="2"></div>
+        <div class="progress-segment" data-step="3"></div>
+        <div class="progress-segment" data-step="4"></div>
+        <div class="progress-segment" data-step="5"></div>
+      </div>
+
+      <!-- Step 1: Welcome -->
+      <div class="step active" data-step="1">
+        <div class="brand">
+          <div class="brand-logo"><span>AI</span>Node</div>
+          <div class="brand-tagline">Local AI Platform</div>
+        </div>
+        <div class="step-title" style="text-align:center">Let's get you set up</div>
+        <div class="step-desc" style="text-align:center">
+          Turn your NVIDIA GPU into a local AI powerhouse. Inference and fine-tuning in your browser, one command to start.
+        </div>
+        <div class="btn-row" style="justify-content:center">
+          <button class="btn btn-primary" onclick="goStep(2)" style="max-width:280px">Get Started</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Name your node -->
+      <div class="step" data-step="2">
+        <div class="step-label">Step 1 of 4</div>
+        <div class="step-title">Name your node</div>
+        <div class="step-desc">Give this AINode a name so you can identify it in the cluster.</div>
+        <div class="field">
+          <label for="node-name">Node Name</label>
+          <input type="text" id="node-name" placeholder="my-ainode" autocomplete="off" spellcheck="false">
+          <div class="hint">Auto-suggested from your hostname. You can change this later.</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="goStep(1)">Back</button>
+          <button class="btn btn-primary" onclick="goStep(3)">Continue</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Select a model -->
+      <div class="step" data-step="3">
+        <div class="step-label">Step 2 of 4</div>
+        <div class="step-title">Choose a model</div>
+        <div class="step-desc">Pick a model to run. Recommended models are highlighted based on your hardware.</div>
+        <div id="gpu-info-bar" class="gpu-bar" style="display:none">
+          <span class="gpu-icon">&#9889;</span>
+          <span class="gpu-label">Detected:</span>
+          <span class="gpu-value" id="gpu-name">—</span>
+          <span class="gpu-label" style="margin-left:auto">Memory:</span>
+          <span class="gpu-value" id="gpu-mem">—</span>
+        </div>
+        <div id="model-list">
+          <div style="text-align:center; color:var(--text-muted); padding:40px 0">Loading models...</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="goStep(2)">Back</button>
+          <button class="btn btn-primary" id="btn-model-next" onclick="goStep(4)" disabled>Continue</button>
+        </div>
+      </div>
+
+      <!-- Step 4: Email -->
+      <div class="step" data-step="4">
+        <div class="step-label">Step 3 of 4</div>
+        <div class="step-title">Stay in the loop</div>
+        <div class="step-desc">Optionally enter your email for product updates and support. We won't spam you.</div>
+        <div class="field">
+          <label for="email">Email Address</label>
+          <input type="email" id="email" placeholder="you@example.com" autocomplete="email">
+        </div>
+        <button class="btn-link" onclick="goStep(5)">Skip this step</button>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="goStep(3)">Back</button>
+          <button class="btn btn-primary" onclick="goStep(5)">Continue</button>
+        </div>
+      </div>
+
+      <!-- Step 5: Summary -->
+      <div class="step" data-step="5">
+        <div class="step-label">Step 4 of 4</div>
+        <div class="step-title">Ready to launch</div>
+        <div class="step-desc">Here's a summary of your setup. Hit the button to start AINode.</div>
+        <div class="summary-table">
+          <div class="summary-row">
+            <span class="summary-key">Node Name</span>
+            <span class="summary-val" id="sum-name">—</span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-key">Model</span>
+            <span class="summary-val" id="sum-model">—</span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-key">Email</span>
+            <span class="summary-val" id="sum-email">—</span>
+          </div>
+        </div>
+        <div id="launch-area">
+          <div class="btn-row">
+            <button class="btn btn-secondary" onclick="goStep(4)">Back</button>
+            <button class="btn btn-primary" id="btn-launch" onclick="launch()">Launch AINode</button>
+          </div>
+        </div>
+        <div class="launch-spinner" id="launch-spinner">
+          <div class="spinner"></div>
+          <div class="launch-text">Saving configuration...</div>
+        </div>
+      </div>
+
+      <div class="footer">
+        Powered by <a href="https://argentos.ai" target="_blank">argentos.ai</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // State
+    let currentStep = 1;
+    let selectedModel = '';
+    let suggestions = {};
+
+    // Fetch suggestions on load
+    async function init() {
+      try {
+        const resp = await fetch('/api/onboarding/suggestions');
+        suggestions = await resp.json();
+
+        // Pre-fill node name
+        const nameInput = document.getElementById('node-name');
+        if (suggestions.hostname) {
+          nameInput.value = suggestions.hostname;
+        }
+
+        // GPU info
+        if (suggestions.gpu) {
+          document.getElementById('gpu-info-bar').style.display = 'flex';
+          document.getElementById('gpu-name').textContent = suggestions.gpu.name;
+          document.getElementById('gpu-mem').textContent = suggestions.gpu.memory_gb + ' GB';
+        }
+
+        // Render models
+        renderModels(suggestions.models || []);
+      } catch (err) {
+        console.error('Failed to load suggestions:', err);
+      }
+    }
+
+    function renderModels(models) {
+      const container = document.getElementById('model-list');
+      if (!models.length) {
+        container.innerHTML = '<div style="color:var(--text-muted)">No models available</div>';
+        return;
+      }
+
+      container.innerHTML = '';
+      models.forEach(m => {
+        const card = document.createElement('div');
+        card.className = 'model-pick' + (m.fits_gpu ? '' : ' disabled');
+        card.dataset.repo = m.hf_repo;
+        card.innerHTML = `
+          <div class="radio"></div>
+          <div class="model-details">
+            <div class="model-pick-name">${esc(m.name)}</div>
+            <div class="model-pick-desc">${esc(m.description)}</div>
+            <div class="model-pick-meta">${m.size_gb} GB &middot; min ${m.min_memory_gb} GB VRAM</div>
+          </div>
+          <span class="fit-badge ${m.fits_gpu ? 'fits' : 'no-fit'}">${m.fits_gpu ? 'Fits' : 'Too large'}</span>
+        `;
+        card.addEventListener('click', () => selectModel(card, m));
+        container.appendChild(card);
+      });
+
+      // Auto-select first fitting model
+      const firstFit = models.find(m => m.fits_gpu);
+      if (firstFit) {
+        const el = container.querySelector(`[data-repo="${firstFit.hf_repo}"]`);
+        if (el) selectModel(el, firstFit);
+      }
+    }
+
+    function selectModel(card, model) {
+      if (!model.fits_gpu && suggestions.gpu) return; // block selection if too large and GPU detected
+      document.querySelectorAll('.model-pick').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      selectedModel = model.hf_repo;
+      document.getElementById('btn-model-next').disabled = false;
+    }
+
+    function goStep(n) {
+      // Update summary when entering step 5
+      if (n === 5) {
+        const name = document.getElementById('node-name').value.trim() || 'my-ainode';
+        const email = document.getElementById('email').value.trim();
+        document.getElementById('sum-name').textContent = name;
+        document.getElementById('sum-model').textContent = selectedModel.split('/').pop() || '—';
+        document.getElementById('sum-email').textContent = email || '(skipped)';
+      }
+
+      // Hide current, show target
+      document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+      const target = document.querySelector(`.step[data-step="${n}"]`);
+      if (target) target.classList.add('active');
+
+      // Update progress
+      document.querySelectorAll('.progress-segment').forEach(seg => {
+        const s = parseInt(seg.dataset.step);
+        seg.classList.remove('done', 'active');
+        if (s < n) seg.classList.add('done');
+        else if (s === n) seg.classList.add('active');
+      });
+
+      currentStep = n;
+    }
+
+    async function launch() {
+      const btn = document.getElementById('btn-launch');
+      btn.disabled = true;
+      document.getElementById('launch-area').style.display = 'none';
+      document.getElementById('launch-spinner').classList.add('visible');
+
+      const payload = {
+        node_name: document.getElementById('node-name').value.trim() || 'my-ainode',
+        model: selectedModel,
+        email: document.getElementById('email').value.trim(),
+      };
+
+      try {
+        const resp = await fetch('/api/onboarding/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (resp.ok) {
+          document.querySelector('.launch-text').textContent = 'Setup complete! Redirecting to dashboard...';
+          setTimeout(() => { window.location.href = '/'; }, 1500);
+        } else {
+          const data = await resp.json();
+          document.querySelector('.launch-text').textContent = 'Error: ' + (data.error || 'Unknown error');
+          btn.disabled = false;
+          document.getElementById('launch-area').style.display = '';
+          document.getElementById('launch-spinner').classList.remove('visible');
+        }
+      } catch (err) {
+        document.querySelector('.launch-text').textContent = 'Network error. Please try again.';
+        btn.disabled = false;
+        document.getElementById('launch-area').style.display = '';
+        document.getElementById('launch-spinner').classList.remove('visible');
+      }
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    init();
+  </script>
+</body>
+</html>

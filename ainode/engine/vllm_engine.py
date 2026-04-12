@@ -109,7 +109,11 @@ class VLLMEngine:
         return False
 
     def health_check(self) -> dict:
-        """Check if vLLM is healthy and responding."""
+        """Check if vLLM is healthy and responding.
+
+        Works both when this instance owns the process and when checking
+        an externally-running vLLM server (e.g. from `ainode status`).
+        """
         import urllib.request
         import json
 
@@ -118,9 +122,6 @@ class VLLMEngine:
             "api_responding": False,
             "models_loaded": [],
         }
-
-        if not result["process_alive"]:
-            return result
 
         try:
             req = urllib.request.Request(f"{self.api_url}/models")
