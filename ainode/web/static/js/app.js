@@ -12,6 +12,9 @@ const AINode = {
     trainingView: 'list',
     trainingDetailId: null,
     trainingLossData: [],
+    // Metrics / monitoring
+    metrics: null,
+    metricsInterval: null,
     // Models management
     modelsCatalog: [],
     modelsRecommended: [],
@@ -31,6 +34,7 @@ const AINode = {
     this.bindChat();
     this.navigate(window.location.hash.slice(1) || 'dashboard');
     this.startPolling();
+    this.startMetricsPolling();
   },
 
   // --- Navigation ---
@@ -287,34 +291,287 @@ const AINode = {
   },
 
   // --- Models View ---
-  renderModels() {
+  async renderModels() {
     const container = document.getElementById('models-list');
     if (!container) return;
-    const s = this.state.status;
-    const loaded = s?.models_loaded || [];
-    const recommended = [
-      { id: 'meta-llama/Llama-3.2-3B-Instruct', size: '~6 GB', desc: 'Quick start, fast inference' },
-      { id: 'meta-llama/Llama-3.1-8B-Instruct', size: '~16 GB', desc: 'Recommended for most tasks' },
-      { id: 'meta-llama/Llama-3.1-70B-Instruct-AWQ', size: '~35 GB', desc: 'High quality, needs 40+ GB' },
-      { id: 'Qwen/Qwen2.5-72B-Instruct', size: '~40 GB', desc: 'Great for coding + multilingual' },
-      { id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', size: '~14 GB', desc: 'Reasoning specialist' },
-      { id: 'mistralai/Mistral-7B-Instruct-v0.3', size: '~14 GB', desc: 'Fast, general purpose' },
-    ];
-    container.innerHTML = recommended.map(model => {
-      const isLoaded = loaded.includes(model.id);
-      return `
-        <div class="model-card">
-          <div class="model-info">
-            <div class="model-name">${this.esc(model.id)}</div>
-            <div class="model-meta">${model.size} &middot; ${model.desc}</div>
-          </div>
-          <div class="model-status">
-            ${isLoaded ? '<span class="model-badge loaded">Loaded</span>' : '<span class="model-badge available">Available</span>'}
-          </div>
-        </div>
-      `;
-    }).join('');
+
+    const [catalogData, recData] = await Promise.all([
+      this.fetchJSON('/api/models'),
+      this.fetchJSON('/api/models/recommended'),
+    ]);
+    this.state.modelsCatalog = catalogData?.models || [];
+    this.state.modelsRecommended = recData?.models?.map(m => m.id) || [];
+    this.state.modelsGpuMemory = recData?.gpu_memory_gb || null;
+
+    if (!this.state.modelsBound) {
+      this.bindModelsUI();
+      this.state.modelsBound = true;
+    }
+
+    this.renderModelsList();
   },
+
+  bindModelsUI() {
+    const searchInput = document.getElementById('models-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        this.state.modelsSearch = e.target.value.toLowerCase();
+        this.renderModelsList();
+      });
+    }
+
+    document.querySelectorAll('#models-filters .filter-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#models-filters .filter-pill').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.state.modelsFilter = btn.dataset.filter;
+        this.renderModelsList();
+      });
+    });
+
+    const sortSelect = document.getElementById('models-sort');
+    if (sortSelect) {
+      sortSelect.addEventListener('change', (e) => {
+        this.state.modelsSort = e.target.value;
+        this.renderModelsList();
+      });
+    }
+
+    document.getElementById('model-delete-cancel')?.addEventListener('click', () => this.hideDeleteModal());
+    document.getElementById('model-delete-confirm')?.addEventListener('click', () => this.confirmDeleteModel());
+    document.getElementById('model-delete-modal')?.addEventListener('click', (e) => {
+      if (e.target.classList.contains('model-modal-overlay')) this.hideDeleteModal();
+    });
+  },
+
+  renderModelsList() {
+    const container = document.getElementById('models-list');
+    if (!container) return;
+
+    const s = this.state.status;
+    const activeModel = s?.model || '';
+    const loadedModels = s?.models_loaded || [];
+    const gpuMem = this.state.modelsGpuMemory;
+    const recommended = this.state.modelsRecommended;
+    let models = [...this.state.modelsCatalog];
+
+    const filter = this.state.modelsFilter;
+    if (filter === 'downloaded') models = models.filter(m => m.downloaded);
+    else if (filter === 'available') models = models.filter(m => !m.downloaded);
+    else if (filter === 'recommended') models = models.filter(m => recommended.includes(m.id));
+
+    const q = this.state.modelsSearch;
+    if (q) {
+      models = models.filter(m =>
+        m.name.toLowerCase().includes(q) ||
+        m.description.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q) ||
+        m.hf_repo.toLowerCase().includes(q)
+      );
+    }
+
+    const sort = this.state.modelsSort;
+    if (sort === 'name') models.sort((a, b) => a.name.localeCompare(b.name));
+    else if (sort === 'size') models.sort((a, b) => a.size_gb - b.size_gb);
+    else {
+      models.sort((a, b) => {
+        const aActive = this.isModelActive(a, activeModel, loadedModels) ? -2 : 0;
+        const bActive = this.isModelActive(b, activeModel, loadedModels) ? -2 : 0;
+        const aDl = a.downloaded ? -1 : 0;
+        const bDl = b.downloaded ? -1 : 0;
+        const aRec = recommended.includes(a.id) ? -1 : 0;
+        const bRec = recommended.includes(b.id) ? -1 : 0;
+        return (aActive + aDl + aRec) - (bActive + bDl + bRec) || a.size_gb - b.size_gb;
+      });
+    }
+
+    const diskEl = document.getElementById('models-disk-space');
+    if (diskEl) {
+      const totalDisk = this.state.modelsCatalog.reduce((sum, m) => sum + (m.local_size_gb || 0), 0);
+      const dlCount = this.state.modelsCatalog.filter(m => m.downloaded).length;
+      diskEl.innerHTML = dlCount > 0
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> ' +
+          '<span>' + dlCount + ' downloaded &middot; ' + totalDisk.toFixed(1) + ' GB used</span>'
+        : '<span>No models downloaded</span>';
+    }
+
+    if (models.length === 0) {
+      container.innerHTML = '<div class="models-empty"><p>No models match your search.</p></div>';
+      return;
+    }
+
+    container.innerHTML = models.map(model => this.renderModelCard(model, activeModel, loadedModels, gpuMem)).join('');
+
+    container.querySelectorAll('.model-card-enhanced').forEach(card => {
+      const modelId = card.dataset.modelId;
+      card.querySelector('.model-card-main')?.addEventListener('click', () => {
+        this.state.modelsExpanded = this.state.modelsExpanded === modelId ? null : modelId;
+        this.renderModelsList();
+      });
+      card.querySelector('.model-download-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.downloadModel(modelId);
+      });
+      card.querySelector('.model-delete-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.showDeleteModal(modelId);
+      });
+    });
+  },
+
+  isModelActive(model, activeModel, loadedModels) {
+    return loadedModels.includes(model.hf_repo) || activeModel === model.hf_repo || activeModel === model.id;
+  },
+
+  getGpuFit(model, gpuMem) {
+    if (gpuMem == null) return 'unknown';
+    if (model.min_memory_gb <= gpuMem * 0.8) return 'fits';
+    if (model.min_memory_gb <= gpuMem) return 'tight';
+    return 'no-fit';
+  },
+
+  renderModelCard(model, activeModel, loadedModels, gpuMem) {
+    const isActive = this.isModelActive(model, activeModel, loadedModels);
+    const isExpanded = this.state.modelsExpanded === model.id;
+    const isDownloading = !!this.state.modelsDownloading[model.id];
+    const downloadProgress = this.state.modelsDownloading[model.id]?.progress || 0;
+    const fit = this.getGpuFit(model, gpuMem);
+
+    const fitIcon = fit === 'fits'
+      ? '<span class="gpu-fit gpu-fit-yes" title="Fits your GPU"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg></span>'
+      : fit === 'tight'
+      ? '<span class="gpu-fit gpu-fit-warn" title="Tight fit for your GPU"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>'
+      : fit === 'no-fit'
+      ? '<span class="gpu-fit gpu-fit-no" title="Won\'t fit your GPU"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>'
+      : '';
+
+    let statusHTML = '';
+    if (isActive) {
+      statusHTML = '<span class="model-badge active">Active</span>';
+    } else if (isDownloading) {
+      statusHTML = '<span class="model-badge downloading">Downloading</span>';
+    } else if (model.downloaded) {
+      statusHTML = '<span class="model-badge loaded">Downloaded</span>';
+    } else {
+      statusHTML = '<span class="model-badge available">Available</span>';
+    }
+
+    let actionHTML = '';
+    if (isDownloading) {
+      actionHTML = '<div class="model-progress-wrap"><div class="progress-bar model-progress-bar"><div class="progress-fill accent model-progress-animated" style="width:' + downloadProgress + '%"></div></div><span class="model-progress-text">Downloading...</span></div>';
+    } else if (model.downloaded) {
+      actionHTML = '<button class="btn btn-ghost btn-sm model-delete-btn" title="Delete model"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>';
+    } else {
+      actionHTML = '<button class="btn btn-primary btn-sm model-download-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</button>';
+    }
+
+    const quantBadge = model.quantization
+      ? '<span class="model-quant-badge">' + this.esc(model.quantization.toUpperCase()) + '</span>'
+      : '';
+
+    let expandedHTML = '';
+    if (isExpanded) {
+      expandedHTML = '<div class="model-detail">' +
+        '<div class="model-detail-grid">' +
+          '<div class="model-detail-item"><span class="model-detail-label">HuggingFace Repo</span><span class="model-detail-value mono">' + this.esc(model.hf_repo) + '</span></div>' +
+          '<div class="model-detail-item"><span class="model-detail-label">Model Size</span><span class="model-detail-value">' + model.size_gb + ' GB</span></div>' +
+          '<div class="model-detail-item"><span class="model-detail-label">Min GPU Memory</span><span class="model-detail-value">' + model.min_memory_gb + ' GB</span></div>' +
+          (model.quantization ? '<div class="model-detail-item"><span class="model-detail-label">Quantization</span><span class="model-detail-value">' + this.esc(model.quantization.toUpperCase()) + '</span></div>' : '') +
+          (model.downloaded && model.local_size_gb != null ? '<div class="model-detail-item"><span class="model-detail-label">Disk Usage</span><span class="model-detail-value">' + model.local_size_gb + ' GB</span></div>' : '') +
+          (gpuMem != null ? '<div class="model-detail-item"><span class="model-detail-label">Your GPU Memory</span><span class="model-detail-value">' + gpuMem + ' GB</span></div>' : '') +
+        '</div>' +
+      '</div>';
+    }
+
+    return '<div class="model-card-enhanced' + (isActive ? ' model-active' : '') + (isExpanded ? ' model-expanded' : '') + '" data-model-id="' + this.esc(model.id) + '">' +
+      '<div class="model-card-main">' +
+        '<div class="model-card-left">' +
+          fitIcon +
+          '<div class="model-info">' +
+            '<div class="model-name-row"><span class="model-name">' + this.esc(model.name) + '</span>' + quantBadge + (isActive ? '<span class="model-active-badge">ACTIVE</span>' : '') + '</div>' +
+            '<div class="model-meta">' + this.esc(model.description) + '</div>' +
+            '<div class="model-meta-stats">' + model.size_gb + ' GB &middot; Min ' + model.min_memory_gb + ' GB GPU' + (model.downloaded && model.local_size_gb != null ? ' &middot; ' + model.local_size_gb + ' GB on disk' : '') + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="model-card-right">' +
+          statusHTML +
+          actionHTML +
+        '</div>' +
+      '</div>' +
+      expandedHTML +
+    '</div>';
+  },
+
+  async downloadModel(modelId) {
+    if (this.state.modelsDownloading[modelId]) return;
+    this.state.modelsDownloading[modelId] = { progress: 0, status: 'downloading' };
+    this.renderModelsList();
+
+    try {
+      const resp = await fetch('/api/models/' + encodeURIComponent(modelId) + '/download', { method: 'POST' });
+      const result = await resp.json();
+      if (!resp.ok) {
+        delete this.state.modelsDownloading[modelId];
+        this.renderModelsList();
+        alert('Download failed: ' + (result.error || 'Unknown error'));
+        return;
+      }
+      this.pollDownload(modelId, result.job_id);
+    } catch (err) {
+      delete this.state.modelsDownloading[modelId];
+      this.renderModelsList();
+      alert('Download error: ' + err.message);
+    }
+  },
+
+  pollDownload(modelId, jobId) {
+    const poll = async () => {
+      if (!this.state.modelsDownloading[modelId]) return;
+      const info = await this.fetchJSON('/api/models/' + encodeURIComponent(modelId));
+      if (info?.downloaded) {
+        delete this.state.modelsDownloading[modelId];
+        this.renderModels();
+        return;
+      }
+      const dl = this.state.modelsDownloading[modelId];
+      if (dl && dl.progress < 90) dl.progress = Math.min(dl.progress + 5, 90);
+      this.renderModelsList();
+      setTimeout(poll, 3000);
+    };
+    setTimeout(poll, 2000);
+  },
+
+  showDeleteModal(modelId) {
+    const model = this.state.modelsCatalog.find(m => m.id === modelId);
+    this.state.modelsDeleteTarget = modelId;
+    const msg = document.getElementById('model-delete-msg');
+    if (msg && model) {
+      msg.textContent = 'Are you sure you want to delete "' + model.name + '"? This will free up ' + (model.local_size_gb || model.size_gb) + ' GB of disk space.';
+    }
+    document.getElementById('model-delete-modal').style.display = 'flex';
+  },
+
+  hideDeleteModal() {
+    this.state.modelsDeleteTarget = null;
+    document.getElementById('model-delete-modal').style.display = 'none';
+  },
+
+  async confirmDeleteModel() {
+    const modelId = this.state.modelsDeleteTarget;
+    if (!modelId) return;
+    this.hideDeleteModal();
+    try {
+      const resp = await fetch('/api/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        alert('Delete failed: ' + (err.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Delete error: ' + err.message);
+    }
+    this.renderModels();
+  },
+
 
   // --- Training View ---
   trainingModels: [
@@ -583,6 +840,135 @@ const AINode = {
     const last = data[data.length - 1];
     ctx.fillStyle = '#4a90d9'; ctx.beginPath(); ctx.arc(toX(last.progress), toY(last.loss), 4, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#0a0e17'; ctx.lineWidth = 2; ctx.stroke();
+  },
+
+  // --- Metrics Polling ---
+  startMetricsPolling() {
+    this.fetchMetrics();
+    this.state.metricsInterval = setInterval(() => this.fetchMetrics(), 3000);
+  },
+
+  async fetchMetrics() {
+    const data = await this.fetchJSON('/api/metrics');
+    if (data) {
+      this.state.metrics = data;
+      if (this.state.currentView === 'dashboard') {
+        this.renderMonitoring();
+      }
+    }
+  },
+
+  // --- Monitoring Widgets ---
+  renderMonitoring() {
+    const container = document.getElementById('dashboard-monitoring');
+    if (!container) return;
+    const m = this.state.metrics;
+    if (!m) { container.innerHTML = ''; return; }
+
+    const gpu = m.gpu || {};
+    const req = m.requests || {};
+    const hasGPU = !gpu.error;
+
+    const utilPct = hasGPU ? (gpu.utilization_percent || 0) : 0;
+    const memUsedMB = hasGPU ? (gpu.memory_used_mb || 0) : 0;
+    const memTotalMB = hasGPU ? (gpu.memory_total_mb || 1) : 1;
+    const memPct = Math.round((memUsedMB / memTotalMB) * 100);
+    const memUsedGB = (memUsedMB / 1024).toFixed(1);
+    const memTotalGB = (memTotalMB / 1024).toFixed(0);
+    const tempC = hasGPU ? (gpu.temperature_c || 0) : 0;
+
+    const totalReqs = req.total || 0;
+    const errors = req.errors || 0;
+    const errorRate = totalReqs > 0 ? ((errors / totalReqs) * 100).toFixed(1) : '0.0';
+    const latency = req.latency_ms || { p50: 0, p95: 0, p99: 0 };
+    const tokSec = req.tokens_per_second || 0;
+    const totalTokens = req.tokens_generated || 0;
+    const uptime = m.uptime_seconds || 0;
+    const reqPerMin = uptime > 60 ? ((totalReqs / uptime) * 60).toFixed(1) : totalReqs.toFixed(1);
+    const activeModel = this.state.status?.model || 'none';
+    const isUnified = this.state.status?.gpu?.unified_memory || false;
+
+    container.innerHTML = `
+      <div class="card-header" style="margin-bottom:12px">
+        <div class="card-title">Monitoring</div>
+      </div>
+      <div class="monitoring-grid" style="margin-bottom:24px">
+        <div class="card monitoring-card">
+          <div class="card-header"><div class="card-title">GPU Utilization</div></div>
+          <div class="gauge-container">
+            ${this.renderArcGauge(utilPct, this.gaugeColor(utilPct), utilPct + '%')}
+          </div>
+        </div>
+        <div class="card monitoring-card">
+          <div class="card-header"><div class="card-title">${isUnified ? 'Unified Memory' : 'GPU Memory'}</div></div>
+          <div class="gauge-container">
+            ${this.renderArcGauge(memPct, this.gaugeColor(memPct), memUsedGB + ' / ' + memTotalGB + ' GB')}
+          </div>
+        </div>
+        <div class="card monitoring-card monitoring-right-panel">
+          <div class="temp-section">
+            <div class="card-header"><div class="card-title">Temperature</div></div>
+            <div class="temp-bar-wrap">
+              <div class="temp-value" style="color:${this.tempColor(tempC)}">${hasGPU ? tempC + '\u00B0C' : 'N/A'}</div>
+              <div class="temp-bar">
+                <div class="temp-bar-fill" style="width:${Math.min(tempC, 100)}%;background:${this.tempColor(tempC)};transition:width 0.6s ease"></div>
+              </div>
+              <div class="temp-labels"><span>0\u00B0C</span><span>50\u00B0C</span><span>100\u00B0C</span></div>
+            </div>
+          </div>
+          <div class="request-section">
+            <div class="card-header"><div class="card-title">Request Metrics</div></div>
+            <table class="table metrics-table">
+              <tr><td>Total Requests</td><td class="metric-val">${totalReqs.toLocaleString()}</td></tr>
+              <tr><td>Requests / min</td><td class="metric-val">${reqPerMin}</td></tr>
+              <tr><td>Error Rate</td><td class="metric-val${errors > 0 ? ' metric-err' : ''}">${errorRate}%</td></tr>
+              <tr><td>Latency p50/p95/p99</td><td class="metric-val">${latency.p50}/${latency.p95}/${latency.p99} ms</td></tr>
+              <tr><td>Active Model</td><td class="metric-val metric-model">${this.esc(activeModel)}</td></tr>
+            </table>
+          </div>
+          ${tokSec > 0 || totalTokens > 0 ? `
+          <div class="inference-section">
+            <div class="card-header"><div class="card-title">Inference</div></div>
+            <div class="inference-stats">
+              <div class="inference-stat"><span class="inference-num">${tokSec.toFixed(1)}</span><span class="inference-label">tok/s</span></div>
+              <div class="inference-stat"><span class="inference-num">${totalTokens.toLocaleString()}</span><span class="inference-label">total tokens</span></div>
+            </div>
+          </div>` : ''}
+        </div>
+      </div>
+    `;
+  },
+
+  renderArcGauge(pct, color, label) {
+    const r = 70, stroke = 12, cx = 85, cy = 85;
+    const startAngle = 135, sweep = 270;
+    const filledAngle = startAngle + (sweep * (pct / 100));
+    const toRad = (deg) => (deg * Math.PI) / 180;
+    const arcX = (deg) => cx + r * Math.cos(toRad(deg));
+    const arcY = (deg) => cy + r * Math.sin(toRad(deg));
+    const bgStart = `${arcX(startAngle)},${arcY(startAngle)}`;
+    const bgEnd = `${arcX(startAngle + sweep)},${arcY(startAngle + sweep)}`;
+    const fillEnd = `${arcX(filledAngle)},${arcY(filledAngle)}`;
+    const fillSweepFlag = (filledAngle - startAngle) > 180 ? 1 : 0;
+    return `<svg class="arc-gauge" viewBox="0 0 170 140" xmlns="http://www.w3.org/2000/svg">
+      <path d="M${bgStart} A${r},${r} 0 1,1 ${bgEnd}" fill="none" stroke="var(--border)" stroke-width="${stroke}" stroke-linecap="round"/>
+      ${pct > 0 ? `<path class="arc-gauge-fill" d="M${bgStart} A${r},${r} 0 ${fillSweepFlag},1 ${fillEnd}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-linecap="round"/>` : ''}
+      <text x="${cx}" y="${cy - 2}" text-anchor="middle" class="gauge-pct">${pct}</text>
+      <text x="${cx}" y="${cy + 16}" text-anchor="middle" class="gauge-label">${label}</text>
+    </svg>`;
+  },
+
+  gaugeColor(pct) {
+    if (pct < 60) return 'var(--green)';
+    if (pct < 85) return 'var(--yellow)';
+    return 'var(--red)';
+  },
+
+  tempColor(temp) {
+    if (temp < 50) return 'var(--accent)';
+    if (temp < 70) return 'var(--green)';
+    if (temp < 85) return 'var(--yellow)';
+    return 'var(--red)';
   },
 
   // --- Utilities ---
