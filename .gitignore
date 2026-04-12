@@ -31,8 +31,10 @@ Thumbs.db
 *.log
 logs/
 
-# Models (don't commit multi-GB files)
+# Models (don't commit multi-GB model weight files)
+# Ignore the data directory but keep the Python package
 models/
+!ainode/models/
 *.bin
 *.safetensors
 *.gguf
