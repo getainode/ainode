@@ -24,7 +24,6 @@ class VLLMEngine:
         self._log_file: Optional[Path] = None
 
     def build_cmd(self) -> list[str]:
-        """Build the vLLM launch command."""
         gpu = detect_gpu()
 
         cmd = [
@@ -146,7 +145,6 @@ class VLLMEngine:
             self._ready = False
 
     def is_running(self) -> bool:
-        """Check if the vLLM process is alive."""
         return self.process is not None and self.process.poll() is None
 
     @property

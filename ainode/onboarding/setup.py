@@ -32,7 +32,6 @@ def run_onboarding(config: NodeConfig) -> NodeConfig:
     email = input("  Email: ").strip()
     if email and _is_valid_email(email):
         config.email = email
-        _register_install(email, gpu)
     elif email:
         print("  Invalid email, skipping.\n")
 
@@ -78,29 +77,3 @@ def run_onboarding(config: NodeConfig) -> NodeConfig:
 
 def _is_valid_email(email: str) -> bool:
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email))
-
-
-def _register_install(email: str, gpu=None):
-    """Send install registration to argentos.ai (non-blocking, best-effort)."""
-    try:
-        import json
-        import urllib.request
-
-        data = {
-            "email": email,
-            "gpu": gpu.name if gpu else "none",
-            "memory_gb": gpu.memory_total_mb // 1024 if gpu else 0,
-            "source": "ainode-onboarding",
-        }
-
-        # TODO: Set up registration endpoint at argentos.ai
-        # req = urllib.request.Request(
-        #     "https://argentos.ai/api/register",
-        #     data=json.dumps(data).encode(),
-        #     headers={"Content-Type": "application/json"},
-        #     method="POST",
-        # )
-        # urllib.request.urlopen(req, timeout=5)
-        _ = (json, urllib.request, data)  # suppress unused warnings until endpoint is ready
-    except Exception:
-        pass  # Never block onboarding for telemetry

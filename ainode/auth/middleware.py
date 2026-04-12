@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass, field, asdict
-from typing import List
 
 from aiohttp import web
 
@@ -30,7 +29,7 @@ class AuthConfig:
     """Persisted auth state."""
 
     enabled: bool = False
-    api_keys: List[dict] = field(default_factory=list)
+    api_keys: list[dict] = field(default_factory=list)
     # Each key entry: {"id": "<short-id>", "key": "<hex>"}
 
     # -- persistence ----------------------------------------------------------

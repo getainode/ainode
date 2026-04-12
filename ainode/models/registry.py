@@ -181,20 +181,7 @@ class ModelManager:
         model_id: str,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> Path:
-        """Download a model from HuggingFace Hub.
-
-        Parameters
-        ----------
-        model_id : str
-            Key from MODEL_CATALOG.
-        progress_callback : callable, optional
-            Called with progress fraction (0.0 to 1.0).
-
-        Returns
-        -------
-        Path
-            Local path where the model was downloaded.
-        """
+        """Download a model from HuggingFace Hub and return the local path."""
         info = MODEL_CATALOG.get(model_id)
         if info is None:
             raise ValueError(f"Unknown model: {model_id}. Use a key from MODEL_CATALOG.")
@@ -218,10 +205,7 @@ class ModelManager:
         return Path(download_path)
 
     def delete_model(self, model_id: str) -> bool:
-        """Delete a downloaded model from disk.
-
-        Returns True if deleted, False if not found.
-        """
+        """Delete a downloaded model from disk; return True if deleted."""
         info = MODEL_CATALOG.get(model_id)
         if info is None:
             raise ValueError(f"Unknown model: {model_id}")
