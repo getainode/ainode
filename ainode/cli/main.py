@@ -504,6 +504,44 @@ def cmd_service(args):
         console.print("  Usage: ainode service {install|uninstall|status|logs}")
 
 
+def cmd_auth(args):
+    """Manage API key authentication."""
+    from ainode.auth.middleware import AuthConfig
+
+    action = getattr(args, "auth_action", None)
+    auth_cfg = AuthConfig.load()
+
+    if action == "enable":
+        entry = auth_cfg.enable()
+        console.print("  [green]Auth enabled.[/green]")
+        console.print(f"  API key: {entry['key']}")
+        console.print(f"  Key ID:  {entry['id']}")
+        console.print()
+        console.print("  Use: Authorization: Bearer <key>")
+        console.print("  Powered by argentos.ai")
+
+    elif action == "disable":
+        auth_cfg.disable()
+        console.print("  [yellow]Auth disabled.[/yellow] All requests allowed.")
+        console.print("  Powered by argentos.ai")
+
+    elif action == "status":
+        state = "[green]enabled[/green]" if auth_cfg.enabled else "[dim]disabled[/dim]"
+        console.print(f"  Auth: {state}")
+        console.print(f"  Keys: {len(auth_cfg.api_keys)}")
+        console.print("  Powered by argentos.ai")
+
+    elif action == "new-key":
+        entry = auth_cfg.generate_key()
+        console.print("  [green]New API key generated.[/green]")
+        console.print(f"  API key: {entry['key']}")
+        console.print(f"  Key ID:  {entry['id']}")
+        console.print("  Powered by argentos.ai")
+
+    else:
+        console.print("  Usage: ainode auth {enable|disable|status|new-key}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ainode",
@@ -556,6 +594,15 @@ def main():
     svc_logs_parser = service_sub.add_parser("logs", help="Show AINode service logs")
     svc_logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of log lines")
     service_parser.set_defaults(func=cmd_service)
+
+    # auth
+    auth_parser = subparsers.add_parser("auth", help="Manage API key authentication")
+    auth_sub = auth_parser.add_subparsers(dest="auth_action")
+    auth_sub.add_parser("enable", help="Enable API key auth")
+    auth_sub.add_parser("disable", help="Disable API key auth")
+    auth_sub.add_parser("status", help="Show auth status")
+    auth_sub.add_parser("new-key", help="Generate a new API key")
+    auth_parser.set_defaults(func=cmd_auth)
 
     args = parser.parse_args()
 
