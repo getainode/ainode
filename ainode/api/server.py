@@ -14,6 +14,11 @@ from ainode.models.api_routes import register_model_routes
 from ainode.onboarding.api_routes import register_onboarding_routes
 from ainode.auth.middleware import AuthConfig, auth_middleware
 from ainode.auth.api_routes import register_auth_routes
+from ainode.metrics.collector import MetricsCollector
+from ainode.metrics.api_routes import register_metrics_routes
+from ainode.training.engine import TrainingManager
+from ainode.training.api_routes import setup_training_routes
+from ainode.discovery.cluster import ClusterState
 
 __version__ = "0.1.0"
 
@@ -38,11 +43,19 @@ def create_app(
     auth_config = AuthConfig.load()
 
     app = web.Application(middlewares=[cors_middleware, auth_middleware])
+    # Instantiate shared services
+    collector = MetricsCollector()
+    manager = TrainingManager()
+    cluster = ClusterState()
+
     app["config"] = config
     app["auth_config"] = auth_config
     app["engine"] = engine
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
+    app["metrics_collector"] = collector
+    app["training_manager"] = manager
+    app["cluster_state"] = cluster
 
     # --- Lifecycle -----------------------------------------------------------
     app.on_startup.append(_on_startup)
@@ -68,6 +81,12 @@ def create_app(
 
     # --- Auth management routes ----------------------------------------------
     register_auth_routes(app)
+
+    # --- Metrics routes ------------------------------------------------------
+    register_metrics_routes(app, collector)
+
+    # --- Training routes -----------------------------------------------------
+    setup_training_routes(app, manager)
 
     # --- Static files --------------------------------------------------------
     app.router.add_static("/static", get_static_path(), name="static")
@@ -175,23 +194,44 @@ async def handle_status(request: web.Request) -> web.Response:
 
 
 async def handle_nodes(request: web.Request) -> web.Response:
-    """Return the list of known cluster nodes (stub: just this node)."""
+    """Return the list of known cluster nodes."""
     config: NodeConfig = request.app["config"]
     engine = request.app["engine"]
-    engine_ready = False
-    if engine is not None:
-        engine_ready = getattr(engine, "ready", False)
+    cluster: ClusterState = request.app["cluster_state"]
 
-    node = {
-        "node_id": config.node_id,
-        "node_name": config.node_name,
-        "host": config.host,
-        "api_port": config.api_port,
-        "web_port": config.web_port,
-        "model": config.model,
-        "engine_ready": engine_ready,
-    }
-    return web.json_response({"nodes": [node]})
+    cluster_nodes = cluster.get_nodes(include_offline=False)
+    if cluster_nodes:
+        nodes_list = [
+            {
+                "node_id": n.node_id,
+                "node_name": n.node_name,
+                "host": "localhost",
+                "api_port": n.api_port,
+                "web_port": n.web_port,
+                "model": n.model,
+                "gpu_name": n.gpu_name,
+                "gpu_memory_gb": n.gpu_memory_gb,
+                "unified_memory": n.unified_memory,
+                "status": n.status.value if hasattr(n.status, "value") else str(n.status),
+                "engine_ready": n.status.value == "online" if hasattr(n.status, "value") else True,
+            }
+            for n in cluster_nodes
+        ]
+    else:
+        # Fallback: return this node
+        engine_ready = False
+        if engine is not None:
+            engine_ready = getattr(engine, "ready", False)
+        nodes_list = [{
+            "node_id": config.node_id,
+            "node_name": config.node_name,
+            "host": config.host,
+            "api_port": config.api_port,
+            "web_port": config.web_port,
+            "model": config.model,
+            "engine_ready": engine_ready,
+        }]
+    return web.json_response({"nodes": nodes_list})
 
 
 # =============================================================================
@@ -202,16 +242,30 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     """Forward the request to the local vLLM server and stream the response back."""
     config: NodeConfig = request.app["config"]
     session: aiohttp.ClientSession = request.app["client_session"]
+    collector: MetricsCollector = request.app["metrics_collector"]
     vllm_url = f"http://localhost:{config.api_port}{request.path}"
+
+    # Extract model name for metrics
+    model = config.model or "unknown"
+    body_bytes = None
+    if request.method == "POST":
+        body_bytes = await request.read()
+        try:
+            import json as _json
+            body_json = _json.loads(body_bytes)
+            model = body_json.get("model", model)
+        except Exception:
+            pass
 
     # Build upstream request kwargs
     kwargs: dict = {
         "headers": {k: v for k, v in request.headers.items()
                     if k.lower() not in ("host", "transfer-encoding")},
     }
-    if request.method == "POST":
-        kwargs["data"] = await request.read()
+    if body_bytes is not None:
+        kwargs["data"] = body_bytes
 
+    start_time = time.time()
     try:
         async with session.request(request.method, vllm_url, **kwargs) as upstream:
             # Detect SSE streaming
@@ -230,15 +284,21 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                 async for chunk in upstream.content.iter_any():
                     await resp.write(chunk)
                 await resp.write_eof()
+                latency_ms = (time.time() - start_time) * 1000
+                collector.record_request(model, latency_ms, error=False)
                 return resp
             else:
                 body = await upstream.read()
+                latency_ms = (time.time() - start_time) * 1000
+                collector.record_request(model, latency_ms, error=False)
                 return web.Response(
                     status=upstream.status,
                     body=body,
                     content_type=upstream.headers.get("Content-Type", "application/json"),
                 )
     except aiohttp.ClientError:
+        latency_ms = (time.time() - start_time) * 1000
+        collector.record_request(model, latency_ms, error=True)
         return web.json_response(
             {"error": {"message": "vLLM engine not reachable", "type": "server_error"}},
             status=502,

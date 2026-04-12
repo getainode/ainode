@@ -3,7 +3,7 @@
 import os
 import json
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 AINODE_HOME = Path(os.environ.get("AINODE_HOME", Path.home() / ".ainode"))

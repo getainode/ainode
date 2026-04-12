@@ -1,6 +1,5 @@
 """vLLM engine wrapper — manages the vLLM inference server lifecycle."""
 
-import asyncio
 import subprocess
 import signal
 import os

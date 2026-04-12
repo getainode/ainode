@@ -117,7 +117,7 @@ def _gpu_info_table(gpu):
 
 def cmd_start(args):
     """Start AINode."""
-    from ainode.core.gpu import gpu_summary, detect_gpu
+    from ainode.core.gpu import detect_gpu
     console.print(_banner())
     ensure_dirs()
 
@@ -188,6 +188,15 @@ def cmd_start(args):
 
     console.print("  [bold green]Engine ready.[/bold green] Open your browser to get started.\n")
 
+    # Start API/web server in a background thread
+    import threading
+
+    def run_server_blocking():
+        from ainode.api.server import run_server
+        run_server(config=config, engine=engine)
+
+    threading.Thread(target=run_server_blocking, daemon=True).start()
+
     # Keep running until interrupted
     try:
         engine.process.wait()
@@ -251,7 +260,7 @@ def cmd_stop(args):
 
 def cmd_status(args):
     """Show cluster status with Rich formatting."""
-    from ainode.core.gpu import gpu_summary, detect_gpu
+    from ainode.core.gpu import detect_gpu
     console.print(_banner())
 
     config = NodeConfig.load()
@@ -437,8 +446,6 @@ def cmd_service(args):
         install_service,
         enable_service,
         start_service,
-        stop_service,
-        disable_service,
         uninstall_service,
         status_service,
         get_journal_lines,
