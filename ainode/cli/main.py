@@ -156,6 +156,79 @@ def cmd_models(args):
     print()
 
 
+def cmd_service(args):
+    """Manage AINode systemd service."""
+    from ainode.service.systemd import (
+        install_service,
+        enable_service,
+        start_service,
+        stop_service,
+        disable_service,
+        uninstall_service,
+        status_service,
+        get_journal_lines,
+        is_installed,
+    )
+
+    user_mode = getattr(args, "user", False)
+    action = getattr(args, "service_action", None)
+
+    if action == "install":
+        if is_installed(user_mode=user_mode):
+            console.print("  [yellow]AINode service is already installed.[/yellow]")
+        else:
+            console.print("  Installing AINode service...")
+            install_service(user_mode=user_mode)
+            console.print("  [green]✓[/green] Unit file written")
+        console.print("  Enabling service...")
+        enable_service(user_mode=user_mode)
+        console.print("  [green]✓[/green] Service enabled")
+        console.print("  Starting service...")
+        start_service(user_mode=user_mode)
+        console.print("  [green]✓[/green] Service started")
+        console.print()
+        console.print("  AINode will now start automatically on boot.")
+        console.print("  Powered by argentos.ai")
+
+    elif action == "uninstall":
+        if not is_installed(user_mode=user_mode):
+            console.print("  [yellow]AINode service is not installed.[/yellow]")
+            return
+        console.print("  Stopping and removing AINode service...")
+        uninstall_service(user_mode=user_mode)
+        console.print("  [green]✓[/green] Service removed")
+        console.print("  Powered by argentos.ai")
+
+    elif action == "status":
+        if not is_installed(user_mode=user_mode):
+            console.print("  AINode service: [dim]not installed[/dim]")
+            return
+        info = status_service(user_mode=user_mode)
+        state = info["state"]
+        color = {"active": "green", "inactive": "dim", "failed": "red"}.get(state, "yellow")
+        console.print(f"  AINode service: [{color}]{state}[/{color}]")
+        console.print(f"  Enabled: {'yes' if info['enabled'] else 'no'}")
+        if info["journal_lines"]:
+            console.print()
+            console.print("  Recent logs:")
+            for line in info["journal_lines"][-10:]:
+                console.print(f"    {line}")
+        console.print()
+        console.print("  Powered by argentos.ai")
+
+    elif action == "logs":
+        lines = getattr(args, "lines", 50)
+        journal = get_journal_lines(user_mode=user_mode, lines=lines)
+        if journal:
+            for line in journal:
+                console.print(line)
+        else:
+            console.print("  No journal entries found for AINode.")
+
+    else:
+        console.print("  Usage: ainode service {install|uninstall|status|logs}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ainode",
@@ -182,6 +255,19 @@ def main():
     # models
     models_parser = subparsers.add_parser("models", help="List available models")
     models_parser.set_defaults(func=cmd_models)
+
+    # service
+    service_parser = subparsers.add_parser("service", help="Manage AINode systemd service")
+    service_parser.add_argument(
+        "--user", action="store_true", help="Use user-level systemd (no sudo required)"
+    )
+    service_sub = service_parser.add_subparsers(dest="service_action")
+    service_sub.add_parser("install", help="Install, enable, and start AINode service")
+    service_sub.add_parser("uninstall", help="Stop, disable, and remove AINode service")
+    service_sub.add_parser("status", help="Show AINode service status")
+    logs_parser = service_sub.add_parser("logs", help="Show AINode service logs")
+    logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of log lines")
+    service_parser.set_defaults(func=cmd_service)
 
     args = parser.parse_args()
 
