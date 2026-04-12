@@ -102,14 +102,43 @@ fi
 echo ""
 echo "    ────────────────────────────────────"
 echo ""
-echo "    To start AINode:"
-echo ""
-echo "      source ${SHELL_RC}"
-echo "      ainode start"
-echo ""
-echo "    Or run directly:"
-echo ""
-echo "      $AINODE_BIN/ainode start"
+
+# Optionally install systemd service
+INSTALL_SERVICE="${AINODE_SERVICE:-}"
+if [ -z "$INSTALL_SERVICE" ]; then
+    echo -n "    Install AINode as a systemd service (auto-start on boot)? [y/N] "
+    read -r INSTALL_SERVICE
+fi
+
+if [[ "$INSTALL_SERVICE" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "    Installing systemd service..."
+    if [ "$(id -u)" -eq 0 ]; then
+        "$AINODE_BIN/ainode" service install
+    else
+        "$AINODE_BIN/ainode" service install --user
+    fi
+    echo -e "    ${GREEN}✓${NC} AINode service installed and enabled"
+    echo ""
+    echo "    Manage with:"
+    echo "      ainode service status"
+    echo "      ainode service logs"
+    echo "      ainode service uninstall"
+else
+    echo ""
+    echo "    To start AINode:"
+    echo ""
+    echo "      source ${SHELL_RC}"
+    echo "      ainode start"
+    echo ""
+    echo "    Or run directly:"
+    echo ""
+    echo "      $AINODE_BIN/ainode start"
+    echo ""
+    echo "    To install as a service later:"
+    echo "      ainode service install"
+fi
+
 echo ""
 echo -e "    Powered by ${BLUE}argentos.ai${NC}"
 echo ""
