@@ -11,6 +11,8 @@ from ainode.core.config import NodeConfig
 from ainode.core.gpu import detect_gpu, GPUInfo
 from ainode.web.serve import get_index_html, get_static_path
 from ainode.models.api_routes import register_model_routes
+from ainode.auth.middleware import AuthConfig, auth_middleware
+from ainode.auth.api_routes import register_auth_routes
 
 __version__ = "0.1.0"
 
@@ -31,8 +33,12 @@ def create_app(
     if config is None:
         config = NodeConfig()
 
-    app = web.Application(middlewares=[cors_middleware])
+    # Load auth config from disk
+    auth_config = AuthConfig.load()
+
+    app = web.Application(middlewares=[cors_middleware, auth_middleware])
     app["config"] = config
+    app["auth_config"] = auth_config
     app["engine"] = engine
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
@@ -54,6 +60,9 @@ def create_app(
 
     # --- Model management routes ---------------------------------------------
     register_model_routes(app)
+
+    # --- Auth management routes ----------------------------------------------
+    register_auth_routes(app)
 
     # --- Static files --------------------------------------------------------
     app.router.add_static("/static", get_static_path(), name="static")
