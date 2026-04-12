@@ -66,50 +66,70 @@
         </div>
 
         <div id="dashboard-stats" class="grid-4" style="margin-bottom:24px">
-          <!-- Filled by JS -->
-        </div>
-
-        <div id="dashboard-monitoring">
-          <!-- Filled by JS: GPU gauge, Memory ring, Temp + Request stats -->
         </div>
 
         <div class="card-header" style="margin-bottom:12px">
-          <div class="card-title">Cluster Topology</div>
+          <div class="card-title">Nodes</div>
         </div>
-        <div id="topology-container" class="topology-container" style="margin-bottom:24px">
-          <canvas id="topology-canvas"></canvas>
-        </div>
-        <div id="topology-detail" class="topology-detail" style="display:none; margin-bottom:24px">
-          <!-- Filled by JS on node click -->
+        <div id="dashboard-nodes" class="grid-3" style="margin-bottom:24px">
         </div>
 
         <div id="dashboard-health">
-          <!-- Filled by JS -->
         </div>
       </div>
 
       <!-- Chat View -->
       <div id="view-chat" class="view" style="display:none">
-        <div class="page-header">
-          <div class="page-title">Chat</div>
-          <div class="page-desc">Talk to your local models</div>
-        </div>
-
-        <div class="chat-container">
-          <select id="chat-model" class="chat-model-select">
-            <option>Loading models...</option>
-          </select>
-
-          <div id="chat-messages" class="chat-messages">
-            <div style="text-align:center; color:var(--text-muted); padding:60px 0">
-              Send a message to get started
+        <div class="chat-layout">
+          <!-- Conversation History Sidebar -->
+          <div id="chat-history-panel" class="chat-history-panel">
+            <div class="chat-history-header">
+              <button id="chat-new-btn" class="btn btn-primary btn-sm chat-new-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                New Chat
+              </button>
+              <button id="chat-history-toggle" class="btn btn-ghost btn-icon" title="Toggle history">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+            </div>
+            <div id="chat-history-list" class="chat-history-list">
             </div>
           </div>
 
-          <div class="chat-input-area">
-            <div class="chat-input-wrapper">
-              <textarea id="chat-input" class="chat-input" placeholder="Type a message..." rows="1"></textarea>
-              <button id="chat-send" class="chat-send">Send</button>
+          <!-- Chat Main Area -->
+          <div class="chat-main">
+            <div class="page-header" style="display:flex;align-items:center;gap:12px">
+              <button id="chat-history-open" class="btn btn-ghost btn-icon chat-history-open-btn" title="Show history" style="display:none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+              <div>
+                <div class="page-title">Chat</div>
+                <div class="page-desc">Talk to your local models</div>
+              </div>
+            </div>
+
+            <div class="chat-container">
+              <select id="chat-model" class="chat-model-select">
+                <option>Loading models...</option>
+              </select>
+
+              <div id="chat-messages" class="chat-messages">
+              </div>
+
+              <div id="chat-metrics-bar" class="chat-metrics-bar" style="display:none">
+                <span id="chat-metric-ttft">TTFT: --</span>
+                <span class="chat-metric-sep">|</span>
+                <span id="chat-metric-tps">-- tok/s</span>
+                <span class="chat-metric-sep">|</span>
+                <span id="chat-metric-tokens">0 tokens</span>
+              </div>
+
+              <div class="chat-input-area">
+                <div class="chat-input-wrapper">
+                  <textarea id="chat-input" class="chat-input" placeholder="Type a message..." rows="1"></textarea>
+                  <button id="chat-send" class="chat-send">Send</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -117,48 +137,12 @@
 
       <!-- Models View -->
       <div id="view-models" class="view" style="display:none">
-        <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div>
-            <div class="page-title">Models</div>
-            <div class="page-desc">Browse and manage available models</div>
-          </div>
-          <div id="models-disk-space" class="models-disk-space"></div>
-        </div>
-
-        <div class="models-toolbar">
-          <div class="models-search-wrap">
-            <svg class="models-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="models-search" class="models-search" placeholder="Search models by name or description...">
-          </div>
-          <div class="models-filters" id="models-filters">
-            <button class="filter-pill active" data-filter="all">All</button>
-            <button class="filter-pill" data-filter="downloaded">Downloaded</button>
-            <button class="filter-pill" data-filter="available">Available</button>
-            <button class="filter-pill" data-filter="recommended">Recommended for GPU</button>
-          </div>
-          <div class="models-sort">
-            <label class="models-sort-label">Sort:</label>
-            <select id="models-sort" class="form-select models-sort-select">
-              <option value="recommended">Recommended</option>
-              <option value="name">Name</option>
-              <option value="size">Size</option>
-            </select>
-          </div>
+        <div class="page-header">
+          <div class="page-title">Models</div>
+          <div class="page-desc">Browse and manage available models</div>
         </div>
 
         <div id="models-list">
-          <!-- Filled by JS -->
-        </div>
-
-        <div id="model-delete-modal" class="model-modal-overlay" style="display:none">
-          <div class="model-modal">
-            <h3>Delete Model</h3>
-            <p id="model-delete-msg">Are you sure you want to delete this model? This will free up disk space but you will need to re-download it later.</p>
-            <div class="model-modal-actions">
-              <button class="btn btn-ghost" id="model-delete-cancel">Cancel</button>
-              <button class="btn btn-danger" id="model-delete-confirm">Delete Model</button>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -170,14 +154,15 @@
         </div>
 
         <div id="training-content">
-          <!-- Filled by JS -->
         </div>
       </div>
 
     </main>
   </div>
 
-  <script src="/static/js/topology.js"></script>
+  <!-- Toast Notifications -->
+  <div id="toast-container" class="toast-container"></div>
+
   <script src="/static/js/app.js"></script>
 </body>
 </html>
