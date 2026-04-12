@@ -1,0 +1,106 @@
+"""Tests for ainode.api.server — AINode-specific endpoints."""
+
+import pytest
+import pytest_asyncio
+from aiohttp.test_utils import TestClient, TestServer
+
+from ainode.api.server import create_app
+from ainode.core.config import NodeConfig
+
+
+@pytest.fixture
+def config():
+    return NodeConfig(node_id="test-node-1", node_name="TestNode", model="test-model")
+
+
+@pytest.fixture
+def app(config):
+    return create_app(config=config, engine=None)
+
+
+@pytest_asyncio.fixture
+async def client(app):
+    async with TestClient(TestServer(app)) as c:
+        yield c
+
+
+# ---- /api/health -----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_health(client):
+    resp = await client.get("/api/health")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data == {"status": "ok"}
+
+
+# ---- /api/status -----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_status_fields(client):
+    resp = await client.get("/api/status")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["node_id"] == "test-node-1"
+    assert data["node_name"] == "TestNode"
+    assert data["model"] == "test-model"
+    assert data["version"] == "0.1.0"
+    assert data["powered_by"] == "argentos.ai"
+    assert data["engine_ready"] is False
+    assert isinstance(data["uptime"], (int, float))
+    assert isinstance(data["models_loaded"], list)
+    assert "api_port" in data
+
+
+# ---- /api/nodes ------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_nodes(client):
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "nodes" in data
+    nodes = data["nodes"]
+    assert len(nodes) == 1
+    node = nodes[0]
+    assert node["node_id"] == "test-node-1"
+    assert node["node_name"] == "TestNode"
+    assert node["model"] == "test-model"
+    assert node["engine_ready"] is False
+
+
+# ---- / (index) -------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_index_serves_html(client):
+    resp = await client.get("/")
+    assert resp.status == 200
+    assert "text/html" in resp.headers.get("Content-Type", "")
+    body = await resp.text()
+    assert "<html" in body.lower() or "<!doctype" in body.lower()
+
+
+# ---- CORS ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cors_headers(client):
+    resp = await client.get("/api/health")
+    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+@pytest.mark.asyncio
+async def test_cors_preflight(client):
+    resp = await client.options("/api/health")
+    assert resp.status == 204
+    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+    assert "POST" in resp.headers.get("Access-Control-Allow-Methods", "")
+
+
+# ---- vLLM proxy returns 502 when engine is down ----------------------------
+
+@pytest.mark.asyncio
+async def test_vllm_proxy_returns_502_when_down(client):
+    resp = await client.get("/v1/models")
+    assert resp.status == 502
+    data = await resp.json()
+    assert "error" in data
