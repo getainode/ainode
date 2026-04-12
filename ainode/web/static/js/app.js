@@ -15,6 +15,17 @@ const AINode = {
     // Metrics / monitoring
     metrics: null,
     metricsInterval: null,
+    // Models management
+    modelsCatalog: [],
+    modelsRecommended: [],
+    modelsGpuMemory: null,
+    modelsFilter: 'all',
+    modelsSearch: '',
+    modelsSort: 'recommended',
+    modelsExpanded: null,
+    modelsDownloading: {},
+    modelsDeleteTarget: null,
+    modelsBound: false,
   },
 
   // --- Initialization ---
@@ -96,47 +107,97 @@ const AINode = {
       <div class="card"><div class="stat-value">${totalMem || (s.gpu?.memory_gb || 0)} GB</div><div class="stat-label">Total Memory</div></div>
       <div class="card"><div class="stat-value">${modelsLoaded}</div><div class="stat-label">Models Loaded</div></div>
     `;
-    this.renderNodes(nodes, s);
+    this.renderTopology(nodes, s);
     this.renderClusterHealth(s);
   },
 
-  renderNodes(nodes, status) {
-    const container = document.getElementById('dashboard-nodes');
-    if (!container) return;
+  _topologyInitialized: false,
+
+  renderTopology(nodes, status) {
+    // Build node list — fallback to local node from status
     if (nodes.length === 0 && status) {
       nodes = [{
         node_id: status.node_id || 'local',
         node_name: status.node_name || 'This Node',
         gpu_name: status.gpu?.name || 'Unknown GPU',
         gpu_memory_gb: status.gpu?.memory_gb || 0,
+        gpu_memory_used_pct: status.gpu?.memory_used_pct || 0,
+        gpu_utilization_pct: status.gpu?.utilization_pct || null,
         unified_memory: status.gpu?.unified_memory || false,
         model: status.model || 'none',
         status: status.engine_ready ? 'online' : 'starting',
         is_leader: true,
+        uptime_seconds: status.uptime_seconds || null,
       }];
     }
-    container.innerHTML = nodes.map(node => {
-      const statusClass = node.status === 'online' ? 'status-online' : node.status === 'starting' ? 'status-starting' : 'status-offline';
-      const leaderClass = node.is_leader ? 'is-leader' : '';
-      const memLabel = node.unified_memory ? 'unified' : 'VRAM';
-      const memPct = node.gpu_memory_used_pct || 0;
-      const barClass = memPct > 90 ? 'red' : memPct > 70 ? 'yellow' : 'green';
-      return `
-        <div class="node-card ${leaderClass}">
-          <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:12px">
-            <div>
-              <div class="node-name">${this.esc(node.node_name || node.node_id)}</div>
-              <div class="node-id">${this.esc(node.node_id)}</div>
-            </div>
-            <div class="status ${statusClass}"><span class="status-dot"></span>${node.status || 'unknown'}</div>
-          </div>
-          <div class="node-gpu">${this.esc(node.gpu_name || 'Unknown')} &middot; ${node.gpu_memory_gb || '?'} GB ${memLabel}</div>
-          <div class="node-model">${this.esc(node.model || 'no model')}</div>
-          <div class="progress-bar"><div class="progress-fill ${barClass}" style="width:${memPct}%"></div></div>
-          <div style="font-size:11px; color:var(--text-muted); margin-top:4px">Memory: ${memPct}% used</div>
+
+    // Initialize topology canvas once
+    if (!this._topologyInitialized) {
+      const canvas = document.getElementById('topology-canvas');
+      if (canvas && typeof Topology !== 'undefined') {
+        Topology.init(canvas, (nodeData) => this.showTopologyDetail(nodeData));
+        this._topologyInitialized = true;
+      }
+    }
+
+    // Update topology data
+    if (typeof Topology !== 'undefined') {
+      Topology.update(nodes);
+    }
+  },
+
+  showTopologyDetail(nodeData) {
+    const panel = document.getElementById('topology-detail');
+    if (!panel) return;
+    if (!nodeData) {
+      panel.style.display = 'none';
+      return;
+    }
+    const d = nodeData;
+    const statusClass = d.status === 'online' ? 'status-online' : d.status === 'starting' ? 'status-starting' : 'status-offline';
+    const memLabel = d.unified_memory ? 'unified' : 'VRAM';
+    const memPct = d.gpu_memory_used_pct || 0;
+    const gpuUtil = d.gpu_utilization_pct != null ? d.gpu_utilization_pct + '%' : 'N/A';
+    const uptime = d.uptime_seconds ? this.formatUptime(d.uptime_seconds) : 'N/A';
+    panel.style.display = 'block';
+    panel.innerHTML = `
+      <div class="topology-detail-header">
+        <div>
+          <div class="topology-detail-name">${this.esc(d.node_name || d.node_id)}${d.is_leader ? ' <span style="color:var(--accent);font-size:12px;font-weight:600">LEADER</span>' : ''}</div>
+          <div class="topology-detail-id">${this.esc(d.node_id)}</div>
         </div>
-      `;
-    }).join('');
+        <div style="display:flex;align-items:center;gap:12px">
+          <div class="status ${statusClass}"><span class="status-dot"></span>${d.status || 'unknown'}</div>
+          <button class="topology-detail-close" id="topology-detail-close">Close</button>
+        </div>
+      </div>
+      <div class="topology-detail-grid">
+        <div class="topology-detail-stat">
+          <div class="stat-value" style="color:var(--text-primary)">${this.esc(d.gpu_name || 'Unknown')}</div>
+          <div class="stat-label">GPU</div>
+        </div>
+        <div class="topology-detail-stat">
+          <div class="stat-value">${d.gpu_memory_gb || '?'} <span style="font-size:14px;color:var(--text-muted)">GB ${memLabel}</span></div>
+          <div class="stat-label">Memory</div>
+          <div class="progress-bar" style="margin-top:6px"><div class="progress-fill ${memPct > 90 ? 'red' : memPct > 70 ? 'yellow' : 'green'}" style="width:${memPct}%"></div></div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${memPct}% used</div>
+        </div>
+        <div class="topology-detail-stat">
+          <div class="stat-value">${gpuUtil}</div>
+          <div class="stat-label">GPU Utilization</div>
+        </div>
+        <div class="topology-detail-stat">
+          <div class="stat-value">${uptime}</div>
+          <div class="stat-label">Uptime</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;font-family:var(--font-mono);font-size:13px;color:var(--accent)">
+        Model: ${this.esc(d.model || 'no model loaded')}
+      </div>
+    `;
+    document.getElementById('topology-detail-close')?.addEventListener('click', () => {
+      panel.style.display = 'none';
+    });
   },
 
   renderClusterHealth(status) {
