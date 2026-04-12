@@ -70,10 +70,13 @@
         </div>
 
         <div class="card-header" style="margin-bottom:12px">
-          <div class="card-title">Nodes</div>
+          <div class="card-title">Cluster Topology</div>
         </div>
-        <div id="dashboard-nodes" class="grid-3" style="margin-bottom:24px">
-          <!-- Filled by JS -->
+        <div id="topology-container" class="topology-container" style="margin-bottom:24px">
+          <canvas id="topology-canvas"></canvas>
+        </div>
+        <div id="topology-detail" class="topology-detail" style="display:none; margin-bottom:24px">
+          <!-- Filled by JS on node click -->
         </div>
 
         <div id="dashboard-health">
@@ -135,6 +138,7 @@
     </main>
   </div>
 
+  <script src="/static/js/topology.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>
