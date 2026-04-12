@@ -1,0 +1,36 @@
+# Slice Registry — AINode Product
+
+## Active Slices
+
+| Slice | Owner | Branch | Status | Linear |
+|-------|-------|--------|--------|--------|
+| engine-vllm | Threadmaster | codex/engine-vllm | IN PROGRESS | — |
+
+## Completed Slices
+
+| Slice | Owner | Merged | Date |
+|-------|-------|--------|------|
+| initial-scaffold | Threadmaster | main | 2026-04-12 |
+
+## Available Slices (Priority Order)
+
+### P0 — MVP (must ship for v0.1)
+- `engine-vllm` — vLLM engine: health checks, readiness wait, log streaming, graceful shutdown
+- `api-proxy` — API proxy: sits in front of vLLM, adds /status, /nodes, model catalog
+- `web-ui` — Embedded chat UI: simple HTML/JS, served by ainode, no external deps
+
+### P1 — Cluster + Polish
+- `cli-polish` — Rich terminal output, progress bars, spinners, colored status
+- `discovery-cluster` — Multi-node: form cluster from discovered nodes, route requests, shard models
+- `onboarding-web` — Browser-based onboarding instead of terminal prompts
+
+### P2 — Differentiators
+- `training-ui` — Fine-tuning from browser: dataset upload, config, launch, monitor
+- `training-engine` — Backend: vLLM/PyTorch training pipeline, LoRA, progress streaming
+- `model-manager` — Download, delete, organize models from UI
+- `metrics` — Prometheus endpoint for GPU, memory, request stats
+
+### P3 — Production
+- `installer-test` — Test install script on real DGX Spark hardware
+- `systemd-service` — Auto-start on boot, service management
+- `auth` — Optional API key auth, user accounts
