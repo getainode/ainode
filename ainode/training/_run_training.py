@@ -24,6 +24,14 @@ def main() -> None:
 
     config = json.loads(config_path.read_text())
 
+    # Resolve relative dataset paths to ~/.ainode/datasets/
+    ds = config.get("dataset_path", "")
+    if ds and not ds.startswith("/") and not ds.startswith("~"):
+        from ainode.core.config import AINODE_HOME
+        resolved = AINODE_HOME / "datasets" / ds
+        if resolved.exists():
+            config["dataset_path"] = str(resolved)
+
     try:
         import torch
         from transformers import (

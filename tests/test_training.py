@@ -1,7 +1,11 @@
-"""Tests for ainode.training — config validation, job lifecycle, manager queue."""
+"""Tests for ainode.training — config validation, job lifecycle, manager queue, API routes."""
 
 import asyncio
+import json
 import pytest
+import pytest_asyncio
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from ainode.training.engine import (
     TrainingConfig,
@@ -9,6 +13,7 @@ from ainode.training.engine import (
     TrainingManager,
     JobStatus,
 )
+from ainode.training.api_routes import setup_training_routes
 
 
 # =============================================================================
@@ -294,3 +299,270 @@ class TestTrainingManager:
         j1 = mgr.submit_job(self._make_config(model="first"))
         j2 = mgr.submit_job(self._make_config(model="second"))
         assert mgr._queue == [j1.job_id, j2.job_id]
+
+
+# =============================================================================
+# Progress parsing edge cases
+# =============================================================================
+
+
+class TestProgressParsing:
+    """Test _parse_progress with various line formats."""
+
+    def _make_job(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        return TrainingJob(config)
+
+    def test_progress_with_timestamp_prefix(self, tmp_path, monkeypatch):
+        """The _log() method prepends [HH:MM:SS] -- progress lines in logs have this."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = '[12:34:56] AINODE_PROGRESS:{"epoch":1,"loss":0.32,"progress":50.0}'
+        job._parse_progress(line)
+        assert job.current_epoch == 1
+        assert job.current_loss == 0.32
+        assert job.progress == 50.0
+
+    def test_progress_partial_fields(self, tmp_path, monkeypatch):
+        """Only some fields present in payload."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = 'AINODE_PROGRESS:{"loss":1.23}'
+        job._parse_progress(line)
+        assert job.current_loss == 1.23
+        assert job.current_epoch == 0  # unchanged
+        assert job.progress == 0.0  # unchanged
+
+    def test_progress_step_field(self, tmp_path, monkeypatch):
+        """Step field from actual trainer callback should not break anything."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = 'AINODE_PROGRESS:{"epoch":2,"loss":0.1,"progress":80.0,"step":150}'
+        job._parse_progress(line)
+        assert job.current_epoch == 2
+        assert job.progress == 80.0
+
+    def test_progress_complete(self, tmp_path, monkeypatch):
+        """Final progress line at 100%."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = 'AINODE_PROGRESS:{"epoch":3,"loss":0,"progress":100.0}'
+        job._parse_progress(line)
+        assert job.progress == 100.0
+
+
+# =============================================================================
+# Integration: submit -> manager lifecycle
+# =============================================================================
+
+
+class TestManagerIntegration:
+    """Integration tests for the full submit -> queue -> state lifecycle."""
+
+    def test_submit_and_verify_state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        mgr = TrainingManager()
+        config = TrainingConfig(
+            base_model="meta-llama/Llama-3.2-3B-Instruct",
+            dataset_path="user/alpaca.jsonl",
+            method="lora",
+            num_epochs=2,
+            batch_size=8,
+        )
+        job = mgr.submit_job(config)
+
+        # Job is pending and in the queue
+        assert job.status == JobStatus.PENDING
+        assert mgr.queue_size == 1
+        assert mgr.get_job(job.job_id) is job
+
+        # Status dict has all expected fields
+        status = job.get_status()
+        assert status["job_id"] == job.job_id
+        assert status["status"] == "pending"
+        assert status["config"]["base_model"] == "meta-llama/Llama-3.2-3B-Instruct"
+        assert status["config"]["num_epochs"] == 2
+        assert status["config"]["batch_size"] == 8
+
+    @pytest.mark.asyncio
+    async def test_submit_cancel_verify(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        mgr = TrainingManager()
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = mgr.submit_job(config)
+
+        cancelled = await mgr.cancel_job(job.job_id)
+        assert cancelled is True
+        assert job.status == JobStatus.CANCELLED
+        assert mgr.queue_size == 0
+
+        # List should still contain the job
+        jobs = mgr.list_jobs()
+        assert len(jobs) == 1
+        assert jobs[0]["status"] == "cancelled"
+
+    def test_submit_multiple_and_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        mgr = TrainingManager()
+        j1 = mgr.submit_job(TrainingConfig(base_model="a", dataset_path="user/d1"))
+        j2 = mgr.submit_job(TrainingConfig(base_model="b", dataset_path="user/d2"))
+        j3 = mgr.submit_job(TrainingConfig(base_model="c", dataset_path="user/d3"))
+
+        jobs = mgr.list_jobs()
+        assert len(jobs) == 3
+        ids = {j["job_id"] for j in jobs}
+        assert ids == {j1.job_id, j2.job_id, j3.job_id}
+
+
+# =============================================================================
+# API route tests (aiohttp test client)
+# =============================================================================
+
+
+@pytest.fixture
+def training_app():
+    """Create a minimal aiohttp app with training routes."""
+    app = web.Application()
+    manager = TrainingManager()
+    setup_training_routes(app, manager)
+    return app
+
+
+@pytest_asyncio.fixture
+async def training_client(training_app):
+    async with TestClient(TestServer(training_app)) as c:
+        yield c
+
+
+class TestTrainingAPI:
+
+    @pytest.mark.asyncio
+    async def test_list_jobs_empty(self, training_client):
+        resp = await training_client.get("/api/training/jobs")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data == {"jobs": []}
+
+    @pytest.mark.asyncio
+    async def test_submit_job(self, training_client):
+        payload = {
+            "base_model": "meta-llama/Llama-3.2-3B-Instruct",
+            "dataset_path": "user/my-dataset.jsonl",
+            "method": "lora",
+            "num_epochs": 2,
+        }
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json=payload,
+        )
+        assert resp.status == 201
+        data = await resp.json()
+        assert "job_id" in data
+        assert data["config"]["base_model"] == "meta-llama/Llama-3.2-3B-Instruct"
+        assert data["config"]["num_epochs"] == 2
+
+    @pytest.mark.asyncio
+    async def test_submit_invalid_config(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "", "dataset_path": ""},
+        )
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_submit_invalid_json(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_get_job(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["job_id"] == job_id
+
+    @pytest.mark.asyncio
+    async def test_get_job_not_found(self, training_client):
+        resp = await training_client.get("/api/training/jobs/nonexistent")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_cancel_job(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.delete(f"/api/training/jobs/{job_id}")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent(self, training_client):
+        resp = await training_client.delete("/api/training/jobs/nope")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_get_logs(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}/logs")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "logs" in data
+        assert isinstance(data["logs"], list)
+        assert "total_lines" in data
+
+    @pytest.mark.asyncio
+    async def test_get_logs_with_tail(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}/logs?tail=5")
+        assert resp.status == 200
+        data = await resp.json()
+        assert isinstance(data["logs"], list)
+
+    @pytest.mark.asyncio
+    async def test_get_logs_not_found(self, training_client):
+        resp = await training_client.get("/api/training/jobs/nope/logs")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_list_after_submit(self, training_client):
+        await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "a", "dataset_path": "user/d"},
+        )
+        await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "b", "dataset_path": "user/d"},
+        )
+        resp = await training_client.get("/api/training/jobs")
+        data = await resp.json()
+        assert len(data["jobs"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_already_cancelled(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        await training_client.delete(f"/api/training/jobs/{job_id}")
+        resp = await training_client.delete(f"/api/training/jobs/{job_id}")
+        assert resp.status == 409

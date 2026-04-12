@@ -10,6 +10,8 @@ AINODE_HOME = Path(os.environ.get("AINODE_HOME", Path.home() / ".ainode"))
 CONFIG_FILE = AINODE_HOME / "config.json"
 MODELS_DIR = AINODE_HOME / "models"
 LOGS_DIR = AINODE_HOME / "logs"
+DATASETS_DIR = AINODE_HOME / "datasets"
+TRAINING_DIR = AINODE_HOME / "training"
 
 
 @dataclass
@@ -59,5 +61,5 @@ class NodeConfig:
 
 
 def ensure_dirs():
-    for d in [AINODE_HOME, MODELS_DIR, LOGS_DIR]:
+    for d in [AINODE_HOME, MODELS_DIR, LOGS_DIR, DATASETS_DIR, TRAINING_DIR]:
         d.mkdir(parents=True, exist_ok=True)
