@@ -174,6 +174,15 @@ def cmd_start(args):
 
     console.print("  [bold green]Engine ready.[/bold green] Open your browser to get started.\n")
 
+    # Start API/web server in a background thread
+    import threading
+
+    def run_server_blocking():
+        from ainode.api.server import run_server
+        run_server(config=config, engine=engine)
+
+    threading.Thread(target=run_server_blocking, daemon=True).start()
+
     # Keep running until interrupted
     try:
         engine.process.wait()

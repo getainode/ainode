@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass, field, asdict
+
 from aiohttp import web
 
 from ainode.core.config import AINODE_HOME
