@@ -3,171 +3,114 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AINode — Local AI Platform</title>
+  <title>AINode — Command Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/css/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 </head>
 <body>
-  <div class="app">
-    <!-- Sidebar -->
-    <aside class="sidebar">
-      <div class="sidebar-header">
-        <div class="sidebar-logo"><span>AI</span>Node</div>
-        <div class="sidebar-subtitle">Local AI Platform</div>
+  <div class="command-center">
+    <!-- Top Bar -->
+    <header class="top-bar">
+      <div class="logo">
+        <span class="logo-green">AI</span><span class="logo-white">Node</span>
       </div>
-
-      <nav class="sidebar-nav">
-        <div class="nav-item active" data-view="dashboard">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="3" width="7" height="7" rx="1"/>
-            <rect x="14" y="3" width="7" height="7" rx="1"/>
-            <rect x="3" y="14" width="7" height="7" rx="1"/>
-            <rect x="14" y="14" width="7" height="7" rx="1"/>
-          </svg>
-          Dashboard
-        </div>
-        <div class="nav-item" data-view="chat">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-          </svg>
-          Chat
-        </div>
-        <div class="nav-item" data-view="models">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
-            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-            <line x1="12" y1="22.08" x2="12" y2="12"/>
-          </svg>
-          Models
-        </div>
-        <div class="nav-item" data-view="training">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/>
-          </svg>
-          Training
-        </div>
+      <nav class="top-nav">
+        <button class="nav-pill active" data-view="dashboard">Dashboard</button>
+        <button class="nav-pill" data-view="downloads">Downloads</button>
       </nav>
+      <div class="top-status">
+        <span class="status-indicator online"></span>
+        <span id="top-node-count">1 node</span>
+      </div>
+    </header>
 
-      <div class="sidebar-footer">
-        Powered by <a href="https://argentos.ai" target="_blank">argentos.ai</a>
+    <!-- Left Panel: Chat -->
+    <aside class="left-panel" id="chat-panel">
+      <button class="btn-nvidia" id="new-chat">+ NEW CHAT</button>
+      <input class="search-input" placeholder="Search conversations..." id="chat-search">
+      <div class="conversation-list" id="conversation-list">
+        <!-- Filled by JS -->
       </div>
     </aside>
 
-    <!-- Main Content -->
-    <main class="main">
-
-      <!-- Dashboard View -->
+    <!-- Center: Topology -->
+    <main class="center-stage" id="center-stage">
+      <!-- Dashboard view (default) -->
       <div id="view-dashboard" class="view">
-        <div class="page-header">
-          <div class="page-title">Dashboard</div>
-          <div class="page-desc">Cluster overview and node status</div>
-        </div>
-
-        <div id="dashboard-stats" class="grid-4" style="margin-bottom:24px">
-        </div>
-
-        <div id="topology-container" style="margin-bottom:24px">
-          <canvas id="topology-canvas"></canvas>
-        </div>
-
-        <div id="dashboard-monitoring" class="monitoring-grid" style="margin-bottom:24px"></div>
-
-        <div class="card-header" style="margin-bottom:12px">
-          <div class="card-title">Nodes</div>
-        </div>
-        <div id="dashboard-nodes" class="grid-3" style="margin-bottom:24px">
-        </div>
-
-        <div id="dashboard-health">
-        </div>
+        <canvas id="topology-canvas"></canvas>
       </div>
-
-      <!-- Chat View -->
-      <div id="view-chat" class="view" style="display:none">
-        <div class="chat-layout">
-          <!-- Conversation History Sidebar -->
-          <div id="chat-history-panel" class="chat-history-panel">
-            <div class="chat-history-header">
-              <button id="chat-new-btn" class="btn btn-primary btn-sm chat-new-btn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                New Chat
-              </button>
-              <button id="chat-history-toggle" class="btn btn-ghost btn-icon" title="Toggle history">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
-              </button>
-            </div>
-            <div id="chat-history-list" class="chat-history-list">
-            </div>
-          </div>
-
-          <!-- Chat Main Area -->
-          <div class="chat-main">
-            <div class="page-header" style="display:flex;align-items:center;gap:12px">
-              <button id="chat-history-open" class="btn btn-ghost btn-icon chat-history-open-btn" title="Show history" style="display:none">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="9 18 15 12 9 6"/></svg>
-              </button>
-              <div>
-                <div class="page-title">Chat</div>
-                <div class="page-desc">Talk to your local models</div>
-              </div>
-            </div>
-
-            <div class="chat-container">
-              <select id="chat-model" class="chat-model-select">
-                <option>Loading models...</option>
-              </select>
-
-              <div id="chat-messages" class="chat-messages">
-              </div>
-
-              <div id="chat-metrics-bar" class="chat-metrics-bar" style="display:none">
-                <span id="chat-metric-ttft">TTFT: --</span>
-                <span class="chat-metric-sep">|</span>
-                <span id="chat-metric-tps">-- tok/s</span>
-                <span class="chat-metric-sep">|</span>
-                <span id="chat-metric-tokens">0 tokens</span>
-              </div>
-
-              <div class="chat-input-area">
-                <div class="chat-input-wrapper">
-                  <textarea id="chat-input" class="chat-input" placeholder="Type a message..." rows="1"></textarea>
-                  <button id="chat-send" class="chat-send">Send</button>
-                </div>
-              </div>
-            </div>
-          </div>
+      <!-- Downloads view -->
+      <div id="view-downloads" class="view" style="display:none">
+        <div class="view-header">
+          <h2>Downloads</h2>
+          <p>Manage model downloads across the cluster</p>
         </div>
+        <div id="downloads-content"></div>
       </div>
-
-      <!-- Models View -->
+      <!-- Models view (accessed from downloads or direct) -->
       <div id="view-models" class="view" style="display:none">
-        <div class="page-header">
-          <div class="page-title">Models</div>
-          <div class="page-desc">Browse and manage available models</div>
+        <div class="view-header">
+          <h2>Models</h2>
         </div>
-
-        <div id="models-list">
-        </div>
+        <div id="models-list"></div>
       </div>
-
-      <!-- Training View -->
+      <!-- Training view -->
       <div id="view-training" class="view" style="display:none">
-        <div class="page-header">
-          <div class="page-title">Training</div>
-          <div class="page-desc">Fine-tune models on your hardware</div>
+        <div class="view-header">
+          <h2>Training</h2>
         </div>
+        <div id="training-content"></div>
+      </div>
+    </main>
 
-        <div id="training-content">
+    <!-- Right Panel: Instances + Launch -->
+    <aside class="right-panel" id="right-panel">
+      <div class="panel-section">
+        <h3 class="panel-title"><span class="status-dot online"></span> INSTANCES</h3>
+        <div id="instances-list">
+          <!-- Filled by JS: running model instance cards -->
         </div>
       </div>
+      <div class="panel-section">
+        <h3 class="panel-title">&#9671; LAUNCH INSTANCE</h3>
+        <div class="launch-form">
+          <label class="form-label">Model</label>
+          <select id="launch-model" class="form-select">
+            <option>— SELECT MODEL —</option>
+          </select>
+          <label class="form-label">Sharding</label>
+          <div class="pill-group" id="sharding-pills">
+            <button class="pill active" data-value="pipeline">Pipeline</button>
+            <button class="pill" data-value="tensor">Tensor</button>
+          </div>
+          <label class="form-label">Minimum Nodes</label>
+          <div class="node-selector" id="node-selector">
+            <button class="node-dot active" data-value="1">1</button>
+            <button class="node-dot" data-value="2">2</button>
+            <button class="node-dot" data-value="3">3</button>
+          </div>
+          <button class="btn-nvidia btn-full" id="launch-btn">LAUNCH</button>
+        </div>
+      </div>
+    </aside>
 
-    </main>
+    <!-- Bottom Bar: Chat Input -->
+    <footer class="bottom-bar">
+      <select id="chat-model" class="model-select">
+        <option>Loading models...</option>
+      </select>
+      <div class="chat-input-wrapper">
+        <textarea id="chat-input" class="chat-input" placeholder="Ask anything..." rows="1"></textarea>
+        <button id="chat-send" class="btn-send">SEND</button>
+      </div>
+    </footer>
+
+    <!-- Toast container -->
+    <div id="toast-container" class="toast-container"></div>
   </div>
-
-  <!-- Toast Notifications -->
-  <div id="toast-container" class="toast-container"></div>
 
   <script src="/static/js/topology.js"></script>
   <script src="/static/js/app.js"></script>
