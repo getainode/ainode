@@ -1,46 +1,376 @@
-/* AINode Dashboard — Core Styles */
+/* ============================================================
+   AINode Command Center — NVIDIA-Inspired Design System
+   Pure black, NVIDIA green accents, premium information-dense UI
+   ============================================================ */
 
+/* === Design Tokens === */
 :root {
-  --bg-primary: #0a0e17;
-  --bg-secondary: #111827;
-  --bg-card: #1a2332;
-  --bg-card-hover: #1e2a3d;
-  --border: #2d3748;
-  --border-active: #4a90d9;
-  --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent: #4a90d9;
-  --accent-hover: #5ba0e9;
-  --green: #10b981;
-  --green-glow: rgba(16, 185, 129, 0.2);
-  --yellow: #f59e0b;
-  --yellow-glow: rgba(245, 158, 11, 0.2);
-  --red: #ef4444;
-  --red-glow: rgba(239, 68, 68, 0.2);
-  --purple: #8b5cf6;
-  --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  --bg-primary: #0a0a0a;
+  --bg-surface: #0d0d0d;
+  --bg-card: #111111;
+  --bg-card-hover: #1a1a1a;
+  --border: #1f1f1f;
+  --border-hover: #2a2a2a;
+  --border-active: #76B900;
+  --nvidia-green: #76B900;
+  --nvidia-green-glow: rgba(118, 185, 0, 0.25);
+  --nvidia-green-bright: #8ACE00;
+  --nvidia-green-dim: #4a7a00;
+  --amber: #FFB800;
+  --red: #FF3333;
+  --cyan: #00D4AA;
+  --text-primary: #E0E0E0;
+  --text-secondary: #888888;
+  --text-muted: #555555;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --radius: 12px;
-  --radius-sm: 8px;
-  --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  --green-glow: rgba(118, 185, 0, 0.2);
+  --red-glow: rgba(255, 51, 51, 0.15);
+  --amber-glow: rgba(255, 184, 0, 0.15);
 }
 
-* {
+/* === Reset === */
+*,
+*::before,
+*::after {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
+/* === Body === */
 body {
   font-family: var(--font-sans);
   background: var(--bg-primary);
+  background-image: radial-gradient(circle, #151515 1px, transparent 1px);
+  background-size: 20px 20px;
   color: var(--text-primary);
   min-height: 100vh;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Layout */
+/* === Scrollbars === */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--nvidia-green-dim);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--nvidia-green);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--nvidia-green-dim) #0a0a0a;
+}
+
+/* ============================================================
+   TOP BAR
+   ============================================================ */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 20px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+}
+
+.top-bar-logo {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.top-bar-logo span {
+  color: var(--nvidia-green);
+}
+
+.top-bar-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nav-pill {
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  background: transparent;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.nav-pill:hover {
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+
+.nav-pill.active {
+  color: var(--nvidia-green);
+  border-color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.08);
+}
+
+.top-bar-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
+   COMMAND CENTER — Main 3-Column Layout
+   ============================================================ */
+.command-center {
+  display: grid;
+  grid-template-columns: 280px 1fr 320px;
+  grid-template-rows: 1fr 60px;
+  grid-template-areas:
+    "left center right"
+    "bottom bottom bottom";
+  height: calc(100vh - 48px);
+  margin-top: 48px;
+}
+
+/* ============================================================
+   LEFT PANEL — Chat Sidebar
+   ============================================================ */
+.left-panel {
+  grid-area: left;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.left-panel-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.left-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+
+.conversation-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.conversation-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+}
+
+.conversation-item:hover {
+  background: var(--bg-card);
+  border-color: var(--border);
+}
+
+.conversation-item.active {
+  background: var(--bg-card);
+  border-color: var(--nvidia-green);
+  box-shadow: inset 3px 0 0 var(--nvidia-green);
+}
+
+.conversation-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-item-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.conversation-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ============================================================
+   CENTER STAGE — Topology Canvas
+   ============================================================ */
+.center-stage {
+  grid-area: center;
+  background: var(--bg-primary);
+  overflow: hidden;
+  position: relative;
+}
+
+.topology-canvas {
+  width: 100%;
+  height: 100%;
+  background: var(--bg-primary);
+  background-image: radial-gradient(circle, #151515 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* ============================================================
+   RIGHT PANEL — Instances + Launch
+   ============================================================ */
+.right-panel {
+  grid-area: right;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.right-panel-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.right-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+
+.instances-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.launch-section {
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.launch-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+/* ============================================================
+   BOTTOM BAR — Input Area
+   ============================================================ */
+.bottom-bar {
+  grid-area: bottom;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+}
+
+.bottom-bar .model-selector {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  outline: none;
+  cursor: pointer;
+  min-width: 160px;
+  transition: border-color 0.15s ease;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+.bottom-bar .model-selector:focus {
+  border-color: var(--nvidia-green);
+}
+
+.bottom-bar .chat-input {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: var(--font-sans);
+  resize: none;
+  min-height: 40px;
+  max-height: 120px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bottom-bar .chat-input:focus {
+  border-color: var(--nvidia-green);
+  box-shadow: 0 0 0 2px var(--nvidia-green-glow);
+}
+
+.bottom-bar .chat-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   LEGACY LAYOUT — Sidebar + Main (backward compat)
+   ============================================================ */
 .app {
   display: flex;
   min-height: 100vh;
@@ -48,7 +378,7 @@ body {
 
 .sidebar {
   width: 240px;
-  background: var(--bg-secondary);
+  background: var(--bg-surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -72,7 +402,7 @@ body {
 }
 
 .sidebar-logo span {
-  color: var(--accent);
+  color: var(--nvidia-green);
 }
 
 .sidebar-subtitle {
@@ -108,8 +438,9 @@ body {
 }
 
 .nav-item.active {
-  background: var(--accent);
-  color: white;
+  background: rgba(118, 185, 0, 0.12);
+  color: var(--nvidia-green);
+  border-left: 3px solid var(--nvidia-green);
 }
 
 .nav-item svg {
@@ -126,7 +457,7 @@ body {
 }
 
 .sidebar-footer a {
-  color: var(--accent);
+  color: var(--nvidia-green);
   text-decoration: none;
 }
 
@@ -137,7 +468,9 @@ body {
   min-height: 100vh;
 }
 
-/* Page Header */
+/* ============================================================
+   PAGE HEADER
+   ============================================================ */
 .page-header {
   margin-bottom: 24px;
 }
@@ -153,17 +486,19 @@ body {
   font-size: 14px;
 }
 
-/* Cards */
+/* ============================================================
+   CARDS
+   ============================================================ */
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 20px;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .card:hover {
-  border-color: var(--border-active);
+  border-color: var(--border-hover);
 }
 
 .card-header {
@@ -174,14 +509,16 @@ body {
 }
 
 .card-title {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-secondary);
+  letter-spacing: 1px;
+  color: var(--text-muted);
 }
 
-/* Grid layouts */
+/* ============================================================
+   GRID LAYOUTS
+   ============================================================ */
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -200,23 +537,28 @@ body {
   gap: 16px;
 }
 
-/* Stat cards */
+/* ============================================================
+   STAT CARDS
+   ============================================================ */
 .stat-value {
   font-size: 32px;
   font-weight: 700;
   font-family: var(--font-mono);
   line-height: 1;
   margin-bottom: 4px;
+  color: var(--nvidia-green);
 }
 
 .stat-label {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
-/* Status indicators */
+/* ============================================================
+   STATUS INDICATORS
+   ============================================================ */
 .status {
   display: inline-flex;
   align-items: center;
@@ -234,51 +576,70 @@ body {
 }
 
 .status-online .status-dot {
-  background: var(--green);
-  box-shadow: 0 0 8px var(--green-glow);
+  background: var(--nvidia-green);
+  box-shadow: 0 0 8px var(--nvidia-green-glow);
+  animation: green-pulse 2s infinite;
 }
 
-.status-online { color: var(--green); }
+.status-online {
+  color: var(--nvidia-green);
+}
 
 .status-starting .status-dot {
-  background: var(--yellow);
-  box-shadow: 0 0 8px var(--yellow-glow);
+  background: var(--amber);
+  box-shadow: 0 0 8px var(--amber-glow);
   animation: pulse 1.5s infinite;
 }
 
-.status-starting { color: var(--yellow); }
+.status-starting {
+  color: var(--amber);
+}
 
 .status-offline .status-dot {
   background: var(--red);
   box-shadow: 0 0 8px var(--red-glow);
 }
 
-.status-offline { color: var(--red); }
+.status-offline {
+  color: var(--red);
+}
+
+/* Green glow pulse animation for active/online indicators */
+@keyframes green-pulse {
+  0%, 100% {
+    box-shadow: 0 0 4px var(--nvidia-green-glow);
+  }
+  50% {
+    box-shadow: 0 0 12px var(--nvidia-green-glow), 0 0 24px rgba(118, 185, 0, 0.15);
+  }
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
 
-/* Node cards */
+/* ============================================================
+   NODE CARDS (Topology)
+   ============================================================ */
 .node-card {
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--nvidia-green);
   border-radius: var(--radius);
   padding: 20px;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   position: relative;
   overflow: hidden;
 }
 
 .node-card:hover {
-  border-color: var(--border-active);
+  border-color: var(--nvidia-green-bright);
+  box-shadow: 0 0 20px var(--nvidia-green-glow), 0 4px 24px rgba(0, 0, 0, 0.4);
   transform: translateY(-2px);
-  box-shadow: var(--shadow);
 }
 
 .node-card.is-leader {
-  border-color: var(--accent);
+  border-color: var(--nvidia-green);
 }
 
 .node-card.is-leader::before {
@@ -286,8 +647,8 @@ body {
   position: absolute;
   top: 12px;
   right: -28px;
-  background: var(--accent);
-  color: white;
+  background: var(--nvidia-green);
+  color: #000;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 1px;
@@ -316,11 +677,60 @@ body {
 
 .node-model {
   font-size: 13px;
-  color: var(--accent);
+  color: var(--nvidia-green);
   font-family: var(--font-mono);
 }
 
-/* Progress bars */
+/* ============================================================
+   INSTANCE CARDS
+   ============================================================ */
+.instance-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--nvidia-green);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  transition: all 0.15s ease;
+}
+
+.instance-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  border-left-color: var(--nvidia-green-bright);
+}
+
+.instance-card .instance-status {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--nvidia-green);
+}
+
+.instance-card .instance-status.stopped {
+  color: var(--red);
+}
+
+.instance-card .instance-status.loading {
+  color: var(--amber);
+}
+
+.instance-name {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  margin-bottom: 4px;
+}
+
+.instance-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   PROGRESS BARS
+   ============================================================ */
 .progress-bar {
   width: 100%;
   height: 6px;
@@ -336,11 +746,214 @@ body {
   transition: width 0.5s ease;
 }
 
-.progress-fill.green { background: var(--green); }
-.progress-fill.yellow { background: var(--yellow); }
+.progress-fill.green { background: var(--nvidia-green); }
+.progress-fill.yellow { background: var(--amber); }
 .progress-fill.red { background: var(--red); }
+.progress-fill.accent { background: var(--nvidia-green); }
 
-/* Chat */
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.btn-nvidia {
+  background: var(--nvidia-green);
+  color: #000;
+  border-color: var(--nvidia-green);
+  font-weight: 700;
+}
+
+.btn-nvidia:hover {
+  background: var(--nvidia-green-bright);
+  border-color: var(--nvidia-green-bright);
+  box-shadow: 0 0 16px var(--nvidia-green-glow);
+}
+
+.btn-nvidia:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-primary {
+  background: var(--nvidia-green);
+  color: #000;
+  border-color: var(--nvidia-green);
+}
+
+.btn-primary:hover {
+  background: var(--nvidia-green-bright);
+  border-color: var(--nvidia-green-bright);
+  box-shadow: 0 0 16px var(--nvidia-green-glow);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--nvidia-green);
+  border-color: var(--nvidia-green);
+}
+
+.btn-ghost:hover {
+  background: rgba(118, 185, 0, 0.08);
+  color: var(--nvidia-green-bright);
+  border-color: var(--nvidia-green-bright);
+}
+
+.btn-danger {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+
+.btn-danger:hover {
+  background: #e62e2e;
+  box-shadow: 0 0 12px var(--red-glow);
+}
+
+.btn-lg {
+  padding: 12px 28px;
+  font-size: 15px;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.btn-icon {
+  padding: 6px;
+  min-width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ============================================================
+   FORM INPUTS
+   ============================================================ */
+.form-input,
+.form-select {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: var(--font-sans);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.form-input:focus,
+.form-select:focus {
+  border-color: var(--nvidia-green);
+  box-shadow: 0 0 0 2px var(--nvidia-green-glow);
+}
+
+.form-input::placeholder {
+  color: var(--text-muted);
+}
+
+.form-select {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 36px;
+}
+
+.form-select option {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.form-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 16px;
+}
+
+.form-section {
+  margin-bottom: 8px;
+}
+
+.form-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.form-section-title.collapsible {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+}
+
+.form-section-title.collapsible .chevron {
+  transition: transform 0.2s ease;
+}
+
+.form-section-title.collapsible.open .chevron {
+  transform: rotate(180deg);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* ============================================================
+   CHAT
+   ============================================================ */
 .chat-container {
   display: flex;
   flex-direction: column;
@@ -360,11 +973,14 @@ body {
   max-width: 80%;
   line-height: 1.6;
   font-size: 14px;
+  position: relative;
+  transition: background 0.15s ease;
 }
 
 .chat-message.user {
-  background: var(--accent);
-  color: white;
+  background: #1a2a0a;
+  border: 1px solid rgba(118, 185, 0, 0.2);
+  color: var(--text-primary);
   margin-left: auto;
   border-bottom-right-radius: 2px;
 }
@@ -383,6 +999,7 @@ body {
   overflow-x: auto;
   font-family: var(--font-mono);
   font-size: 13px;
+  border: 1px solid var(--border);
 }
 
 .chat-message code {
@@ -417,11 +1034,12 @@ body {
   min-height: 48px;
   max-height: 200px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .chat-input:focus {
-  border-color: var(--accent);
+  border-color: var(--nvidia-green);
+  box-shadow: 0 0 0 2px var(--nvidia-green-glow);
 }
 
 .chat-input::placeholder {
@@ -429,25 +1047,27 @@ body {
 }
 
 .chat-send {
-  background: var(--accent);
-  color: white;
+  background: var(--nvidia-green);
+  color: #000;
   border: none;
   border-radius: var(--radius-sm);
   padding: 12px 20px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: all 0.15s ease;
   white-space: nowrap;
 }
 
 .chat-send:hover {
-  background: var(--accent-hover);
+  background: var(--nvidia-green-bright);
+  box-shadow: 0 0 16px var(--nvidia-green-glow);
 }
 
 .chat-send:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .chat-model-select {
@@ -457,11 +1077,19 @@ body {
   padding: 8px 12px;
   color: var(--text-primary);
   font-size: 13px;
+  font-family: var(--font-mono);
   outline: none;
   margin-bottom: 12px;
+  transition: border-color 0.15s ease;
 }
 
-/* Models list */
+.chat-model-select:focus {
+  border-color: var(--nvidia-green);
+}
+
+/* ============================================================
+   MODELS LIST
+   ============================================================ */
 .model-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -475,7 +1103,7 @@ body {
 }
 
 .model-card:hover {
-  border-color: var(--border-active);
+  border-color: var(--nvidia-green);
 }
 
 .model-info {
@@ -510,18 +1138,19 @@ body {
 
 .model-badge.loaded {
   background: var(--green-glow);
-  color: var(--green);
-  border: 1px solid var(--green);
+  color: var(--nvidia-green);
+  border: 1px solid var(--nvidia-green);
 }
 
 .model-badge.available {
-  background: rgba(74, 144, 217, 0.1);
-  color: var(--accent);
-  border: 1px solid var(--accent);
+  background: rgba(118, 185, 0, 0.06);
+  color: var(--nvidia-green-dim);
+  border: 1px solid var(--nvidia-green-dim);
 }
 
-/* --- Training Section --- */
-
+/* ============================================================
+   TRAINING SECTION
+   ============================================================ */
 .training-header {
   display: flex;
   justify-content: space-between;
@@ -562,65 +1191,9 @@ body {
   color: var(--text-secondary);
 }
 
-/* Buttons */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  font-weight: 600;
-  font-family: var(--font-sans);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  border: 1px solid transparent;
-  white-space: nowrap;
-}
-
-.btn-primary {
-  background: var(--accent);
-  color: white;
-  border-color: var(--accent);
-}
-
-.btn-primary:hover {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-ghost {
-  background: transparent;
-  color: var(--text-secondary);
-  border-color: var(--border);
-}
-
-.btn-ghost:hover {
-  background: var(--bg-card);
-  color: var(--text-primary);
-}
-
-.btn-danger {
-  background: var(--red);
-  color: white;
-  border-color: var(--red);
-}
-
-.btn-danger:hover {
-  background: #dc2626;
-}
-
-.btn-lg {
-  padding: 12px 28px;
-  font-size: 15px;
-}
-
-/* Job Cards */
+/* ============================================================
+   TRAINING JOB CARDS
+   ============================================================ */
 .training-jobs-list {
   display: flex;
   flex-direction: column;
@@ -637,9 +1210,9 @@ body {
 }
 
 .training-job-card:hover {
-  border-color: var(--border-active);
+  border-color: var(--nvidia-green);
   transform: translateY(-1px);
-  box-shadow: var(--shadow);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
 .job-card-top {
@@ -668,9 +1241,9 @@ body {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  background: rgba(139, 92, 246, 0.15);
-  color: var(--purple);
-  border: 1px solid rgba(139, 92, 246, 0.3);
+  background: rgba(118, 185, 0, 0.1);
+  color: var(--nvidia-green);
+  border: 1px solid rgba(118, 185, 0, 0.3);
 }
 
 .job-card-id {
@@ -700,46 +1273,58 @@ body {
 }
 
 .job-status-badge.status-pending {
-  background: rgba(100, 116, 139, 0.15);
+  background: rgba(85, 85, 85, 0.15);
   color: var(--text-secondary);
 }
-.job-status-badge.status-pending::before { background: var(--text-muted); }
+
+.job-status-badge.status-pending::before {
+  background: var(--text-muted);
+}
 
 .job-status-badge.status-running {
   background: var(--green-glow);
-  color: var(--green);
+  color: var(--nvidia-green);
 }
+
 .job-status-badge.status-running::before {
-  background: var(--green);
+  background: var(--nvidia-green);
   animation: pulse 1.5s infinite;
 }
 
 .job-status-badge.status-completed {
-  background: rgba(74, 144, 217, 0.15);
-  color: var(--accent);
+  background: rgba(118, 185, 0, 0.1);
+  color: var(--nvidia-green);
 }
-.job-status-badge.status-completed::before { background: var(--accent); }
+
+.job-status-badge.status-completed::before {
+  background: var(--nvidia-green);
+}
 
 .job-status-badge.status-failed {
   background: var(--red-glow);
   color: var(--red);
 }
-.job-status-badge.status-failed::before { background: var(--red); }
+
+.job-status-badge.status-failed::before {
+  background: var(--red);
+}
 
 .job-status-badge.status-cancelled {
-  background: var(--yellow-glow);
-  color: var(--yellow);
+  background: var(--amber-glow);
+  color: var(--amber);
 }
-.job-status-badge.status-cancelled::before { background: var(--yellow); }
+
+.job-status-badge.status-cancelled::before {
+  background: var(--amber);
+}
 
 /* Job card progress */
 .job-card-progress { margin: 8px 0; }
 .training-progress-bar { height: 8px; }
 .training-progress-bar-lg { height: 12px; }
-.progress-fill.accent { background: var(--accent); }
 
 .training-progress-animated {
-  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hover) 50%, var(--accent) 100%);
+  background: linear-gradient(90deg, var(--nvidia-green) 0%, var(--nvidia-green-bright) 50%, var(--nvidia-green) 100%);
   background-size: 200% 100%;
   animation: progress-shimmer 2s infinite linear;
 }
@@ -783,35 +1368,6 @@ body {
   gap: 4px;
 }
 
-.form-section { margin-bottom: 8px; }
-
-.form-section-title {
-  font-size: 13px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.form-section-title.collapsible {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  user-select: none;
-}
-
-.form-section-title.collapsible .chevron {
-  transition: transform 0.2s ease;
-}
-
-.form-section-title.collapsible.open .chevron {
-  transform: rotate(180deg);
-}
-
 .advanced-settings {
   overflow: hidden;
   transition: max-height 0.3s ease, opacity 0.2s ease;
@@ -822,65 +1378,6 @@ body {
 .advanced-settings.collapsed {
   max-height: 0;
   opacity: 0;
-}
-
-.form-group { margin-bottom: 16px; }
-
-.form-label {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 6px;
-}
-
-.form-input,
-.form-select {
-  width: 100%;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-family: var(--font-sans);
-  outline: none;
-  transition: border-color 0.15s ease;
-}
-
-.form-input:focus,
-.form-select:focus {
-  border-color: var(--accent);
-}
-
-.form-input::placeholder {
-  color: var(--text-muted);
-}
-
-.form-select {
-  cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-  padding-right: 36px;
-}
-
-.form-select option {
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-
-.form-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px 16px;
 }
 
 /* Method toggle */
@@ -903,12 +1400,12 @@ body {
 }
 
 .method-btn:hover {
-  border-color: var(--border-active);
+  border-color: var(--border-hover);
 }
 
 .method-btn.active {
-  border-color: var(--accent);
-  background: rgba(74, 144, 217, 0.08);
+  border-color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.06);
 }
 
 .method-btn-title {
@@ -921,15 +1418,6 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.4;
-}
-
-.form-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 16px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border);
 }
 
 /* Training Detail View */
@@ -958,7 +1446,7 @@ body {
   font-size: 28px;
   font-weight: 700;
   font-family: var(--font-mono);
-  color: var(--accent);
+  color: var(--nvidia-green);
 }
 
 .progress-epoch {
@@ -1037,7 +1525,9 @@ body {
   font-family: var(--font-mono);
 }
 
-/* Table */
+/* ============================================================
+   TABLE
+   ============================================================ */
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -1047,7 +1537,7 @@ body {
   text-align: left;
   padding: 10px 16px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-muted);
@@ -1064,45 +1554,366 @@ body {
   background: var(--bg-card-hover);
 }
 
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
+/* ============================================================
+   FILTER PILLS
+   ============================================================ */
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+.filter-pill {
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s ease;
 }
 
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
+.filter-pill:hover {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+.filter-pill.active {
+  color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.08);
+  border-color: var(--nvidia-green);
 }
 
-/* Responsive */
-@media (max-width: 1024px) {
-  .grid-4 { grid-template-columns: repeat(2, 1fr); }
-  .grid-3 { grid-template-columns: repeat(2, 1fr); }
-  .training-detail-grid { grid-template-columns: 1fr; }
-  .training-config-card { position: static; }
-  .training-stat-row { grid-template-columns: repeat(2, 1fr); }
+/* ============================================================
+   CHAT ENHANCEMENTS — History Panel
+   ============================================================ */
+.chat-layout {
+  display: flex;
+  height: calc(100vh - 48px);
+  margin: -24px -32px;
 }
 
-@media (max-width: 768px) {
-  .sidebar { display: none; }
-  .main { margin-left: 0; }
-  .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
-  .training-header { flex-direction: column; }
-  .training-stat-row { grid-template-columns: repeat(2, 1fr); }
-  .form-grid, .method-toggle { grid-template-columns: 1fr; }
+.chat-history-panel {
+  width: 240px;
+  min-width: 240px;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease;
+  overflow: hidden;
 }
 
-/* Loading skeleton */
+.chat-history-panel.collapsed {
+  width: 0;
+  min-width: 0;
+  opacity: 0;
+  border-right: none;
+}
+
+.chat-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+
+.chat-new-btn { flex: 1; }
+
+.chat-history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.chat-history-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 24px 12px;
+}
+
+.chat-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  margin-bottom: 2px;
+}
+
+.chat-history-item:hover {
+  background: var(--bg-card);
+}
+
+.chat-history-item.active {
+  background: var(--bg-card);
+  border: 1px solid var(--nvidia-green);
+}
+
+.chat-history-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-history-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-history-item-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.chat-history-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.chat-history-item:hover .chat-history-delete {
+  opacity: 1;
+}
+
+.chat-history-delete:hover {
+  color: var(--red);
+  background: var(--red-glow);
+}
+
+.chat-main {
+  flex: 1;
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chat-main .chat-container {
+  height: auto;
+  flex: 1;
+}
+
+.chat-history-open-btn { flex-shrink: 0; }
+
+/* Streaming Metrics Bar */
+.chat-metrics-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.chat-metric-sep {
+  color: var(--text-muted);
+}
+
+/* Stop Button */
+.chat-send.chat-stop {
+  background: var(--red);
+}
+
+.chat-send.chat-stop:hover {
+  background: #e62e2e;
+}
+
+/* Copy Button */
+.chat-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-message:hover .chat-copy-btn {
+  opacity: 1;
+}
+
+.chat-copy-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--nvidia-green);
+}
+
+/* Empty State */
+.chat-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.chat-empty-icon {
+  color: var(--nvidia-green-dim);
+  opacity: 0.3;
+  margin-bottom: 16px;
+}
+
+.chat-empty-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.chat-empty-desc {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+}
+
+.chat-suggested-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 600px;
+}
+
+.chat-prompt-chip {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+}
+
+.chat-prompt-chip:hover {
+  border-color: var(--nvidia-green);
+  color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.06);
+}
+
+/* ============================================================
+   TOAST NOTIFICATIONS
+   ============================================================ */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--nvidia-green);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  pointer-events: auto;
+  transform: translateX(120%);
+  opacity: 0;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  max-width: 360px;
+}
+
+.toast-visible {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.toast-fade-out {
+  transform: translateX(120%);
+  opacity: 0;
+}
+
+.toast-success {
+  border-left-color: var(--nvidia-green);
+}
+
+.toast-error {
+  border-left-color: var(--red);
+}
+
+.toast-info {
+  border-left-color: var(--cyan);
+}
+
+.toast-warning {
+  border-left-color: var(--amber);
+}
+
+.toast-message { flex: 1; }
+
+.toast-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.toast-close:hover {
+  opacity: 1;
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   LOADING SKELETON — Green shimmer
+   ============================================================ */
 .skeleton {
-  background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-card-hover) 50%, var(--bg-card) 75%);
+  background: linear-gradient(
+    90deg,
+    var(--bg-card) 25%,
+    rgba(118, 185, 0, 0.06) 50%,
+    var(--bg-card) 75%
+  );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: var(--radius-sm);
@@ -1113,70 +1924,75 @@ body {
   100% { background-position: 200% 0; }
 }
 
-/* ===== Chat Enhancements ===== */
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 1200px) {
+  .command-center {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 60px;
+    grid-template-areas:
+      "center"
+      "bottom";
+  }
 
-.chat-layout { display: flex; height: calc(100vh - 48px); margin: -24px -32px; }
+  .left-panel,
+  .right-panel {
+    display: none;
+  }
+}
 
-.chat-history-panel { width: 240px; min-width: 240px; background: var(--bg-secondary); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease; overflow: hidden; }
-.chat-history-panel.collapsed { width: 0; min-width: 0; opacity: 0; border-right: none; }
-.chat-history-header { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid var(--border); gap: 8px; }
-.chat-new-btn { flex: 1; }
-.btn-sm { padding: 6px 12px; font-size: 12px; }
-.btn-icon { padding: 6px; min-width: 32px; display: flex; align-items: center; justify-content: center; }
-.chat-history-list { flex: 1; overflow-y: auto; padding: 8px; }
-.chat-history-empty { text-align: center; color: var(--text-muted); font-size: 13px; padding: 24px 12px; }
-.chat-history-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.15s ease; margin-bottom: 2px; }
-.chat-history-item:hover { background: var(--bg-card); }
-.chat-history-item.active { background: var(--bg-card); border: 1px solid var(--border-active); }
-.chat-history-item-content { flex: 1; min-width: 0; }
-.chat-history-item-title { font-size: 13px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-history-item-date { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.chat-history-delete { background: none; border: none; color: var(--text-muted); font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 4px; opacity: 0; transition: opacity 0.15s, color 0.15s; flex-shrink: 0; }
-.chat-history-item:hover .chat-history-delete { opacity: 1; }
-.chat-history-delete:hover { color: var(--red); background: var(--red-glow); }
-
-.chat-main { flex: 1; padding: 24px 32px; display: flex; flex-direction: column; min-width: 0; }
-.chat-main .chat-container { height: auto; flex: 1; }
-.chat-history-open-btn { flex-shrink: 0; }
-
-/* Streaming Metrics Bar */
-.chat-metrics-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
-.chat-metric-sep { color: var(--text-muted); }
-
-/* Stop Button */
-.chat-send.chat-stop { background: var(--red); }
-.chat-send.chat-stop:hover { background: #dc2626; }
-
-/* Copy Button */
-.chat-message { position: relative; }
-.chat-copy-btn { position: absolute; top: 8px; right: 8px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; cursor: pointer; color: var(--text-muted); opacity: 0; transition: opacity 0.15s ease, color 0.15s ease; display: flex; align-items: center; justify-content: center; }
-.chat-message:hover .chat-copy-btn { opacity: 1; }
-.chat-copy-btn:hover { color: var(--text-primary); border-color: var(--border-active); }
-
-/* Empty State */
-.chat-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 300px; text-align: center; padding: 40px 20px; }
-.chat-empty-icon { color: var(--text-muted); opacity: 0.3; margin-bottom: 16px; }
-.chat-empty-title { font-size: 20px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
-.chat-empty-desc { font-size: 14px; color: var(--text-muted); margin-bottom: 24px; }
-.chat-suggested-prompts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 600px; }
-.chat-prompt-chip { background: var(--bg-card); border: 1px solid var(--border); border-radius: 20px; padding: 8px 16px; font-size: 13px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; font-family: var(--font-sans); }
-.chat-prompt-chip:hover { border-color: var(--accent); color: var(--accent); background: rgba(74, 144, 217, 0.08); }
-
-/* Toast Notifications */
-.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column-reverse; gap: 8px; pointer-events: none; }
-.toast { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; color: white; pointer-events: auto; transform: translateX(120%); opacity: 0; transition: transform 0.3s ease, opacity 0.3s ease; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4); max-width: 360px; }
-.toast-visible { transform: translateX(0); opacity: 1; }
-.toast-fade-out { transform: translateX(120%); opacity: 0; }
-.toast-success { background: var(--green); }
-.toast-error { background: var(--red); }
-.toast-info { background: var(--accent); }
-.toast-warning { background: var(--yellow); color: #1a1a1a; }
-.toast-message { flex: 1; }
-.toast-close { background: none; border: none; color: inherit; font-size: 18px; cursor: pointer; padding: 0 2px; opacity: 0.7; transition: opacity 0.15s; }
-.toast-close:hover { opacity: 1; }
+@media (max-width: 1024px) {
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: repeat(2, 1fr); }
+  .training-detail-grid { grid-template-columns: 1fr; }
+  .training-config-card { position: static; }
+  .training-stat-row { grid-template-columns: repeat(2, 1fr); }
+}
 
 @media (max-width: 768px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 16px; }
+  .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
+  .training-header { flex-direction: column; }
+  .training-stat-row { grid-template-columns: repeat(2, 1fr); }
+  .form-grid, .method-toggle { grid-template-columns: 1fr; }
   .chat-history-panel { display: none; }
   .chat-main { padding: 16px; }
   .chat-layout { margin: -16px; }
+  .top-bar-nav { display: none; }
+
+  .command-center {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 60px;
+    grid-template-areas:
+      "center"
+      "bottom";
+  }
+
+  .left-panel,
+  .right-panel {
+    display: none;
+  }
 }
+
+/* ============================================================
+   UTILITY CLASSES
+   ============================================================ */
+.text-green { color: var(--nvidia-green); }
+.text-amber { color: var(--amber); }
+.text-red { color: var(--red); }
+.text-cyan { color: var(--cyan); }
+.text-muted { color: var(--text-muted); }
+.text-secondary { color: var(--text-secondary); }
+.text-mono { font-family: var(--font-mono); }
+
+.bg-green-dim { background: rgba(118, 185, 0, 0.08); }
+
+.border-green { border-color: var(--nvidia-green); }
+
+.glow-green {
+  box-shadow: 0 0 16px var(--nvidia-green-glow);
+}
+
+.hidden { display: none !important; }
