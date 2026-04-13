@@ -216,7 +216,7 @@ body {
   padding: 4px 12px;
 }
 
-.conversation-item {
+.conversation-item, .conv-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -228,35 +228,71 @@ body {
   border: 1px solid transparent;
 }
 
-.conversation-item:hover {
+.conversation-item:hover, .conv-item:hover {
   background: var(--bg-card);
   border-color: var(--border);
 }
 
-.conversation-item.active {
+.conversation-item:hover .conversation-delete,
+.conv-item:hover .conv-delete {
+  opacity: 1;
+}
+
+.conversation-item.active, .conv-item.active {
   background: var(--bg-card);
   border-color: var(--nvidia-green);
   box-shadow: inset 3px 0 0 var(--nvidia-green);
 }
 
-.conversation-item-title {
+.conversation-item-content, .conv-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-item-title, .conv-item-title {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.3;
 }
 
-.conversation-item-date {
+.conversation-item-date, .conv-item-date {
   font-size: 11px;
   color: var(--text-muted);
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
-.conversation-item-content {
-  flex: 1;
-  min-width: 0;
+.conversation-delete, .conv-delete {
+  opacity: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.conversation-delete:hover, .conv-delete:hover {
+  background: var(--red-glow);
+  color: var(--red);
+}
+
+.conv-empty {
+  text-align: center;
+  padding: 24px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 /* ============================================================
