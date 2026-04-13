@@ -180,9 +180,10 @@ body {
 
 .left-panel .btn-nvidia {
   margin: 16px 16px 12px;
-  padding: 12px 20px;
+  padding: 14px 20px;
   font-size: 13px;
-  letter-spacing: 0.5px;
+  letter-spacing: 1px;
+  border-radius: var(--radius-lg);
 }
 
 .search-input {
