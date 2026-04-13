@@ -24,9 +24,9 @@
   --text-muted: #555555;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
-  --radius: 8px;
-  --radius-sm: 6px;
-  --radius-lg: 12px;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --radius-lg: 14px;
   --shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
   --green-glow: rgba(118, 185, 0, 0.2);
   --red-glow: rgba(255, 51, 51, 0.15);
@@ -342,32 +342,39 @@ body {
   min-height: 72px;
 }
 
-.bottom-bar .model-selector {
+.bottom-bar .model-selector,
+.bottom-bar select,
+#chat-model {
   background: var(--bg-card);
   border: 1px solid var(--border-hover);
   border-radius: var(--radius);
-  padding: 12px 16px;
+  padding: 14px 40px 14px 16px;
   color: var(--text-primary);
   font-size: 13px;
   font-family: var(--font-mono);
   outline: none;
   cursor: pointer;
-  min-width: 200px;
+  min-width: 220px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   appearance: none;
   -webkit-appearance: none;
+  -moz-appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2376B900' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 14px center;
-  padding-right: 36px;
 }
 
-.bottom-bar .model-selector option {
+.bottom-bar .model-selector option,
+.bottom-bar select option,
+#chat-model option {
   background: var(--bg-card);
   color: var(--text-primary);
+  padding: 8px;
 }
 
-.bottom-bar .model-selector:focus {
+.bottom-bar .model-selector:focus,
+.bottom-bar select:focus,
+#chat-model:focus {
   border-color: var(--nvidia-green);
   box-shadow: 0 0 0 2px var(--nvidia-green-glow);
 }
@@ -409,7 +416,7 @@ body {
   background: var(--nvidia-green);
   color: #000;
   border: none;
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 14px 28px;
   font-size: 14px;
   font-weight: 700;
@@ -923,6 +930,7 @@ body {
   font-size: 14px;
   letter-spacing: 1px;
   margin-top: 16px;
+  border-radius: var(--radius-lg);
 }
 
 /* ============================================================
