@@ -146,10 +146,35 @@ body {
 .top-bar-status {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   font-size: 12px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 16px 6px 12px;
+}
+
+.top-bar-status .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--nvidia-green);
+  box-shadow: 0 0 8px var(--nvidia-green-glow);
+  animation: green-pulse 2s ease-in-out infinite;
+}
+
+.top-bar-status .node-count {
+  font-weight: 600;
+  color: var(--nvidia-green);
+}
+
+.top-bar-status .node-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
 }
 
 /* ============================================================
