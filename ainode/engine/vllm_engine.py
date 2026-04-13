@@ -65,6 +65,20 @@ class VLLMEngine:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
 
+        # Auto-detect CUDA runtime for GB10/Spark unified memory systems
+        # vLLM wheels may be built for CUDA 12 but the system has CUDA 13
+        if not env.get("LD_PRELOAD"):
+            import glob
+            for pattern in [
+                os.path.join(sys.prefix, "lib/python*/site-packages/nvidia/cu*/lib/libcudart.so.*"),
+                "/usr/local/cuda/targets/*/lib/libcudart.so.*",
+                "/usr/local/cuda-*/targets/*/lib/libcudart.so.*",
+            ]:
+                matches = sorted(glob.glob(pattern))
+                if matches:
+                    env["LD_PRELOAD"] = matches[-1]
+                    break
+
         # Log to file
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file = LOGS_DIR / "vllm.log"
