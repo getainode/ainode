@@ -361,7 +361,9 @@ body {
 .center-stage .view {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* Dashboard view (topology) should not scroll — canvas fills */
@@ -1561,6 +1563,35 @@ select {
 /* ============================================================
    DOWNLOADS / MODEL LIST
    ============================================================ */
+#view-downloads {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+#view-downloads #downloads-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+#view-downloads .downloads-header,
+#view-downloads .downloads-toolbar {
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+#view-downloads #downloads-results {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
 .downloads-header {
   display: flex;
   align-items: baseline;
