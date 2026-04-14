@@ -112,6 +112,24 @@ body {
   color: var(--nvidia-green);
 }
 
+.logo {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.logo-img {
+  height: 32px;
+  width: auto;
+  display: block;
+  filter: drop-shadow(0 0 8px rgba(118, 185, 0, 0.15));
+  transition: filter 0.2s ease;
+}
+
+.logo-img:hover {
+  filter: drop-shadow(0 0 12px rgba(118, 185, 0, 0.35));
+}
+
 .top-bar-nav {
   display: flex;
   align-items: center;
