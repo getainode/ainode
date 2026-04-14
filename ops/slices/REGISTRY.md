@@ -9,11 +9,21 @@
 | cli-polish | Agent (pane 2) | codex/cli-polish | IN PROGRESS | — |
 | discovery-cluster | Agent (pane 3) | codex/discovery-cluster | IN PROGRESS | — |
 
+### docker-engine — scope
+Full scripted Docker-based vLLM for GB10 nodes. Runbook: `ops/runbooks/docker-engine-deploy.md`.
+- `ainode/engine/docker_engine.py` (new) — same interface as VLLMEngine, drives `docker compose`
+- `scripts/install.sh` — writes compose file, .env, systemd user unit, auto-enables
+- `ainode/cli/main.py` — cmd_start picks engine by `config.engine_strategy`
+- `ainode/core/config.py` — add `engine_strategy: "docker" | "pip"` field
+- systemd user unit at `~/.config/systemd/user/ainode.service`, linger enabled
+- Acceptance: one-liner install on Spark 2 brings it to cluster with zero manual steps
+
 ## Completed Slices
 
 | Slice | Owner | Merged | Date |
 |-------|-------|--------|------|
 | initial-scaffold | Threadmaster | main | 2026-04-12 |
+| docker-engine | Claude (Opus 4.6) | dev | 2026-04-14 |
 
 ## Available Slices (Priority Order)
 

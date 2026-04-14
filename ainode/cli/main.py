@@ -149,10 +149,13 @@ def cmd_start(args):
     # Write PID file
     _write_pid()
 
-    # Start vLLM engine
-    from ainode.engine.vllm_engine import VLLMEngine
-
-    engine = VLLMEngine(config)
+    # Start inference engine — pip vLLM by default, docker for GB10/CUDA 13 nodes.
+    if config.engine_strategy == "docker":
+        from ainode.engine.docker_engine import DockerEngine
+        engine = DockerEngine(config)
+    else:
+        from ainode.engine.vllm_engine import VLLMEngine
+        engine = VLLMEngine(config)
     if not engine.start():
         console.print("  [red]Failed to start engine.[/red] Check logs in ~/.ainode/logs/")
         _remove_pid()
@@ -274,9 +277,13 @@ def cmd_status(args):
     console.print(table)
     console.print()
 
-    # Engine health check
-    from ainode.engine.vllm_engine import VLLMEngine
-    engine = VLLMEngine(config)
+    # Engine health check — dispatch by engine_strategy for parity with cmd_start.
+    if config.engine_strategy == "docker":
+        from ainode.engine.docker_engine import DockerEngine
+        engine = DockerEngine(config)
+    else:
+        from ainode.engine.vllm_engine import VLLMEngine
+        engine = VLLMEngine(config)
     health = engine.health_check()
 
     if health["api_responding"]:

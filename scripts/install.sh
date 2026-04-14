@@ -4,8 +4,9 @@
 #        AINODE_REPO=webdevtodayjason/ainode bash scripts/install.sh   (use a fork)
 set -e
 
-AINODE_VERSION="0.2.0"
+AINODE_VERSION="0.3.0"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
+export AINODE_HOME
 VENV_DIR="$AINODE_HOME/venv"
 AINODE_REPO="${AINODE_REPO:-webdevtodayjason/ainode}"
 AINODE_BRANCH="${AINODE_BRANCH:-main}"
@@ -156,6 +157,115 @@ if [ "$ENGINE_STRATEGY" = "docker" ]; then
     else
         warn "Docker not available — AINode will install without inference engine"
     fi
+
+    # ── Write compose file + .env ────────────────────────────────────────
+    info "Writing ~/.ainode/docker-compose.yml..."
+    cat > "$AINODE_HOME/docker-compose.yml" <<'COMPOSE_EOF'
+services:
+  vllm:
+    image: scitrera/dgx-spark-vllm:0.17.0-t5
+    container_name: ainode-vllm
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ${HOME}/.ainode/models:/models
+    environment:
+      HF_HOME: /models
+      AINODE_MODEL: ${AINODE_MODEL:-meta-llama/Llama-3.2-3B-Instruct}
+      AINODE_GPU_MEMORY_UTIL: ${AINODE_GPU_MEMORY_UTIL:-0.9}
+      AINODE_TP_SIZE: ${AINODE_TP_SIZE:-1}
+      AINODE_RAY_ADDRESS: ${AINODE_RAY_ADDRESS:-}
+    command:
+      - --model
+      - ${AINODE_MODEL:-meta-llama/Llama-3.2-3B-Instruct}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --gpu-memory-utilization
+      - ${AINODE_GPU_MEMORY_UTIL:-0.9}
+      - --tensor-parallel-size
+      - ${AINODE_TP_SIZE:-1}
+      - --dtype
+      - bfloat16
+      - --download-dir
+      - /models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+COMPOSE_EOF
+    log "docker-compose.yml written"
+
+    info "Writing ~/.ainode/.env..."
+    cat > "$AINODE_HOME/.env" <<ENV_EOF
+AINODE_MODEL=meta-llama/Llama-3.2-3B-Instruct
+AINODE_GPU_MEMORY_UTIL=0.9
+AINODE_TP_SIZE=1
+AINODE_RAY_ADDRESS=
+ENV_EOF
+    log ".env written"
+
+    # Seed config.json with docker strategy. Merge with existing config if present.
+    info "Seeding ~/.ainode/config.json (engine_strategy=docker)..."
+    python3 - <<PYEOF
+import json, os
+from pathlib import Path
+cfg_path = Path(os.environ["AINODE_HOME"]) / "config.json"
+existing = {}
+if cfg_path.exists():
+    try:
+        existing = json.loads(cfg_path.read_text())
+    except Exception:
+        existing = {}
+existing.update({
+    "engine_strategy": "docker",
+    "discovery_port": 5679,
+    "cluster_id": "default",
+    "onboarded": True,
+})
+cfg_path.write_text(json.dumps(existing, indent=2))
+PYEOF
+    log "config.json seeded"
+
+    # ── systemd user unit ────────────────────────────────────────────────
+    info "Writing systemd user unit..."
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/ainode.service" <<UNIT_EOF
+[Unit]
+Description=AINode
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+ExecStart=%h/.ainode/venv/bin/ainode start
+ExecStop=%h/.ainode/venv/bin/ainode stop
+Restart=on-failure
+RestartSec=5
+Environment=PATH=%h/.ainode/venv/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+UNIT_EOF
+    log "systemd user unit installed"
+
+    systemctl --user daemon-reload 2>&1 | tail -3 || warn "systemctl daemon-reload failed"
+    systemctl --user enable --now ainode.service 2>&1 | tail -3 \
+        && log "ainode.service enabled and started" \
+        || warn "systemctl --user enable --now ainode.service failed — start manually"
+
+    # Linger so the service survives logout / starts at boot. Non-fatal if it fails.
+    sudo loginctl enable-linger "$USER" 2>/dev/null \
+        && log "Linger enabled for $USER" \
+        || warn "loginctl enable-linger failed — service will start on login instead of boot"
+
+    AINODE_SERVICE_STARTED=1
 else
     step "3/4" "Installing vLLM (pip)..."
     pip install --quiet vllm 2>&1 | tail -3 || warn "vLLM pip install failed — install it later with: pip install vllm"
@@ -214,12 +324,25 @@ echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━�
 echo -e "    ${GREEN}  AINode v${AINODE_VERSION} installed!${NC}"
 echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo "    To start:"
-echo ""
-echo -e "      ${CYAN}source ${SHELL_RC:-~/.bashrc}${NC}"
-echo -e "      ${CYAN}ainode start${NC}"
-echo ""
-echo "    Open http://localhost:3000 in your browser."
+
+if [ "${AINODE_SERVICE_STARTED:-0}" = "1" ]; then
+    echo "    AINode service is already running under systemd."
+    echo ""
+    echo "    Validate:"
+    echo ""
+    echo -e "      ${CYAN}systemctl --user status ainode.service${NC}"
+    echo -e "      ${CYAN}docker ps --filter name=ainode-vllm${NC}"
+    echo -e "      ${CYAN}curl http://localhost:3000/api/health${NC}"
+    echo ""
+    echo "    Open http://localhost:3000 in your browser."
+else
+    echo "    To start:"
+    echo ""
+    echo -e "      ${CYAN}source ${SHELL_RC:-~/.bashrc}${NC}"
+    echo -e "      ${CYAN}ainode start${NC}"
+    echo ""
+    echo "    Open http://localhost:3000 in your browser."
+fi
 echo ""
 echo -e "    Powered by ${BLUE}argentos.ai${NC}"
 echo ""
