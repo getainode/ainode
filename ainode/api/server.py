@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import socket
 import time
 from dataclasses import asdict
 from typing import Optional
@@ -156,7 +157,7 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
 
     return NodeAnnouncement(
         node_id=config.node_id or "unknown",
-        node_name=config.node_name or "unknown",
+        node_name=config.node_name or socket.gethostname() or "unknown",
         gpu_name=gpu_name,
         gpu_memory_gb=gpu_memory_gb,
         unified_memory=unified_memory,
