@@ -44,6 +44,10 @@ const AINode = {
     this.initTopology();
     this.startPolling();
     this.renderConversationList();
+    // Restore any in-flight downloads from before page refresh
+    this.loadActiveDownloads();
+    // Also ask the server if there are active jobs we missed
+    setTimeout(() => this.reconcileActiveDownloads(), 500);
   },
 
   initTopology() {
@@ -208,7 +212,15 @@ const AINode = {
   },
 
   navigate(view) {
+    var prevView = this.state.currentView;
     this.state.currentView = view;
+    // Reset downloads-view init flag when leaving the view, so we do a full render next time
+    if (prevView === 'downloads' && view !== 'downloads') {
+      this._downloadsViewInitialized = false;
+    }
+    if (view === 'downloads' && prevView !== 'downloads') {
+      this._downloadsViewInitialized = false;  // force full render on entry
+    }
     // Update nav pill active state
     document.querySelectorAll('.nav-pill').forEach(function (el) {
       el.classList.toggle('active', el.dataset.view === view);
@@ -270,7 +282,15 @@ const AINode = {
         this.renderDashboard();
         break;
       case 'downloads':
-        this.renderDownloads();
+        // Don't rebuild the downloads view during periodic refresh — just update the queue
+        // in place. Only do a full render when the user lands on the view.
+        if (this._downloadsViewInitialized) {
+          this.renderDownloadsQueue();
+          this.updateNavDownloadBadge();
+        } else {
+          this._downloadsViewInitialized = true;
+          this.renderDownloads();
+        }
         break;
       case 'models':
         this.renderModels();
@@ -1117,11 +1137,211 @@ const AINode = {
     });
   },
 
+  // Persist active downloads to localStorage so page refresh doesn't lose them
+  saveActiveDownloads() {
+    try {
+      var toSave = {};
+      Object.keys(this.state.activeDownloads || {}).forEach(function (repo) {
+        var dl = this.state.activeDownloads[repo];
+        toSave[repo] = {
+          jobId: dl.jobId,
+          hfRepo: dl.hfRepo,
+          startedAt: dl.startedAt,
+          status: dl.status,
+          totalBytes: dl.totalBytes || 0,
+          downloadedBytes: dl.downloadedBytes || 0,
+          progress: dl.progress,
+        };
+      }, this);
+      localStorage.setItem('ainode_active_downloads', JSON.stringify(toSave));
+    } catch (e) { /* quota or disabled */ }
+  },
+
+  loadActiveDownloads() {
+    try {
+      var raw = localStorage.getItem('ainode_active_downloads');
+      if (!raw) return;
+      var saved = JSON.parse(raw) || {};
+      this.state.activeDownloads = this.state.activeDownloads || {};
+      var self = this;
+      Object.keys(saved).forEach(function (repo) {
+        var dl = saved[repo];
+        if (!dl || !dl.jobId) return;
+        // Discard entries older than 12 hours — stale
+        if (dl.startedAt && Date.now() - dl.startedAt > 12 * 3600 * 1000) return;
+        if (dl.status === 'completed' || dl.status === 'failed') return;
+        self.state.activeDownloads[repo] = Object.assign({ elapsed: 0 }, dl);
+        self.resumeDownloadPolling(repo);
+      });
+    } catch (e) { /* ignore */ }
+  },
+
+  resumeDownloadPolling(hfRepo) {
+    var self = this;
+    var dl = self.state.activeDownloads[hfRepo];
+    if (!dl || !dl.jobId) return;
+    if (dl._pollId) return;  // already polling
+
+    dl._pollId = setInterval(function () {
+      self.pollDownloadOnce(hfRepo);
+    }, 2000);
+
+    dl._tickId = setInterval(function () {
+      var d = self.state.activeDownloads[hfRepo];
+      if (!d || d.status !== 'downloading') return;
+      d.elapsed = Math.floor((Date.now() - d.startedAt) / 1000);
+      self.renderQueueItemInPlace(hfRepo);
+    }, 1000);
+  },
+
+  pollDownloadOnce(hfRepo) {
+    var self = this;
+    var dl = self.state.activeDownloads && self.state.activeDownloads[hfRepo];
+    if (!dl) return;
+
+    fetch('/api/models/download/status?job_id=' + encodeURIComponent(dl.jobId))
+      .then(function (r) { return r.json(); })
+      .then(function (st) {
+        if (st.error || st.status === 'unknown') {
+          // Job vanished — treat as probably completed if the model is downloaded
+          self.stopDownloadPolling(hfRepo);
+          self.checkIfDownloaded(hfRepo);
+          return;
+        }
+        dl.status = st.status;
+        dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
+        dl.totalBytes = st.total_bytes || dl.totalBytes || 0;
+        // Monotonic — only go up, never down
+        var newBytes = st.downloaded_bytes || 0;
+        if (newBytes >= (dl.downloadedBytes || 0)) dl.downloadedBytes = newBytes;
+        if (st.progress != null && (dl.progress == null || st.progress >= dl.progress)) {
+          dl.progress = st.progress;
+        }
+
+        self.saveActiveDownloads();
+        self.renderQueueItemInPlace(hfRepo);
+        self.updateNavDownloadBadge();
+
+        if (st.status === 'completed') {
+          self.stopDownloadPolling(hfRepo);
+          self.toast('Downloaded: ' + hfRepo, 'success');
+          self.state.catalog = null;  // refresh catalog next time
+          // Keep in queue 8s so user sees completion, then remove
+          dl.status = 'completed';
+          dl.progress = 100;
+          dl.downloadedBytes = dl.totalBytes || dl.downloadedBytes;
+          self.renderQueueItemInPlace(hfRepo);
+          setTimeout(function () {
+            delete self.state.activeDownloads[hfRepo];
+            self.saveActiveDownloads();
+            self.renderDownloadsQueue();
+            self.updateNavDownloadBadge();
+          }, 6000);
+        } else if (st.status === 'failed') {
+          self.stopDownloadPolling(hfRepo);
+          self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
+          dl.error = st.error;
+          self.renderQueueItemInPlace(hfRepo);
+          setTimeout(function () {
+            delete self.state.activeDownloads[hfRepo];
+            self.saveActiveDownloads();
+            self.renderDownloadsQueue();
+            self.updateNavDownloadBadge();
+          }, 10000);
+        }
+      })
+      .catch(function () { /* keep polling on transient errors */ });
+  },
+
+  stopDownloadPolling(hfRepo) {
+    var dl = this.state.activeDownloads && this.state.activeDownloads[hfRepo];
+    if (!dl) return;
+    if (dl._pollId) { clearInterval(dl._pollId); dl._pollId = null; }
+    if (dl._tickId) { clearInterval(dl._tickId); dl._tickId = null; }
+  },
+
+  checkIfDownloaded(hfRepo) {
+    var self = this;
+    var slug = hfRepo.replace(/\//g, '--').toLowerCase();
+    fetch('/api/models/' + encodeURIComponent(slug)).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (info) {
+      var dl = self.state.activeDownloads && self.state.activeDownloads[hfRepo];
+      if (!dl) return;
+      if (info && info.downloaded) {
+        dl.status = 'completed';
+        dl.progress = 100;
+        self.toast('Downloaded: ' + hfRepo, 'success');
+      } else {
+        dl.status = 'failed';
+        dl.error = 'Job expired';
+      }
+      self.renderQueueItemInPlace(hfRepo);
+      self.saveActiveDownloads();
+      setTimeout(function () {
+        delete self.state.activeDownloads[hfRepo];
+        self.saveActiveDownloads();
+        self.renderDownloadsQueue();
+        self.updateNavDownloadBadge();
+      }, 6000);
+    }).catch(function () { /* ignore */ });
+  },
+
+  // Update just one queue item's DOM in place — no re-rendering
+  renderQueueItemInPlace(hfRepo) {
+    var dl = this.state.activeDownloads && this.state.activeDownloads[hfRepo];
+    if (!dl) return;
+    var queue = document.getElementById('downloads-queue');
+    if (!queue) return;
+    if (queue.style.display === 'none' || !queue.children.length) {
+      this.renderDownloadsQueue();
+      return;
+    }
+    var existing = queue.querySelector('[data-queue-repo="' + CSS.escape(hfRepo) + '"]');
+    if (!existing) {
+      this.renderDownloadsQueue();
+      return;
+    }
+    existing.outerHTML = this.renderQueueItem(dl);
+  },
+
+  // Reconcile on startup — ask server for active jobs that might be ours
+  reconcileActiveDownloads() {
+    var self = this;
+    fetch('/api/models/downloads/active')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var jobs = (data.jobs || []).filter(function (j) {
+          return j.status === 'downloading';
+        });
+        jobs.forEach(function (job) {
+          var repo = job.model_id;
+          if (!repo || !repo.includes('/')) return;
+          if (self.state.activeDownloads && self.state.activeDownloads[repo]) return;
+          self.state.activeDownloads = self.state.activeDownloads || {};
+          self.state.activeDownloads[repo] = {
+            jobId: job.job_id,
+            hfRepo: repo,
+            status: 'downloading',
+            startedAt: Date.now() - 1000,
+            elapsed: 0,
+            totalBytes: job.total_bytes || 0,
+            downloadedBytes: job.downloaded_bytes || 0,
+            progress: job.progress,
+          };
+          self.resumeDownloadPolling(repo);
+          self.toast('Resumed tracking: ' + repo, 'info');
+        });
+        self.saveActiveDownloads();
+        self.renderDownloadsQueue();
+        self.updateNavDownloadBadge();
+      }).catch(function () { /* ignore */ });
+  },
+
   startRepoDownload(hfRepo) {
     var self = this;
     if (!self.state.activeDownloads) self.state.activeDownloads = {};
 
-    // Already downloading? Don't duplicate.
     if (self.state.activeDownloads[hfRepo] &&
         self.state.activeDownloads[hfRepo].status === 'downloading') {
       self.toast('Already downloading ' + hfRepo, 'info');
@@ -1138,73 +1358,23 @@ const AINode = {
       return resp.json();
     }).then(function (data) {
       if (data.error) { self.toast(data.error, 'error'); return; }
-      var jobId = data.job_id;
 
-      // Track this download
       self.state.activeDownloads[hfRepo] = {
-        jobId: jobId,
+        jobId: data.job_id,
         status: 'downloading',
         startedAt: Date.now(),
         elapsed: 0,
         hfRepo: hfRepo,
+        totalBytes: 0,
+        downloadedBytes: 0,
+        progress: null,
       };
+      self.saveActiveDownloads();
 
-      // Navigate to Downloads view so queue is visible
       self.navigate('downloads');
       self.renderDownloadsQueue();
       self.toast('Downloading ' + hfRepo, 'info');
-
-      // Poll status
-      var pollId = setInterval(function () {
-        fetch('/api/models/download/status?job_id=' + encodeURIComponent(jobId))
-          .then(function (r) { return r.json(); })
-          .then(function (st) {
-            var dl = self.state.activeDownloads[hfRepo];
-            if (!dl) { clearInterval(pollId); return; }
-            dl.status = st.status;
-            dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
-            dl.totalBytes = st.total_bytes || dl.totalBytes || 0;
-            dl.downloadedBytes = st.downloaded_bytes || 0;
-            dl.progress = st.progress;
-
-            self.updateDownloadProgress(hfRepo);
-            self.renderDownloadsQueue();
-            self.updateNavDownloadBadge();
-
-            if (st.status === 'completed') {
-              clearInterval(pollId);
-              self.toast('Downloaded: ' + hfRepo, 'success');
-              // Keep completed in queue for a bit so user sees it
-              setTimeout(function () {
-                delete self.state.activeDownloads[hfRepo];
-                self.renderDownloadsQueue();
-                self.updateNavDownloadBadge();
-              }, 8000);
-              self.state.catalog = null;
-              self.refresh();
-              self.renderDownloads();
-            } else if (st.status === 'failed') {
-              clearInterval(pollId);
-              self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
-              dl.error = st.error;
-              self.updateDownloadProgress(hfRepo);
-              setTimeout(function () {
-                delete self.state.activeDownloads[hfRepo];
-                self.renderDownloadsQueue();
-                self.updateNavDownloadBadge();
-              }, 10000);
-            }
-          }).catch(function () { /* keep polling */ });
-      }, 2000);
-
-      // Also tick every second for elapsed time update
-      var tickId = setInterval(function () {
-        var dl = self.state.activeDownloads[hfRepo];
-        if (!dl || dl.status !== 'downloading') { clearInterval(tickId); return; }
-        dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
-        self.renderDownloadsQueue();
-      }, 1000);
-
+      self.resumeDownloadPolling(hfRepo);
       self.updateNavDownloadBadge();
     }).catch(function (err) {
       self.toast('Download failed: ' + err.message, 'error');
@@ -1286,7 +1456,7 @@ const AINode = {
         '</div>';
     }
 
-    return '<div class="queue-item ' + statusClass + '">' +
+    return '<div class="queue-item ' + statusClass + '" data-queue-repo="' + this.esc(dl.hfRepo) + '">' +
       '<div class="queue-item-info">' +
         '<div class="queue-item-repo">' + this.esc(dl.hfRepo) + '</div>' +
         '<div class="queue-item-status">' + statusLabel + '</div>' +

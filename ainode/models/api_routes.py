@@ -33,6 +33,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_get("/api/models/{model_id}", handle_get_model)
     app.router.add_post("/api/models/download-repo", handle_download_repo)
     app.router.add_get("/api/models/download/status", handle_download_status)
+    app.router.add_get("/api/models/downloads/active", handle_active_downloads)
     app.router.add_post("/api/models/{model_id}/download", handle_download_model)
     app.router.add_delete("/api/models/{model_id}", handle_delete_model)
 
@@ -127,8 +128,21 @@ async def handle_download_status(request: web.Request) -> web.Response:
     job_id = request.query.get("job_id", "").strip()
     jobs: dict = request.app["download_jobs"]
     if job_id and job_id in jobs:
-        return web.json_response(jobs[job_id])
+        payload = dict(jobs[job_id])
+        payload["job_id"] = job_id
+        return web.json_response(payload)
     return web.json_response({"error": "job not found", "status": "unknown"}, status=404)
+
+
+async def handle_active_downloads(request: web.Request) -> web.Response:
+    """GET /api/models/downloads/active — list all download jobs (running + recently finished)."""
+    jobs: dict = request.app["download_jobs"]
+    active = []
+    for job_id, job in jobs.items():
+        entry = dict(job)
+        entry["job_id"] = job_id
+        active.append(entry)
+    return web.json_response({"jobs": active, "count": len(active)})
 
 
 def _get_repo_total_bytes(hf_repo: str) -> int:
