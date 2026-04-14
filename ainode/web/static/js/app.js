@@ -346,6 +346,10 @@ const AINode = {
     // Always update right panel
     this.renderInstances();
     this.populateLaunchModels();
+    // Keep the distributed/solo hint in sync with the latest cluster state.
+    if (typeof this._launchHintUpdater === 'function') {
+      try { this._launchHintUpdater(); } catch (_) {}
+    }
 
     // Restore scroll
     if (mainEl && savedScroll) {
@@ -598,14 +602,47 @@ const AINode = {
 
     // Node selector dots
     var nodeSelector = document.getElementById('node-selector');
+    var launchHint = document.getElementById('launch-hint');
+    var self = this;
+    function updateLaunchHint() {
+      if (!launchHint) return;
+      var activeDot = nodeSelector && nodeSelector.querySelector('.node-dot.active');
+      var n = activeDot ? parseInt(activeDot.dataset.value) || 1 : 1;
+      var strategyPill = document.querySelector('#sharding-pills .pill.active');
+      var strat = strategyPill ? strategyPill.dataset.value : 'pipeline';
+      if (n <= 1) {
+        launchHint.textContent = 'Solo mode — runs on this node only.';
+        launchHint.className = 'launch-hint';
+      } else {
+        // Count available member peers for honesty.
+        var cr = self.state.clusterResources;
+        var members = 0;
+        if (cr && cr.nodes) {
+          members = cr.nodes.filter(function (x) { return x.distributed_mode === 'member'; }).length;
+        }
+        var enough = members >= (n - 1);
+        launchHint.textContent = 'Distributed ' + strat.toUpperCase() + ' · ' + n + ' nodes'
+          + (enough ? ' — will place ' + (n - 1) + ' Ray worker(s) on discovered member node(s).'
+                    : ' — need ' + (n - 1) + ' member peer(s), ' + members + ' discovered.');
+        launchHint.className = 'launch-hint' + (enough ? '' : ' warn');
+      }
+    }
     if (nodeSelector) {
       nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
         dot.addEventListener('click', function () {
           nodeSelector.querySelectorAll('.node-dot').forEach(function (d) { d.classList.remove('active'); });
           dot.classList.add('active');
+          updateLaunchHint();
         });
       });
     }
+    // Update hint when strategy pill changes too
+    document.querySelectorAll('#sharding-pills .pill').forEach(function (pill) {
+      pill.addEventListener('click', updateLaunchHint);
+    });
+    // And on every refresh (cluster state may change)
+    this._launchHintUpdater = updateLaunchHint;
+    updateLaunchHint();
 
     // Launch button
     var launchBtn = document.getElementById('launch-btn');

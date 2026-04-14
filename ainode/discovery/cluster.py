@@ -32,6 +32,7 @@ class ClusterNode:
     distributed_mode: str = "solo"
     distributed_instance_id: Optional[str] = None
     distributed_peers: list = field(default_factory=list)
+    peer_ip: Optional[str] = None  # captured from UDP recvfrom on the head
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -53,6 +54,7 @@ class ClusterNode:
             distributed_mode=getattr(a, "distributed_mode", "solo"),
             distributed_instance_id=getattr(a, "distributed_instance_id", None),
             distributed_peers=list(getattr(a, "distributed_peers", []) or []),
+            peer_ip=getattr(discovered, "peer_ip", None),
         )
 
     @classmethod

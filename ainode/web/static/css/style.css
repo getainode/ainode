@@ -973,6 +973,22 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
   margin-bottom: 6px;
 }
 
+.launch-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin: 10px 0 12px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.06);
+  letter-spacing: 0.2px;
+}
+.launch-hint.warn {
+  color: #ffb84d;
+  border-left-color: #ffb84d;
+  background: rgba(255, 184, 77, 0.06);
+}
+
 /* ============================================================
    BOTTOM BAR — Input Area
    ============================================================ */
