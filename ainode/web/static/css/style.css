@@ -2685,6 +2685,155 @@ select {
   border-radius: var(--radius-lg);
 }
 
+/* Downloads queue — persistent panel at top of downloads view */
+.downloads-queue {
+  margin: 0 32px 16px;
+  background: linear-gradient(135deg, rgba(118, 185, 0, 0.08), rgba(118, 185, 0, 0.02));
+  border: 1px solid var(--nvidia-green-dim);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: 0 0 24px rgba(118, 185, 0, 0.1);
+}
+
+.queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-bottom: 1px solid rgba(118, 185, 0, 0.2);
+  background: rgba(118, 185, 0, 0.05);
+}
+
+.queue-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--nvidia-green);
+}
+
+.queue-count {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  padding: 3px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-hover);
+  border-radius: 20px;
+}
+
+.queue-list {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: all 0.15s ease;
+}
+
+.queue-item.done {
+  border-color: var(--nvidia-green-dim);
+  opacity: 0.7;
+}
+
+.queue-item.failed {
+  border-color: rgba(255, 51, 51, 0.4);
+  background: var(--red-glow);
+}
+
+.queue-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.queue-item-repo {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+.queue-item-status {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--nvidia-green);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.queue-item.done .queue-item-status { color: var(--nvidia-green-bright); }
+.queue-item.failed .queue-item-status { color: var(--red); }
+
+.queue-item-bar {
+  width: 140px;
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.queue-item-bar-fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--nvidia-green-bright), transparent);
+  background-size: 50% 100%;
+  animation: download-indeterminate 1.4s ease-in-out infinite;
+  box-shadow: 0 0 8px var(--nvidia-green-glow);
+}
+
+/* Nav pill badge (download count) */
+.nav-pill-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--nvidia-green);
+  color: #000;
+  font-size: 10px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  animation: nav-pulse 2s ease-in-out infinite;
+}
+
+@keyframes nav-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(118, 185, 0, 0.6); }
+  50% { box-shadow: 0 0 0 4px rgba(118, 185, 0, 0); }
+}
+
+/* Details button — subtle outline variant */
+.download-details-btn {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+  border: 1px solid var(--border-hover) !important;
+  font-weight: 600 !important;
+}
+
+.download-details-btn:hover {
+  background: var(--bg-card-hover) !important;
+  color: var(--nvidia-green) !important;
+  border-color: var(--nvidia-green-dim) !important;
+}
+
 /* Download progress block (replaces button while downloading) */
 .download-progress-block {
   min-width: 180px;

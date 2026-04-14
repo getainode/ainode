@@ -986,6 +986,7 @@ const AINode = {
         '<h2 class="view-title" id="live-catalog-title">' + titles[source] + '</h2>' +
         '<div class="downloads-count" id="live-count">Loading...</div>' +
         '</div>' +
+        '<div id="downloads-queue" class="downloads-queue"></div>' +
         '<div class="downloads-toolbar">' +
         '<div class="live-catalog-subtitle">' + subtitles[source] + '</div>' +
         '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
@@ -1039,6 +1040,7 @@ const AINode = {
           var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' ⬇' : '';
           var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
           var metaParts = [paramsStr, sizeStr, ageStr, downloadsStr, likesStr].filter(Boolean);
+          var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
           var downloadBtn = !isLoaded ?
             '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>' : '';
           return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
@@ -1048,10 +1050,10 @@ const AINode = {
             '<div class="download-card-name">' + self.esc(m.name || m.hf_repo) + '</div>' +
             '<div class="download-card-badges">' + recBadge + quantBadge + capBadges + fitBadge + statusBadge + '</div>' +
             '</div>' +
-            '<div class="download-card-repo" data-info-repo="' + self.esc(m.hf_repo) + '">' + self.esc(m.hf_repo) + ' <span class="card-info-icon" title="Model details">ⓘ</span></div>' +
+            '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
             '<div class="download-card-desc">' + metaParts.join(' · ') + '</div>' +
             '</div>' +
-            '<div class="download-card-actions">' + downloadBtn + '</div>' +
+            '<div class="download-card-actions">' + detailsBtn + downloadBtn + '</div>' +
             '</div>' +
             '</div>';
         }).join('');
@@ -1079,7 +1081,7 @@ const AINode = {
       });
     });
 
-    // Capability badges & info icon open the detail modal
+    // Details button + capability badges open the detail modal
     container.querySelectorAll('[data-info-repo]').forEach(function (el) {
       if (el.dataset.infoBound) return;
       el.dataset.infoBound = '1';
@@ -1095,6 +1097,14 @@ const AINode = {
   startRepoDownload(hfRepo) {
     var self = this;
     if (!self.state.activeDownloads) self.state.activeDownloads = {};
+
+    // Already downloading? Don't duplicate.
+    if (self.state.activeDownloads[hfRepo] &&
+        self.state.activeDownloads[hfRepo].status === 'downloading') {
+      self.toast('Already downloading ' + hfRepo, 'info');
+      self.navigate('downloads');
+      return;
+    }
 
     fetch('/api/models/download-repo', {
       method: 'POST',
@@ -1112,13 +1122,14 @@ const AINode = {
         jobId: jobId,
         status: 'downloading',
         startedAt: Date.now(),
+        elapsed: 0,
         hfRepo: hfRepo,
       };
 
-      // Navigate to downloads view and switch to the Downloads filter so user sees progress
-      self.state.modelsFilter = 'all';
+      // Navigate to Downloads view so queue is visible
       self.navigate('downloads');
-      self.toast('Downloading ' + hfRepo + '...', 'info');
+      self.renderDownloadsQueue();
+      self.toast('Downloading ' + hfRepo, 'info');
 
       // Poll status
       var pollId = setInterval(function () {
@@ -1130,14 +1141,20 @@ const AINode = {
             dl.status = st.status;
             dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
 
-            // Update any visible progress card for this model
             self.updateDownloadProgress(hfRepo);
+            self.renderDownloadsQueue();
+            self.updateNavDownloadBadge();
 
             if (st.status === 'completed') {
               clearInterval(pollId);
               self.toast('Downloaded: ' + hfRepo, 'success');
-              delete self.state.activeDownloads[hfRepo];
-              self.state.catalog = null;  // force catalog refresh
+              // Keep completed in queue for a bit so user sees it
+              setTimeout(function () {
+                delete self.state.activeDownloads[hfRepo];
+                self.renderDownloadsQueue();
+                self.updateNavDownloadBadge();
+              }, 8000);
+              self.state.catalog = null;
               self.refresh();
               self.renderDownloads();
             } else if (st.status === 'failed') {
@@ -1145,12 +1162,87 @@ const AINode = {
               self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
               dl.error = st.error;
               self.updateDownloadProgress(hfRepo);
+              setTimeout(function () {
+                delete self.state.activeDownloads[hfRepo];
+                self.renderDownloadsQueue();
+                self.updateNavDownloadBadge();
+              }, 10000);
             }
           }).catch(function () { /* keep polling */ });
       }, 2000);
+
+      // Also tick every second for elapsed time update
+      var tickId = setInterval(function () {
+        var dl = self.state.activeDownloads[hfRepo];
+        if (!dl || dl.status !== 'downloading') { clearInterval(tickId); return; }
+        dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
+        self.renderDownloadsQueue();
+      }, 1000);
+
+      self.updateNavDownloadBadge();
     }).catch(function (err) {
       self.toast('Download failed: ' + err.message, 'error');
     });
+  },
+
+  renderDownloadsQueue() {
+    var container = document.getElementById('downloads-queue');
+    if (!container) return;
+    var self = this;
+    var active = Object.values(this.state.activeDownloads || {});
+    if (active.length === 0) {
+      container.innerHTML = '';
+      container.style.display = 'none';
+      return;
+    }
+    container.style.display = '';
+    container.innerHTML =
+      '<div class="queue-header">' +
+        '<span class="queue-title">⬇ Downloads Queue</span>' +
+        '<span class="queue-count">' + active.length + ' active</span>' +
+      '</div>' +
+      '<div class="queue-list">' +
+        active.map(function (dl) {
+          var mins = Math.floor(dl.elapsed / 60);
+          var secs = dl.elapsed % 60;
+          var timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+          var statusLabel = dl.status === 'completed' ? '✓ Done' :
+                            dl.status === 'failed' ? '⚠ Failed' :
+                            timeStr;
+          var statusClass = dl.status === 'completed' ? 'done' :
+                            dl.status === 'failed' ? 'failed' :
+                            'active';
+          return '<div class="queue-item ' + statusClass + '">' +
+            '<div class="queue-item-info">' +
+              '<div class="queue-item-repo">' + self.esc(dl.hfRepo) + '</div>' +
+              '<div class="queue-item-status">' + statusLabel + (dl.error ? ' — ' + self.esc(dl.error) : '') + '</div>' +
+            '</div>' +
+            (dl.status === 'downloading' ?
+              '<div class="queue-item-bar"><div class="queue-item-bar-fill"></div></div>' : '') +
+          '</div>';
+        }).join('') +
+      '</div>';
+  },
+
+  updateNavDownloadBadge() {
+    var navPill = document.querySelector('.nav-pill[data-view="downloads"]');
+    if (!navPill) return;
+    var active = Object.values(this.state.activeDownloads || {}).filter(function (dl) {
+      return dl.status === 'downloading';
+    });
+    var existingBadge = navPill.querySelector('.nav-pill-badge');
+    if (active.length === 0) {
+      if (existingBadge) existingBadge.remove();
+      return;
+    }
+    if (existingBadge) {
+      existingBadge.textContent = active.length;
+    } else {
+      var badge = document.createElement('span');
+      badge.className = 'nav-pill-badge';
+      badge.textContent = active.length;
+      navPill.appendChild(badge);
+    }
   },
 
   updateDownloadProgress(hfRepo) {
@@ -1365,6 +1457,7 @@ const AINode = {
         '<h2 class="view-title">🤗 Hugging Face Hub</h2>' +
         '<div class="downloads-count" id="hf-count">Search millions of models</div>' +
         '</div>' +
+        '<div id="downloads-queue" class="downloads-queue"></div>' +
         '<div class="downloads-toolbar">' +
         '<input type="text" id="hf-search-input" class="search-input" placeholder="Search HuggingFace (e.g. llama, qwen, mistral, phi)..." value="' + this.esc(query) + '" autofocus>' +
         '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
@@ -1441,9 +1534,10 @@ const AINode = {
           var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' downloads' : '';
           var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
           var statsLine = [downloadsStr, likesStr].filter(Boolean).join(' · ');
+          var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
           var downloadBtn = !isLoaded ?
-            '<button class="btn-nvidia btn-sm hf-download-btn" data-hf-repo="' + self.esc(m.hf_repo) + '" data-hf-slug="' + self.esc(m.id) + '">Download</button>' : '';
-          return '<div class="download-card">' +
+            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>' : '';
+          return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
             '<div class="download-card-main">' +
             '<div class="download-card-info">' +
             '<div class="download-card-header">' +
@@ -1453,7 +1547,7 @@ const AINode = {
             '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
             '<div class="download-card-desc">' + sizeStr + (statsLine ? ' &middot; ' + statsLine : '') + '</div>' +
             '</div>' +
-            '<div class="download-card-actions">' + downloadBtn + '</div>' +
+            '<div class="download-card-actions">' + detailsBtn + downloadBtn + '</div>' +
             '</div>' +
             '</div>';
         }).join('');
@@ -1585,6 +1679,7 @@ const AINode = {
         '<h2 class="view-title">Model Catalog</h2>' +
         '<div class="downloads-count" id="downloads-count">' + filteredCount + ' of ' + totalCount + ' models</div>' +
         '</div>' +
+        '<div id="downloads-queue" class="downloads-queue"></div>' +
         '<div class="downloads-toolbar">' +
         '<input type="text" id="downloads-search" class="search-input" placeholder="Search models, families, or descriptions..." value="' + this.esc(this.state.modelsSearch) + '">' +
         '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
@@ -1621,17 +1716,18 @@ const AINode = {
       if (!fits && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb) {
         shardBtn = '<button class="btn-sm downloads-shard-btn" data-model-id="' + self.esc(model.id) + '">Shard Across Cluster</button>';
       }
-      return '<div class="download-card" data-model-id="' + self.esc(model.id) + '">' +
+      var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(model.hf_repo || model.id) + '">Details</button>';
+      return '<div class="download-card" data-model-id="' + self.esc(model.hf_repo || model.id) + '">' +
         '<div class="download-card-main">' +
         '<div class="download-card-info">' +
         '<div class="download-card-header">' +
         '<div class="download-card-name">' + self.esc(model.name || model.id) + '</div>' +
         '<div class="download-card-badges">' + recBadge + quantBadge + capabilityBadges + fitBadge + statusBadge + '</div>' +
         '</div>' +
-        '<div class="download-card-repo" data-info-repo="' + self.esc(model.id) + '">' + self.esc(model.id) + ' <span class="card-info-icon" title="Model details">ⓘ</span></div>' +
+        '<div class="download-card-repo">' + self.esc(model.id) + '</div>' +
         '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
         '</div>' +
-        '<div class="download-card-actions">' + downloadBtn + shardBtn + '</div>' +
+        '<div class="download-card-actions">' + detailsBtn + downloadBtn + shardBtn + '</div>' +
         '</div>' +
         '</div>';
     }).join('');
@@ -1671,6 +1767,9 @@ const AINode = {
 
     // Bind download buttons — unified to repo-based download with progress view
     self.bindRepoDownloadButtons(container);
+
+    // Render active downloads queue
+    self.renderDownloadsQueue();
 
     // Bind shard buttons
     container.querySelectorAll('.downloads-shard-btn').forEach(function (btn) {
