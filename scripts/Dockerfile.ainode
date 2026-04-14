@@ -34,7 +34,12 @@ RUN pip install --no-cache-dir /src \
 # configured, it is unused. openssh-client ensures `ssh` is present for the
 # launch-cluster.sh invocation.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client sshpass \
+    && apt-get install -y --no-install-recommends \
+         openssh-client \
+         sshpass \
+         iproute2 \
+         iputils-ping \
+         curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Ship a copy of eugr's launcher into a stable path. The base image builds
