@@ -131,23 +131,94 @@ async def handle_download_status(request: web.Request) -> web.Response:
     return web.json_response({"error": "job not found", "status": "unknown"}, status=404)
 
 
+def _get_repo_total_bytes(hf_repo: str) -> int:
+    """Query HF API for the total byte size of all files in a repo."""
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        info = api.model_info(hf_repo, files_metadata=True)
+        total = 0
+        siblings = getattr(info, "siblings", []) or []
+        for f in siblings:
+            size = getattr(f, "size", None) or getattr(f, "lfs", {}) or 0
+            if isinstance(size, dict):
+                size = size.get("size", 0) or 0
+            if isinstance(size, (int, float)) and size > 0:
+                total += int(size)
+        return total
+    except Exception:
+        return 0
+
+
+def _get_dir_bytes(path: Path) -> int:
+    """Sum of sizes of all regular files under path (follows symlinks for LFS)."""
+    total = 0
+    try:
+        for p in path.rglob("*"):
+            if p.is_file() or (p.is_symlink() and p.exists()):
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return total
+
+
 async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str, jobs: dict) -> None:
     """Download an arbitrary HF repo that may not be in our catalog."""
+    loop = asyncio.get_event_loop()
+    target = Path(manager.models_dir) / hf_repo.replace("/", "--")
+    target.mkdir(parents=True, exist_ok=True)
+
+    # Fetch total size in background (don't block start)
+    total_bytes = await loop.run_in_executor(None, _get_repo_total_bytes, hf_repo)
+    jobs[job_id]["total_bytes"] = total_bytes
+    jobs[job_id]["downloaded_bytes"] = 0
+    jobs[job_id]["target_dir"] = str(target)
+
+    # Poller task: watch directory size and update job progress
+    poll_stop = asyncio.Event()
+
+    async def _poll_progress():
+        while not poll_stop.is_set():
+            try:
+                downloaded = await loop.run_in_executor(None, _get_dir_bytes, target)
+                jobs[job_id]["downloaded_bytes"] = downloaded
+                if total_bytes > 0:
+                    jobs[job_id]["progress"] = min(100.0, (downloaded / total_bytes) * 100)
+                else:
+                    jobs[job_id]["progress"] = None
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(poll_stop.wait(), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+
+    poll_task = loop.create_task(_poll_progress())
+
     try:
-        loop = asyncio.get_event_loop()
         def _do_download():
             from huggingface_hub import snapshot_download
-            target = Path(manager.models_dir) / hf_repo.replace("/", "--")
-            target.mkdir(parents=True, exist_ok=True)
             snapshot_download(repo_id=hf_repo, local_dir=str(target))
             return str(target)
         await loop.run_in_executor(None, _do_download)
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["finished_at"] = time.time()
+        jobs[job_id]["progress"] = 100.0
+        if total_bytes > 0:
+            jobs[job_id]["downloaded_bytes"] = total_bytes
     except Exception as exc:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(exc)
         jobs[job_id]["finished_at"] = time.time()
+    finally:
+        poll_stop.set()
+        try:
+            await poll_task
+        except Exception:
+            pass
 
 
 async def handle_delete_model(request: web.Request) -> web.Response:

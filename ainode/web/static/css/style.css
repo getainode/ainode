@@ -2778,16 +2778,41 @@ select {
 .queue-item.failed .queue-item-status { color: var(--red); }
 
 .queue-item-bar {
-  width: 140px;
-  height: 4px;
+  width: 200px;
+  height: 6px;
   background: var(--bg-primary);
-  border-radius: 2px;
+  border-radius: 3px;
   overflow: hidden;
   position: relative;
   flex-shrink: 0;
   border: 1px solid var(--border);
 }
 
+/* Determinate progress fill */
+.queue-item-bar-progress {
+  height: 100%;
+  background: linear-gradient(90deg, var(--nvidia-green-dim), var(--nvidia-green-bright));
+  border-radius: 2px;
+  transition: width 0.5s ease;
+  box-shadow: 0 0 8px var(--nvidia-green-glow);
+  position: relative;
+  overflow: hidden;
+}
+
+.queue-item-bar-progress::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  animation: queue-bar-shimmer 1.8s ease-in-out infinite;
+}
+
+@keyframes queue-bar-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* Indeterminate fill (pre-size-known state) */
 .queue-item-bar-fill {
   position: absolute;
   inset: 0;
@@ -2795,6 +2820,17 @@ select {
   background-size: 50% 100%;
   animation: download-indeterminate 1.4s ease-in-out infinite;
   box-shadow: 0 0 8px var(--nvidia-green-glow);
+}
+
+/* Make queue item status text monospace and fit all the info */
+.queue-item {
+  min-height: 56px;
+}
+
+.queue-item-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--nvidia-green);
 }
 
 /* Nav pill badge (download count) */

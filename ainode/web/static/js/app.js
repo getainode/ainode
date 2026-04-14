@@ -1140,6 +1140,9 @@ const AINode = {
             if (!dl) { clearInterval(pollId); return; }
             dl.status = st.status;
             dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
+            dl.totalBytes = st.total_bytes || dl.totalBytes || 0;
+            dl.downloadedBytes = st.downloaded_bytes || 0;
+            dl.progress = st.progress;
 
             self.updateDownloadProgress(hfRepo);
             self.renderDownloadsQueue();
@@ -1203,25 +1206,89 @@ const AINode = {
       '</div>' +
       '<div class="queue-list">' +
         active.map(function (dl) {
-          var mins = Math.floor(dl.elapsed / 60);
-          var secs = dl.elapsed % 60;
-          var timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
-          var statusLabel = dl.status === 'completed' ? '✓ Done' :
-                            dl.status === 'failed' ? '⚠ Failed' :
-                            timeStr;
-          var statusClass = dl.status === 'completed' ? 'done' :
-                            dl.status === 'failed' ? 'failed' :
-                            'active';
-          return '<div class="queue-item ' + statusClass + '">' +
-            '<div class="queue-item-info">' +
-              '<div class="queue-item-repo">' + self.esc(dl.hfRepo) + '</div>' +
-              '<div class="queue-item-status">' + statusLabel + (dl.error ? ' — ' + self.esc(dl.error) : '') + '</div>' +
-            '</div>' +
-            (dl.status === 'downloading' ?
-              '<div class="queue-item-bar"><div class="queue-item-bar-fill"></div></div>' : '') +
-          '</div>';
+          return self.renderQueueItem(dl);
         }).join('') +
       '</div>';
+  },
+
+  renderQueueItem(dl) {
+    var mins = Math.floor(dl.elapsed / 60);
+    var secs = dl.elapsed % 60;
+    var elapsedStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+
+    var statusClass = dl.status === 'completed' ? 'done' :
+                      dl.status === 'failed' ? 'failed' :
+                      'active';
+
+    var pct = dl.progress;
+    var hasPct = pct != null && !isNaN(pct);
+    var pctStr = hasPct ? pct.toFixed(1) + '%' : '';
+
+    var total = dl.totalBytes || 0;
+    var got = dl.downloadedBytes || 0;
+    var sizeStr = '';
+    if (total > 0) {
+      sizeStr = this.formatBytes(got) + ' / ' + this.formatBytes(total);
+    } else if (got > 0) {
+      sizeStr = this.formatBytes(got) + ' downloaded';
+    }
+
+    // Throughput + ETA
+    var rate = dl.elapsed > 0 ? got / dl.elapsed : 0;
+    var rateStr = rate > 0 ? this.formatBytes(rate) + '/s' : '';
+    var etaStr = '';
+    if (rate > 0 && total > 0 && got < total) {
+      var remaining = (total - got) / rate;
+      etaStr = 'ETA ' + this.formatDuration(remaining);
+    }
+
+    var statusLabel;
+    var barHtml = '';
+    if (dl.status === 'completed') {
+      statusLabel = '✓ Complete · ' + (total > 0 ? this.formatBytes(total) : elapsedStr);
+    } else if (dl.status === 'failed') {
+      statusLabel = '⚠ Failed' + (dl.error ? ' — ' + this.esc(dl.error) : '');
+    } else if (hasPct) {
+      statusLabel = pctStr + ' · ' + sizeStr + (rateStr ? ' · ' + rateStr : '') + (etaStr ? ' · ' + etaStr : '');
+      barHtml =
+        '<div class="queue-item-bar">' +
+          '<div class="queue-item-bar-progress" style="width:' + pct.toFixed(2) + '%"></div>' +
+        '</div>';
+    } else {
+      // No total yet — show indeterminate shimmer
+      statusLabel = 'Starting... ' + elapsedStr + (sizeStr ? ' · ' + sizeStr : '');
+      barHtml =
+        '<div class="queue-item-bar">' +
+          '<div class="queue-item-bar-fill"></div>' +
+        '</div>';
+    }
+
+    return '<div class="queue-item ' + statusClass + '">' +
+      '<div class="queue-item-info">' +
+        '<div class="queue-item-repo">' + this.esc(dl.hfRepo) + '</div>' +
+        '<div class="queue-item-status">' + statusLabel + '</div>' +
+      '</div>' +
+      barHtml +
+    '</div>';
+  },
+
+  formatBytes(bytes) {
+    if (!bytes || bytes < 0) return '0 B';
+    if (bytes < 1024) return bytes.toFixed(0) + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes < 1024 * 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    return (bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2) + ' TB';
+  },
+
+  formatDuration(seconds) {
+    if (!seconds || seconds < 0 || !isFinite(seconds)) return '—';
+    seconds = Math.round(seconds);
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    return h + 'h ' + m + 'm';
   },
 
   updateNavDownloadBadge() {
