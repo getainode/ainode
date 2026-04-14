@@ -44,6 +44,9 @@ training = [
     "datasets>=2.14",
     "peft>=0.6",
 ]
+embeddings = [
+    "sentence-transformers>=2.7.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23.0",

@@ -111,6 +111,16 @@ step "2/4" "Installing AINode from ${AINODE_REPO}..."
 pip install --quiet "git+https://github.com/${AINODE_REPO}.git@${AINODE_BRANCH}"
 log "AINode installed"
 
+# Embeddings (sentence-transformers) — small, CPU-friendly, enabled by default.
+# Failure is non-fatal: AINode runs fine without it, the embeddings endpoint
+# just returns a 503 dependency-missing error until it's installed.
+info "Installing embedding support (sentence-transformers)..."
+if pip install --quiet sentence-transformers 2>&1 | tail -3; then
+    log "Embedding support ready"
+else
+    warn "sentence-transformers install failed — embeddings endpoint will be unavailable"
+fi
+
 # ── Install inference engine ──────────────────────────────────────────────
 
 if [ "$ENGINE_STRATEGY" = "docker" ]; then

@@ -31,6 +31,8 @@ from ainode.discovery.cluster import ClusterState
 from ainode.engine.sharding_routes import register_sharding_routes
 from ainode.secrets import SecretsManager
 from ainode.secrets.api_routes import register_secrets_routes
+from ainode.embeddings.manager import EmbeddingManager
+from ainode.embeddings.api_routes import register_embedding_routes
 from ainode.api.server_routes import (
     register_server_routes,
     request_log_middleware,
@@ -83,6 +85,7 @@ def create_app(
     app["broadcast_sender"] = None
     app["broadcast_listener"] = None
     app["secrets_manager"] = SecretsManager()
+    app["embedding_manager"] = EmbeddingManager()
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -122,6 +125,9 @@ def create_app(
 
     # --- Secrets routes ------------------------------------------------------
     register_secrets_routes(app)
+
+    # --- Embedding routes ----------------------------------------------------
+    register_embedding_routes(app)
 
     # --- Server view routes --------------------------------------------------
     register_server_routes(app)
