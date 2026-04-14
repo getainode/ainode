@@ -37,6 +37,14 @@ class ModelInfo:
     created_at: str = ""
     downloads: int = 0
     likes: int = 0
+    # Capabilities — inferred from HF tags or model ID
+    capabilities: list = None  # ["vision", "tool_use", "reasoning", "code", "multilingual"]
+    architecture: str = ""
+    format: str = ""  # "safetensors", "gguf", "awq", etc.
+
+    def __post_init__(self):
+        if self.capabilities is None:
+            self.capabilities = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -218,6 +226,39 @@ class CatalogAggregator:
         downloads = getattr(m, "downloads", 0) or 0
         likes = getattr(m, "likes", 0) or 0
 
+        # Detect capabilities from tags + ID
+        tags_raw = (card_data.get("tags", []) if isinstance(card_data, dict) else []) or []
+        if not isinstance(tags_raw, list):
+            tags_raw = []
+        tags_joined = " ".join(str(t) for t in tags_raw).lower() + " " + m.id.lower()
+        capabilities = []
+        if any(k in tags_joined for k in ("vision", "multimodal", "image", "vlm", "vl-", "vl ")):
+            capabilities.append("vision")
+        if any(k in tags_joined for k in ("tool", "function-call", "function_call")):
+            capabilities.append("tool_use")
+        if any(k in tags_joined for k in ("reasoning", "thinking", "r1", "o1", "cot")):
+            capabilities.append("reasoning")
+        if any(k in tags_joined for k in ("code", "coder", "codellama")):
+            capabilities.append("code")
+        if any(k in tags_joined for k in ("multilingual", "translation")):
+            capabilities.append("multilingual")
+
+        # Architecture + format
+        arch = ""
+        for a in ("llama", "qwen", "mistral", "mixtral", "phi", "gemma", "deepseek", "yi", "falcon", "mpt"):
+            if a in m.id.lower():
+                arch = a
+                break
+        fmt = ""
+        if "gguf" in m.id.lower():
+            fmt = "GGUF"
+        elif "awq" in m.id.lower():
+            fmt = "AWQ"
+        elif "gptq" in m.id.lower():
+            fmt = "GPTQ"
+        else:
+            fmt = "SafeTensors"
+
         # Extract ISO timestamp from createdAt or lastModified
         created_at = ""
         for attr in ("createdAt", "created_at", "lastModified", "last_modified"):
@@ -246,6 +287,9 @@ class CatalogAggregator:
             created_at=created_at,
             downloads=downloads,
             likes=likes,
+            capabilities=capabilities,
+            architecture=arch,
+            format=fmt,
         )
 
     # -- Source: HuggingFace trending ---------------------------------------

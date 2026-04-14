@@ -1031,6 +1031,7 @@ const AINode = {
             '<span class="fit-badge no-fit">Too large</span>') : '';
           var recBadge = m.recommended ? '<span class="fit-badge rec">Recommended</span>' : '';
           var quantBadge = m.quantization ? '<span class="fit-badge quant">' + self.esc(m.quantization.toUpperCase()) + '</span>' : '';
+          var capBadges = self.renderCapabilityBadges(m);
           var statusBadge = isLoaded ?
             '<span class="model-badge loaded">Loaded</span>' :
             '<span class="model-badge available">Available</span>';
@@ -1040,14 +1041,14 @@ const AINode = {
           var metaParts = [paramsStr, sizeStr, ageStr, downloadsStr, likesStr].filter(Boolean);
           var downloadBtn = !isLoaded ?
             '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>' : '';
-          return '<div class="download-card">' +
+          return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
             '<div class="download-card-main">' +
             '<div class="download-card-info">' +
             '<div class="download-card-header">' +
             '<div class="download-card-name">' + self.esc(m.name || m.hf_repo) + '</div>' +
-            '<div class="download-card-badges">' + recBadge + quantBadge + fitBadge + statusBadge + '</div>' +
+            '<div class="download-card-badges">' + recBadge + quantBadge + capBadges + fitBadge + statusBadge + '</div>' +
             '</div>' +
-            '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
+            '<div class="download-card-repo" data-info-repo="' + self.esc(m.hf_repo) + '">' + self.esc(m.hf_repo) + ' <span class="card-info-icon" title="Model details">ⓘ</span></div>' +
             '<div class="download-card-desc">' + metaParts.join(' · ') + '</div>' +
             '</div>' +
             '<div class="download-card-actions">' + downloadBtn + '</div>' +
@@ -1074,44 +1075,260 @@ const AINode = {
           self.toast('Invalid model repo', 'error');
           return;
         }
-        btn.disabled = true;
-        btn.textContent = 'Starting...';
-        fetch('/api/models/download-repo', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ hf_repo: hfRepo }),
-        }).then(function (resp) {
-          if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t.slice(0, 80)); });
-          return resp.json();
-        }).then(function (data) {
-          if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Download'; return; }
-          btn.textContent = 'Downloading...';
-          self.toast('Download started: ' + hfRepo, 'info');
-          var jobId = data.job_id;
-          var pollId = setInterval(function () {
-            fetch('/api/models/download/status?job_id=' + encodeURIComponent(jobId))
-              .then(function (r) { return r.json(); })
-              .then(function (st) {
-                if (st.status === 'completed') {
-                  clearInterval(pollId);
-                  btn.textContent = 'Downloaded';
-                  self.toast('Downloaded: ' + hfRepo, 'success');
-                  self.refresh();
-                } else if (st.status === 'failed') {
-                  clearInterval(pollId);
-                  btn.textContent = 'Failed';
-                  self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
-                  setTimeout(function () { btn.disabled = false; btn.textContent = 'Download'; }, 3000);
-                }
-              }).catch(function () { /* keep polling */ });
-          }, 3000);
-        }).catch(function (err) {
-          self.toast('Download failed: ' + err.message, 'error');
-          btn.disabled = false;
-          btn.textContent = 'Download';
-        });
+        self.startRepoDownload(hfRepo);
       });
     });
+
+    // Capability badges & info icon open the detail modal
+    container.querySelectorAll('[data-info-repo]').forEach(function (el) {
+      if (el.dataset.infoBound) return;
+      el.dataset.infoBound = '1';
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var repo = el.dataset.infoRepo;
+        if (repo) self.showModelDetail(repo);
+      });
+    });
+  },
+
+  startRepoDownload(hfRepo) {
+    var self = this;
+    if (!self.state.activeDownloads) self.state.activeDownloads = {};
+
+    fetch('/api/models/download-repo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hf_repo: hfRepo }),
+    }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t.slice(0, 80)); });
+      return resp.json();
+    }).then(function (data) {
+      if (data.error) { self.toast(data.error, 'error'); return; }
+      var jobId = data.job_id;
+
+      // Track this download
+      self.state.activeDownloads[hfRepo] = {
+        jobId: jobId,
+        status: 'downloading',
+        startedAt: Date.now(),
+        hfRepo: hfRepo,
+      };
+
+      // Navigate to downloads view and switch to the Downloads filter so user sees progress
+      self.state.modelsFilter = 'all';
+      self.navigate('downloads');
+      self.toast('Downloading ' + hfRepo + '...', 'info');
+
+      // Poll status
+      var pollId = setInterval(function () {
+        fetch('/api/models/download/status?job_id=' + encodeURIComponent(jobId))
+          .then(function (r) { return r.json(); })
+          .then(function (st) {
+            var dl = self.state.activeDownloads[hfRepo];
+            if (!dl) { clearInterval(pollId); return; }
+            dl.status = st.status;
+            dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
+
+            // Update any visible progress card for this model
+            self.updateDownloadProgress(hfRepo);
+
+            if (st.status === 'completed') {
+              clearInterval(pollId);
+              self.toast('Downloaded: ' + hfRepo, 'success');
+              delete self.state.activeDownloads[hfRepo];
+              self.state.catalog = null;  // force catalog refresh
+              self.refresh();
+              self.renderDownloads();
+            } else if (st.status === 'failed') {
+              clearInterval(pollId);
+              self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
+              dl.error = st.error;
+              self.updateDownloadProgress(hfRepo);
+            }
+          }).catch(function () { /* keep polling */ });
+      }, 2000);
+    }).catch(function (err) {
+      self.toast('Download failed: ' + err.message, 'error');
+    });
+  },
+
+  updateDownloadProgress(hfRepo) {
+    var dl = (this.state.activeDownloads || {})[hfRepo];
+    if (!dl) return;
+    // Find all download cards for this model (regardless of which tab user is on)
+    document.querySelectorAll('[data-model-id="' + CSS.escape(hfRepo) + '"]').forEach(function (card) {
+      var actions = card.querySelector('.download-card-actions');
+      if (!actions) return;
+      var mins = Math.floor(dl.elapsed / 60);
+      var secs = dl.elapsed % 60;
+      var timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+      var label = dl.status === 'failed' ? '⚠ Failed' :
+                  dl.status === 'completed' ? '✓ Downloaded' :
+                  'Downloading ' + timeStr;
+      actions.innerHTML =
+        '<div class="download-progress-block">' +
+          '<div class="download-progress-label">' + label + '</div>' +
+          (dl.status === 'downloading' ?
+            '<div class="download-progress-bar"><div class="download-progress-fill"></div></div>' : '') +
+        '</div>';
+    });
+  },
+
+  renderCapabilityBadges(model) {
+    var caps = model.capabilities || [];
+    var defs = {
+      vision:       { label: 'Vision',       icon: '👁',  cls: 'cap-vision' },
+      tool_use:     { label: 'Tool Use',     icon: '🔧', cls: 'cap-tool' },
+      reasoning:    { label: 'Reasoning',    icon: '🧠', cls: 'cap-reasoning' },
+      code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
+      multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
+    };
+    var self = this;
+    var repo = model.hf_repo || model.id;
+    return caps.map(function (c) {
+      var d = defs[c];
+      if (!d) return '';
+      return '<span class="cap-badge ' + d.cls + '" data-info-repo="' + self.esc(repo) + '" title="Click for details">' +
+        '<span class="cap-badge-icon">' + d.icon + '</span>' + self.esc(d.label) +
+      '</span>';
+    }).join('');
+  },
+
+  showModelDetail(repoOrId) {
+    var self = this;
+    // Look up the model from our active source (catalog first, then live-catalog buffer)
+    var pool = (this.state.catalog || []).slice();
+    if (this.state.liveCatalogBuffer) pool = pool.concat(this.state.liveCatalogBuffer);
+    var model = pool.find(function (m) {
+      return m.hf_repo === repoOrId || m.id === repoOrId;
+    });
+    if (!model) {
+      // Fetch details from HF search as a fallback
+      fetch('/api/models/search?q=' + encodeURIComponent(repoOrId.split('/').pop() || repoOrId) + '&limit=5')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var hit = (data.models || []).find(function (m) { return m.hf_repo === repoOrId; });
+          if (hit) self.renderModelDetailModal(hit);
+          else self.toast('Model details unavailable', 'error');
+        }).catch(function () { self.toast('Failed to fetch details', 'error'); });
+      return;
+    }
+    this.renderModelDetailModal(model);
+  },
+
+  renderModelDetailModal(m) {
+    var self = this;
+    var existing = document.getElementById('model-detail-modal');
+    if (existing) existing.remove();
+
+    var repo = m.hf_repo || m.id;
+    var name = m.name || repo;
+    var isLoaded = ((this.state.status && this.state.status.models_loaded) || []).includes(repo);
+    var capDefs = {
+      vision:       { label: 'Vision',       icon: '👁',  cls: 'cap-vision' },
+      tool_use:     { label: 'Tool Use',     icon: '🔧', cls: 'cap-tool' },
+      reasoning:    { label: 'Reasoning',    icon: '🧠', cls: 'cap-reasoning' },
+      code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
+      multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
+    };
+    var caps = (m.capabilities || []).map(function (c) {
+      var d = capDefs[c]; if (!d) return '';
+      return '<span class="cap-badge large ' + d.cls + '"><span class="cap-badge-icon">' + d.icon + '</span>' + d.label + '</span>';
+    }).join('');
+
+    var sizeStr = m.size_gb ? '~' + Math.round(m.size_gb) + ' GB' : (m.size || 'size unknown');
+    var downloadsStr = m.downloads ? self.formatNumber(m.downloads) : '—';
+    var likesStr = m.likes ? self.formatNumber(m.likes) : '—';
+    var ageStr = m.created_at ? self.relativeTime(m.created_at).replace('released ', '') : '—';
+    var license = m.license || '—';
+    var arch = (m.architecture || m.family || '—');
+    var fmt = m.format || (m.quantization ? m.quantization.toUpperCase() : 'SafeTensors');
+    var paramsStr = m.params_b ? m.params_b + 'B' : (m.params || '—');
+    var ctxStr = m.context_length ? self.formatNumber(m.context_length) + ' tokens' : '—';
+
+    var metaRow =
+      '<div class="md-meta-row">' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Params</span><span class="md-meta-value">' + self.esc(paramsStr) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Arch</span><span class="md-meta-value">' + self.esc(arch) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Format</span><span class="md-meta-value md-format">' + self.esc(fmt) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Context</span><span class="md-meta-value">' + self.esc(ctxStr) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">License</span><span class="md-meta-value">' + self.esc(license) + '</span></div>' +
+      '</div>';
+
+    var primaryCta = isLoaded
+      ? '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>'
+      : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
+
+    var modal = document.createElement('div');
+    modal.id = 'model-detail-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon">⬡</div>' +
+            '<div class="md-title">' + self.esc(repo) + '</div>' +
+            '<button class="md-copy" data-copy="' + self.esc(repo) + '" title="Copy repo">⧉</button>' +
+          '</div>' +
+          '<button class="md-close" title="Close">×</button>' +
+        '</div>' +
+        '<div class="md-stats-row">' +
+          '<div class="md-stat"><span class="md-stat-icon">⬇</span>' + downloadsStr + '</div>' +
+          '<div class="md-stat"><span class="md-stat-icon">★</span>' + likesStr + '</div>' +
+          '<div class="md-stat md-stat-age">Last updated: ' + self.esc(ageStr) + '</div>' +
+          (m.recommended ? '<div class="md-staff-pick">✨ Recommended</div>' : '') +
+        '</div>' +
+        (m.description || m.desc ? '<div class="md-description">' + self.esc(m.description || m.desc) + '</div>' : '') +
+        metaRow +
+        (caps ? '<div class="md-capabilities"><span class="md-section-label">Capabilities</span><div class="md-cap-list">' + caps + '</div></div>' : '') +
+        '<div class="md-footer">' +
+          '<div class="md-footer-status">' + (isLoaded ? '● Model loaded and ready' : '○ Not yet downloaded') + '</div>' +
+          primaryCta +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(modal);
+
+    // Close handlers
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+    document.addEventListener('keydown', function escHandler(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', escHandler); }
+    });
+
+    // Copy repo
+    modal.querySelector('.md-copy').addEventListener('click', function (e) {
+      navigator.clipboard.writeText(e.currentTarget.dataset.copy);
+      self.toast('Repo copied', 'success');
+    });
+
+    // Download
+    var dlBtn = modal.querySelector('#md-download');
+    if (dlBtn) {
+      dlBtn.addEventListener('click', function () {
+        self.startRepoDownload(dlBtn.dataset.hfRepo);
+        close();
+      });
+    }
+
+    // Use in chat
+    var chatBtn = modal.querySelector('#md-use-chat');
+    if (chatBtn) {
+      chatBtn.addEventListener('click', function () {
+        self.state.messages = [];
+        self.state.currentConversation = null;
+        self.navigate('chat');
+        var sel = document.getElementById('chat-model');
+        if (sel) {
+          for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === repo) { sel.value = repo; break; }
+          }
+        }
+        close();
+      });
+    }
   },
 
   relativeTime(isoString) {
@@ -1287,6 +1504,12 @@ const AINode = {
             created_at: m.created_at || '',
             downloads: m.downloads || 0,
             likes: m.likes || 0,
+            capabilities: m.capabilities || [],
+            architecture: m.architecture || '',
+            format: m.format || '',
+            hf_repo: m.hf_repo || '',
+            context_length: m.context_length || 0,
+            license: m.license || '',
           };
         });
         self.renderDownloads();
@@ -1391,6 +1614,7 @@ const AINode = {
       var ageText = model.created_at ? self.relativeTime(model.created_at) : '';
       var downloadsText = model.downloads ? self.formatNumber(model.downloads) + ' ⬇' : '';
       var descParts = [paramsText, model.size, ageText, downloadsText].filter(Boolean);
+      var capabilityBadges = self.renderCapabilityBadges(model);
       var downloadBtn = !isLoaded ?
         '<button class="btn-nvidia btn-sm downloads-download-btn" data-model-id="' + self.esc(model.id) + '">Download</button>' : '';
       var shardBtn = '';
@@ -1402,9 +1626,9 @@ const AINode = {
         '<div class="download-card-info">' +
         '<div class="download-card-header">' +
         '<div class="download-card-name">' + self.esc(model.name || model.id) + '</div>' +
-        '<div class="download-card-badges">' + recBadge + quantBadge + fitBadge + statusBadge + '</div>' +
+        '<div class="download-card-badges">' + recBadge + quantBadge + capabilityBadges + fitBadge + statusBadge + '</div>' +
         '</div>' +
-        '<div class="download-card-repo">' + self.esc(model.id) + '</div>' +
+        '<div class="download-card-repo" data-info-repo="' + self.esc(model.id) + '">' + self.esc(model.id) + ' <span class="card-info-icon" title="Model details">ⓘ</span></div>' +
         '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
         '</div>' +
         '<div class="download-card-actions">' + downloadBtn + shardBtn + '</div>' +
@@ -1445,42 +1669,8 @@ const AINode = {
       });
     });
 
-    // Bind download buttons
-    container.querySelectorAll('.downloads-download-btn').forEach(function (btn) {
-      btn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        var modelId = btn.dataset.modelId;
-        // Find the catalog slug from the HF repo ID
-        var modelEntry = (self.state.catalog || []).find(function (m) { return m.id === modelId; });
-        var slug = modelEntry ? modelEntry.slug : modelId;
-        btn.disabled = true;
-        btn.textContent = 'Starting...';
-        fetch('/api/models/' + encodeURIComponent(slug) + '/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        }).then(function (resp) {
-          if (!resp.ok) {
-            return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t.slice(0, 100)); });
-          }
-          return resp.json();
-        }).then(function (data) {
-          if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Download'; return; }
-          btn.textContent = 'Downloading...';
-          var pollId = setInterval(function () {
-            fetch('/api/models/' + encodeURIComponent(slug))
-              .then(function (r) { return r.json(); })
-              .then(function (st) {
-                if (st.downloaded) {
-                  clearInterval(pollId);
-                  self.toast('Model downloaded: ' + modelId, 'success');
-                  self.refresh();
-                  btn.textContent = 'Downloaded';
-                }
-              }).catch(function () { clearInterval(pollId); btn.disabled = false; btn.textContent = 'Download'; });
-          }, 2000);
-        }).catch(function (err) { self.toast('Error: ' + err.message, 'error'); btn.disabled = false; btn.textContent = 'Download'; });
-      });
-    });
+    // Bind download buttons — unified to repo-based download with progress view
+    self.bindRepoDownloadButtons(container);
 
     // Bind shard buttons
     container.querySelectorAll('.downloads-shard-btn').forEach(function (btn) {

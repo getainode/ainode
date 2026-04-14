@@ -2348,6 +2348,390 @@ select {
   font-size: 14px;
 }
 
+/* Capability badges */
+.cap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.cap-badge.large {
+  padding: 8px 16px;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.cap-badge-icon {
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+}
+.cap-badge.large .cap-badge-icon { font-size: 14px; }
+
+.cap-vision {
+  background: rgba(255, 184, 0, 0.12);
+  color: var(--amber);
+  border: 1px solid rgba(255, 184, 0, 0.35);
+}
+.cap-vision:hover {
+  background: rgba(255, 184, 0, 0.2);
+  box-shadow: 0 0 10px rgba(255, 184, 0, 0.3);
+}
+
+.cap-tool {
+  background: rgba(74, 144, 217, 0.12);
+  color: #5baee5;
+  border: 1px solid rgba(74, 144, 217, 0.35);
+}
+.cap-tool:hover {
+  background: rgba(74, 144, 217, 0.2);
+  box-shadow: 0 0 10px rgba(74, 144, 217, 0.3);
+}
+
+.cap-reasoning {
+  background: rgba(139, 92, 246, 0.12);
+  color: #b794f6;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+.cap-reasoning:hover {
+  background: rgba(139, 92, 246, 0.2);
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.3);
+}
+
+.cap-code {
+  background: rgba(0, 212, 170, 0.12);
+  color: var(--cyan);
+  border: 1px solid rgba(0, 212, 170, 0.35);
+  font-family: var(--font-mono);
+}
+.cap-code:hover {
+  background: rgba(0, 212, 170, 0.2);
+  box-shadow: 0 0 10px rgba(0, 212, 170, 0.3);
+}
+
+.cap-multilingual {
+  background: rgba(118, 185, 0, 0.1);
+  color: var(--nvidia-green);
+  border: 1px solid var(--nvidia-green-dim);
+}
+.cap-multilingual:hover {
+  background: rgba(118, 185, 0, 0.2);
+  box-shadow: 0 0 10px var(--nvidia-green-glow);
+}
+
+/* Card info icon */
+.card-info-icon {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: 6px;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.download-card-repo:hover .card-info-icon {
+  color: var(--nvidia-green);
+  opacity: 1;
+}
+
+/* ============================================================
+   MODEL DETAIL MODAL
+   ============================================================ */
+.model-detail-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: md-fade 0.2s ease;
+}
+
+@keyframes md-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.model-detail-modal {
+  width: min(760px, 94vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(118, 185, 0, 0.05);
+  animation: md-pop 0.25s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+@keyframes md-pop {
+  from { transform: scale(0.95) translateY(10px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+.md-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.md-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.md-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(118, 185, 0, 0.15), rgba(118, 185, 0, 0.05));
+  border: 1px solid var(--nvidia-green-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--nvidia-green);
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.md-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.md-copy {
+  background: transparent;
+  border: 1px solid var(--border-hover);
+  color: var(--text-muted);
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+.md-copy:hover { color: var(--nvidia-green); border-color: var(--nvidia-green-dim); }
+
+.md-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+.md-close:hover { color: var(--red); background: var(--red-glow); }
+
+.md-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 24px;
+  flex-wrap: wrap;
+}
+
+.md-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.md-stat-icon {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.md-stat-age {
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+}
+
+.md-staff-pick {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  background: rgba(118, 185, 0, 0.15);
+  color: var(--nvidia-green-bright);
+  border: 1px solid var(--nvidia-green);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  box-shadow: 0 0 12px var(--nvidia-green-glow);
+}
+
+.md-description {
+  margin: 0 24px 16px;
+  padding: 14px 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.md-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 4px 24px 16px;
+}
+
+.md-meta-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.md-meta-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.md-meta-value {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-hover);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.md-format {
+  background: rgba(74, 144, 217, 0.15);
+  color: #5baee5;
+  border-color: rgba(74, 144, 217, 0.4);
+}
+
+.md-capabilities {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 24px 20px;
+  flex-wrap: wrap;
+}
+
+.md-section-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.md-cap-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.md-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.md-footer-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.md-cta {
+  padding: 12px 24px;
+  font-size: 14px;
+  letter-spacing: 0.3px;
+  border-radius: var(--radius-lg);
+}
+
+/* Download progress block (replaces button while downloading) */
+.download-progress-block {
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.download-progress-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--nvidia-green);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+
+.download-progress-bar {
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+  border: 1px solid var(--border);
+}
+
+.download-progress-fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--nvidia-green-dim) 30%,
+    var(--nvidia-green-bright) 50%,
+    var(--nvidia-green-dim) 70%,
+    transparent 100%
+  );
+  background-size: 50% 100%;
+  animation: download-indeterminate 1.4s ease-in-out infinite;
+  box-shadow: 0 0 10px var(--nvidia-green-glow);
+}
+
+@keyframes download-indeterminate {
+  0% { background-position: -100% 0; }
+  100% { background-position: 200% 0; }
+}
+
 /* ============================================================
    TRAINING SECTION
    ============================================================ */
