@@ -166,9 +166,9 @@ class CatalogAggregator:
         try:
             api = HfApi()
             queries = [
-                {"task": "text-generation", "sort": "downloads", "limit": 50},
-                {"task": "text-generation", "tags": "instruct", "sort": "downloads", "limit": 30},
-                {"task": "text-generation", "tags": "chat", "sort": "downloads", "limit": 20},
+                {"filter": "text-generation", "sort": "downloads", "limit": 50},
+                {"filter": "text-generation", "tags": "instruct", "sort": "downloads", "limit": 30},
+                {"filter": "text-generation", "tags": "chat", "sort": "downloads", "limit": 20},
             ]
             results: list[ModelInfo] = []
             seen_ids: set[str] = set()
@@ -251,14 +251,14 @@ class CatalogAggregator:
     # -- Source: HuggingFace trending ---------------------------------------
 
     def fetch_trending(self, limit: int = 30) -> list[ModelInfo]:
-        """Models trending on HF in the last day."""
+        """Models trending on HF (high download velocity recently)."""
         try:
             from huggingface_hub import HfApi
             api = HfApi()
-            # HF sort by "trending" is via their API
+            # HF's trending signal is exposed as sort="trendingScore"
             models = api.list_models(
-                task="text-generation",
-                sort="trending",
+                filter="text-generation",
+                sort="trendingScore",
                 limit=limit,
                 direction=-1,
             )
@@ -284,7 +284,7 @@ class CatalogAggregator:
             from huggingface_hub import HfApi
             api = HfApi()
             models = api.list_models(
-                task="text-generation",
+                filter="text-generation",
                 sort="createdAt",
                 limit=limit * 3,  # overfetch because many will lack metadata
                 direction=-1,
@@ -741,7 +741,7 @@ class ModelManager:
             api = HfApi()
             models = api.list_models(
                 search=query,
-                task="text-generation",
+                filter="text-generation",
                 limit=limit,
                 sort="downloads",
                 direction=-1,
