@@ -144,11 +144,16 @@ async def autostart_loop(
             try:
                 if cluster_state.is_master_of_cluster():
                     if not state.is_head:
-                        start_head_if_needed(state)
+                        # Blocking subprocess → offload so aiohttp stays responsive
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, start_head_if_needed, state
+                        )
                 else:
                     master_addr = get_master_address()
                     if master_addr and not state.joined_as_worker:
-                        join_worker_if_possible(state, master_addr)
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, join_worker_if_possible, state, master_addr
+                        )
             except Exception as exc:  # pragma: no cover - defensive
                 state.error = str(exc)
                 logger.exception("Ray autostart loop error: %s", exc)

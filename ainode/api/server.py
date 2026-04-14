@@ -219,8 +219,13 @@ async def _on_startup(app: web.Application) -> None:
             # Same node → no remote address needed
             if master.node_id == announcement.node_id:
                 return None
-            # Prefer explicit announced master_address if present on the master
-            return f"{master.node_name}:6379"
+            # node_name can be None/"unknown" (no hostname resolution yet); the
+            # Ray join would hang for 60s on a bogus address and block the
+            # asyncio event loop. Skip until we have real peer IP plumbing.
+            name = master.node_name
+            if not name or name in ("unknown", "localhost", "None"):
+                return None
+            return f"{name}:6379"
 
         app["_ray_autostart_task"] = asyncio.get_event_loop().create_task(
             _ray_autostart_loop(
