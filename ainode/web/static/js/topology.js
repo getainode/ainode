@@ -1,334 +1,335 @@
-/* AINode Topology — Interactive Force-Directed Node Graph */
+/* AINode Topology — NVIDIA-Styled Interactive Node Visualization
+ * Premium canvas-based topology renderer with force-directed layout,
+ * animated data pulses, and drag physics.
+ */
 
-const Topology = (() => {
-  // --- Configuration ---
-  const CONFIG = {
-    nodeWidth: 220,
-    nodeHeight: 88,
-    nodeRadius: 14,
-    minHeight: 360,
-    padding: 60,
-    // Physics
-    repulsionStrength: 8000,
-    attractionStrength: 0.005,
-    centerGravity: 0.03,
-    damping: 0.88,
-    minVelocity: 0.01,
-    // Appearance
-    connectionWidth: 2,
-    pulseSpeed: 0.002,
-    hoverExpandHeight: 56,
-    // Colors (read from CSS vars at init)
-    colors: {},
-  };
+class TopologyRenderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.dpr = window.devicePixelRatio || 1;
+    this.width = 0;
+    this.height = 0;
+    this.time = 0;
+    this.animFrameId = null;
 
-  // --- State ---
-  let canvas = null;
-  let ctx = null;
-  let width = 0;
-  let height = 0;
-  let dpr = 1;
-  let animFrameId = null;
-  let time = 0;
-  let selectedNodeId = null;
-  let hoveredNodeId = null;
-  let onSelectCallback = null;
+    // Graph state
+    this.nodes = [];
+    this.edges = [];
 
-  // Graph data
-  let graphNodes = [];
-  let graphEdges = [];
+    // Interaction state
+    this.mouse = { x: 0, y: 0, down: false };
+    this.dragNode = null;
+    this.dragOffset = { x: 0, y: 0 };
+    this.dragStartPos = { x: 0, y: 0 };
+    this.hoveredNodeId = null;
+    this.selectedNodeId = null;
 
-  // Mouse state
-  let mouse = { x: 0, y: 0, down: false };
-  let dragNode = null;
-  let dragOffset = { x: 0, y: 0 };
+    // Callbacks
+    this.onNodeSelect = null;
 
-  // --- Color Helpers ---
-  function readCSSColors() {
-    const style = getComputedStyle(document.documentElement);
-    const get = (v) => style.getPropertyValue(v).trim();
-    CONFIG.colors = {
-      bgPrimary: get('--bg-primary') || '#0a0e17',
-      bgCard: get('--bg-card') || '#1a2332',
-      bgCardHover: get('--bg-card-hover') || '#1e2a3d',
-      border: get('--border') || '#2d3748',
-      borderActive: get('--border-active') || '#4a90d9',
-      textPrimary: get('--text-primary') || '#e2e8f0',
-      textSecondary: get('--text-secondary') || '#94a3b8',
-      textMuted: get('--text-muted') || '#64748b',
-      accent: get('--accent') || '#4a90d9',
-      green: get('--green') || '#10b981',
-      yellow: get('--yellow') || '#f59e0b',
-      red: get('--red') || '#ef4444',
-      purple: get('--purple') || '#8b5cf6',
-    };
-  }
+    // Data pulse particles
+    this.pulses = [];
 
-  function hexToRgba(hex, alpha) {
-    hex = hex.replace('#', '');
-    if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
-    const r = parseInt(hex.substring(0,2), 16);
-    const g = parseInt(hex.substring(2,4), 16);
-    const b = parseInt(hex.substring(4,6), 16);
-    return `rgba(${r},${g},${b},${alpha})`;
-  }
-
-  // --- Initialization ---
-  function init(canvasEl, onSelect) {
-    canvas = canvasEl;
-    ctx = canvas.getContext('2d');
-    onSelectCallback = onSelect;
-    dpr = window.devicePixelRatio || 1;
-    readCSSColors();
-    resize();
-    bindEvents();
-    startLoop();
-  }
-
-  function destroy() {
-    if (animFrameId) cancelAnimationFrame(animFrameId);
-    animFrameId = null;
-    unbindEvents();
-  }
-
-  function resize() {
-    if (!canvas || !canvas.parentElement) return;
-    const rect = canvas.parentElement.getBoundingClientRect();
-    width = rect.width;
-    height = Math.max(rect.height, CONFIG.minHeight);
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    canvas.style.width = width + 'px';
-    canvas.style.height = height + 'px';
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  // --- Event Binding ---
-  let boundHandlers = {};
-
-  function bindEvents() {
-    boundHandlers.mouseMove = (e) => {
-      const rect = canvas.getBoundingClientRect();
-      mouse.x = e.clientX - rect.left;
-      mouse.y = e.clientY - rect.top;
-      if (dragNode) {
-        dragNode.x = mouse.x - dragOffset.x;
-        dragNode.y = mouse.y - dragOffset.y;
-        dragNode.vx = 0;
-        dragNode.vy = 0;
-        dragNode.pinned = true;
-      }
-      updateHover();
-    };
-    boundHandlers.mouseDown = (e) => {
-      mouse.down = true;
-      const node = getNodeAt(mouse.x, mouse.y);
-      if (node) {
-        dragNode = node;
-        dragOffset.x = mouse.x - node.x;
-        dragOffset.y = mouse.y - node.y;
-        canvas.style.cursor = 'grabbing';
-      }
-    };
-    boundHandlers.mouseUp = () => {
-      if (dragNode) {
-        // If barely moved, treat as click
-        const dx = mouse.x - (dragNode.x + dragOffset.x);
-        const dy = mouse.y - (dragNode.y + dragOffset.y);
-        if (Math.abs(dx) < 3 && Math.abs(dy) < 3) {
-          selectNode(dragNode.id);
-        }
-        dragNode.pinned = false;
-        dragNode = null;
-        canvas.style.cursor = 'default';
-      }
-      mouse.down = false;
-    };
-    boundHandlers.resize = () => {
-      resize();
-      // Re-center nodes if needed
-      graphNodes.forEach(n => {
-        n.x = Math.min(Math.max(n.x, CONFIG.padding), width - CONFIG.padding);
-        n.y = Math.min(Math.max(n.y, CONFIG.padding), height - CONFIG.padding);
-      });
-    };
-    boundHandlers.click = (e) => {
-      const node = getNodeAt(mouse.x, mouse.y);
-      if (!node && !dragNode) {
-        selectNode(null);
-      }
+    // Config
+    this.cfg = {
+      nodeWidth: 180,
+      nodeHeight: 120,
+      cornerRadius: 12,
+      padding: 60,
+      minHeight: 360,
+      // Physics
+      repulsion: 9000,
+      attraction: 0.004,
+      centerGravity: 0.025,
+      damping: 0.86,
+      breathAmplitude: 0.3,
+      // Colors
+      nvidiaGreen: '#76B900',
+      nvidiaGreenBright: '#8ACE00',
+      nodeBg: '#111111',
+      nodeBorder: '#76B900',
+      nodeBorderOffline: '#333333',
+      textPrimary: '#E0E0E0',
+      textSecondary: '#AAAAAA',
+      textMuted: '#888888',
+      trackBg: '#1f1f1f',
+      dotGrid: '#1a1a1a',
+      tempGreen: '#76B900',
+      tempAmber: '#F5A623',
+      tempRed: '#FF4444',
     };
 
-    canvas.addEventListener('mousemove', boundHandlers.mouseMove);
-    canvas.addEventListener('mousedown', boundHandlers.mouseDown);
-    canvas.addEventListener('mouseup', boundHandlers.mouseUp);
-    canvas.addEventListener('mouseleave', () => {
-      hoveredNodeId = null;
-      if (dragNode) { dragNode.pinned = false; dragNode = null; }
-      mouse.down = false;
-      canvas.style.cursor = 'default';
-    });
-    canvas.addEventListener('click', boundHandlers.click);
-    window.addEventListener('resize', boundHandlers.resize);
+    this._boundHandlers = {};
+    this._resize();
+    this._bindEvents();
+    this._startLoop();
   }
 
-  function unbindEvents() {
-    if (!canvas) return;
-    canvas.removeEventListener('mousemove', boundHandlers.mouseMove);
-    canvas.removeEventListener('mousedown', boundHandlers.mouseDown);
-    canvas.removeEventListener('mouseup', boundHandlers.mouseUp);
-    canvas.removeEventListener('click', boundHandlers.click);
-    window.removeEventListener('resize', boundHandlers.resize);
-  }
+  // --- Public API ---
 
-  function updateHover() {
-    const node = getNodeAt(mouse.x, mouse.y);
-    const newHovered = node ? node.id : null;
-    if (newHovered !== hoveredNodeId) {
-      hoveredNodeId = newHovered;
-      canvas.style.cursor = newHovered ? 'grab' : 'default';
-      if (dragNode) canvas.style.cursor = 'grabbing';
-    }
-  }
-
-  function getNodeAt(mx, my) {
-    // Reverse order so topmost (last drawn) is checked first
-    for (let i = graphNodes.length - 1; i >= 0; i--) {
-      const n = graphNodes[i];
-      const nw = CONFIG.nodeWidth;
-      const nh = getNodeHeight(n);
-      if (mx >= n.x - nw/2 && mx <= n.x + nw/2 &&
-          my >= n.y - nh/2 && my <= n.y + nh/2) {
-        return n;
-      }
-    }
-    return null;
-  }
-
-  function getNodeHeight(n) {
-    let h = CONFIG.nodeHeight;
-    if (n.data && n.data.shard_role) h += 22;
-    if (hoveredNodeId === n.id) h += CONFIG.hoverExpandHeight + (n.data && n.data.sharded_model ? 16 : 0);
-    return h;
-  }
-
-  function selectNode(id) {
-    selectedNodeId = id;
-    if (onSelectCallback) {
-      const node = graphNodes.find(n => n.id === id);
-      onSelectCallback(node ? node.data : null);
-    }
-  }
-
-  // --- Data Update ---
-  function update(nodesData) {
-    if (!nodesData || !Array.isArray(nodesData)) return;
+  update(nodesArray) {
+    if (!nodesArray || !Array.isArray(nodesArray)) return;
 
     const existingMap = {};
-    graphNodes.forEach(n => { existingMap[n.id] = n; });
+    this.nodes.forEach(n => { existingMap[n.id] = n; });
 
-    const newIds = new Set(nodesData.map(n => n.node_id || n.id || 'local'));
     const updatedNodes = [];
-
-    nodesData.forEach((nd, i) => {
+    nodesArray.forEach((nd, i) => {
       const id = nd.node_id || nd.id || 'local';
       let gn = existingMap[id];
       if (gn) {
-        // Update data, keep position
         gn.data = nd;
+        gn.targetAlpha = 1;
       } else {
-        // New node — place with initial position
         gn = {
           id,
           data: nd,
-          x: width / 2 + (Math.random() - 0.5) * 100,
-          y: height / 2 + (Math.random() - 0.5) * 100,
+          x: this.width / 2 + (Math.random() - 0.5) * 120,
+          y: this.height / 2 + (Math.random() - 0.5) * 120,
           vx: 0,
           vy: 0,
           pinned: false,
+          alpha: 0,
           targetAlpha: 1,
-          alpha: 0, // fade in
+          scale: 1,
+          targetScale: 1,
         };
       }
       updatedNodes.push(gn);
     });
 
-    graphNodes = updatedNodes;
+    this.nodes = updatedNodes;
+    this._buildEdges();
 
-    // Build edges: all-to-all mesh for discovered cluster
-    graphEdges = [];
-    for (let i = 0; i < graphNodes.length; i++) {
-      for (let j = i + 1; j < graphNodes.length; j++) {
-        const a = graphNodes[i];
-        const b = graphNodes[j];
-        const aOnline = a.data.status === 'online';
-        const bOnline = b.data.status === 'online';
-        const bothSharded = !!(a.data.shard_role && b.data.shard_role);
-        graphEdges.push({
-          source: a,
-          target: b,
-          solid: aOnline && bOnline,
-          label: bothSharded ? 'SHARD' : 'LAN',
-        });
-      }
-    }
-
-    // If single node, position at center
-    if (graphNodes.length === 1) {
-      const n = graphNodes[0];
+    if (this.nodes.length === 1) {
+      const n = this.nodes[0];
       if (!n.pinned) {
-        n.x = width / 2;
-        n.y = height / 2;
+        n.x = this.width / 2;
+        n.y = this.height / 2;
       }
-    }
-    // For 2-4 nodes, arrange in a circle initially if new
-    else if (graphNodes.length <= 4) {
-      layoutCircle(false);
+    } else if (this.nodes.length <= 4) {
+      this._layoutCircle(false);
     }
   }
 
-  function layoutCircle(force) {
-    const cx = width / 2;
-    const cy = height / 2;
-    const radius = Math.min(width, height) * 0.25;
-    graphNodes.forEach((n, i) => {
+  destroy() {
+    if (this.animFrameId) cancelAnimationFrame(this.animFrameId);
+    this.animFrameId = null;
+    this._unbindEvents();
+  }
+
+  resize() {
+    this._resize();
+  }
+
+  getSelectedNodeId() {
+    return this.selectedNodeId;
+  }
+
+  // --- Layout ---
+
+  _buildEdges() {
+    this.edges = [];
+    for (let i = 0; i < this.nodes.length; i++) {
+      for (let j = i + 1; j < this.nodes.length; j++) {
+        const a = this.nodes[i];
+        const b = this.nodes[j];
+        const aOnline = a.data.status === 'online';
+        const bOnline = b.data.status === 'online';
+        this.edges.push({
+          source: a,
+          target: b,
+          active: aOnline && bOnline,
+        });
+      }
+    }
+  }
+
+  _layoutCircle(force) {
+    const cx = this.width / 2;
+    const cy = this.height / 2;
+    const radius = Math.min(this.width, this.height) * 0.25;
+    this.nodes.forEach((n, i) => {
       if (force || (n.alpha < 0.1 && !n.pinned)) {
-        const angle = (i / graphNodes.length) * Math.PI * 2 - Math.PI / 2;
+        const angle = (i / this.nodes.length) * Math.PI * 2 - Math.PI / 2;
         n.x = cx + Math.cos(angle) * radius;
         n.y = cy + Math.sin(angle) * radius;
       }
     });
   }
 
+  // --- Resize ---
+
+  _resize() {
+    if (!this.canvas || !this.canvas.parentElement) return;
+    const rect = this.canvas.parentElement.getBoundingClientRect();
+    this.width = rect.width;
+    this.height = Math.max(rect.height, this.cfg.minHeight);
+    this.canvas.width = this.width * this.dpr;
+    this.canvas.height = this.height * this.dpr;
+    this.canvas.style.width = this.width + 'px';
+    this.canvas.style.height = this.height + 'px';
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  }
+
+  // --- Events ---
+
+  _bindEvents() {
+    const h = this._boundHandlers;
+
+    h.mouseMove = (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      this.mouse.x = e.clientX - rect.left;
+      this.mouse.y = e.clientY - rect.top;
+      if (this.dragNode) {
+        this.dragNode.x = this.mouse.x - this.dragOffset.x;
+        this.dragNode.y = this.mouse.y - this.dragOffset.y;
+        this.dragNode.vx = 0;
+        this.dragNode.vy = 0;
+        this.dragNode.pinned = true;
+      }
+      this._updateHover();
+    };
+
+    h.mouseDown = (e) => {
+      this.mouse.down = true;
+      const node = this._getNodeAt(this.mouse.x, this.mouse.y);
+      if (node) {
+        this.dragNode = node;
+        this.dragOffset.x = this.mouse.x - node.x;
+        this.dragOffset.y = this.mouse.y - node.y;
+        this.dragStartPos.x = this.mouse.x;
+        this.dragStartPos.y = this.mouse.y;
+        this.canvas.style.cursor = 'grabbing';
+      }
+    };
+
+    h.mouseUp = () => {
+      if (this.dragNode) {
+        const dx = this.mouse.x - this.dragStartPos.x;
+        const dy = this.mouse.y - this.dragStartPos.y;
+        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+          this._selectNode(this.dragNode.id);
+        }
+        this.dragNode.pinned = false;
+        this.dragNode = null;
+        this.canvas.style.cursor = 'default';
+      }
+      this.mouse.down = false;
+    };
+
+    h.click = () => {
+      const node = this._getNodeAt(this.mouse.x, this.mouse.y);
+      if (!node && !this.dragNode) {
+        this._selectNode(null);
+      }
+    };
+
+    h.mouseLeave = () => {
+      this.hoveredNodeId = null;
+      if (this.dragNode) { this.dragNode.pinned = false; this.dragNode = null; }
+      this.mouse.down = false;
+      this.canvas.style.cursor = 'default';
+    };
+
+    h.resize = () => {
+      this._resize();
+      this.nodes.forEach(n => {
+        n.x = Math.min(Math.max(n.x, this.cfg.padding), this.width - this.cfg.padding);
+        n.y = Math.min(Math.max(n.y, this.cfg.padding), this.height - this.cfg.padding);
+      });
+    };
+
+    this.canvas.addEventListener('mousemove', h.mouseMove);
+    this.canvas.addEventListener('mousedown', h.mouseDown);
+    this.canvas.addEventListener('mouseup', h.mouseUp);
+    this.canvas.addEventListener('mouseleave', h.mouseLeave);
+    this.canvas.addEventListener('click', h.click);
+    window.addEventListener('resize', h.resize);
+  }
+
+  _unbindEvents() {
+    if (!this.canvas) return;
+    const h = this._boundHandlers;
+    this.canvas.removeEventListener('mousemove', h.mouseMove);
+    this.canvas.removeEventListener('mousedown', h.mouseDown);
+    this.canvas.removeEventListener('mouseup', h.mouseUp);
+    this.canvas.removeEventListener('mouseleave', h.mouseLeave);
+    this.canvas.removeEventListener('click', h.click);
+    window.removeEventListener('resize', h.resize);
+  }
+
+  _updateHover() {
+    const node = this._getNodeAt(this.mouse.x, this.mouse.y);
+    const newId = node ? node.id : null;
+    if (newId !== this.hoveredNodeId) {
+      this.hoveredNodeId = newId;
+      this.canvas.style.cursor = newId ? 'grab' : 'default';
+      if (this.dragNode) this.canvas.style.cursor = 'grabbing';
+    }
+    // Update target scales
+    this.nodes.forEach(n => {
+      n.targetScale = (n.id === this.hoveredNodeId) ? 1.02 : 1.0;
+    });
+  }
+
+  _getNodeAt(mx, my) {
+    const nw = this.cfg.nodeWidth;
+    const nh = this.cfg.nodeHeight;
+    for (let i = this.nodes.length - 1; i >= 0; i--) {
+      const n = this.nodes[i];
+      const hw = nw / 2 * n.scale;
+      const hh = nh / 2 * n.scale;
+      if (mx >= n.x - hw && mx <= n.x + hw && my >= n.y - hh && my <= n.y + hh) {
+        return n;
+      }
+    }
+    return null;
+  }
+
+  _selectNode(id) {
+    this.selectedNodeId = id;
+    if (this.onNodeSelect) {
+      const node = this.nodes.find(n => n.id === id);
+      this.onNodeSelect(node ? node.data : null);
+    }
+  }
+
   // --- Physics ---
-  function simulate() {
-    const N = graphNodes.length;
+
+  _simulate() {
+    const N = this.nodes.length;
     if (N === 0) return;
+
     if (N === 1) {
-      // Single node: gently drift to center
-      const n = graphNodes[0];
+      const n = this.nodes[0];
       if (!n.pinned) {
-        n.vx += (width / 2 - n.x) * 0.02;
-        n.vy += (height / 2 - n.y) * 0.02;
-        n.vx *= CONFIG.damping;
-        n.vy *= CONFIG.damping;
+        // Gentle breathing motion around center
+        const bx = Math.sin(this.time * 0.7) * this.cfg.breathAmplitude;
+        const by = Math.cos(this.time * 0.5) * this.cfg.breathAmplitude;
+        n.vx += (this.width / 2 + bx - n.x) * 0.02;
+        n.vy += (this.height / 2 + by - n.y) * 0.02;
+        n.vx *= this.cfg.damping;
+        n.vy *= this.cfg.damping;
         n.x += n.vx;
         n.y += n.vy;
       }
       n.alpha += (n.targetAlpha - n.alpha) * 0.05;
+      n.scale += (n.targetScale - n.scale) * 0.1;
       return;
     }
 
-    // Repulsion between all node pairs
+    // Repulsion
     for (let i = 0; i < N; i++) {
       for (let j = i + 1; j < N; j++) {
-        const a = graphNodes[i];
-        const b = graphNodes[j];
+        const a = this.nodes[i];
+        const b = this.nodes[j];
         let dx = b.x - a.x;
         let dy = b.y - a.y;
         let dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < 1) dist = 1;
-        const force = CONFIG.repulsionStrength / (dist * dist);
+        const force = this.cfg.repulsion / (dist * dist);
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
         if (!a.pinned) { a.vx -= fx; a.vy -= fy; }
@@ -337,316 +338,449 @@ const Topology = (() => {
     }
 
     // Attraction along edges
-    graphEdges.forEach(edge => {
+    this.edges.forEach(edge => {
       const a = edge.source;
       const b = edge.target;
       let dx = b.x - a.x;
       let dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const idealDist = 280;
-      const force = (dist - idealDist) * CONFIG.attractionStrength;
-      const fx = (dx / (dist || 1)) * force;
-      const fy = (dy / (dist || 1)) * force;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const idealDist = 300;
+      const force = (dist - idealDist) * this.cfg.attraction;
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
       if (!a.pinned) { a.vx += fx; a.vy += fy; }
       if (!b.pinned) { b.vx -= fx; b.vy -= fy; }
     });
 
-    // Center gravity
-    const cx = width / 2;
-    const cy = height / 2;
-    graphNodes.forEach(n => {
-      if (n.pinned) return;
-      n.vx += (cx - n.x) * CONFIG.centerGravity;
-      n.vy += (cy - n.y) * CONFIG.centerGravity;
-      // Damping
-      n.vx *= CONFIG.damping;
-      n.vy *= CONFIG.damping;
-      // Apply
+    // Center gravity + breathing
+    const cx = this.width / 2;
+    const cy = this.height / 2;
+    this.nodes.forEach(n => {
+      if (n.pinned) {
+        n.alpha += (n.targetAlpha - n.alpha) * 0.05;
+        n.scale += (n.targetScale - n.scale) * 0.1;
+        return;
+      }
+      // Gentle breathing offset per node
+      const bx = Math.sin(this.time * 0.5 + n.x * 0.01) * this.cfg.breathAmplitude;
+      const by = Math.cos(this.time * 0.4 + n.y * 0.01) * this.cfg.breathAmplitude;
+      n.vx += (cx + bx - n.x) * this.cfg.centerGravity;
+      n.vy += (cy + by - n.y) * this.cfg.centerGravity;
+      n.vx *= this.cfg.damping;
+      n.vy *= this.cfg.damping;
       n.x += n.vx;
       n.y += n.vy;
       // Bounds
-      const hw = CONFIG.nodeWidth / 2 + 10;
-      const hh = CONFIG.nodeHeight / 2 + 10;
-      n.x = Math.max(hw, Math.min(width - hw, n.x));
-      n.y = Math.max(hh, Math.min(height - hh, n.y));
-      // Fade in
+      const hw = this.cfg.nodeWidth / 2 + 10;
+      const hh = this.cfg.nodeHeight / 2 + 10;
+      n.x = Math.max(hw, Math.min(this.width - hw, n.x));
+      n.y = Math.max(hh, Math.min(this.height - hh, n.y));
+      // Animations
       n.alpha += (n.targetAlpha - n.alpha) * 0.05;
+      n.scale += (n.targetScale - n.scale) * 0.1;
     });
   }
 
-  // --- Rendering ---
-  function draw() {
-    const c = CONFIG.colors;
-    ctx.clearRect(0, 0, width, height);
+  // --- Pulse Particles ---
 
-    // Background subtle grid
-    drawGrid();
+  _updatePulses() {
+    // Spawn pulses on active edges
+    if (this.edges.length > 0 && Math.random() < 0.03) {
+      const edge = this.edges[Math.floor(Math.random() * this.edges.length)];
+      if (edge.active) {
+        this.pulses.push({
+          edge,
+          t: 0,
+          speed: 0.005 + Math.random() * 0.005,
+          size: 2 + Math.random() * 1.5,
+        });
+      }
+    }
+    // Update existing pulses
+    this.pulses = this.pulses.filter(p => {
+      p.t += p.speed;
+      return p.t < 1;
+    });
+  }
 
-    // Draw edges
-    graphEdges.forEach(edge => drawEdge(edge));
+  // --- Drawing ---
 
-    // Draw nodes (selected on top)
-    const sorted = [...graphNodes].sort((a, b) => {
-      if (a.id === selectedNodeId) return 1;
-      if (b.id === selectedNodeId) return -1;
+  _draw() {
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, this.width, this.height);
+
+    this._drawDotGrid();
+    this._drawEdges();
+    this._drawPulses();
+
+    // Sort nodes: selected on top
+    const sorted = [...this.nodes].sort((a, b) => {
+      if (a.id === this.selectedNodeId) return 1;
+      if (b.id === this.selectedNodeId) return -1;
       return 0;
     });
-    sorted.forEach(n => drawNode(n));
+    sorted.forEach(n => this._drawNode(n));
 
-    // Single node: pulsing ring and subtitle
-    if (graphNodes.length === 1) {
-      drawSingleNodeEffects(graphNodes[0]);
+    if (this.nodes.length === 1) {
+      this._drawSingleNodeEffects(this.nodes[0]);
     }
   }
 
-  function drawGrid() {
-    const c = CONFIG.colors;
-    ctx.strokeStyle = hexToRgba(c.border, 0.15);
-    ctx.lineWidth = 1;
-    const gridSize = 40;
-    for (let x = gridSize; x < width; x += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-    }
-    for (let y = gridSize; y < height; y += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+  _drawDotGrid() {
+    const ctx = this.ctx;
+    const spacing = 20;
+    ctx.fillStyle = this.cfg.dotGrid;
+    for (let x = spacing; x < this.width; x += spacing) {
+      for (let y = spacing; y < this.height; y += spacing) {
+        ctx.fillRect(x, y, 1, 1);
+      }
     }
   }
 
-  function drawEdge(edge) {
-    const c = CONFIG.colors;
-    const a = edge.source;
-    const b = edge.target;
-    const alpha = Math.min(a.alpha, b.alpha) * 0.6;
-    if (alpha < 0.01) return;
+  _drawEdges() {
+    const ctx = this.ctx;
+    this.edges.forEach(edge => {
+      const a = edge.source;
+      const b = edge.target;
+      const alpha = Math.min(a.alpha, b.alpha);
+      if (alpha < 0.01) return;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+
+      const opacity = edge.active ? 0.4 : 0.2;
+      ctx.strokeStyle = this._rgba(this.cfg.nvidiaGreen, opacity);
+      ctx.lineWidth = 1.5;
+
+      if (!edge.active) {
+        ctx.setLineDash([6, 6]);
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Direction chevron at midpoint
+      if (edge.active) {
+        this._drawChevron(a.x, a.y, b.x, b.y, alpha * 0.6);
+      }
+
+      ctx.restore();
+    });
+  }
+
+  _drawChevron(x1, y1, x2, y2, alpha) {
+    const ctx = this.ctx;
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const size = 6;
 
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = edge.solid ? hexToRgba(c.accent, 0.4) : hexToRgba(c.textMuted, 0.3);
-    ctx.lineWidth = CONFIG.connectionWidth;
-    if (!edge.solid) {
-      ctx.setLineDash([6, 4]);
-    }
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.strokeStyle = this.cfg.nvidiaGreen;
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
 
-    // Connection label at midpoint
-    const mx = (a.x + b.x) / 2;
-    const my = (a.y + b.y) / 2;
-    ctx.font = '10px Inter, -apple-system, sans-serif';
-    ctx.fillStyle = hexToRgba(c.textMuted, 0.7);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // Background pill for label
-    const labelText = edge.label || 'LAN';
-    const tw = ctx.measureText(labelText).width + 10;
-    ctx.fillStyle = hexToRgba(c.bgPrimary, 0.85);
-    roundRect(ctx, mx - tw/2, my - 8, tw, 16, 4);
-    ctx.fill();
-    ctx.fillStyle = hexToRgba(c.textMuted, 0.7);
-    ctx.fillText(labelText, mx, my);
+    ctx.beginPath();
+    ctx.moveTo(
+      mx - Math.cos(angle - 0.5) * size,
+      my - Math.sin(angle - 0.5) * size
+    );
+    ctx.lineTo(mx, my);
+    ctx.lineTo(
+      mx - Math.cos(angle + 0.5) * size,
+      my - Math.sin(angle + 0.5) * size
+    );
+    ctx.stroke();
+
+    // Second chevron offset forward
+    const ox = Math.cos(angle) * 10;
+    const oy = Math.sin(angle) * 10;
+    ctx.beginPath();
+    ctx.moveTo(
+      mx + ox - Math.cos(angle - 0.5) * size,
+      my + oy - Math.sin(angle - 0.5) * size
+    );
+    ctx.lineTo(mx + ox, my + oy);
+    ctx.lineTo(
+      mx + ox - Math.cos(angle + 0.5) * size,
+      my + oy - Math.sin(angle + 0.5) * size
+    );
+    ctx.stroke();
 
     ctx.restore();
   }
 
-  function drawNode(n) {
-    const c = CONFIG.colors;
+  _drawPulses() {
+    const ctx = this.ctx;
+    this.pulses.forEach(p => {
+      const a = p.edge.source;
+      const b = p.edge.target;
+      const x = a.x + (b.x - a.x) * p.t;
+      const y = a.y + (b.y - a.y) * p.t;
+      // Fade in/out at edges
+      const fadeAlpha = Math.min(p.t * 5, 1) * Math.min((1 - p.t) * 5, 1);
+
+      // Glow
+      ctx.save();
+      ctx.globalAlpha = fadeAlpha * 0.4;
+      ctx.shadowColor = this.cfg.nvidiaGreen;
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = this.cfg.nvidiaGreen;
+      ctx.beginPath();
+      ctx.arc(x, y, p.size + 1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Core dot
+      ctx.globalAlpha = fadeAlpha * 0.9;
+      ctx.fillStyle = this.cfg.nvidiaGreenBright;
+      ctx.beginPath();
+      ctx.arc(x, y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  _drawNode(n) {
+    const ctx = this.ctx;
     const d = n.data;
-    const isHovered = hoveredNodeId === n.id;
-    const isSelected = selectedNodeId === n.id;
+    const cfg = this.cfg;
+    const isHovered = this.hoveredNodeId === n.id;
+    const isSelected = this.selectedNodeId === n.id;
     const isLeader = d.is_leader;
-    const nw = CONFIG.nodeWidth;
-    const nh = getNodeHeight(n);
-    const x = n.x - nw / 2;
-    const y = n.y - nh / 2;
-    const r = CONFIG.nodeRadius;
+    const isOnline = d.status === 'online';
+    const nw = cfg.nodeWidth;
+    const nh = cfg.nodeHeight;
+    const r = cfg.cornerRadius;
 
     ctx.save();
     ctx.globalAlpha = n.alpha;
 
-    // Glow for leader
-    if (isLeader) {
-      const glowPulse = 0.15 + Math.sin(time * 3) * 0.08;
-      ctx.shadowColor = c.accent;
-      ctx.shadowBlur = 20 + Math.sin(time * 3) * 5;
-      ctx.fillStyle = hexToRgba(c.accent, glowPulse);
-      roundRect(ctx, x - 3, y - 3, nw + 6, nh + 6, r + 2);
+    // Apply scale transform around node center
+    ctx.translate(n.x, n.y);
+    ctx.scale(n.scale, n.scale);
+
+    const x = -nw / 2;
+    const y = -nh / 2;
+
+    // Hover/selected glow
+    if (isHovered || isSelected) {
+      const glowColor = this.cfg.nvidiaGreen;
+      const glowAlpha = isSelected ? 0.25 : 0.15;
+      ctx.shadowColor = glowColor;
+      ctx.shadowBlur = isSelected ? 20 : 12;
+      ctx.fillStyle = this._rgba(glowColor, glowAlpha);
+      this._roundRect(x - 2, y - 2, nw + 4, nh + 4, r + 1);
       ctx.fill();
       ctx.shadowBlur = 0;
     }
 
-    // Selected glow
+    // Selected outer glow ring
     if (isSelected) {
-      ctx.shadowColor = c.accent;
-      ctx.shadowBlur = 16;
+      ctx.strokeStyle = this._rgba(this.cfg.nvidiaGreen, 0.3 + Math.sin(this.time * 3) * 0.1);
+      ctx.lineWidth = 1;
+      this._roundRect(x - 5, y - 5, nw + 10, nh + 10, r + 3);
+      ctx.stroke();
     }
 
     // Node background
-    ctx.fillStyle = isHovered ? c.bgCardHover : c.bgCard;
-    roundRect(ctx, x, y, nw, nh, r);
+    ctx.fillStyle = cfg.nodeBg;
+    this._roundRect(x, y, nw, nh, r);
     ctx.fill();
 
     // Border
-    ctx.strokeStyle = isLeader ? c.accent : isSelected ? c.borderActive : c.border;
-    ctx.lineWidth = isLeader || isSelected ? 2 : 1;
-    roundRect(ctx, x, y, nw, nh, r);
+    const borderColor = isOnline
+      ? (isHovered ? cfg.nvidiaGreenBright : cfg.nvidiaGreen)
+      : cfg.nodeBorderOffline;
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = isSelected ? 2 : 1;
+    this._roundRect(x, y, nw, nh, r);
     ctx.stroke();
-    ctx.shadowBlur = 0;
 
-    // Status indicator dot with pulse
-    const statusColor = d.status === 'online' ? c.green : d.status === 'starting' ? c.yellow : c.red;
-    const dotX = x + nw - 16;
-    const dotY = y + 16;
-    // Pulse ring for online
-    if (d.status === 'online') {
-      const pulseAlpha = 0.3 + Math.sin(time * 4) * 0.2;
-      const pulseR = 6 + Math.sin(time * 4) * 3;
-      ctx.fillStyle = hexToRgba(statusColor, pulseAlpha);
+    // --- Content ---
+    const leftPad = x + 12;
+    const rightEdge = x + nw - 12;
+
+    // Leader badge (top-right)
+    if (isLeader) {
+      ctx.fillStyle = this.cfg.nvidiaGreen;
+      ctx.font = '12px Inter, -apple-system, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText('\u2605', rightEdge, y + 8);
+    }
+
+    // Hostname (bold, left)
+    ctx.fillStyle = cfg.textPrimary;
+    ctx.font = 'bold 14px Inter, -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const hostname = this._truncate(d.node_name || d.node_id || 'Node', 16);
+    ctx.fillText(hostname, leftPad, y + 10);
+
+    // GPU utilization % (bold, right side)
+    const util = d.gpu_utilization != null ? d.gpu_utilization : (d.gpu_utilization_pct != null ? d.gpu_utilization_pct : null);
+    if (util != null) {
+      ctx.fillStyle = cfg.nvidiaGreen;
+      ctx.font = 'bold 18px Inter, -apple-system, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText(Math.round(util) + '%', rightEdge, y + 8);
+    }
+
+    // GPU name (secondary text)
+    ctx.fillStyle = cfg.textSecondary;
+    ctx.font = '10px Inter, -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const gpuName = this._truncate(d.gpu_name || 'Unknown GPU', 24);
+    ctx.fillText(gpuName, leftPad, y + 30);
+
+    // Temperature with color coding
+    const temp = d.gpu_temp;
+    if (temp != null) {
+      let tempColor = cfg.tempGreen;
+      if (temp >= 80) tempColor = cfg.tempRed;
+      else if (temp >= 60) tempColor = cfg.tempAmber;
+
+      ctx.fillStyle = tempColor;
+      ctx.font = '11px Inter, -apple-system, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(Math.round(temp) + '\u00B0C', leftPad, y + 46);
+    }
+
+    // Wattage (small text, next to temp)
+    const wattage = d.gpu_wattage;
+    if (wattage != null) {
+      ctx.fillStyle = cfg.textMuted;
+      ctx.font = '10px Inter, -apple-system, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const tempOffset = temp != null ? 45 : 0;
+      ctx.fillText(Math.round(wattage) + 'W', leftPad + tempOffset, y + 47);
+    }
+
+    // Model name if loaded
+    if (d.model && d.model !== 'none') {
+      ctx.fillStyle = cfg.textMuted;
+      ctx.font = '9px JetBrains Mono, Fira Code, monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText(this._truncate(d.model, 18), rightEdge, y + 47);
+    }
+
+    // Memory bar
+    const barX = leftPad;
+    const barY = y + 66;
+    const barW = nw - 24;
+    const barH = 4;
+    const memPct = d.gpu_memory_used_pct || 0;
+
+    // Track
+    ctx.fillStyle = cfg.trackBg;
+    this._roundRect(barX, barY, barW, barH, 2);
+    ctx.fill();
+
+    // Fill
+    if (memPct > 0) {
+      ctx.fillStyle = cfg.nvidiaGreen;
+      const fillW = Math.max(2, barW * (memPct / 100));
+      this._roundRect(barX, barY, fillW, barH, 2);
+      ctx.fill();
+    }
+
+    // Memory text below bar
+    const memTotal = d.gpu_memory_gb || 0;
+    const memUsed = memTotal > 0 ? (memTotal * memPct / 100) : 0;
+    const memText = memUsed.toFixed(1) + 'GB/' + memTotal + 'GB (' + Math.round(memPct) + '%)';
+    ctx.fillStyle = cfg.textMuted;
+    ctx.font = '9px JetBrains Mono, Fira Code, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(memText, leftPad, barY + 8);
+
+    // Shard role badge if present
+    if (d.shard_role) {
+      const badgeY = barY + 22;
+      const badgeColor = d.shard_role === 'head' ? cfg.nvidiaGreen : '#8B5CF6';
+      ctx.fillStyle = this._rgba(badgeColor, 0.15);
+      this._roundRect(leftPad, badgeY, nw - 24, 16, 3);
+      ctx.fill();
+      ctx.fillStyle = badgeColor;
+      ctx.font = 'bold 8px Inter, -apple-system, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(
+        d.shard_role.toUpperCase() + ' | Layers ' + (d.shard_layers || 'all'),
+        leftPad + 4,
+        badgeY + 3
+      );
+    }
+
+    // Status indicator dot (bottom-right)
+    const statusColor = isOnline ? cfg.nvidiaGreen : d.status === 'stale' ? cfg.tempAmber : cfg.tempRed;
+    const dotX = rightEdge - 2;
+    const dotY = y + nh - 12;
+
+    if (isOnline) {
+      // Pulse ring
+      const pulseAlpha = 0.2 + Math.sin(this.time * 4) * 0.15;
+      const pulseR = 5 + Math.sin(this.time * 4) * 2;
+      ctx.fillStyle = this._rgba(statusColor, pulseAlpha);
       ctx.beginPath();
       ctx.arc(dotX, dotY, pulseR, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Solid dot
     ctx.fillStyle = statusColor;
     ctx.beginPath();
-    ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
+    ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
     ctx.fill();
-
-    // Leader crown indicator
-    if (isLeader) {
-      ctx.fillStyle = c.accent;
-      ctx.font = 'bold 9px Inter, -apple-system, sans-serif';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      // Crown icon as text
-      const crownX = x + 10;
-      const crownY = y + 6;
-      ctx.fillStyle = hexToRgba(c.accent, 0.8);
-      ctx.font = '11px Inter, -apple-system, sans-serif';
-      ctx.fillText('\u2605', crownX, crownY); // star
-      ctx.fillStyle = c.accent;
-      ctx.font = 'bold 9px Inter, -apple-system, sans-serif';
-      ctx.fillText('LEADER', crownX + 14, crownY + 1);
-    }
-
-    // Node name
-    const nameY = isLeader ? y + 22 : y + 14;
-    ctx.fillStyle = c.textPrimary;
-    ctx.font = 'bold 13px Inter, -apple-system, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    const name = truncate(d.node_name || d.node_id || 'Node', 22);
-    ctx.fillText(name, x + 12, nameY);
-
-    // GPU name
-    ctx.fillStyle = c.textSecondary;
-    ctx.font = '11px Inter, -apple-system, sans-serif';
-    const gpuText = truncate(d.gpu_name || 'Unknown GPU', 28);
-    ctx.fillText(gpuText, x + 12, nameY + 18);
-
-    // Memory + model line
-    const memText = (d.gpu_memory_gb || '?') + ' GB';
-    const modelText = truncate(d.model || 'no model', 18);
-    ctx.fillStyle = c.textMuted;
-    ctx.font = '10px JetBrains Mono, Fira Code, monospace';
-    ctx.fillText(memText + '  |  ' + modelText, x + 12, nameY + 34);
-
-    // Shard role badge (visible without hover)
-    if (d.shard_role) {
-      const badgeY = nameY + 50;
-      const badgeColor = d.shard_role === 'head' ? c.green : c.purple;
-      ctx.fillStyle = hexToRgba(badgeColor, 0.15);
-      roundRect(ctx, x + 10, badgeY - 2, nw - 20, 18, 4);
-      ctx.fill();
-      ctx.font = 'bold 9px Inter, -apple-system, sans-serif';
-      ctx.fillStyle = badgeColor;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(d.shard_role.toUpperCase() + ' | Layers ' + (d.shard_layers || 'all') + ' | ~' + (d.shard_memory_gb || '?') + ' GB', x + 14, badgeY + 1);
-    }
-
-    // Hover expanded info
-    if (isHovered) {
-      const expandY = d.shard_role ? nameY + 72 : nameY + 52;
-      ctx.fillStyle = hexToRgba(c.border, 0.5);
-      ctx.fillRect(x + 12, expandY - 4, nw - 24, 1);
-
-      ctx.font = '10px Inter, -apple-system, sans-serif';
-      ctx.fillStyle = c.textSecondary;
-      const gpuUtil = d.gpu_utilization_pct != null ? d.gpu_utilization_pct + '%' : 'N/A';
-      const memUsed = d.gpu_memory_used_pct != null ? d.gpu_memory_used_pct + '%' : 'N/A';
-      const memLabel = d.unified_memory ? 'unified' : 'VRAM';
-      const uptime = d.uptime_seconds ? formatUptime(d.uptime_seconds) : 'N/A';
-      ctx.fillText('GPU: ' + gpuUtil + '   Mem: ' + memUsed + ' ' + memLabel, x + 12, expandY + 4);
-      ctx.fillText('Uptime: ' + uptime + '   Status: ' + (d.status || 'unknown'), x + 12, expandY + 20);
-
-      // Memory bar
-      const barX = x + 12;
-      const barY = expandY + 36;
-      const barW = nw - 24;
-      const barH = 4;
-      const pct = d.gpu_memory_used_pct || 0;
-      ctx.fillStyle = hexToRgba(c.bgPrimary, 0.8);
-      roundRect(ctx, barX, barY, barW, barH, 2);
-      ctx.fill();
-      const barColor = pct > 90 ? c.red : pct > 70 ? c.yellow : c.green;
-      ctx.fillStyle = barColor;
-      roundRect(ctx, barX, barY, barW * (pct / 100), barH, 2);
-      ctx.fill();
-    }
 
     ctx.restore();
   }
 
-  function drawSingleNodeEffects(n) {
-    const c = CONFIG.colors;
+  _drawSingleNodeEffects(n) {
+    const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = n.alpha;
 
-    // Pulsing ring
-    const pulsePhase = (time * 1.5) % (Math.PI * 2);
-    const ringRadius = CONFIG.nodeWidth * 0.75 + Math.sin(pulsePhase) * 10;
-    const ringAlpha = 0.1 + Math.sin(pulsePhase) * 0.05;
-    ctx.strokeStyle = hexToRgba(c.accent, ringAlpha);
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, ringRadius, 0, Math.PI * 2);
-    ctx.stroke();
+    // Pulsing green rings
+    const phase = (this.time * 1.5) % (Math.PI * 2);
+    for (let i = 0; i < 3; i++) {
+      const rPhase = phase + i * 1.2;
+      const ringR = this.cfg.nodeWidth * 0.7 + i * 30 + Math.sin(rPhase) * 8;
+      const ringAlpha = (0.08 - i * 0.02) + Math.sin(rPhase) * 0.03;
+      ctx.strokeStyle = this._rgba(this.cfg.nvidiaGreen, Math.max(0, ringAlpha));
+      ctx.lineWidth = 1.5 - i * 0.3;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
-    // Second ring offset
-    const ring2Radius = CONFIG.nodeWidth * 0.95 + Math.cos(pulsePhase * 0.7) * 15;
-    const ring2Alpha = 0.06 + Math.cos(pulsePhase * 0.7) * 0.03;
-    ctx.strokeStyle = hexToRgba(c.accent, ring2Alpha);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, ring2Radius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // "Waiting for peers..." subtitle
+    // "Scanning for peers..." subtitle
+    const textAlpha = 0.4 + Math.sin(this.time * 2) * 0.2;
     ctx.font = '12px Inter, -apple-system, sans-serif';
-    ctx.fillStyle = hexToRgba(c.textMuted, 0.5 + Math.sin(time * 2) * 0.2);
+    ctx.fillStyle = this._rgba(this.cfg.textMuted, textAlpha);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText('Waiting for peers...', n.x, n.y + CONFIG.nodeHeight / 2 + 20);
+    ctx.fillText('Scanning for peers...', n.x, n.y + this.cfg.nodeHeight / 2 + 24);
 
-    // Scanning dots
+    // Orbiting scan dots
     for (let i = 0; i < 3; i++) {
-      const dotAngle = time * 0.8 + (i * Math.PI * 2 / 3);
-      const dotR = CONFIG.nodeWidth * 0.85;
+      const dotAngle = this.time * 0.8 + (i * Math.PI * 2 / 3);
+      const dotR = this.cfg.nodeWidth * 0.8;
       const dx = n.x + Math.cos(dotAngle) * dotR;
       const dy = n.y + Math.sin(dotAngle) * dotR;
-      const dotAlpha = 0.15 + Math.sin(time * 3 + i) * 0.1;
-      ctx.fillStyle = hexToRgba(c.accent, dotAlpha);
+      const dotAlpha = 0.2 + Math.sin(this.time * 3 + i) * 0.1;
+      ctx.fillStyle = this._rgba(this.cfg.nvidiaGreen, dotAlpha);
       ctx.beginPath();
-      ctx.arc(dx, dy, 3, 0, Math.PI * 2);
+      ctx.arc(dx, dy, 2.5, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -654,7 +788,9 @@ const Topology = (() => {
   }
 
   // --- Utilities ---
-  function roundRect(ctx, x, y, w, h, r) {
+
+  _roundRect(x, y, w, h, r) {
+    const ctx = this.ctx;
     ctx.beginPath();
     ctx.moveTo(x + r, y);
     ctx.lineTo(x + w - r, y);
@@ -668,34 +804,46 @@ const Topology = (() => {
     ctx.closePath();
   }
 
-  function truncate(str, max) {
+  _rgba(hex, alpha) {
+    hex = hex.replace('#', '');
+    if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  }
+
+  _truncate(str, max) {
     if (!str) return '';
     return str.length > max ? str.slice(0, max - 1) + '\u2026' : str;
   }
 
-  function formatUptime(seconds) {
-    if (seconds < 60) return seconds + 's';
-    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
-    return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
-  }
-
   // --- Animation Loop ---
-  function startLoop() {
-    function frame(ts) {
-      time = ts * CONFIG.pulseSpeed;
-      simulate();
-      draw();
-      animFrameId = requestAnimationFrame(frame);
-    }
-    animFrameId = requestAnimationFrame(frame);
-  }
 
-  // --- Public API ---
-  return {
-    init,
-    destroy,
-    update,
-    resize,
-    getSelectedNodeId: () => selectedNodeId,
-  };
-})();
+  _startLoop() {
+    const frame = (ts) => {
+      this.time = ts * 0.002;
+      this._simulate();
+      this._updatePulses();
+      this._draw();
+      this.animFrameId = requestAnimationFrame(frame);
+    };
+    this.animFrameId = requestAnimationFrame(frame);
+  }
+}
+
+// Backward-compatible wrapper: app.js uses `new Topology(canvas)` and `.update()`
+const Topology = function(canvas) {
+  const renderer = new TopologyRenderer(canvas);
+  this.update = function(nodesArray) { renderer.update(nodesArray); };
+  this.destroy = function() { renderer.destroy(); };
+  this.resize = function() { renderer.resize(); };
+  this.getSelectedNodeId = function() { return renderer.getSelectedNodeId(); };
+  this.onNodeSelect = null;
+  // Proxy onNodeSelect callback
+  const self = this;
+  Object.defineProperty(this, 'onNodeSelect', {
+    set: function(fn) { renderer.onNodeSelect = fn; },
+    get: function() { return renderer.onNodeSelect; },
+  });
+};

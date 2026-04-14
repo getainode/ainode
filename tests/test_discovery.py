@@ -49,6 +49,7 @@ class TestNodeAnnouncement:
         expected_keys = {
             "node_id", "node_name", "gpu_name", "gpu_memory_gb",
             "unified_memory", "model", "status", "api_port", "web_port", "timestamp",
+            "cluster_id", "role", "is_master",
         }
         assert set(data.keys()) == expected_keys
 

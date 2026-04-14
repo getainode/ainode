@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ainode.training.engine import TrainingConfig, TrainingManager
+from ainode.training.engine import (
+    TrainingConfig,
+    TrainingManager,
+    get_training_templates,
+)
 
 
 def setup_training_routes(app: web.Application, manager: TrainingManager) -> None:
@@ -16,6 +20,36 @@ def setup_training_routes(app: web.Application, manager: TrainingManager) -> Non
     app.router.add_get("/api/training/jobs/{job_id}", handle_get_job)
     app.router.add_delete("/api/training/jobs/{job_id}", handle_cancel_job)
     app.router.add_get("/api/training/jobs/{job_id}/logs", handle_get_logs)
+    app.router.add_get("/api/training/templates", handle_templates)
+    app.router.add_get("/api/training/stats", handle_stats)
+    app.router.add_post("/api/training/estimate", handle_estimate)
+
+
+async def handle_templates(_request: web.Request) -> web.Response:
+    """GET /api/training/templates — return the built-in templates."""
+    return web.json_response({"templates": get_training_templates()})
+
+
+async def handle_stats(request: web.Request) -> web.Response:
+    """GET /api/training/stats — summary counters for the overview dashboard."""
+    manager: TrainingManager = request.app["training_manager"]
+    return web.json_response(manager.stats())
+
+
+async def handle_estimate(request: web.Request) -> web.Response:
+    """POST /api/training/estimate — rough time/memory/throughput estimates."""
+    manager: TrainingManager = request.app["training_manager"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    sample_count = body.pop("sample_count", None)
+    try:
+        cfg = TrainingConfig.from_dict(body)
+    except Exception as exc:
+        return web.json_response({"error": f"Invalid config: {exc}"}, status=400)
+    return web.json_response(manager.estimate(cfg, sample_count=sample_count))
 
 
 async def handle_submit_job(request: web.Request) -> web.Response:
