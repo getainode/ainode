@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.6
+#
+# AINode unified image — eugr/spark-vllm-docker base + AINode web/API/CLI.
+#
+# Build via scripts/build-base-image.sh first (produces the `ainode-base`
+# layer), then:
+#   docker build -f scripts/Dockerfile.ainode -t ainode:dev .
+#
+# Published at ghcr.io/getainode/ainode:<version> and argentos/ainode:<version>
+# once green (see .github/workflows/publish-image.yml).
+
+ARG BASE_IMAGE=ghcr.io/getainode/ainode-base:c026c92
+FROM ${BASE_IMAGE} AS ainode
+
+LABEL org.opencontainers.image.source="https://github.com/getainode/ainode"
+LABEL org.opencontainers.image.description="AINode — local AI platform for NVIDIA GB10 (DGX Spark, ASUS GX10). UI + inference engine, one container per node."
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+ENV AINODE_HOME=/root/.ainode \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    # eugr's base already has PATH pointing at /usr/local/bin; keep it intact.
+    AINODE_IN_CONTAINER=1
+
+# Install AINode from local source. Copy only what's needed for pip install so
+# the layer invalidates cleanly when code changes.
+COPY pyproject.toml README.md /src/
+COPY ainode /src/ainode
+RUN pip install --no-cache-dir /src \
+    && rm -rf /src
+
+# sshpass is convenient for the distributed launcher to non-interactively
+# orchestrate peers during first-time bootstrap; after passwordless SSH is
+# configured, it is unused. openssh-client ensures `ssh` is present for the
+# launch-cluster.sh invocation.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client sshpass \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ship a copy of eugr's launcher into a stable path. The base image builds
+# from their Dockerfile but doesn't necessarily keep the repo; copy it in
+# from the build context to guarantee /opt/spark-vllm-docker is present.
+# scripts/build-base-image.sh places a checkout at scripts/_eugr before this
+# stage runs.
+COPY scripts/_eugr /opt/spark-vllm-docker
+
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /opt/spark-vllm-docker/launch-cluster.sh \
+    && chmod +x /opt/spark-vllm-docker/autodiscover.sh \
+    && chmod +x /opt/spark-vllm-docker/hf-download.sh 2>/dev/null \
+    || true
+
+# Default ports: 3000 web UI, 8000 OpenAI-compatible API, 5679/udp discovery.
+EXPOSE 3000 8000 5679/udp
+
+# Persist config/models/logs via bind mount at runtime.
+VOLUME ["/root/.ainode"]
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

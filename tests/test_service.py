@@ -14,29 +14,33 @@ class TestUnitFileGeneration:
     """Test systemd unit file content generation."""
 
     def test_generate_system_unit(self):
-        """System-level unit file uses multi-user.target."""
+        """System-level unit file uses multi-user.target and runs docker run."""
         content = systemd.generate_unit_file(user_mode=False)
         assert "WantedBy=multi-user.target" in content
-        assert "ainode start" in content
+        assert "docker run" in content
+        assert "ghcr.io/getainode/ainode" in content
         assert "NVIDIA_VISIBLE_DEVICES=all" in content
-        assert "After=network.target nvidia-persistenced.service" in content
+        assert "After=network.target docker.service" in content
         assert "Restart=on-failure" in content
 
     def test_generate_user_unit(self):
         """User-level unit file uses default.target."""
         content = systemd.generate_unit_file(user_mode=True)
         assert "WantedBy=default.target" in content
-        assert "ainode start" in content
+        assert "docker run" in content
 
     def test_unit_has_gpu_env_vars(self):
         content = systemd.generate_unit_file()
         assert "NVIDIA_VISIBLE_DEVICES=all" in content
         assert "CUDA_DEVICE_ORDER=PCI_BUS_ID" in content
 
-    def test_unit_has_hardening(self):
+    def test_unit_mounts_docker_socket_and_ssh(self):
+        """Distributed mode needs docker.sock + ~/.ssh access."""
         content = systemd.generate_unit_file()
-        assert "NoNewPrivileges=true" in content
-        assert "ProtectSystem=strict" in content
+        assert "/var/run/docker.sock:/var/run/docker.sock" in content
+        assert ".ssh:/root/.ssh:ro" in content
+        # No host-venv hardening — docker handles isolation.
+        assert "ProtectSystem" not in content
 
     def test_unit_has_restart_policy(self):
         content = systemd.generate_unit_file()
@@ -80,7 +84,8 @@ class TestInstallService:
             unit_path = tmp_path / "ainode.service"
             assert unit_path.exists()
             content = unit_path.read_text()
-            assert "ainode start" in content
+            assert "docker run" in content
+            assert "ghcr.io/getainode/ainode" in content
             mock_ctl.assert_called_once_with(["daemon-reload"], user_mode=False)
 
     def test_install_user_mode(self, tmp_path):

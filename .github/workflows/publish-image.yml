@@ -1,0 +1,97 @@
+name: publish-image
+# Build + publish the AINode container image to GHCR and Docker Hub.
+#
+# Manual only (workflow_dispatch) — we do NOT auto-build on push because the
+# self-hosted aarch64 runner is shared hardware (a Spark) and we want
+# explicit control over when a ~18 GB push happens.
+#
+# Runner must be labelled [self-hosted, dgx-spark, aarch64] and have:
+#   - docker + docker buildx
+#   - nvidia-container-toolkit (for building; image itself targets GB10)
+#   - GHCR login via GITHUB_TOKEN (provided automatically)
+#   - Optional: DOCKERHUB_USER / DOCKERHUB_TOKEN secrets for Docker Hub mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push to registries? (false = build only)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      ainode_version:
+        description: "AINode version tag (matches pyproject.toml)"
+        required: true
+        default: "0.4.0"
+        type: string
+
+jobs:
+  build:
+    runs-on: [self-hosted, dgx-spark, aarch64]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      AINODE_VERSION: ${{ inputs.ainode_version }}
+      REGISTRY_GHCR: ghcr.io/getainode
+      REGISTRY_DOCKERHUB: docker.io/argentos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build base (eugr) image
+        run: |
+          scripts/build-base-image.sh
+
+      - name: Resolve eugr commit short SHA
+        id: eugr
+        run: |
+          cd scripts/_eugr
+          echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build ainode image
+        run: |
+          docker build \
+            -f scripts/Dockerfile.ainode \
+            --build-arg BASE_IMAGE="${REGISTRY_GHCR}/ainode-base:${{ steps.eugr.outputs.short }}" \
+            -t ainode:${AINODE_VERSION} \
+            -t ainode:latest \
+            .
+
+      - name: Tag for registries
+        if: inputs.push == 'true'
+        run: |
+          for reg in "$REGISTRY_GHCR" "$REGISTRY_DOCKERHUB"; do
+            docker tag ainode:${AINODE_VERSION} "${reg}/ainode:${AINODE_VERSION}"
+            docker tag ainode:${AINODE_VERSION} "${reg}/ainode:latest"
+          done
+
+      - name: Login to GHCR
+        if: inputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: inputs.push == 'true' && env.DOCKERHUB_USER != ''
+        uses: docker/login-action@v3
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push
+        if: inputs.push == 'true'
+        run: |
+          docker push ${REGISTRY_GHCR}/ainode-base:${{ steps.eugr.outputs.short }}
+          docker push ${REGISTRY_GHCR}/ainode-base:${AINODE_VERSION}-${{ steps.eugr.outputs.short }}
+          docker push ${REGISTRY_GHCR}/ainode:${AINODE_VERSION}
+          docker push ${REGISTRY_GHCR}/ainode:latest
+          if [ -n "${{ secrets.DOCKERHUB_USER }}" ]; then
+            docker push ${REGISTRY_DOCKERHUB}/ainode:${AINODE_VERSION}
+            docker push ${REGISTRY_DOCKERHUB}/ainode:latest
+          fi

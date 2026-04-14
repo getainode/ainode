@@ -149,10 +149,16 @@ def cmd_start(args):
     # Write PID file
     _write_pid()
 
-    # Start inference engine — pip vLLM by default, docker for GB10/CUDA 13 nodes.
-    if config.engine_strategy == "docker":
-        from ainode.engine.docker_engine import DockerEngine
-        engine = DockerEngine(config)
+    # Start inference engine.
+    #
+    # As of v0.4.0 AINode ships as a single container that bundles vLLM + the
+    # Python server, so ``DockerEngine`` is the only runtime path. The legacy
+    # pip-venv ``VLLMEngine`` branch is retained only for developer use (tests,
+    # non-GB10 workstations) and kicks in when AINODE_IN_CONTAINER is unset.
+    in_container = os.environ.get("AINODE_IN_CONTAINER") == "1" or getattr(args, "in_container", False)
+    if in_container or config.engine_strategy == "docker":
+        from ainode.engine.docker_engine import build_engine
+        engine = build_engine(config)
     else:
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)
@@ -549,6 +555,11 @@ def main():
     start_parser = subparsers.add_parser("start", help="Start AINode")
     start_parser.add_argument("--model", help="Model to serve")
     start_parser.add_argument("--port", type=int, help="API port")
+    start_parser.add_argument(
+        "--in-container",
+        action="store_true",
+        help="Signal that the CLI is running inside the AINode image (docker-entrypoint.sh sets this).",
+    )
     start_parser.set_defaults(func=cmd_start)
 
     # stop

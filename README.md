@@ -8,6 +8,26 @@
 curl -fsSL https://ainode.dev/install | bash
 ```
 
+### Architecture
+
+AINode ships as **one container per node**: web UI, API, vLLM engine, and
+cross-node orchestrator are version-locked in a single image pulled from
+`ghcr.io/getainode/ainode`. No host Python venv to maintain. The systemd
+unit runs `docker run ... ainode` once per host.
+
+Distributed mode (tensor/pipeline-parallel across nodes) is production on
+2-node setups and experimental on 3+ nodes until a QSFP switch or mesh
+topology is in place.
+
+**Image footprint:** ~18 GB (includes CUDA 13 + patched vLLM + Ray + NCCL
+tuned for NVIDIA GB10). One-time pull per node.
+
+**Security note:** the systemd unit bind-mounts `/var/run/docker.sock` into
+the container so the head node can launch peer workers over SSH. That
+grants the container root-equivalent control of the host Docker daemon,
+appropriate for a dedicated AI-appliance node. Don't run AINode alongside
+untrusted workloads on the same box.
+
 ```
   ┌──────────────────────────────────────┐
   │         Welcome to AINode            │

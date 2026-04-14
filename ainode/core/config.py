@@ -3,8 +3,8 @@
 import os
 import json
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass, asdict, field
+from typing import List, Optional
 
 AINODE_HOME = Path(os.environ.get("AINODE_HOME", Path.home() / ".ainode"))
 CONFIG_FILE = AINODE_HOME / "config.json"
@@ -49,6 +49,19 @@ class NodeConfig:
     cluster_id: str = "default"
     # Optional explicit master address for workers (e.g. "10.0.0.1:3000").
     master_address: Optional[str] = None
+
+    # Distributed inference (TP/PP across nodes via eugr's launch-cluster.sh).
+    # Only "solo" and "head" are valid ainode startup modes; peer workers are
+    # launched by the head's distributed launcher and run the eugr worker-side
+    # container directly — not a full ainode process.
+    distributed_mode: str = "solo"  # "solo" | "head"
+    # IPs of peer workers (on the cluster_interface subnet) when distributed.
+    peer_ips: List[str] = field(default_factory=list)
+    # SSH user for head-to-worker passwordless login (eugr launcher uses it).
+    ssh_user: str = "ubuntu"
+    # Interface NCCL/Ray/Gloo bind to (e.g. "enp1s0f0np0" for DGX Spark direct
+    # connect, or the dedicated cluster-switch NIC).
+    cluster_interface: str = "eno1"
 
     # Storage paths (override defaults)
     datasets_dir: Optional[str] = None
