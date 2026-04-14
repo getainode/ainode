@@ -646,15 +646,55 @@ class ModelManager:
     # -- Catalog queries ------------------------------------------------------
 
     def list_available(self) -> list[dict]:
-        """Return catalog models annotated with download status."""
+        """Return catalog models annotated with download status.
+
+        Also surfaces anything present in models_dir that is NOT in the catalog
+        (user-downloaded via HF search or Trending) so the UI never loses
+        track of a completed download.
+        """
         results = []
+        catalog_repos = set()
         for info in self.get_catalog():
             entry = info.to_dict()
             entry["downloaded"] = self._is_downloaded_info(info)
             local_size = self._local_size_gb_info(info)
             if local_size is not None:
                 entry["local_size_gb"] = round(local_size, 2)
+            catalog_repos.add(info.hf_repo.lower())
             results.append(entry)
+
+        # Merge in downloaded-but-not-in-catalog entries
+        if self.models_dir.exists():
+            for child in sorted(self.models_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                # Recover hf_repo from the slug (first "--" → "/")
+                hf_repo = child.name.replace("--", "/", 1)
+                if hf_repo.lower() in catalog_repos:
+                    continue  # already merged
+                results.append({
+                    "id": child.name,
+                    "slug": child.name,
+                    "name": hf_repo.split("/")[-1],
+                    "hf_repo": hf_repo,
+                    "size_gb": round(self._dir_size_gb(child), 2),
+                    "description": "User-downloaded model",
+                    "quantization": None,
+                    "min_memory_gb": 0,
+                    "family": hf_repo.split("/")[0].lower() if "/" in hf_repo else "",
+                    "params_b": 0,
+                    "context_length": 0,
+                    "license": "",
+                    "recommended": False,
+                    "created_at": "",
+                    "downloads": 0,
+                    "likes": 0,
+                    "capabilities": [],
+                    "architecture": "",
+                    "format": "",
+                    "downloaded": True,
+                    "local_size_gb": round(self._dir_size_gb(child), 2),
+                })
         return results
 
     def list_downloaded(self) -> list[dict]:
