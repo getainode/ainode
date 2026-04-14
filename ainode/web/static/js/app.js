@@ -818,15 +818,15 @@ const AINode = {
   renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, filterPills, totalCount) {
     var self = this;
     var query = this.state.hfSearchQuery || '';
-    var needsToolbar = !container.querySelector('#hf-search-input');
-
-    if (needsToolbar) {
+    // Always rebuild if we're entering HF mode from catalog mode
+    var hfInput = container.querySelector('#hf-search-input');
+    if (!hfInput) {
       var toolbarHtml = '<div class="downloads-header">' +
         '<h2 class="view-title">🤗 Hugging Face Hub</h2>' +
-        '<div class="downloads-count" id="hf-count">Search for any text-generation model</div>' +
+        '<div class="downloads-count" id="hf-count">Search millions of models</div>' +
         '</div>' +
         '<div class="downloads-toolbar">' +
-        '<input type="text" id="hf-search-input" class="search-input" placeholder="Search HuggingFace (e.g. llama, qwen, mistral)..." value="' + this.esc(query) + '">' +
+        '<input type="text" id="hf-search-input" class="search-input" placeholder="Search HuggingFace (e.g. llama, qwen, mistral, phi)..." value="' + this.esc(query) + '" autofocus>' +
         '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
         '</div>' +
         '<div id="downloads-results"></div>';
@@ -1006,6 +1006,11 @@ const AINode = {
     }
 
     var filteredCount = models.length;
+
+    // If we're coming from HF mode, clear the container
+    if (container.querySelector('#hf-search-input')) {
+      container.innerHTML = '';
+    }
 
     // Render toolbar once; only results re-render on search
     var needsToolbar = !container.querySelector('#downloads-search');
