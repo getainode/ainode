@@ -351,6 +351,21 @@ body {
 .center-stage {
   grid-area: center;
   background: var(--bg-primary);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.center-stage .view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Dashboard view (topology) should not scroll — canvas fills */
+.center-stage #view-dashboard {
   overflow: hidden;
   position: relative;
 }
