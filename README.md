@@ -361,7 +361,40 @@ traceroute 10.0.0.2    # 1 hop means you're on the right link
 
 # Confirm passwordless SSH works as your ainode ssh_user
 ssh sem@10.0.0.2 true && echo OK
+
+# After launching distributed: confirm NCCL chose RoCE, not Socket
+docker exec vllm_node bash -c 'grep -E "Using network|NET/IB.*RoCE" /tmp/ray/session_latest/logs/worker-*-01000000-*.out | head -5'
+# Expect: "Using network IB" + "NET/IB ... mlx5_0:1/RoCE ... speed=200000"
+# If you see "Using network Socket" instead, NCCL_IB_HCA isn't reaching
+# the workers — check that CONTAINER_NCCL_IB_HCA is in the eugr .env the
+# head wrote (cat /opt/spark-vllm-docker/.env inside the ainode container).
 ```
+
+### Optional: GPU Direct RDMA (GDR)
+
+By default NCCL will report `GPU Direct RDMA Disabled for HCA 0 'mlx5_0'`
+in its init log. Without GDR, cross-node traffic goes GPU → CPU buffer →
+NIC → NIC → CPU buffer → GPU. With GDR it bypasses the CPU: GPU → NIC →
+NIC → GPU. On discrete NVIDIA GPUs this roughly doubles effective
+bandwidth; on GB10's unified memory the CPU-hop is cheap, so the win is
+smaller but still measurable on large all-reduces.
+
+To enable GDR on the hosts (not the container):
+
+```bash
+# Load the peermem module on each node; add to /etc/modules-load.d for persistence.
+sudo modprobe nvidia_peermem
+echo nvidia_peermem | sudo tee -a /etc/modules-load.d/nvidia-peermem.conf
+
+# Verify NCCL picks it up on the next launch:
+docker exec vllm_node bash -c 'grep "GPU Direct RDMA" /tmp/ray/session_latest/logs/worker-*-01000000-*.out'
+# Expect: "GPU Direct RDMA Enabled" (not "Disabled")
+```
+
+If `modprobe nvidia_peermem` errors with "module not found", your driver
+was built without peermem support. On DGX Spark this is the stock
+NVIDIA driver; check that you're on a 580.x series driver and that
+`lsmod | grep nvidia` shows `nvidia_peermem` as loadable.
 
 ---
 
