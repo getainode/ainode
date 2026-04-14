@@ -971,11 +971,19 @@ const AINode = {
     var totalCount = catalog.length;
 
     // Build filter pills now so HF branch can use them
-    var allFilters = ['all', 'downloaded', 'available', 'recommended', 'huggingface'];
+    var allFilters = ['all', 'recommended', 'downloaded', 'trending', 'openrouter', 'ollama', 'huggingface'];
+    var filterLabels = {
+      all: 'All',
+      recommended: 'Recommended',
+      downloaded: 'Downloaded',
+      trending: '🔥 Trending',
+      openrouter: '🚀 Most Used',
+      ollama: '🦙 Ollama',
+      huggingface: '🤗 Search HF',
+    };
     var filterPills = allFilters.map(function (f) {
       var active = self.state.modelsFilter === f ? ' active' : '';
-      var label = f === 'huggingface' ? '🤗 Hugging Face' : (f.charAt(0).toUpperCase() + f.slice(1));
-      return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + label + '</button>';
+      return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + filterLabels[f] + '</button>';
     }).join('');
 
     // HuggingFace live search mode
