@@ -58,9 +58,14 @@ if command -v nvcc &>/dev/null; then
     echo -e "    ${GREEN}✓${NC} CUDA ${CUDA_VER}"
 fi
 
-# Create AINode home
-mkdir -p "$AINODE_HOME"/{models,logs}
-echo -e "    ${GREEN}✓${NC} Home: ${AINODE_HOME}"
+# Determine engine strategy:
+#   - GB10 / CUDA 13 → Docker container (pip vLLM wheels don't target CUDA 13)
+#   - Everything else → pip vLLM
+ENGINE_STRATEGY="pip"
+if [[ "$GPU_NAME" =~ "GB10" ]] || [[ "$GPU_COMPUTE" == "12.1" ]] || [[ "$CUDA_MAJOR" == "13" ]]; then
+    ENGINE_STRATEGY="docker"
+    info "Blackwell GB10 / CUDA 13 detected — will use Docker-based vLLM"
+fi
 
 # Create virtual environment
 echo ""
@@ -77,9 +82,53 @@ pip install --quiet ainode
 echo "    Installing vLLM inference engine (this may take a few minutes)..."
 pip install --quiet vllm
 
-echo ""
-echo -e "    ${GREEN}✓${NC} AINode installed successfully!"
-echo ""
+# ── Install AINode ────────────────────────────────────────────────────────
+
+step "3/5" "Installing AINode..."
+pip install --quiet ainode 2>/dev/null || {
+    # If not on PyPI yet, install from GitHub
+    pip install --quiet "git+https://github.com/getainode/ainode.git"
+}
+log "AINode installed"
+
+# ── Install inference engine ──────────────────────────────────────────────
+
+if [ "$ENGINE_STRATEGY" = "docker" ]; then
+    step "4/5" "Setting up Docker-based vLLM for Blackwell GB10..."
+
+    if ! command -v docker &>/dev/null; then
+        info "Docker not found — installing Docker..."
+        curl -fsSL https://get.docker.com | sudo sh 2>&1 | tail -3 || warn "Docker install failed"
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+    fi
+
+    if ! sudo docker info &>/dev/null; then
+        info "Starting Docker..."
+        sudo systemctl reset-failed docker.service 2>/dev/null || true
+        sudo rm -rf /var/lib/docker/buildkit 2>/dev/null || true
+        sudo systemctl start docker 2>&1 | tail -3 || warn "Could not start Docker — you may need to start it manually"
+    fi
+
+    if sudo docker info &>/dev/null; then
+        log "Docker is running"
+        info "Pulling vLLM container for GB10 (this may take several minutes)..."
+        sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5 2>&1 | tail -3 || warn "Container pull failed — AINode will still install"
+        log "vLLM container ready"
+    else
+        warn "Docker not available — AINode will install without inference engine"
+        warn "You can install Docker later and run: ainode engine install"
+    fi
+
+else
+    step "4/5" "Installing vLLM inference engine (pip)..."
+    pip install --quiet vllm 2>&1 | tail -3 || warn "vLLM pip install failed — AINode will still install without it"
+    VLLM_VER=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null) && \
+        log "vLLM ${VLLM_VER}" || warn "vLLM import failed — check logs"
+fi
+
+# ── PATH setup ────────────────────────────────────────────────────────────
+
+step "5/5" "Finishing up..."
 
 # Add to PATH
 AINODE_BIN="$VENV_DIR/bin"
