@@ -29,6 +29,7 @@ class NodeConfig:
     discovery_port: int = 5678
 
     # Engine
+    engine_strategy: str = "pip"  # "pip" | "docker"
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     models_dir: str = str(MODELS_DIR)
     max_model_len: Optional[int] = None
