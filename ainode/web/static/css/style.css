@@ -274,15 +274,17 @@ body {
 /* Footer sits above everything — reserve space so content never scrolls behind */
 html, body {
   height: 100%;
-}
-
-body {
-  padding-bottom: 32px;
   overflow: hidden;
 }
 
 .command-center {
   height: calc(100vh - 32px) !important;
+  margin-top: 0;
+  padding-bottom: 0;
+}
+
+.mini-footer {
+  height: 32px;
 }
 
 /* ============================================================
