@@ -174,14 +174,14 @@ services:
       - ${HOME}/.ainode/models:/models
     environment:
       HF_HOME: /models
-      AINODE_MODEL: ${AINODE_MODEL:-meta-llama/Llama-3.2-3B-Instruct}
+      AINODE_MODEL: ${AINODE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
       AINODE_GPU_MEMORY_UTIL: ${AINODE_GPU_MEMORY_UTIL:-0.9}
       AINODE_TP_SIZE: ${AINODE_TP_SIZE:-1}
       AINODE_RAY_ADDRESS: ${AINODE_RAY_ADDRESS:-}
     command:
       - vllm
       - serve
-      - ${AINODE_MODEL:-meta-llama/Llama-3.2-3B-Instruct}
+      - ${AINODE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
       - --host
       - 0.0.0.0
       - --port
@@ -206,7 +206,7 @@ COMPOSE_EOF
 
     info "Writing ~/.ainode/.env..."
     cat > "$AINODE_HOME/.env" <<ENV_EOF
-AINODE_MODEL=meta-llama/Llama-3.2-3B-Instruct
+AINODE_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 AINODE_GPU_MEMORY_UTIL=0.9
 AINODE_TP_SIZE=1
 AINODE_RAY_ADDRESS=
