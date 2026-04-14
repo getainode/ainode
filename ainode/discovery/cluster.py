@@ -26,6 +26,9 @@ class ClusterNode:
     api_port: int
     web_port: int
     last_seen: float
+    cluster_id: str = "default"
+    role: str = "auto"  # raw config role
+    is_master: bool = False  # broadcast-declared
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -41,6 +44,9 @@ class ClusterNode:
             api_port=a.api_port,
             web_port=a.web_port,
             last_seen=discovered.last_seen,
+            cluster_id=getattr(a, "cluster_id", "default"),
+            role=getattr(a, "role", "auto"),
+            is_master=getattr(a, "is_master", False),
         )
 
     @classmethod
@@ -56,6 +62,9 @@ class ClusterNode:
             api_port=announcement.api_port,
             web_port=announcement.web_port,
             last_seen=time.time(),
+            cluster_id=getattr(announcement, "cluster_id", "default"),
+            role=getattr(announcement, "role", "auto"),
+            is_master=getattr(announcement, "is_master", False),
         )
 
 
@@ -117,6 +126,74 @@ class ClusterState:
         if not online:
             return None
         return min(online, key=lambda n: n.node_id)
+
+    # ------------------------------------------------------------------
+    # Master election (role-aware, cluster-id scoped)
+    # ------------------------------------------------------------------
+
+    def _local_cluster_id(self) -> str:
+        if self._local_announcement:
+            return getattr(self._local_announcement, "cluster_id", "default")
+        return "default"
+
+    def _peers_in_cluster(self) -> List[ClusterNode]:
+        """Online nodes (including self) sharing the local cluster_id."""
+        cid = self._local_cluster_id()
+        return [
+            n for n in self._nodes.values()
+            if n.status == NodeStatus.ONLINE and (n.cluster_id or "default") == cid
+        ]
+
+    def get_master(self) -> Optional[ClusterNode]:
+        """Return the elected master node for the local cluster.
+
+        Election rules:
+          * If any online node in the cluster has ``role == "master"`` (explicit),
+            the lowest such node_id wins.
+          * Otherwise, the lowest node_id among online nodes whose role is
+            ``"auto"`` becomes master.
+          * Nodes with ``role == "worker"`` are NEVER elected.
+          * Only nodes sharing the local ``cluster_id`` participate.
+        """
+        peers = self._peers_in_cluster()
+        if not peers:
+            return None
+
+        explicit = [n for n in peers if n.role == "master"]
+        if explicit:
+            return min(explicit, key=lambda n: n.node_id)
+
+        candidates = [n for n in peers if n.role == "auto"]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda n: n.node_id)
+
+    def is_master_of_cluster(self) -> bool:
+        """Return True if the local node is currently the elected master."""
+        if not self._local_announcement:
+            return False
+        master = self.get_master()
+        if master is None:
+            return False
+        return master.node_id == self._local_announcement.node_id
+
+    def get_cluster_role_for(self, node_id: str) -> str:
+        """Return the EFFECTIVE role for *node_id*: ``"master"`` or ``"worker"``.
+
+        Nodes outside the local cluster, or unknown, return ``"worker"``.
+        """
+        master = self.get_master()
+        if master is not None and master.node_id == node_id:
+            return "master"
+        return "worker"
+
+    def members(self, cluster_id: Optional[str] = None) -> List[ClusterNode]:
+        """Return all nodes that share the given (or local) cluster_id."""
+        cid = cluster_id or self._local_cluster_id()
+        return [
+            n for n in self._nodes.values()
+            if (n.cluster_id or "default") == cid
+        ]
 
     def find_model(self, model_name: str) -> List[ClusterNode]:
         """Return which node(s) serve a given model. Only returns ONLINE or STALE nodes."""

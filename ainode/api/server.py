@@ -29,6 +29,8 @@ from ainode.discovery.broadcast import (
 )
 from ainode.discovery.cluster import ClusterState
 from ainode.engine.sharding_routes import register_sharding_routes
+from ainode.secrets import SecretsManager
+from ainode.secrets.api_routes import register_secrets_routes
 
 from ainode import __version__
 
@@ -74,6 +76,7 @@ def create_app(
     app["announcement"] = announcement
     app["broadcast_sender"] = None
     app["broadcast_listener"] = None
+    app["secrets_manager"] = SecretsManager()
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -83,6 +86,11 @@ def create_app(
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nodes", handle_nodes)
+    app.router.add_get("/api/cluster/info", handle_cluster_info)
+    app.router.add_post("/api/cluster/role", handle_cluster_set_role)
+    app.router.add_post("/api/cluster/id", handle_cluster_set_id)
+    app.router.add_get("/api/config", handle_get_config)
+    app.router.add_patch("/api/config", handle_patch_config)
 
     app.router.add_get("/v1/models", proxy_to_vllm)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
@@ -105,6 +113,9 @@ def create_app(
 
     # --- Sharding routes ----------------------------------------------------
     register_sharding_routes(app)
+
+    # --- Secrets routes ------------------------------------------------------
+    register_secrets_routes(app)
 
     app.router.add_static("/static", get_static_path(), name="static")
 
@@ -132,6 +143,9 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         status="serving" if engine_ready else "starting",
         api_port=config.api_port,
         web_port=config.web_port,
+        cluster_id=getattr(config, "cluster_id", "default"),
+        role=getattr(config, "cluster_role", "auto"),
+        is_master=False,  # runtime flag, updated by sync loop
     )
 
 
@@ -185,14 +199,25 @@ async def _cluster_sync_loop(app: web.Application) -> None:
             cluster: ClusterState = app["cluster_state"]
             if listener:
                 cluster.update_from_discovered(listener.registry)
-                # Update sender announcement with current engine status
+                # Update sender announcement with current engine status + master flag
                 sender: Optional[BroadcastSender] = app.get("broadcast_sender")
                 engine = app.get("engine")
-                if sender and engine:
+                config: NodeConfig = app["config"]
+                is_master = cluster.is_master_of_cluster()
+                updates: dict = {
+                    "is_master": is_master,
+                    "cluster_id": getattr(config, "cluster_id", "default"),
+                    "role": getattr(config, "cluster_role", "auto"),
+                }
+                if engine is not None:
                     engine_ready = getattr(engine, "ready", False)
-                    sender.update_announcement(
-                        status="serving" if engine_ready else "starting"
-                    )
+                    updates["status"] = "serving" if engine_ready else "starting"
+                if sender:
+                    sender.update_announcement(**updates)
+                    # Keep the app-level announcement in sync so /api/status sees fresh values
+                    for k, v in updates.items():
+                        if hasattr(sender.announcement, k):
+                            setattr(sender.announcement, k, v)
     except asyncio.CancelledError:
         pass
 
@@ -294,6 +319,10 @@ async def handle_status(request: web.Request) -> web.Response:
         except Exception:
             pass
 
+    cluster: ClusterState = request.app["cluster_state"]
+    master = cluster.get_master()
+    effective_role = cluster.get_cluster_role_for(config.node_id) if config.node_id else "worker"
+
     return web.json_response({
         "node_id": config.node_id,
         "node_name": config.node_name,
@@ -305,6 +334,9 @@ async def handle_status(request: web.Request) -> web.Response:
         "powered_by": "argentos.ai",
         "models_loaded": models_loaded,
         "api_port": config.api_port,
+        "cluster_role": effective_role,
+        "cluster_id": getattr(config, "cluster_id", "default"),
+        "master_node_id": master.node_id if master else None,
     })
 
 async def handle_nodes(request: web.Request) -> web.Response:
@@ -412,6 +444,192 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
             {"error": {"message": "vLLM engine not reachable", "type": "server_error"}},
             status=502,
         )
+
+async def handle_cluster_info(request: web.Request) -> web.Response:
+    """Return the current cluster topology from this node's perspective."""
+    config: NodeConfig = request.app["config"]
+    cluster: ClusterState = request.app["cluster_state"]
+
+    master = cluster.get_master()
+    members = cluster.members()
+    master_address: Optional[str] = getattr(config, "master_address", None)
+    if master and not master_address and master.node_id != config.node_id:
+        master_address = f"{master.node_name}:{master.web_port}"
+
+    return web.json_response({
+        "my_role": cluster.get_cluster_role_for(config.node_id) if config.node_id else "worker",
+        "my_node_id": config.node_id,
+        "cluster_id": getattr(config, "cluster_id", "default"),
+        "configured_role": getattr(config, "cluster_role", "auto"),
+        "master_node_id": master.node_id if master else None,
+        "master_address": master_address,
+        "members": [
+            {
+                "node_id": m.node_id,
+                "node_name": m.node_name,
+                "api_port": m.api_port,
+                "web_port": m.web_port,
+                "role": m.role,
+                "effective_role": "master" if (master and master.node_id == m.node_id) else "worker",
+                "status": m.status.value if hasattr(m.status, "value") else str(m.status),
+                "last_seen": m.last_seen,
+                "gpu_name": m.gpu_name,
+                "gpu_memory_gb": m.gpu_memory_gb,
+            }
+            for m in members
+        ],
+    })
+
+
+def _rebuild_announcement(app: web.Application) -> None:
+    """Apply the current config to the live broadcast announcement.
+
+    Lets role/cluster-id changes take effect without a server restart.
+    """
+    config: NodeConfig = app["config"]
+    sender: Optional[BroadcastSender] = app.get("broadcast_sender")
+    if sender is not None:
+        sender.update_announcement(
+            cluster_id=getattr(config, "cluster_id", "default"),
+            role=getattr(config, "cluster_role", "auto"),
+        )
+    # Also refresh the stored announcement
+    announcement: NodeAnnouncement = app.get("announcement")
+    if announcement is not None:
+        announcement.cluster_id = getattr(config, "cluster_id", "default")
+        announcement.role = getattr(config, "cluster_role", "auto")
+
+
+async def handle_cluster_set_role(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"message": "Invalid JSON body", "type": "invalid_request"}},
+            status=400,
+        )
+    role = body.get("role", "")
+    if role not in ("auto", "master", "worker"):
+        return web.json_response(
+            {"error": {"message": "role must be one of auto|master|worker", "type": "invalid_request"}},
+            status=400,
+        )
+    config: NodeConfig = request.app["config"]
+    config.cluster_role = role
+    config.save()
+    _rebuild_announcement(request.app)
+    return web.json_response({"ok": True, "cluster_role": role})
+
+
+async def handle_cluster_set_id(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"message": "Invalid JSON body", "type": "invalid_request"}},
+            status=400,
+        )
+    cluster_id = str(body.get("cluster_id", "")).strip() or "default"
+    if len(cluster_id) > 64 or not all(c.isalnum() or c in "-_." for c in cluster_id):
+        return web.json_response(
+            {"error": {"message": "cluster_id must be alphanumeric (plus -_.), 1-64 chars",
+                       "type": "invalid_request"}},
+            status=400,
+        )
+    config: NodeConfig = request.app["config"]
+    config.cluster_id = cluster_id
+    config.save()
+    _rebuild_announcement(request.app)
+    return web.json_response({"ok": True, "cluster_id": cluster_id})
+
+
+# Fields that can be updated via PATCH /api/config. Keep this list tight --
+# never expose auth or secret-related fields here.
+PATCHABLE_CONFIG_FIELDS = {
+    "node_name",
+    "email",
+    "host",
+    "api_port",
+    "web_port",
+    "discovery_port",
+    "model",
+    "models_dir",
+    "max_model_len",
+    "gpu_memory_utilization",
+    "quantization",
+    "trust_remote_code",
+    "cluster_enabled",
+    "cluster_role",
+    "cluster_id",
+    "master_address",
+    "datasets_dir",
+    "training_dir",
+    "hf_cache_dir",
+    "cors_origins",
+    "telemetry",
+    "training_default_method",
+    "training_default_epochs",
+    "training_default_batch_size",
+    "training_default_learning_rate",
+}
+
+
+def _safe_config_dict(config: NodeConfig) -> dict:
+    """Return a safely serializable view of the config (no secrets)."""
+    data = asdict(config)
+    # Scrub anything that might carry a credential.
+    data.pop("cluster_secret", None)
+    return data
+
+
+async def handle_get_config(request: web.Request) -> web.Response:
+    config: NodeConfig = request.app["config"]
+    return web.json_response(_safe_config_dict(config))
+
+
+async def handle_patch_config(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"message": "Invalid JSON body", "type": "invalid_request"}},
+            status=400,
+        )
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"error": {"message": "Body must be an object", "type": "invalid_request"}},
+            status=400,
+        )
+
+    config: NodeConfig = request.app["config"]
+    applied: dict = {}
+    rejected: list = []
+
+    for key, value in body.items():
+        if key not in PATCHABLE_CONFIG_FIELDS:
+            rejected.append(key)
+            continue
+        if not hasattr(config, key):
+            rejected.append(key)
+            continue
+        # Basic validation on role / cluster_id
+        if key == "cluster_role" and value not in ("auto", "master", "worker"):
+            rejected.append(key)
+            continue
+        setattr(config, key, value)
+        applied[key] = value
+
+    config.save()
+    if any(k in applied for k in ("cluster_id", "cluster_role")):
+        _rebuild_announcement(request.app)
+
+    return web.json_response({
+        "ok": True,
+        "applied": applied,
+        "rejected": rejected,
+        "config": _safe_config_dict(config),
+    })
+
 
 def run_server(config: Optional[NodeConfig] = None, engine=None) -> None:
     """Start the API server (blocking)."""

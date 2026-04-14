@@ -31,6 +31,7 @@
         <button class="nav-pill" data-view="chat">Chat</button>
         <button class="nav-pill" data-view="downloads">Downloads</button>
         <button class="nav-pill" data-view="training">Training</button>
+        <button class="nav-pill" data-view="config">Config</button>
       </nav>
       <div class="top-bar-status">
         <span class="status-dot"></span>
@@ -95,6 +96,26 @@
           <h2>Training</h2>
         </div>
         <div id="training-content"></div>
+      </div>
+      <!-- Config view -->
+      <div id="view-config" class="view" style="display:none">
+        <div class="config-layout">
+          <aside class="config-sidebar">
+            <div class="config-sidebar-title">SETTINGS</div>
+            <nav class="config-nav" id="config-nav">
+              <button class="config-nav-item active" data-section="credentials">🔑 Credentials</button>
+              <button class="config-nav-item" data-section="cluster">🌐 Cluster</button>
+              <button class="config-nav-item" data-section="node">🖥️ Node Identity</button>
+              <button class="config-nav-item" data-section="storage">📦 Storage</button>
+              <button class="config-nav-item" data-section="training">🎓 Training Defaults</button>
+              <button class="config-nav-item" data-section="network">🌐 Network</button>
+              <button class="config-nav-item" data-section="about">ℹ️ About</button>
+            </nav>
+          </aside>
+          <div class="config-content" id="config-content">
+            <!-- Rendered per section by app.js -->
+          </div>
+        </div>
       </div>
     </main>
 

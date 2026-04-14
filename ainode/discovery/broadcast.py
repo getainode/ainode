@@ -34,6 +34,14 @@ class NodeAnnouncement:
     api_port: int
     web_port: int
     timestamp: float = field(default_factory=time.time)
+    # Cluster membership: only nodes with the same cluster_id see each other.
+    cluster_id: str = "default"
+    # Raw role from config: "auto" | "master" | "worker".
+    role: str = "auto"
+    # Runtime flag -- set to True if this node currently believes it is the
+    # elected master for its cluster. Informational only; workers make their
+    # own decision based on the full announcement set.
+    is_master: bool = False
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -41,8 +49,10 @@ class NodeAnnouncement:
 
     @classmethod
     def from_json(cls, data: str) -> "NodeAnnouncement":
-        """Deserialize from JSON string."""
-        return cls(**json.loads(data))
+        """Deserialize from JSON string, tolerating unknown/missing fields."""
+        raw = json.loads(data)
+        fields = {k: v for k, v in raw.items() if k in cls.__dataclass_fields__}
+        return cls(**fields)
 
 
 @dataclass

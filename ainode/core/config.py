@@ -39,6 +39,29 @@ class NodeConfig:
     # Cluster
     cluster_enabled: bool = True
     cluster_secret: Optional[str] = None
+    # Role this node should take in the cluster:
+    #   "auto"   -> elected dynamically (lowest node_id among online auto nodes)
+    #   "master" -> explicitly the cluster head
+    #   "worker" -> never becomes master; follows whichever node is master
+    cluster_role: str = "auto"
+    # Shared identifier -- only nodes with the same cluster_id see each other.
+    cluster_id: str = "default"
+    # Optional explicit master address for workers (e.g. "10.0.0.1:3000").
+    master_address: Optional[str] = None
+
+    # Storage paths (override defaults)
+    datasets_dir: Optional[str] = None
+    training_dir: Optional[str] = None
+    hf_cache_dir: Optional[str] = None
+
+    # CORS
+    cors_origins: Optional[str] = None  # comma-separated list
+
+    # Training defaults
+    training_default_method: str = "lora"       # lora | full | qlora
+    training_default_epochs: int = 3
+    training_default_batch_size: int = 4
+    training_default_learning_rate: float = 2e-4
 
     # Onboarding
     email: Optional[str] = None

@@ -30,6 +30,13 @@ const AINode = {
     modelsFilter: 'all',
     modelsSearch: '',
     modelsSort: 'recommended',
+    configSection: 'credentials',
+    configData: {
+      secrets: null,
+      cluster: null,
+      config: null,
+    },
+    configRevealed: {},
   },
 
   // ========================================================================
@@ -297,6 +304,9 @@ const AINode = {
         break;
       case 'training':
         this.renderTraining();
+        break;
+      case 'config':
+        this.renderConfig();
         break;
     }
 
@@ -3654,6 +3664,586 @@ const AINode = {
     if (celsius > 85) return '#ef4444';
     if (celsius > 70) return '#f59e0b';
     return '#76b900';
+  },
+
+  // ========================================================================
+  //  CONFIG VIEW
+  // ========================================================================
+
+  renderConfig() {
+    var nav = document.getElementById('config-nav');
+    var self = this;
+    if (nav && !nav.dataset.bound) {
+      nav.dataset.bound = '1';
+      nav.querySelectorAll('.config-nav-item').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          self.state.configSection = btn.dataset.section;
+          nav.querySelectorAll('.config-nav-item').forEach(function (b) {
+            b.classList.toggle('active', b.dataset.section === self.state.configSection);
+          });
+          self.renderConfigSection();
+        });
+      });
+    }
+    // Keep sidebar active in sync
+    if (nav) {
+      nav.querySelectorAll('.config-nav-item').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.section === self.state.configSection);
+      });
+    }
+    this.renderConfigSection();
+  },
+
+  renderConfigSection() {
+    switch (this.state.configSection) {
+      case 'credentials': return this.renderConfigCredentials();
+      case 'cluster':     return this.renderConfigCluster();
+      case 'node':        return this.renderConfigNode();
+      case 'storage':     return this.renderConfigStorage();
+      case 'training':    return this.renderConfigTrainingDefaults();
+      case 'network':     return this.renderConfigNetwork();
+      case 'about':       return this.renderConfigAbout();
+    }
+  },
+
+  _configMount() {
+    return document.getElementById('config-content');
+  },
+
+  async _fetchConfigBundle() {
+    var self = this;
+    var results = await Promise.all([
+      this.fetchJSON('/api/secrets'),
+      this.fetchJSON('/api/cluster/info'),
+      this.fetchJSON('/api/config'),
+    ]);
+    self.state.configData.secrets = results[0];
+    self.state.configData.cluster = results[1];
+    self.state.configData.config = results[2];
+  },
+
+  // ----- Credentials --------------------------------------------------------
+  async renderConfigCredentials() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading credentials…</div>';
+    var data = await this.fetchJSON('/api/secrets');
+    this.state.configData.secrets = data;
+    if (!data) {
+      mount.innerHTML = '<div class="config-empty">Unable to load secrets.</div>';
+      return;
+    }
+    var self = this;
+    var known = data.known || {};
+    var custom = data.custom || {};
+    var html = '';
+    html += '<h2 class="config-section-title">Credentials</h2>';
+    html += '<p class="config-section-desc">Store API tokens used by AINode to download gated models, log training metrics, and access hosted services. Values are stored locally at <code>~/.ainode/secrets.json</code> with mode 0600 and never transmitted to AINode servers.</p>';
+
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Known credentials</h3>';
+    html += '<p class="config-card-desc">Recognized services with built-in integrations.</p>';
+    Object.keys(known).forEach(function (k) {
+      html += self._renderSecretRow(known[k]);
+    });
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Custom secrets</h3>';
+    html += '<p class="config-card-desc">Arbitrary named values, e.g. for training scripts or third-party integrations.</p>';
+    if (Object.keys(custom).length === 0) {
+      html += '<div class="config-empty">No custom secrets yet.</div>';
+    } else {
+      Object.keys(custom).forEach(function (name) {
+        var s = custom[name];
+        html += '<div class="config-secret-row">';
+        html += '  <div class="config-secret-main">';
+        html += '    <div class="config-secret-label-row">';
+        html += '      <span class="config-secret-name">' + self.esc(name) + '</span>';
+        html += s.is_set ? '      <span class="config-secret-mask">' + self.esc(s.masked) + '</span>' : '      <span class="config-secret-unset">not set</span>';
+        html += '    </div>';
+        html += '  </div>';
+        html += '  <span></span>';
+        html += '  <button class="config-icon-btn danger" data-custom-delete="' + self.esc(name) + '">Delete</button>';
+        html += '</div>';
+      });
+    }
+    html += '<div class="config-add-custom">';
+    html += '  <input class="form-input" id="cfg-custom-name" placeholder="name (alphanumeric)">';
+    html += '  <input class="form-input" id="cfg-custom-value" type="password" placeholder="value">';
+    html += '  <button class="config-btn" id="cfg-custom-add">+ Add</button>';
+    html += '</div>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    // Wire save buttons for each known secret
+    Object.keys(known).forEach(function (k) {
+      self._wireSecretRow(k);
+    });
+
+    mount.querySelectorAll('[data-custom-delete]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var name = btn.dataset.customDelete;
+        if (!confirm('Delete custom secret "' + name + '"?')) return;
+        await fetch('/api/secrets/custom/' + encodeURIComponent(name), { method: 'DELETE' });
+        self.toast('Deleted ' + name, 'info');
+        self.renderConfigCredentials();
+      });
+    });
+
+    var addBtn = document.getElementById('cfg-custom-add');
+    if (addBtn) {
+      addBtn.addEventListener('click', async function () {
+        var nameEl = document.getElementById('cfg-custom-name');
+        var valEl = document.getElementById('cfg-custom-value');
+        var name = (nameEl.value || '').trim();
+        var value = valEl.value || '';
+        if (!name || !value) { self.toast('Name and value required', 'error'); return; }
+        var resp = await fetch('/api/secrets/custom/' + encodeURIComponent(name), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: value }),
+        });
+        var body = await resp.json().catch(function () { return {}; });
+        if (!resp.ok) {
+          self.toast((body.error && body.error.message) || 'Failed to add secret', 'error');
+          return;
+        }
+        self.toast('Added ' + name, 'success');
+        self.renderConfigCredentials();
+      });
+    }
+  },
+
+  _renderSecretRow(entry) {
+    var self = this;
+    var k = entry.key;
+    var html = '<div class="config-secret-row" data-secret-row="' + self.esc(k) + '">';
+    html += '  <div class="config-secret-main">';
+    html += '    <div class="config-secret-label-row">';
+    html += '      <span class="config-secret-name">' + self.esc(entry.label) + '</span>';
+    html += entry.is_set
+      ? '      <span class="config-secret-mask">' + self.esc(entry.masked) + '</span>'
+      : '      <span class="config-secret-unset">not set</span>';
+    html += '    </div>';
+    html += '    <div class="config-secret-desc">' + self.esc(entry.description || '') +
+            (entry.docs_url ? ' <a href="' + self.esc(entry.docs_url) + '" target="_blank" rel="noopener" style="color:var(--nvidia-green)">Docs ↗</a>' : '') +
+            '</div>';
+    html += '    <div class="config-secret-input-row" id="cfg-sec-input-' + self.esc(k) + '" style="' + (entry.is_set ? 'display:none' : '') + '">';
+    html += '      <input class="form-input" type="password" id="cfg-sec-val-' + self.esc(k) + '" placeholder="' + self.esc(entry.prefix_hint ? entry.prefix_hint + '…' : 'paste token here') + '">';
+    html += '      <button class="config-eye-btn" data-eye="' + self.esc(k) + '" type="button">Show</button>';
+    html += '      <button class="config-btn" data-save-secret="' + self.esc(k) + '">Save</button>';
+    html += '    </div>';
+    html += '    <div class="config-test-result" id="cfg-sec-result-' + self.esc(k) + '" style="display:none"></div>';
+    html += '  </div>';
+    if (entry.is_set) {
+      html += '  <button class="config-btn secondary" data-replace-secret="' + self.esc(k) + '">Replace</button>';
+      html += '  <button class="config-btn danger" data-delete-secret="' + self.esc(k) + '">Delete</button>';
+    } else {
+      html += '  <span></span><span></span>';
+    }
+    if (entry.testable) {
+      html += '<div style="grid-column: 1 / -1; margin-top: 6px; text-align: right;"><button class="config-btn secondary" data-test-secret="' + self.esc(k) + '"' + (entry.is_set ? '' : ' disabled') + '>Test connection</button></div>';
+    }
+    html += '</div>';
+    return html;
+  },
+
+  _wireSecretRow(key) {
+    var self = this;
+    var mount = this._configMount();
+    if (!mount) return;
+    var row = mount.querySelector('[data-secret-row="' + key + '"]');
+    if (!row) return;
+
+    var eye = row.querySelector('[data-eye="' + key + '"]');
+    if (eye) eye.addEventListener('click', function () {
+      var inp = document.getElementById('cfg-sec-val-' + key);
+      if (!inp) return;
+      var shown = inp.type === 'text';
+      inp.type = shown ? 'password' : 'text';
+      eye.textContent = shown ? 'Show' : 'Hide';
+    });
+
+    var save = row.querySelector('[data-save-secret="' + key + '"]');
+    if (save) save.addEventListener('click', async function () {
+      var inp = document.getElementById('cfg-sec-val-' + key);
+      var val = inp ? inp.value : '';
+      if (!val) { self.toast('Value is required', 'error'); return; }
+      var resp = await fetch('/api/secrets/' + encodeURIComponent(key), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: val }),
+      });
+      var body = await resp.json().catch(function () { return {}; });
+      if (!resp.ok) {
+        self.toast((body.error && body.error.message) || 'Save failed', 'error');
+        return;
+      }
+      if (inp) inp.value = '';
+      self.toast('Saved', 'success');
+      self.renderConfigCredentials();
+    });
+
+    var replace = row.querySelector('[data-replace-secret="' + key + '"]');
+    if (replace) replace.addEventListener('click', function () {
+      var wrap = document.getElementById('cfg-sec-input-' + key);
+      if (wrap) wrap.style.display = '';
+      replace.style.display = 'none';
+    });
+
+    var del = row.querySelector('[data-delete-secret="' + key + '"]');
+    if (del) del.addEventListener('click', async function () {
+      if (!confirm('Delete ' + key + '?')) return;
+      await fetch('/api/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
+      self.toast('Deleted', 'info');
+      self.renderConfigCredentials();
+    });
+
+    var test = row.querySelector('[data-test-secret="' + key + '"]');
+    if (test) test.addEventListener('click', async function () {
+      var result = document.getElementById('cfg-sec-result-' + key);
+      if (result) { result.style.display = ''; result.className = 'config-test-result'; result.textContent = 'Testing…'; }
+      var resp = await fetch('/api/secrets/' + encodeURIComponent(key) + '/test');
+      var body = await resp.json().catch(function () { return {}; });
+      if (!result) return;
+      if (body.ok) {
+        result.className = 'config-test-result ok';
+        result.textContent = 'OK — authenticated as ' + (body.identity || 'user');
+      } else {
+        result.className = 'config-test-result err';
+        result.textContent = 'Failed: ' + (body.message || 'unknown error');
+      }
+    });
+  },
+
+  // ----- Cluster ------------------------------------------------------------
+  async renderConfigCluster() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading cluster info…</div>';
+    var data = await this.fetchJSON('/api/cluster/info');
+    this.state.configData.cluster = data;
+    if (!data) {
+      mount.innerHTML = '<div class="config-empty">Unable to load cluster info.</div>';
+      return;
+    }
+    var self = this;
+    var role = data.my_role || 'worker';
+    var configured = data.configured_role || 'auto';
+    var masterId = data.master_node_id;
+    var iAmMaster = role === 'master';
+    var members = data.members || [];
+    var peers = members.filter(function (m) { return m.node_id !== data.my_node_id; });
+
+    var badgeTitle, badgeSub, badgeIcon, badgeCls;
+    if (iAmMaster) {
+      badgeIcon = '⚡';
+      badgeTitle = 'MASTER — You are the cluster head';
+      badgeSub = peers.length > 0 ? 'Serving ' + peers.length + ' worker(s)'
+                                   : (configured === 'auto' ? 'Waiting for peers (auto-elected)' : 'Standalone');
+      badgeCls = 'master';
+    } else {
+      badgeIcon = '🔗';
+      var masterNode = members.find(function (m) { return m.node_id === masterId; });
+      badgeTitle = 'WORKER';
+      badgeSub = masterNode
+        ? 'Connected to master: ' + masterNode.node_name + ' (' + (data.master_address || masterNode.node_id) + ')'
+        : 'No master detected yet';
+      badgeCls = 'worker';
+    }
+
+    var html = '';
+    html += '<h2 class="config-section-title">Cluster</h2>';
+    html += '<p class="config-section-desc">Nodes on the same network with a matching <code>cluster_id</code> form a cluster. Master is elected automatically, or you can pin a role explicitly.</p>';
+
+    html += '<div class="config-role-badge ' + badgeCls + '">';
+    html += '  <div class="config-role-badge-icon">' + badgeIcon + '</div>';
+    html += '  <div class="config-role-badge-text">';
+    html += '    <div class="config-role-badge-title">' + self.esc(badgeTitle) + '</div>';
+    html += '    <div class="config-role-badge-subtitle">' + self.esc(badgeSub) + '</div>';
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Role</h3>';
+    html += '  <p class="config-card-desc">Auto = elected dynamically · Master = always cluster head · Worker = never becomes master.</p>';
+    html += '  <div class="config-role-pills pill-group">';
+    ['auto', 'master', 'worker'].forEach(function (r) {
+      html += '<button class="pill' + (configured === r ? ' active' : '') + '" data-set-role="' + r + '">' + r.toUpperCase() + '</button>';
+    });
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Cluster ID</h3>';
+    html += '  <p class="config-card-desc">Only nodes sharing this identifier will see each other.</p>';
+    html += '  <div class="config-secret-input-row">';
+    html += '    <input class="form-input" id="cfg-cluster-id" value="' + self.esc(data.cluster_id || 'default') + '">';
+    html += '    <button class="config-btn" id="cfg-cluster-id-save">Save</button>';
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Members</h3>';
+    html += '  <p class="config-card-desc">Nodes currently visible in this cluster.</p>';
+    if (members.length === 0) {
+      html += '<div class="config-empty">No members yet.</div>';
+    } else {
+      html += '<div class="config-member-table">';
+      html += '<div class="config-member-row header"><span>Node</span><span>Address</span><span>Role</span><span>Status</span><span>Last seen</span></div>';
+      members.forEach(function (m) {
+        var when = m.last_seen ? new Date(m.last_seen * 1000).toLocaleTimeString() : '—';
+        html += '<div class="config-member-row">';
+        html += '  <span><strong>' + self.esc(m.node_name || m.node_id) + '</strong><div style="color:var(--text-muted);font-size:11px" class="mono">' + self.esc(m.node_id) + '</div></span>';
+        html += '  <span class="mono">' + self.esc(m.node_name) + ':' + self.esc(String(m.web_port)) + '</span>';
+        html += '  <span><span class="config-member-role-tag ' + m.effective_role + '">' + m.effective_role + '</span></span>';
+        html += '  <span>' + self.esc(m.status) + '</span>';
+        html += '  <span class="mono" style="color:var(--text-muted)">' + when + '</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">How election works</h3>';
+    html += '  <p class="config-card-desc">If any node is explicitly configured as <code>master</code>, the lowest-ID such node wins. Otherwise the lowest node_id among <code>auto</code> nodes becomes master. <code>worker</code> nodes are never elected. Election is re-run every 5s as heartbeats arrive; changing your role takes effect on the next broadcast (≤5s) without a restart.</p>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    mount.querySelectorAll('[data-set-role]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var role = btn.dataset.setRole;
+        var resp = await fetch('/api/cluster/role', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: role }),
+        });
+        if (!resp.ok) { self.toast('Role change failed', 'error'); return; }
+        self.toast('Role → ' + role.toUpperCase(), 'success');
+        setTimeout(function () { self.renderConfigCluster(); }, 500);
+      });
+    });
+
+    var idBtn = document.getElementById('cfg-cluster-id-save');
+    if (idBtn) idBtn.addEventListener('click', async function () {
+      var val = document.getElementById('cfg-cluster-id').value.trim() || 'default';
+      var resp = await fetch('/api/cluster/id', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cluster_id: val }),
+      });
+      var body = await resp.json().catch(function () { return {}; });
+      if (!resp.ok) { self.toast((body.error && body.error.message) || 'Save failed', 'error'); return; }
+      self.toast('Cluster ID saved', 'success');
+      setTimeout(function () { self.renderConfigCluster(); }, 500);
+    });
+  },
+
+  // ----- Node Identity ------------------------------------------------------
+  async renderConfigNode() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var html = '';
+    html += '<h2 class="config-section-title">Node Identity</h2>';
+    html += '<p class="config-section-desc">Human-readable name and owner contact for this node.</p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += this._field('Node name', 'node_name', cfg.node_name || '');
+    html += this._field('Node ID (read-only)', 'node_id', cfg.node_id || '', { readonly: true, mono: true });
+    html += this._field('Email', 'email', cfg.email || '', { type: 'email' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-node-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-node-save').addEventListener('click', function () {
+      self._patchConfig({
+        node_name: document.getElementById('cfg-f-node_name').value,
+        email: document.getElementById('cfg-f-email').value,
+      });
+    });
+  },
+
+  // ----- Storage ------------------------------------------------------------
+  async renderConfigStorage() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var html = '';
+    html += '<h2 class="config-section-title">Storage</h2>';
+    html += '<p class="config-section-desc">Where AINode keeps downloaded models, datasets, and training artifacts. Leave blank to use defaults under <code>~/.ainode/</code>.</p>';
+    html += '<div class="config-card"><div class="config-form-grid single">';
+    html += this._field('Models directory', 'models_dir', cfg.models_dir || '', { hint: 'vLLM/HF model weights' });
+    html += this._field('Datasets directory', 'datasets_dir', cfg.datasets_dir || '', { hint: 'Training / eval datasets' });
+    html += this._field('Training output directory', 'training_dir', cfg.training_dir || '', { hint: 'Checkpoints and logs' });
+    html += this._field('HuggingFace cache', 'hf_cache_dir', cfg.hf_cache_dir || '', { hint: 'Defaults to $HF_HOME / ~/.cache/huggingface' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-storage-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-storage-save').addEventListener('click', function () {
+      self._patchConfig({
+        models_dir: document.getElementById('cfg-f-models_dir').value,
+        datasets_dir: document.getElementById('cfg-f-datasets_dir').value,
+        training_dir: document.getElementById('cfg-f-training_dir').value,
+        hf_cache_dir: document.getElementById('cfg-f-hf_cache_dir').value,
+      });
+    });
+  },
+
+  // ----- Training Defaults --------------------------------------------------
+  async renderConfigTrainingDefaults() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var method = cfg.training_default_method || 'lora';
+    var html = '';
+    html += '<h2 class="config-section-title">Training Defaults</h2>';
+    html += '<p class="config-section-desc">Default values prefilled when starting a new fine-tuning run.</p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += '<div><label class="config-field-label">Default method</label>';
+    html += '<select class="form-select" id="cfg-f-training_default_method">';
+    ['lora', 'qlora', 'full'].forEach(function (m) {
+      html += '<option value="' + m + '"' + (method === m ? ' selected' : '') + '>' + m.toUpperCase() + '</option>';
+    });
+    html += '</select></div>';
+    html += this._field('Default epochs', 'training_default_epochs', cfg.training_default_epochs, { type: 'number' });
+    html += this._field('Default batch size', 'training_default_batch_size', cfg.training_default_batch_size, { type: 'number' });
+    html += this._field('Default learning rate', 'training_default_learning_rate', cfg.training_default_learning_rate, { type: 'number', step: '0.00001' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-training-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-training-save').addEventListener('click', function () {
+      self._patchConfig({
+        training_default_method: document.getElementById('cfg-f-training_default_method').value,
+        training_default_epochs: parseInt(document.getElementById('cfg-f-training_default_epochs').value, 10),
+        training_default_batch_size: parseInt(document.getElementById('cfg-f-training_default_batch_size').value, 10),
+        training_default_learning_rate: parseFloat(document.getElementById('cfg-f-training_default_learning_rate').value),
+      });
+    });
+  },
+
+  // ----- Network ------------------------------------------------------------
+  async renderConfigNetwork() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var host = cfg.host || '0.0.0.0';
+    var html = '';
+    html += '<h2 class="config-section-title">Network</h2>';
+    html += '<p class="config-section-desc">Port and binding configuration. <strong>Changes to ports require an AINode restart to take effect.</strong></p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += this._field('API port (vLLM)', 'api_port', cfg.api_port, { type: 'number' });
+    html += this._field('Web port (UI + proxy)', 'web_port', cfg.web_port, { type: 'number' });
+    html += this._field('Discovery port (UDP)', 'discovery_port', cfg.discovery_port, { type: 'number' });
+    html += '<div><label class="config-field-label">Bind host</label>';
+    html += '<select class="form-select" id="cfg-f-host">';
+    [['0.0.0.0', 'All interfaces (0.0.0.0)'], ['127.0.0.1', 'Localhost only (127.0.0.1)']].forEach(function (pair) {
+      html += '<option value="' + pair[0] + '"' + (host === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>';
+    });
+    html += '</select></div>';
+    html += this._field('CORS origins', 'cors_origins', cfg.cors_origins || '', { hint: 'Comma-separated list of allowed origins' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-net-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-net-save').addEventListener('click', function () {
+      self._patchConfig({
+        api_port: parseInt(document.getElementById('cfg-f-api_port').value, 10),
+        web_port: parseInt(document.getElementById('cfg-f-web_port').value, 10),
+        discovery_port: parseInt(document.getElementById('cfg-f-discovery_port').value, 10),
+        host: document.getElementById('cfg-f-host').value,
+        cors_origins: document.getElementById('cfg-f-cors_origins').value,
+      }, { restartHint: true });
+    });
+  },
+
+  // ----- About --------------------------------------------------------------
+  async renderConfigAbout() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var status = await this.fetchJSON('/api/status');
+    var gpu = status && status.gpu;
+    var html = '';
+    html += '<h2 class="config-section-title">About</h2>';
+    html += '<p class="config-section-desc">AINode — local AI platform powered by argentos.ai.</p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += '<div><div class="config-field-label">AINode version</div><div>' + this.esc((status && status.version) || 'n/a') + '</div></div>';
+    html += '<div><div class="config-field-label">Node ID</div><div class="mono" style="font-family:var(--font-mono);font-size:12px">' + this.esc((status && status.node_id) || 'n/a') + '</div></div>';
+    html += '<div><div class="config-field-label">Current model</div><div>' + this.esc((status && status.model) || 'none') + '</div></div>';
+    html += '<div><div class="config-field-label">GPU</div><div>' + this.esc(gpu ? (gpu.name + (gpu.memory_total_mb ? ' · ' + Math.round(gpu.memory_total_mb / 1024) + ' GB' : '')) : 'CPU only') + '</div></div>';
+    html += '<div><div class="config-field-label">Cluster role</div><div>' + this.esc((status && status.cluster_role) || 'n/a') + '</div></div>';
+    html += '<div><div class="config-field-label">Master node</div><div class="mono">' + this.esc((status && status.master_node_id) || '—') + '</div></div>';
+    html += '</div></div>';
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Links</h3>';
+    html += '  <p><a href="https://ainode.dev" target="_blank" rel="noopener" style="color:var(--nvidia-green)">ainode.dev</a> · ';
+    html += '  <a href="https://github.com/getainode/ainode" target="_blank" rel="noopener" style="color:var(--nvidia-green)">GitHub</a> · ';
+    html += '  <a href="https://docs.argentos.ai" target="_blank" rel="noopener" style="color:var(--nvidia-green)">Docs</a></p>';
+    html += '  <p class="config-card-desc" style="margin-top:10px">Licensed under Apache 2.0. Powered by argentos.ai.</p>';
+    html += '</div>';
+    mount.innerHTML = html;
+  },
+
+  // ----- Helpers ------------------------------------------------------------
+  _field(label, key, value, opts) {
+    opts = opts || {};
+    var type = opts.type || 'text';
+    var readonly = opts.readonly ? ' readonly' : '';
+    var step = opts.step ? ' step="' + opts.step + '"' : '';
+    var mono = opts.mono ? ' style="font-family:var(--font-mono);font-size:12px"' : '';
+    var val = value === null || value === undefined ? '' : String(value);
+    var html = '<div>';
+    html += '  <label class="config-field-label" for="cfg-f-' + key + '">' + this.esc(label) + '</label>';
+    html += '  <input class="form-input" id="cfg-f-' + key + '" type="' + type + '"' + step + readonly + mono + ' value="' + this.esc(val) + '">';
+    if (opts.hint) html += '<div class="config-field-hint">' + this.esc(opts.hint) + '</div>';
+    html += '</div>';
+    return html;
+  },
+
+  async _patchConfig(patch, opts) {
+    opts = opts || {};
+    // Strip NaN / empty numeric
+    Object.keys(patch).forEach(function (k) {
+      var v = patch[k];
+      if (typeof v === 'number' && Number.isNaN(v)) delete patch[k];
+      if (v === '') patch[k] = null;
+    });
+    var resp = await fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    var body = await resp.json().catch(function () { return {}; });
+    if (!resp.ok) {
+      this.toast((body.error && body.error.message) || 'Save failed', 'error');
+      return;
+    }
+    if (opts.restartHint) {
+      this.toast('Saved — restart AINode for network changes to apply', 'info');
+    } else {
+      this.toast('Saved', 'success');
+    }
   },
 };
 
