@@ -768,6 +768,52 @@ class ModelManager:
         total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
         return total / (1024**3)
 
+    def search_huggingface(self, query: str, limit: int = 50) -> list[dict]:
+        """Search HuggingFace Hub for text-generation models matching the query.
+
+        Returns list of dicts with same shape as catalog entries:
+        {id, name, hf_repo, size_gb, description, family, params_b, context_length, license, recommended, in_catalog}
+        """
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            models = api.list_models(
+                search=query,
+                task="text-generation",
+                limit=limit,
+                sort="downloads",
+                direction=-1,
+            )
+            results = []
+            for m in models:
+                repo = m.id
+                # Skip base models (we want instruct/chat variants primarily)
+                # but let user see everything they search for
+                slug = repo.replace("/", "--").lower()
+                # Estimate size from safetensors metadata if available
+                size_gb = 0.0
+                if hasattr(m, "safetensors") and m.safetensors:
+                    total_params = m.safetensors.get("total", 0)
+                    size_gb = (total_params * 2) / (1024 ** 3)  # bf16 = 2 bytes/param
+                results.append({
+                    "id": slug,
+                    "name": repo.split("/")[-1],
+                    "hf_repo": repo,
+                    "size_gb": round(size_gb, 1),
+                    "description": (m.pipeline_tag or "text-generation") + " model",
+                    "family": repo.split("/")[0].lower(),
+                    "params_b": round((size_gb / 2), 2) if size_gb > 0 else 0,
+                    "context_length": 0,
+                    "license": getattr(m, "cardData", {}).get("license", "") if getattr(m, "cardData", None) else "",
+                    "recommended": False,
+                    "downloads": getattr(m, "downloads", 0),
+                    "likes": getattr(m, "likes", 0),
+                    "in_catalog": slug in MODEL_CATALOG,
+                })
+            return results
+        except Exception as e:
+            return []
+
     def _find_catalog_by_dir(self, dirname: str) -> Optional[ModelInfo]:
         for info in MODEL_CATALOG.values():
             if ModelManager._repo_to_dirname(info.hf_repo) == dirname:

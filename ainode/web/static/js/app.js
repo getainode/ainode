@@ -815,6 +815,121 @@ const AINode = {
   //  DOWNLOADS VIEW (center-stage)
   // ========================================================================
 
+  renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, filterPills, totalCount) {
+    var self = this;
+    var query = this.state.hfSearchQuery || '';
+    var needsToolbar = !container.querySelector('#hf-search-input');
+
+    if (needsToolbar) {
+      var toolbarHtml = '<div class="downloads-header">' +
+        '<h2 class="view-title">🤗 Hugging Face Hub</h2>' +
+        '<div class="downloads-count" id="hf-count">Search for any text-generation model</div>' +
+        '</div>' +
+        '<div class="downloads-toolbar">' +
+        '<input type="text" id="hf-search-input" class="search-input" placeholder="Search HuggingFace (e.g. llama, qwen, mistral)..." value="' + this.esc(query) + '">' +
+        '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
+        '</div>' +
+        '<div id="downloads-results"></div>';
+      container.innerHTML = toolbarHtml;
+    } else {
+      var pillsEl = container.querySelector('#downloads-filters');
+      if (pillsEl) pillsEl.innerHTML = filterPills;
+    }
+
+    var resultsContainer = container.querySelector('#downloads-results');
+    var countEl = container.querySelector('#hf-count');
+
+    // Rebind filter pills
+    container.querySelectorAll('.downloads-filter').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.state.modelsFilter = btn.dataset.filter;
+        self.renderDownloads();
+      });
+    });
+
+    // Bind search input (debounced)
+    var input = container.querySelector('#hf-search-input');
+    if (input && !input.dataset.bound) {
+      input.dataset.bound = '1';
+      input.addEventListener('input', function () {
+        self.state.hfSearchQuery = input.value;
+        clearTimeout(self._hfSearchTimer);
+        self._hfSearchTimer = setTimeout(function () {
+          self.performHuggingFaceSearch(input.value, resultsContainer, countEl, loaded, gpuMem);
+        }, 400);
+      });
+    }
+
+    // Initial: if we have a query, rerun search; else show hint
+    if (query) {
+      this.performHuggingFaceSearch(query, resultsContainer, countEl, loaded, gpuMem);
+    } else if (resultsContainer && !resultsContainer.innerHTML) {
+      resultsContainer.innerHTML = '<div class="downloads-empty">Type a search query to find models on HuggingFace Hub.</div>';
+    }
+  },
+
+  performHuggingFaceSearch(query, resultsContainer, countEl, loaded, gpuMem) {
+    var self = this;
+    if (!query || query.length < 2) {
+      if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Type at least 2 characters to search.</div>';
+      if (countEl) countEl.textContent = 'Search for any text-generation model';
+      return;
+    }
+
+    if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Searching HuggingFace...</div>';
+
+    fetch('/api/models/search?q=' + encodeURIComponent(query) + '&limit=50')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var models = data.models || [];
+        if (countEl) countEl.textContent = models.length + ' results for "' + query + '"';
+        if (models.length === 0) {
+          if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">No models found.</div>';
+          return;
+        }
+        var rows = models.map(function (m) {
+          var isLoaded = loaded.includes(m.hf_repo);
+          var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
+          var fits = gpuMem > 0 && m.size_gb > 0 && gpuMem >= m.size_gb;
+          var fitBadge = (gpuMem > 0 && m.size_gb > 0) ? (fits ?
+            '<span class="fit-badge fits">Fits GPU</span>' :
+            '<span class="fit-badge no-fit">Too large</span>') : '';
+          var catalogBadge = m.in_catalog ? '<span class="fit-badge rec">In Catalog</span>' : '';
+          var statusBadge = isLoaded ?
+            '<span class="model-badge loaded">Loaded</span>' :
+            '<span class="model-badge available">Available</span>';
+          var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' downloads' : '';
+          var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
+          var statsLine = [downloadsStr, likesStr].filter(Boolean).join(' · ');
+          var downloadBtn = !isLoaded ?
+            '<button class="btn-nvidia btn-sm hf-download-btn" data-hf-repo="' + self.esc(m.hf_repo) + '" data-hf-slug="' + self.esc(m.id) + '">Download</button>' : '';
+          return '<div class="download-card">' +
+            '<div class="download-card-main">' +
+            '<div class="download-card-info">' +
+            '<div class="download-card-header">' +
+            '<div class="download-card-name">' + self.esc(m.name) + '</div>' +
+            '<div class="download-card-badges">' + catalogBadge + fitBadge + statusBadge + '</div>' +
+            '</div>' +
+            '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
+            '<div class="download-card-desc">' + sizeStr + (statsLine ? ' &middot; ' + statsLine : '') + '</div>' +
+            '</div>' +
+            '<div class="download-card-actions">' + downloadBtn + '</div>' +
+            '</div>' +
+            '</div>';
+        }).join('');
+        if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
+      })
+      .catch(function (err) {
+        if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Search failed: ' + err.message + '</div>';
+      });
+  },
+
+  formatNumber(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  },
+
   renderDownloads() {
     var container = document.getElementById('downloads-content');
     if (!container) return;
@@ -853,6 +968,21 @@ const AINode = {
 
     var catalog = this.state.catalog;
     var query = (this.state.modelsSearch || '').toLowerCase();
+    var totalCount = catalog.length;
+
+    // Build filter pills now so HF branch can use them
+    var allFilters = ['all', 'downloaded', 'available', 'recommended', 'huggingface'];
+    var filterPills = allFilters.map(function (f) {
+      var active = self.state.modelsFilter === f ? ' active' : '';
+      var label = f === 'huggingface' ? '🤗 Hugging Face' : (f.charAt(0).toUpperCase() + f.slice(1));
+      return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + label + '</button>';
+    }).join('');
+
+    // HuggingFace live search mode
+    if (this.state.modelsFilter === 'huggingface') {
+      return this.renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, filterPills, totalCount);
+    }
+
     var models = catalog.filter(function (m) {
       if (query && m.id.toLowerCase().indexOf(query) === -1 &&
           m.desc.toLowerCase().indexOf(query) === -1 &&
@@ -875,12 +1005,6 @@ const AINode = {
       });
     }
 
-    var filterPills = ['all', 'downloaded', 'available', 'recommended'].map(function (f) {
-      var active = self.state.modelsFilter === f ? ' active' : '';
-      return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + f.charAt(0).toUpperCase() + f.slice(1) + '</button>';
-    }).join('');
-
-    var totalCount = catalog.length;
     var filteredCount = models.length;
 
     // Render toolbar once; only results re-render on search

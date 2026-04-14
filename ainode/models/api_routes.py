@@ -23,6 +23,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
 
     app.router.add_get("/api/models", handle_list_models)
     app.router.add_get("/api/models/recommended", handle_recommended)
+    app.router.add_get("/api/models/search", handle_search_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
     app.router.add_post("/api/models/{model_id}/download", handle_download_model)
     app.router.add_delete("/api/models/{model_id}", handle_delete_model)
@@ -99,6 +100,19 @@ async def handle_delete_model(request: web.Request) -> web.Response:
         {"error": f"Model '{model_id}' is not downloaded"},
         status=404,
     )
+
+
+async def handle_search_models(request: web.Request) -> web.Response:
+    """Search HuggingFace Hub for models."""
+    manager: ModelManager = request.app["model_manager"]
+    query = request.query.get("q", "").strip()
+    if not query:
+        return web.json_response({"models": []})
+    limit = int(request.query.get("limit", "30"))
+    # Run the blocking HF call in executor
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, manager.search_huggingface, query, limit)
+    return web.json_response({"models": results, "query": query})
 
 
 async def handle_recommended(request: web.Request) -> web.Response:
