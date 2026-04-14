@@ -115,6 +115,7 @@ body {
 .logo {
   display: flex;
   align-items: center;
+  gap: 14px;
   height: 100%;
 }
 
@@ -122,12 +123,157 @@ body {
   height: 32px;
   width: auto;
   display: block;
-  filter: drop-shadow(0 0 8px rgba(118, 185, 0, 0.15));
+  filter: drop-shadow(0 0 8px rgba(118, 185, 0, 0.25));
   transition: filter 0.2s ease;
 }
 
 .logo-img:hover {
-  filter: drop-shadow(0 0 12px rgba(118, 185, 0, 0.35));
+  filter: drop-shadow(0 0 14px rgba(118, 185, 0, 0.5));
+}
+
+/* Wordmark with gradient shine + shimmer */
+.logo-wordmark {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: baseline;
+  position: relative;
+  user-select: none;
+}
+
+.logo-wordmark-ai {
+  background: linear-gradient(
+    90deg,
+    #8ACE00 0%,
+    #76B900 40%,
+    #BFFF3D 50%,
+    #76B900 60%,
+    #8ACE00 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: logo-shimmer 4s ease-in-out infinite;
+  text-shadow: 0 0 18px rgba(118, 185, 0, 0.35);
+}
+
+.logo-wordmark-node {
+  color: #F5F5F5;
+  text-shadow: 0 0 12px rgba(255, 255, 255, 0.08);
+}
+
+.logo-wordmark-tld {
+  color: var(--nvidia-green);
+  font-weight: 500;
+  font-size: 13px;
+  margin-left: 2px;
+  opacity: 0.7;
+  letter-spacing: 0.5px;
+  position: relative;
+  top: -1px;
+}
+
+@keyframes logo-shimmer {
+  0%, 100% { background-position: 200% 0; }
+  50% { background-position: -100% 0; }
+}
+
+/* ============================================================
+   MINI FOOTER
+   ============================================================ */
+.mini-footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+  z-index: 50;
+  pointer-events: auto;
+}
+
+.mini-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mini-footer-logo {
+  height: 18px;
+  width: auto;
+  opacity: 0.6;
+  filter: drop-shadow(0 0 4px rgba(118, 185, 0, 0.2));
+}
+
+.mini-footer-tagline {
+  color: var(--text-muted);
+  letter-spacing: 0.2px;
+}
+
+.mini-footer-tagline a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.mini-footer-tagline a:hover {
+  color: var(--nvidia-green);
+}
+
+.mini-footer-heart {
+  color: var(--red);
+  animation: heart-beat 2.5s ease-in-out infinite;
+  display: inline-block;
+  margin: 0 2px;
+}
+
+@keyframes heart-beat {
+  0%, 100% { transform: scale(1); }
+  15%, 35% { transform: scale(1.2); }
+  25% { transform: scale(1); }
+}
+
+.mini-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+}
+
+.mini-footer-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: all 0.15s ease;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.mini-footer-link:hover {
+  color: var(--nvidia-green);
+  text-shadow: 0 0 6px var(--nvidia-green-glow);
+}
+
+.mini-footer-sep {
+  color: var(--border-hover);
+}
+
+/* Make room for footer at the bottom of the viewport */
+body {
+  padding-bottom: 32px;
 }
 
 .top-bar-nav {
