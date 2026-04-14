@@ -1521,33 +1521,62 @@ select {
 /* ============================================================
    DOWNLOADS / MODEL LIST
    ============================================================ */
+.downloads-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 24px 32px 8px;
+  gap: 16px;
+}
+
+.view-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  margin: 0;
+}
+
+.downloads-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+}
+
 .downloads-toolbar {
-  padding: 20px 24px 0;
+  padding: 8px 32px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .downloads-toolbar .search-input {
   width: 100%;
-  margin: 0 0 12px;
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 14px;
 }
 
 .downloads-toolbar .pill-group {
-  margin: 0 0 16px;
+  margin: 0;
+  flex-wrap: wrap;
 }
 
 .downloads-grid {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 0 24px 24px;
+  padding: 0 32px 32px;
 }
 
 .download-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px 20px;
   transition: all 0.15s ease;
   cursor: default;
+  overflow: hidden;
 }
 
 .download-card:hover {
@@ -1555,19 +1584,42 @@ select {
   background: var(--bg-card-hover);
 }
 
+.download-card-main {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 20px;
+}
+
+.download-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
 .download-card-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 4px;
 }
 
 .download-card-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
-  font-family: var(--font-mono);
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.1px;
+}
+
+.download-card-repo {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-bottom: 6px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1575,19 +1627,29 @@ select {
 
 .download-card-badges {
   display: flex;
-  gap: 8px;
-  flex-shrink: 0;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .download-card-desc {
   font-size: 13px;
   color: var(--text-secondary);
-  margin-bottom: 12px;
+  line-height: 1.5;
 }
 
 .download-card-actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.download-card-actions .btn-sm {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border-radius: var(--radius);
 }
 
 .fit-badge {
@@ -1599,6 +1661,7 @@ select {
   font-weight: 700;
   letter-spacing: 0.5px;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .fit-badge.fits {
@@ -1611,6 +1674,20 @@ select {
   background: var(--amber-glow);
   color: var(--amber);
   border: 1px solid rgba(255, 184, 0, 0.3);
+}
+
+.fit-badge.rec {
+  background: rgba(118, 185, 0, 0.15);
+  color: var(--nvidia-green-bright);
+  border: 1px solid var(--nvidia-green);
+  box-shadow: 0 0 8px var(--nvidia-green-glow);
+}
+
+.fit-badge.quant {
+  background: rgba(0, 212, 170, 0.1);
+  color: var(--cyan);
+  border: 1px solid rgba(0, 212, 170, 0.3);
+  font-family: var(--font-mono);
 }
 
 .downloads-empty {

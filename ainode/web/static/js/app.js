@@ -813,18 +813,37 @@ const AINode = {
     var totalClusterMem = nodes.reduce(function (sum, n) { return sum + (n.gpu_memory_gb || 0); }, 0);
     var clusterNodeCount = nodes.length;
 
-    var recommended = [
-      { id: 'meta-llama/Llama-3.2-3B-Instruct', size: '~6 GB', sizeGb: 6, desc: 'Quick start, fast inference', recommended: true },
-      { id: 'meta-llama/Llama-3.1-8B-Instruct', size: '~16 GB', sizeGb: 16, desc: 'Recommended for most tasks', recommended: true },
-      { id: 'meta-llama/Llama-3.1-70B-Instruct-AWQ', size: '~35 GB', sizeGb: 35, desc: 'High quality, needs 40+ GB', recommended: false },
-      { id: 'Qwen/Qwen2.5-72B-Instruct', size: '~40 GB', sizeGb: 40, desc: 'Great for coding + multilingual', recommended: false },
-      { id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', size: '~14 GB', sizeGb: 14, desc: 'Reasoning specialist', recommended: true },
-      { id: 'mistralai/Mistral-7B-Instruct-v0.3', size: '~14 GB', sizeGb: 14, desc: 'Fast, general purpose', recommended: false },
-    ];
+    // Fetch catalog from API (42+ models) — lazy load once
+    if (!this.state.catalog) {
+      this.state.catalog = [];
+      fetch('/api/models').then(function (r) { return r.json(); }).then(function (data) {
+        self.state.catalog = (data.models || []).map(function (m) {
+          return {
+            id: m.hf_repo || m.id,
+            slug: m.id,
+            name: m.name,
+            size: '~' + Math.round(m.size_gb) + ' GB',
+            sizeGb: m.size_gb,
+            desc: m.description,
+            family: m.family || '',
+            params: m.params_b ? m.params_b + 'B' : '',
+            quantization: m.quantization,
+            minMem: m.min_memory_gb || m.size_gb,
+            recommended: m.recommended || false,
+          };
+        });
+        self.renderDownloads();
+      }).catch(function () { self.state.catalog = []; });
+      container.innerHTML = '<div class="downloads-empty">Loading catalog...</div>';
+      return;
+    }
 
+    var catalog = this.state.catalog;
     var query = (this.state.modelsSearch || '').toLowerCase();
-    var models = recommended.filter(function (m) {
-      if (query && m.id.toLowerCase().indexOf(query) === -1 && m.desc.toLowerCase().indexOf(query) === -1) return false;
+    var models = catalog.filter(function (m) {
+      if (query && m.id.toLowerCase().indexOf(query) === -1 &&
+          m.desc.toLowerCase().indexOf(query) === -1 &&
+          (m.family || '').toLowerCase().indexOf(query) === -1) return false;
       var isLoaded = loaded.includes(m.id);
       if (self.state.modelsFilter === 'downloaded' && !isLoaded) return false;
       if (self.state.modelsFilter === 'available' && isLoaded) return false;
@@ -835,27 +854,44 @@ const AINode = {
     if (this.state.modelsSort === 'size-asc') models.sort(function (a, b) { return a.sizeGb - b.sizeGb; });
     else if (this.state.modelsSort === 'size-desc') models.sort(function (a, b) { return b.sizeGb - a.sizeGb; });
     else if (this.state.modelsSort === 'name') models.sort(function (a, b) { return a.id.localeCompare(b.id); });
+    else {
+      // Default: recommended first, then by size
+      models.sort(function (a, b) {
+        if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+        return a.sizeGb - b.sizeGb;
+      });
+    }
 
     var filterPills = ['all', 'downloaded', 'available', 'recommended'].map(function (f) {
       var active = self.state.modelsFilter === f ? ' active' : '';
       return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + f.charAt(0).toUpperCase() + f.slice(1) + '</button>';
     }).join('');
 
-    var html = '<div class="downloads-toolbar">' +
-      '<input type="text" id="downloads-search" class="search-input" placeholder="Search models..." value="' + this.esc(this.state.modelsSearch) + '">' +
+    var totalCount = catalog.length;
+    var filteredCount = models.length;
+
+    var html = '<div class="downloads-header">' +
+      '<h2 class="view-title">Model Catalog</h2>' +
+      '<div class="downloads-count">' + filteredCount + ' of ' + totalCount + ' models</div>' +
+      '</div>' +
+      '<div class="downloads-toolbar">' +
+      '<input type="text" id="downloads-search" class="search-input" placeholder="Search models, families, or descriptions..." value="' + this.esc(this.state.modelsSearch) + '">' +
       '<div class="pill-group downloads-filters">' + filterPills + '</div>' +
       '</div>';
 
     html += '<div class="downloads-grid">';
     html += models.map(function (model) {
       var isLoaded = loaded.includes(model.id);
-      var fits = gpuMem >= model.sizeGb;
+      var fits = gpuMem >= (model.minMem || model.sizeGb);
       var fitBadge = gpuMem > 0 ? (fits ?
         '<span class="fit-badge fits">Fits GPU</span>' :
         '<span class="fit-badge no-fit">Too large</span>') : '';
       var statusBadge = isLoaded ?
         '<span class="model-badge loaded">Loaded</span>' :
         '<span class="model-badge available">Available</span>';
+      var recBadge = model.recommended ? '<span class="fit-badge rec">Recommended</span>' : '';
+      var quantBadge = model.quantization ? '<span class="fit-badge quant">' + self.esc(model.quantization.toUpperCase()) + '</span>' : '';
+      var paramsText = model.params ? model.params + ' params · ' : '';
       var downloadBtn = !isLoaded ?
         '<button class="btn-nvidia btn-sm downloads-download-btn" data-model-id="' + self.esc(model.id) + '">Download</button>' : '';
       var shardBtn = '';
@@ -863,12 +899,17 @@ const AINode = {
         shardBtn = '<button class="btn-sm downloads-shard-btn" data-model-id="' + self.esc(model.id) + '">Shard Across Cluster</button>';
       }
       return '<div class="download-card" data-model-id="' + self.esc(model.id) + '">' +
+        '<div class="download-card-main">' +
+        '<div class="download-card-info">' +
         '<div class="download-card-header">' +
-        '<div class="download-card-name">' + self.esc(model.id) + '</div>' +
-        '<div class="download-card-badges">' + fitBadge + statusBadge + '</div>' +
+        '<div class="download-card-name">' + self.esc(model.name || model.id) + '</div>' +
+        '<div class="download-card-badges">' + recBadge + quantBadge + fitBadge + statusBadge + '</div>' +
         '</div>' +
-        '<div class="download-card-desc">' + model.size + ' &middot; ' + self.esc(model.desc) + '</div>' +
+        '<div class="download-card-repo">' + self.esc(model.id) + '</div>' +
+        '<div class="download-card-desc">' + paramsText + model.size + ' &middot; ' + self.esc(model.desc) + '</div>' +
+        '</div>' +
         '<div class="download-card-actions">' + downloadBtn + shardBtn + '</div>' +
+        '</div>' +
         '</div>';
     }).join('');
     html += '</div>';

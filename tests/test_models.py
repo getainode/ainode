@@ -46,7 +46,8 @@ def _fake_downloaded(manager: ModelManager, model_id: str) -> Path:
 
 class TestCatalog:
     def test_catalog_has_expected_models(self):
-        expected = {
+        # Original 8 entries must remain (tests and clients depend on these IDs).
+        expected_subset = {
             "llama-3.2-3b",
             "llama-3.1-8b",
             "llama-3.1-70b-awq",
@@ -56,7 +57,9 @@ class TestCatalog:
             "phi-3-mini",
             "codellama-34b",
         }
-        assert set(MODEL_CATALOG.keys()) == expected
+        assert expected_subset.issubset(set(MODEL_CATALOG.keys()))
+        # Catalog should be meaningfully expanded beyond the original 8.
+        assert len(MODEL_CATALOG) >= 40
 
     def test_all_entries_are_model_info(self):
         for model_id, info in MODEL_CATALOG.items():
@@ -145,16 +148,18 @@ class TestRecommendations:
         assert "llama-3.1-70b-awq" not in ids
 
     def test_recommend_large_gpu(self, manager: ModelManager):
-        recs = manager.recommend_for_gpu(256)
-        # Everything should fit on 256 GB
+        # Pick a value larger than any catalog entry's min_memory_gb so all fit.
+        huge = max(info.min_memory_gb for info in MODEL_CATALOG.values()) + 1
+        recs = manager.recommend_for_gpu(huge)
         assert len(recs) == len(MODEL_CATALOG)
 
     def test_recommend_tiny_gpu(self, manager: ModelManager):
-        recs = manager.recommend_for_gpu(4)
+        recs = manager.recommend_for_gpu(1)
         assert len(recs) == 0
 
     def test_recommend_sorted_by_size_desc(self, manager: ModelManager):
-        recs = manager.recommend_for_gpu(256)
+        huge = max(info.min_memory_gb for info in MODEL_CATALOG.values()) + 1
+        recs = manager.recommend_for_gpu(huge)
         sizes = [r["size_gb"] for r in recs]
         assert sizes == sorted(sizes, reverse=True)
 
