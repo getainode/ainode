@@ -274,6 +274,128 @@ For 100 GB+ models where load latency matters:
 Not implemented yet; file this as a follow-up slice when it becomes a
 bottleneck.
 
+## 10.6. Custom vLLM image build + publish
+
+Stock `scitrera/dgx-spark-vllm:0.17.0-t5` hangs during multi-node tensor-parallel
+init on GB10 (workers spawn, placement groups allocate, but TP workers never
+start NCCL). Fix: build on top of [eugr/spark-vllm-docker] which carries the
+NCCL patches, FlashInfer patches and DGX-Spark-tuned vLLM wheel the community
+uses for working 2-/3-node mesh clusters.
+
+[eugr/spark-vllm-docker]: https://github.com/eugr/spark-vllm-docker
+
+### Build (maintainers only — end users never compile)
+
+On any Spark (needs the GB10 toolchain):
+```bash
+git clone https://github.com/eugr/spark-vllm-docker.git
+cd spark-vllm-docker
+./build-and-copy.sh --copy-to <spark2-ip>,<gx10-ip> --copy-parallel
+```
+
+Compiles NCCL + vLLM from source (~15–25 min with prebuilt wheels, longer on
+`--rebuild-vllm`). Lands as local image `vllm-node:latest` on all 3 hosts.
+
+### Smoke-test before publishing
+
+Do §10.7 (distributed inference smoke) on the built image. If TP=3 across 3
+nodes produces valid completions, *then* push to registries. Never publish an
+unverified image.
+
+### Publish to both registries
+
+Once green, tag + push to **both** GHCR and Docker Hub. We dual-publish so
+end users can pull from whichever they prefer; install.sh defaults to GHCR.
+
+```bash
+VERSION=0.3.1
+docker tag vllm-node:latest  ghcr.io/getainode/ainode-vllm:${VERSION}
+docker tag vllm-node:latest  ghcr.io/getainode/ainode-vllm:latest
+docker tag vllm-node:latest  argentos/ainode-vllm:${VERSION}
+docker tag vllm-node:latest  argentos/ainode-vllm:latest
+
+docker push ghcr.io/getainode/ainode-vllm:${VERSION}
+docker push ghcr.io/getainode/ainode-vllm:latest
+docker push argentos/ainode-vllm:${VERSION}
+docker push argentos/ainode-vllm:latest
+```
+
+### Automate with GitHub Actions (self-hosted aarch64 runner on a Spark)
+
+GitHub's free runners don't have aarch64 + GB10. Register one of the Sparks as
+a self-hosted runner (Settings → Actions → Runners → New self-hosted runner),
+then a workflow like:
+
+```yaml
+# .github/workflows/build-vllm-image.yml
+on:
+  workflow_dispatch:
+  push:
+    tags: ['vllm-image-v*']
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, dgx-spark]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+      - uses: docker/login-action@v3
+        with: { username: ${{ secrets.DOCKERHUB_USER }}, password: ${{ secrets.DOCKERHUB_TOKEN }} }
+      - run: ./scripts/build-vllm-image.sh   # wraps eugr build + tags for both registries
+      - run: docker push --all-tags ghcr.io/getainode/ainode-vllm
+      - run: docker push --all-tags argentos/ainode-vllm
+```
+
+### install.sh wiring
+
+Default to GHCR. Allow Docker Hub fallback via env:
+
+```bash
+AINODE_VLLM_IMAGE="${AINODE_VLLM_IMAGE:-ghcr.io/getainode/ainode-vllm:latest}"
+# Or set AINODE_VLLM_IMAGE=argentos/ainode-vllm:latest to pull from Docker Hub.
+docker pull "$AINODE_VLLM_IMAGE"
+```
+
+Update `~/.ainode/docker-compose.yml` image line to use `${AINODE_VLLM_IMAGE}`
+rendered from `~/.ainode/.env`.
+
+### Tagging policy
+
+- `latest` — always the most recent verified image
+- `X.Y.Z` — immutable tag matching AINode release; pinned in install.sh
+- `dev-<sha>` — pre-release builds, not touched by install.sh
+
+## 10.7. Distributed inference smoke test
+
+Pre-flight before publishing or claiming cross-node TP works.
+
+**Preconditions:** 3 nodes up, Ray cluster formed, shared NFS model cache at
+`/models` inside container.
+
+```bash
+# On master, inside the vllm image, with existing Ray head running:
+vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+  --host 0.0.0.0 --port 8000 \
+  --distributed-executor-backend ray \
+  --tensor-parallel-size 3 \
+  --gpu-memory-utilization 0.5 \
+  --dtype bfloat16 \
+  --download-dir /models
+
+# Wait for "Application startup complete" in log
+# Then:
+curl http://<master-ip>:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":10}'
+# Expect valid completion in response
+
+# Simultaneously on all 3 nodes:
+nvidia-smi --query-gpu=memory.used --format=csv
+# Each node should show ~3 GB of GPU memory allocated by vLLM worker
+```
+
+Only after this passes on the built image do we publish.
+
 ## 11. Known issues / gotchas
 
 - EXO grabs UDP 5678 on DGX Sparks. AINode discovery pinned to 5679 in the install config.
