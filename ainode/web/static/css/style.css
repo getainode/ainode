@@ -287,15 +287,61 @@ html, body {
 }
 
 /* ============================================================
-   CHAT OVERLAY (messages in center-stage)
+   CHAT VIEW & OVERLAY
    ============================================================ */
+#view-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+#view-chat-mount {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.chat-empty-icon {
+  color: var(--nvidia-green-dim);
+  margin-bottom: 20px;
+  opacity: 0.6;
+  filter: drop-shadow(0 0 12px var(--nvidia-green-glow));
+}
+
+.chat-empty-state h2 {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+  letter-spacing: -0.3px;
+}
+
+.chat-empty-state p {
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 400px;
+  line-height: 1.5;
+}
+
 .chat-overlay {
-  position: absolute;
-  inset: 0;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-primary);
-  z-index: 10;
 }
 
 .chat-metrics-bar {

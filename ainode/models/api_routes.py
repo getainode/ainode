@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
@@ -30,6 +31,8 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_get("/api/models/openrouter", handle_openrouter_models)
     app.router.add_get("/api/models/ollama", handle_ollama_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
+    app.router.add_post("/api/models/download-repo", handle_download_repo)
+    app.router.add_get("/api/models/download/status", handle_download_status)
     app.router.add_post("/api/models/{model_id}/download", handle_download_model)
     app.router.add_delete("/api/models/{model_id}", handle_delete_model)
 
@@ -90,6 +93,61 @@ async def handle_download_model(request: web.Request) -> web.Response:
         {"job_id": job_id, "model_id": model_id, "status": "downloading"},
         status=202,
     )
+
+
+async def handle_download_repo(request: web.Request) -> web.Response:
+    """POST /api/models/download-repo -- download any HF repo directly."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    hf_repo = body.get("hf_repo") or body.get("repo") or body.get("model_id") or ""
+    hf_repo = hf_repo.strip()
+    if not hf_repo or "/" not in hf_repo:
+        return web.json_response({"error": "hf_repo required (e.g. meta-llama/Llama-3.2-3B-Instruct)"}, status=400)
+
+    manager: ModelManager = request.app["model_manager"]
+    job_id = str(uuid.uuid4())
+    jobs: dict = request.app["download_jobs"]
+    jobs[job_id] = {"model_id": hf_repo, "status": "downloading", "error": None, "finished_at": None}
+    _cleanup_old_jobs(jobs)
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(_run_download_repo(manager, hf_repo, job_id, jobs))
+
+    return web.json_response(
+        {"job_id": job_id, "hf_repo": hf_repo, "status": "downloading"},
+        status=202,
+    )
+
+
+async def handle_download_status(request: web.Request) -> web.Response:
+    """GET /api/models/download/status?job_id=... — returns job status."""
+    job_id = request.query.get("job_id", "").strip()
+    jobs: dict = request.app["download_jobs"]
+    if job_id and job_id in jobs:
+        return web.json_response(jobs[job_id])
+    return web.json_response({"error": "job not found", "status": "unknown"}, status=404)
+
+
+async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str, jobs: dict) -> None:
+    """Download an arbitrary HF repo that may not be in our catalog."""
+    try:
+        loop = asyncio.get_event_loop()
+        def _do_download():
+            from huggingface_hub import snapshot_download
+            target = Path(manager.models_dir) / hf_repo.replace("/", "--")
+            target.mkdir(parents=True, exist_ok=True)
+            snapshot_download(repo_id=hf_repo, local_dir=str(target))
+            return str(target)
+        await loop.run_in_executor(None, _do_download)
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["finished_at"] = time.time()
+    except Exception as exc:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = str(exc)
+        jobs[job_id]["finished_at"] = time.time()
 
 
 async def handle_delete_model(request: web.Request) -> web.Response:

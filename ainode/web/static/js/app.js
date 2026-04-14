@@ -479,26 +479,35 @@ const AINode = {
   populateLaunchModels() {
     var select = document.getElementById('launch-model');
     if (!select) return;
-    var s = this.state.status;
-    if (!s || !s.models_loaded) return;
-
-    // Also fetch available models
     var self = this;
-    if (!this._launchModelsPopulated) {
-      this._launchModelsPopulated = true;
-      this.fetchJSON('/api/models').then(function (data) {
-        if (!data) return;
-        var models = data.models || data.available || [];
-        if (models.length === 0) return;
-        var cv = select.value;
-        select.innerHTML = '<option value="">-- SELECT MODEL --</option>' +
-          models.map(function (m) {
-            var id = typeof m === 'string' ? m : m.id || m.model_id || '';
-            return '<option value="' + self.esc(id) + '">' + self.esc(id) + '</option>';
-          }).join('');
-        if (cv) select.value = cv;
+    var s = this.state.status;
+    var loaded = (s && s.models_loaded) || [];
+
+    this.fetchJSON('/api/models').then(function (data) {
+      if (!data) return;
+      var all = data.models || [];
+      // Only show models that are downloaded (or currently loaded).
+      var ready = all.filter(function (m) {
+        if (m.downloaded) return true;
+        if (loaded.indexOf(m.hf_repo) !== -1) return true;
+        if (loaded.indexOf(m.id) !== -1) return true;
+        return false;
       });
-    }
+
+      var cv = select.value;
+      if (ready.length === 0) {
+        select.innerHTML = '<option value="">-- No models downloaded --</option>';
+        return;
+      }
+      select.innerHTML = '<option value="">-- SELECT MODEL --</option>' +
+        ready.map(function (m) {
+          var repo = m.hf_repo || m.id;
+          var label = m.name || repo;
+          var sizeNote = m.size_gb ? ' (' + Math.round(m.size_gb) + ' GB)' : '';
+          return '<option value="' + self.esc(repo) + '">' + self.esc(label) + sizeNote + '</option>';
+        }).join('');
+      if (cv) select.value = cv;
+    });
   },
 
   async launchInstance() {
@@ -736,9 +745,10 @@ const AINode = {
     if (!this.state.currentConversation) this.newConversation();
 
     this.state.messages.push({ role: 'user', content: content });
-    this.renderChatMessages();
 
-    // Switch center-stage to show chat overlay
+    // Auto-navigate to chat view when sending
+    this.navigate('chat');
+    this.renderChatMessages();
     this.showChatOverlay();
 
     var select = document.getElementById('chat-model');
@@ -795,7 +805,7 @@ const AINode = {
               var elapsed = (performance.now() - this.state.streamMetrics.firstTokenTime) / 1000;
               if (elapsed > 0) this.state.streamMetrics.tps = this.state.streamMetrics.tokens / elapsed;
               assistantMsg.content += delta;
-              this.renderChatMessages();
+              this.updateStreamingMessage(assistantMsg);
               this.updateStreamMetrics();
             }
           } catch (e) { /* skip parse errors */ }
@@ -822,8 +832,8 @@ const AINode = {
   // ========================================================================
 
   showChatOverlay() {
-    var stage = document.getElementById('center-stage');
-    if (!stage) return;
+    var mount = document.getElementById('view-chat-mount');
+    if (!mount) return;
     var overlay = document.getElementById('chat-overlay');
     if (!overlay) {
       overlay = document.createElement('div');
@@ -835,14 +845,19 @@ const AINode = {
         '<span id="chat-metric-tokens">0 tokens</span>' +
         '</div>' +
         '<div class="chat-messages" id="chat-messages"></div>';
-      stage.appendChild(overlay);
+      mount.appendChild(overlay);
     }
-    overlay.style.display = '';
+    // Hide the empty state when we have messages
+    var empty = document.getElementById('chat-view-empty');
+    if (empty) empty.style.display = this.state.messages.length > 0 ? 'none' : '';
+    overlay.style.display = this.state.messages.length > 0 ? '' : 'none';
   },
 
   hideChatOverlay() {
     var overlay = document.getElementById('chat-overlay');
     if (overlay) overlay.style.display = 'none';
+    var empty = document.getElementById('chat-view-empty');
+    if (empty) empty.style.display = '';
   },
 
   updateStreamMetrics() {
@@ -853,6 +868,24 @@ const AINode = {
     if (t1) t1.textContent = m.ttft != null ? 'TTFT: ' + m.ttft + 'ms' : 'TTFT: --';
     if (t2) t2.textContent = m.tps > 0 ? m.tps.toFixed(1) + ' tok/s' : '-- tok/s';
     if (t3) t3.textContent = m.tokens + ' tokens';
+  },
+
+  // Targeted update for streaming — only rewrites the current assistant message
+  updateStreamingMessage(assistantMsg) {
+    var container = document.getElementById('chat-messages');
+    if (!container) { this.renderChatMessages(); return; }
+    var last = container.lastElementChild;
+    if (!last || !last.classList.contains('assistant')) {
+      // Not yet rendered — full render once
+      this.renderChatMessages();
+      return;
+    }
+    var contentEl = last.querySelector('.chat-msg-content');
+    if (!contentEl) { this.renderChatMessages(); return; }
+    contentEl.innerHTML = this.formatMarkdown(assistantMsg.content);
+    // Auto-scroll to bottom only if user hasn't scrolled up
+    var atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+    if (atBottom) container.scrollTop = container.scrollHeight;
   },
 
   renderChatMessages() {
@@ -1022,10 +1055,63 @@ const AINode = {
             '</div>';
         }).join('');
         resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
+        self.bindRepoDownloadButtons(resultsContainer);
       })
       .catch(function (err) {
         if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Failed to fetch: ' + self.esc(err.message || 'network error') + '</div>';
       });
+  },
+
+  bindRepoDownloadButtons(container) {
+    var self = this;
+    container.querySelectorAll('.downloads-download-btn').forEach(function (btn) {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var hfRepo = btn.dataset.modelId;
+        if (!hfRepo || hfRepo.indexOf('/') === -1) {
+          self.toast('Invalid model repo', 'error');
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+        fetch('/api/models/download-repo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hf_repo: hfRepo }),
+        }).then(function (resp) {
+          if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t.slice(0, 80)); });
+          return resp.json();
+        }).then(function (data) {
+          if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Download'; return; }
+          btn.textContent = 'Downloading...';
+          self.toast('Download started: ' + hfRepo, 'info');
+          var jobId = data.job_id;
+          var pollId = setInterval(function () {
+            fetch('/api/models/download/status?job_id=' + encodeURIComponent(jobId))
+              .then(function (r) { return r.json(); })
+              .then(function (st) {
+                if (st.status === 'completed') {
+                  clearInterval(pollId);
+                  btn.textContent = 'Downloaded';
+                  self.toast('Downloaded: ' + hfRepo, 'success');
+                  self.refresh();
+                } else if (st.status === 'failed') {
+                  clearInterval(pollId);
+                  btn.textContent = 'Failed';
+                  self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
+                  setTimeout(function () { btn.disabled = false; btn.textContent = 'Download'; }, 3000);
+                }
+              }).catch(function () { /* keep polling */ });
+          }, 3000);
+        }).catch(function (err) {
+          self.toast('Download failed: ' + err.message, 'error');
+          btn.disabled = false;
+          btn.textContent = 'Download';
+        });
+      });
+    });
   },
 
   relativeTime(isoString) {
@@ -1154,7 +1240,10 @@ const AINode = {
             '</div>' +
             '</div>';
         }).join('');
-        if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
+        if (resultsContainer) {
+          resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
+          self.bindRepoDownloadButtons(resultsContainer);
+        }
       })
       .catch(function (err) {
         if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Search failed: ' + err.message + '</div>';

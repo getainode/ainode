@@ -27,8 +27,10 @@
         </span>
       </div>
       <nav class="top-nav">
-        <button class="nav-pill active" data-view="dashboard">Dashboard</button>
+        <button class="nav-pill active" data-view="dashboard">Cluster</button>
+        <button class="nav-pill" data-view="chat">Chat</button>
         <button class="nav-pill" data-view="downloads">Downloads</button>
+        <button class="nav-pill" data-view="training">Training</button>
       </nav>
       <div class="top-bar-status">
         <span class="status-dot"></span>
@@ -51,6 +53,19 @@
       <!-- Dashboard view (default) -->
       <div id="view-dashboard" class="view">
         <canvas id="topology-canvas"></canvas>
+      </div>
+      <!-- Chat view -->
+      <div id="view-chat" class="view" style="display:none">
+        <div id="chat-view-empty" class="chat-empty-state">
+          <div class="chat-empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+            </svg>
+          </div>
+          <h2>Start a conversation</h2>
+          <p>Chat with your local AI models. Drag images to the chat area for vision models.</p>
+        </div>
+        <div id="view-chat-mount"></div>
       </div>
       <!-- Downloads view -->
       <div id="view-downloads" class="view" style="display:none">
