@@ -34,6 +34,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_post("/api/models/download-repo", handle_download_repo)
     app.router.add_get("/api/models/download/status", handle_download_status)
     app.router.add_get("/api/models/downloads/active", handle_active_downloads)
+    app.router.add_post("/api/models/delete-repo", handle_delete_repo)
     app.router.add_post("/api/models/{model_id}/download", handle_download_model)
     app.router.add_delete("/api/models/{model_id}", handle_delete_model)
 
@@ -132,6 +133,46 @@ async def handle_download_status(request: web.Request) -> web.Response:
         payload["job_id"] = job_id
         return web.json_response(payload)
     return web.json_response({"error": "job not found", "status": "unknown"}, status=404)
+
+
+async def handle_delete_repo(request: web.Request) -> web.Response:
+    """POST /api/models/delete-repo — delete any downloaded hf_repo directory."""
+    import shutil
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    hf_repo = (body.get("hf_repo") or body.get("model_id") or "").strip()
+    if not hf_repo or "/" not in hf_repo:
+        return web.json_response({"error": "hf_repo required"}, status=400)
+
+    manager: ModelManager = request.app["model_manager"]
+    slug = hf_repo.replace("/", "--")
+    target = Path(manager.models_dir) / slug
+
+    if not target.exists() or not target.is_dir():
+        return web.json_response({"error": f"Model not downloaded: {hf_repo}"}, status=404)
+
+    # Safety: ensure we're deleting inside models_dir
+    try:
+        target_resolved = target.resolve()
+        models_resolved = Path(manager.models_dir).resolve()
+        if not str(target_resolved).startswith(str(models_resolved)):
+            return web.json_response({"error": "refusing to delete outside models_dir"}, status=400)
+    except Exception:
+        return web.json_response({"error": "path resolution failed"}, status=500)
+
+    try:
+        size_gb = manager._dir_size_gb(target)
+        shutil.rmtree(target)
+        return web.json_response({
+            "status": "deleted",
+            "hf_repo": hf_repo,
+            "freed_gb": round(size_gb, 2),
+        })
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
 
 
 async def handle_active_downloads(request: web.Request) -> web.Response:

@@ -1145,6 +1145,79 @@ const AINode = {
         if (repo) self.showModelDetail(repo);
       });
     });
+
+    // Delete buttons
+    container.querySelectorAll('.downloads-delete-btn').forEach(function (btn) {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var repo = btn.dataset.modelId;
+        self.confirmDeleteModel(repo);
+      });
+    });
+  },
+
+  confirmDeleteModel(hfRepo) {
+    var self = this;
+    var existing = document.getElementById('confirm-delete-modal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'confirm-delete-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal" style="max-width:480px">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon" style="color:var(--red);border-color:rgba(255,51,51,0.4)">⚠</div>' +
+            '<div class="md-title">Delete Model</div>' +
+          '</div>' +
+          '<button class="md-close">×</button>' +
+        '</div>' +
+        '<div class="md-description">' +
+          'Permanently remove <strong>' + self.esc(hfRepo) + '</strong> from disk?' +
+          '<br><span style="color:var(--text-muted);font-size:13px">This frees the disk space immediately. You can re-download anytime.</span>' +
+        '</div>' +
+        '<div class="md-footer">' +
+          '<button class="btn-sm" id="cd-cancel" style="background:transparent;color:var(--text-secondary);border:1px solid var(--border-hover)">Cancel</button>' +
+          '<button class="btn-sm" id="cd-confirm" style="background:var(--red);color:#fff;border:1px solid var(--red);font-weight:700;letter-spacing:0.5px;padding:10px 22px">DELETE</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.querySelector('#cd-cancel').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+    modal.querySelector('#cd-confirm').addEventListener('click', function () {
+      var btn = modal.querySelector('#cd-confirm');
+      btn.disabled = true;
+      btn.textContent = 'Deleting...';
+      fetch('/api/models/delete-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hf_repo: hfRepo }),
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (data.error) {
+          self.toast('Delete failed: ' + data.error, 'error');
+          btn.disabled = false;
+          btn.textContent = 'DELETE';
+          return;
+        }
+        self.toast('Deleted ' + hfRepo + ' (freed ' + (data.freed_gb || '?') + ' GB)', 'success');
+        close();
+        self.state.catalog = null;  // force catalog refresh
+        self.refresh();
+        self._downloadsViewInitialized = false;
+        self.renderDownloads();
+      }).catch(function (err) {
+        self.toast('Delete failed: ' + err.message, 'error');
+        btn.disabled = false;
+        btn.textContent = 'DELETE';
+      });
+    });
   },
 
   // Persist active downloads to localStorage so page refresh doesn't lose them
@@ -1980,10 +2053,12 @@ const AINode = {
       var downloadsText = model.downloads ? self.formatNumber(model.downloads) + ' ⬇' : '';
       var descParts = [paramsText, model.size, ageText, downloadsText].filter(Boolean);
       var capabilityBadges = self.renderCapabilityBadges(model);
-      var downloadBtn = !isLoaded ?
-        '<button class="btn-nvidia btn-sm downloads-download-btn" data-model-id="' + self.esc(model.id) + '">Download</button>' : '';
+      var isDownloaded = model.downloaded === true;
+      var actionBtn = isDownloaded
+        ? '<button class="btn-sm downloads-delete-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Delete</button>'
+        : '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Download</button>';
       var shardBtn = '';
-      if (!fits && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb) {
+      if (!fits && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb && !isDownloaded) {
         shardBtn = '<button class="btn-sm downloads-shard-btn" data-model-id="' + self.esc(model.id) + '">Shard Across Cluster</button>';
       }
       var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(model.hf_repo || model.id) + '">Details</button>';
@@ -1997,7 +2072,7 @@ const AINode = {
         '<div class="download-card-repo">' + self.esc(model.id) + '</div>' +
         '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
         '</div>' +
-        '<div class="download-card-actions">' + detailsBtn + downloadBtn + shardBtn + '</div>' +
+        '<div class="download-card-actions">' + detailsBtn + actionBtn + shardBtn + '</div>' +
         '</div>' +
         '</div>';
     }).join('');

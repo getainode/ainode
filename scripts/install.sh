@@ -1,15 +1,14 @@
 #!/bin/bash
 # AINode installer — https://ainode.dev
 # Usage: curl -fsSL https://ainode.dev/install | bash
+#        AINODE_REPO=webdevtodayjason/ainode bash scripts/install.sh   (use a fork)
 set -e
 
-AINODE_VERSION="0.1.0"
+AINODE_VERSION="0.2.0"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
 VENV_DIR="$AINODE_HOME/venv"
-
-# vLLM source build config (for Blackwell/CUDA 13)
-VLLM_COMMIT="66a168a197ba214a5b70a74fa2e713c9eeb3251a"
-TRITON_COMMIT="4caa0328bf8df64896dd5f6fb9df41b0eb2e750a"
+AINODE_REPO="${AINODE_REPO:-webdevtodayjason/ainode}"
+AINODE_BRANCH="${AINODE_BRANCH:-main}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -28,14 +27,15 @@ banner() {
     echo ""
 }
 
-log()     { echo -e "    ${GREEN}✓${NC} $1"; }
-info()    { echo -e "    ${BLUE}→${NC} $1"; }
-warn()    { echo -e "    ${YELLOW}!${NC} $1"; }
-fail()    { echo -e "    ${RED}✗${NC} $1"; exit 1; }
-step()    { echo ""; echo -e "    ${CYAN}[$1]${NC} $2"; }
+log()   { echo -e "    ${GREEN}✓${NC} $1"; }
+info()  { echo -e "    ${BLUE}→${NC} $1"; }
+warn()  { echo -e "    ${YELLOW}!${NC} $1"; }
+fail()  { echo -e "    ${RED}✗${NC} $1"; exit 1; }
+step()  { echo ""; echo -e "    ${CYAN}[$1]${NC} $2"; }
 
 banner
 echo "    Installing AINode v${AINODE_VERSION}..."
+echo "    Source: ${AINODE_REPO}@${AINODE_BRANCH}"
 echo ""
 
 # ── System checks ─────────────────────────────────────────────────────────
@@ -44,21 +44,23 @@ echo ""
 
 command -v python3 &>/dev/null || fail "Python 3 required. Install: sudo apt install python3 python3-venv python3-pip"
 
-# Ensure python3-dev is installed (needed for source builds)
-if ! python3 -c "import sysconfig; assert sysconfig.get_path('include')" 2>/dev/null; then
-    info "Installing python3-dev..."
-    sudo apt-get install -y python3-dev 2>/dev/null || warn "Could not install python3-dev — source builds may fail"
-fi
-
 PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 log "Python ${PYTHON_VER}"
 
-# ── GPU detection ─────────────────────────────────────────────────────────
+# Ensure python3-dev + venv tools are present (needed for pip-from-source builds)
+if ! python3 -c "import sysconfig, ensurepip" 2>/dev/null; then
+    info "Installing python3-dev / python3-venv..."
+    sudo apt-get install -y python3-dev python3-venv python3-pip 2>/dev/null || warn "apt install skipped — make sure these are present"
+fi
+
+command -v git &>/dev/null || { info "Installing git..."; sudo apt-get install -y git 2>/dev/null || fail "git required"; }
+
+# ── GPU + CUDA detection ─────────────────────────────────────────────────
 
 GPU_NAME=""
-GPU_ARCH=""
+GPU_COMPUTE=""
 CUDA_MAJOR=""
-NEEDS_SOURCE_BUILD=false
+ENGINE_STRATEGY="pip"
 
 if command -v nvidia-smi &>/dev/null; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
@@ -67,75 +69,55 @@ if command -v nvidia-smi &>/dev/null; then
         log "GPU: ${GPU_NAME} (sm_${GPU_COMPUTE/./})"
     fi
 else
-    warn "No NVIDIA GPU detected — AINode will run in CPU mode"
+    warn "No NVIDIA GPU detected — AINode will install but inference will be unavailable"
 fi
 
-# Detect CUDA version
 NVCC_PATH=""
 for p in /usr/local/cuda/bin/nvcc /usr/local/cuda-13.0/bin/nvcc /usr/local/cuda-12.*/bin/nvcc; do
-    if [ -x "$p" ]; then
-        NVCC_PATH="$p"
-        break
-    fi
+    [ -x "$p" ] && NVCC_PATH="$p" && break
 done
 
 if [ -n "$NVCC_PATH" ]; then
     CUDA_VER=$("$NVCC_PATH" --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//')
     CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
-    log "CUDA ${CUDA_VER} (${NVCC_PATH})"
-    export PATH="$(dirname "$NVCC_PATH"):$PATH"
-    export CUDA_HOME="$(dirname "$(dirname "$NVCC_PATH")")"
-elif command -v nvcc &>/dev/null; then
-    CUDA_VER=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//')
-    CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
     log "CUDA ${CUDA_VER}"
-fi
-
-# Determine engine strategy:
-#   - GB10 / CUDA 13 → Docker container (pip vLLM wheels don't target CUDA 13)
-#   - Everything else → pip vLLM
-ENGINE_STRATEGY="pip"
-if [[ "$GPU_NAME" =~ "GB10" ]] || [[ "$GPU_COMPUTE" == "12.1" ]] || [[ "$CUDA_MAJOR" == "13" ]]; then
-    ENGINE_STRATEGY="docker"
-    info "Blackwell GB10 / CUDA 13 detected — will use Docker-based vLLM"
 fi
 
 ARCH=$(uname -m)
 log "Architecture: ${ARCH}"
 
-# ── Create home + venv ────────────────────────────────────────────────────
+# Engine strategy:
+#   GB10 / sm_121 / CUDA 13 → Docker container (pip wheels don't target CUDA 13)
+#   Everything else        → pip vLLM (pre-built wheels)
+if [[ "$GPU_NAME" =~ "GB10" ]] || [[ "$GPU_COMPUTE" == "12.1" ]] || [[ "$CUDA_MAJOR" == "13" ]]; then
+    ENGINE_STRATEGY="docker"
+    info "Blackwell GB10 / CUDA 13 detected — will use Docker-based vLLM"
+fi
+
+# ── Create AINode home + venv ────────────────────────────────────────────
 
 mkdir -p "$AINODE_HOME"/{models,logs,datasets,training}
 
-step "1/5" "Creating virtual environment..."
+step "1/4" "Creating virtual environment..."
 python3 -m venv "$VENV_DIR"
+# shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 pip install --quiet --upgrade pip setuptools wheel
-
-# ── Install uv (fast package manager) ────────────────────────────────────
-
-if ! command -v uv &>/dev/null; then
-    step "2/5" "Installing uv package manager..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null
-    export PATH="$HOME/.local/bin:$PATH"
-fi
+log "Virtual environment ready: ${VENV_DIR}"
 
 # ── Install AINode ────────────────────────────────────────────────────────
 
-step "3/5" "Installing AINode..."
-pip install --quiet ainode 2>/dev/null || {
-    # If not on PyPI yet, install from GitHub
-    pip install --quiet "git+https://github.com/getainode/ainode.git"
-}
+step "2/4" "Installing AINode from ${AINODE_REPO}..."
+pip install --quiet "git+https://github.com/${AINODE_REPO}.git@${AINODE_BRANCH}"
 log "AINode installed"
 
 # ── Install inference engine ──────────────────────────────────────────────
 
 if [ "$ENGINE_STRATEGY" = "docker" ]; then
-    step "4/5" "Setting up Docker-based vLLM for Blackwell GB10..."
+    step "3/4" "Setting up Docker-based vLLM (Blackwell GB10)..."
 
     if ! command -v docker &>/dev/null; then
-        info "Docker not found — installing Docker..."
+        info "Docker not found — installing..."
         curl -fsSL https://get.docker.com | sudo sh 2>&1 | tail -3 || warn "Docker install failed"
         sudo usermod -aG docker "$USER" 2>/dev/null || true
     fi
@@ -144,48 +126,50 @@ if [ "$ENGINE_STRATEGY" = "docker" ]; then
         info "Starting Docker..."
         sudo systemctl reset-failed docker.service 2>/dev/null || true
         sudo rm -rf /var/lib/docker/buildkit 2>/dev/null || true
-        sudo systemctl start docker 2>&1 | tail -3 || warn "Could not start Docker — you may need to start it manually"
+        sudo systemctl start docker 2>&1 | tail -3 || warn "Could not start Docker — start it manually with: sudo systemctl start docker"
     fi
 
     if sudo docker info &>/dev/null; then
         log "Docker is running"
-        info "Pulling vLLM container for GB10 (this may take several minutes)..."
-        sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5 2>&1 | tail -3 || warn "Container pull failed — AINode will still install"
-        log "vLLM container ready"
+        info "Pulling vLLM container for GB10 (a few minutes)..."
+        sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5 2>&1 | tail -3 || warn "Container pull failed — re-run: sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5"
+        log "vLLM container ready: scitrera/dgx-spark-vllm:0.17.0-t5"
     else
         warn "Docker not available — AINode will install without inference engine"
-        warn "You can install Docker later and run: ainode engine install"
     fi
-
 else
-    step "4/5" "Installing vLLM inference engine (pip)..."
-    pip install --quiet vllm 2>&1 | tail -3 || warn "vLLM pip install failed — AINode will still install without it"
+    step "3/4" "Installing vLLM (pip)..."
+    pip install --quiet vllm 2>&1 | tail -3 || warn "vLLM pip install failed — install it later with: pip install vllm"
     VLLM_VER=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null) && \
-        log "vLLM ${VLLM_VER}" || warn "vLLM import failed — check logs"
+        log "vLLM ${VLLM_VER}" || warn "vLLM import failed"
+fi
+
+# Verify torch
+TORCH_AVAIL=$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
+if [ "$TORCH_AVAIL" = "True" ]; then
+    TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null)
+    log "PyTorch CUDA ${TORCH_CUDA}"
 fi
 
 # ── PATH setup ────────────────────────────────────────────────────────────
 
-step "5/5" "Finishing up..."
+step "4/4" "Finishing up..."
 
 AINODE_BIN="$VENV_DIR/bin"
 SHELL_RC=""
 [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
 [ -f "$HOME/.zshrc" ] && SHELL_RC="$HOME/.zshrc"
 
-if [ -n "$SHELL_RC" ]; then
-    if ! grep -q "ainode" "$SHELL_RC" 2>/dev/null; then
-        echo "" >> "$SHELL_RC"
-        echo "# AINode — https://ainode.dev" >> "$SHELL_RC"
-        echo "export PATH=\"$AINODE_BIN:\$PATH\"" >> "$SHELL_RC"
-        log "Added to PATH in ${SHELL_RC}"
-    fi
+if [ -n "$SHELL_RC" ] && ! grep -q "AINode" "$SHELL_RC" 2>/dev/null; then
+    {
+        echo ""
+        echo "# AINode — https://ainode.dev"
+        echo "export PATH=\"$AINODE_BIN:\$PATH\""
+    } >> "$SHELL_RC"
+    log "Added to PATH in ${SHELL_RC}"
 fi
 
-# ── Systemd service (optional) ────────────────────────────────────────────
-
-echo ""
-echo "    ────────────────────────────────────"
+# ── systemd service (optional) ────────────────────────────────────────────
 
 INSTALL_SERVICE="${AINODE_SERVICE:-}"
 if [ -z "$INSTALL_SERVICE" ] && [ -t 0 ]; then
@@ -208,7 +192,7 @@ fi
 
 echo ""
 echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "    ${GREEN}  AINode v${AINODE_VERSION} installed successfully!${NC}"
+echo -e "    ${GREEN}  AINode v${AINODE_VERSION} installed!${NC}"
 echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "    To start:"
@@ -216,7 +200,7 @@ echo ""
 echo -e "      ${CYAN}source ${SHELL_RC:-~/.bashrc}${NC}"
 echo -e "      ${CYAN}ainode start${NC}"
 echo ""
-echo "    Then open http://localhost:3000 in your browser."
+echo "    Open http://localhost:3000 in your browser."
 echo ""
 echo -e "    Powered by ${BLUE}argentos.ai${NC}"
 echo ""
