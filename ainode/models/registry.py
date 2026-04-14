@@ -663,13 +663,24 @@ class ModelManager:
             catalog_repos.add(info.hf_repo.lower())
             results.append(entry)
 
-        # Merge in downloaded-but-not-in-catalog entries
-        if self.models_dir.exists():
-            for child in sorted(self.models_dir.iterdir()):
+        # Merge in downloaded-but-not-in-catalog entries. HF's cache layout is
+        # models_dir/hub/models--<org>--<name>/ — skip control dirs like
+        # .locks, xet, blobs, snapshots and anything not prefixed `models--`.
+        scan_roots = [self.models_dir, self.models_dir / "hub"]
+        seen_slugs: set[str] = set()
+        for root in scan_roots:
+            if not root.exists():
+                continue
+            for child in sorted(root.iterdir()):
                 if not child.is_dir():
                     continue
-                # Recover hf_repo from the slug (first "--" → "/")
-                hf_repo = child.name.replace("--", "/", 1)
+                if not child.name.startswith("models--"):
+                    continue  # HF internals: .locks, xet, hub, blobs, snapshots
+                if child.name in seen_slugs:
+                    continue
+                seen_slugs.add(child.name)
+                # HF slug "models--org--name" → "org/name"
+                hf_repo = child.name[len("models--"):].replace("--", "/", 1)
                 if hf_repo.lower() in catalog_repos:
                     continue  # already merged
                 results.append({

@@ -308,6 +308,12 @@ const AINode = {
     this.updateClusterHero();
     this.updateChatModelSelect();
 
+    // Preserve scroll position of the main content area across periodic
+    // re-renders — the 5s poll was rebuilding innerHTML and bouncing the
+    // user back to the top of long lists.
+    var mainEl = document.querySelector('.main-content') || document.querySelector('#main') || document.scrollingElement;
+    var savedScroll = mainEl ? mainEl.scrollTop : 0;
+
     switch (this.state.currentView) {
       case 'dashboard':
         this.renderDashboard();
@@ -340,6 +346,11 @@ const AINode = {
     // Always update right panel
     this.renderInstances();
     this.populateLaunchModels();
+
+    // Restore scroll
+    if (mainEl && savedScroll) {
+      try { mainEl.scrollTop = savedScroll; } catch (_) {}
+    }
   },
 
   startPolling() {
