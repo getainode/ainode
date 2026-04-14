@@ -39,12 +39,19 @@
       </div>
     </header>
 
-    <!-- Left Panel: Chat -->
+    <!-- Left Panel: Chat + Training (context-switching) -->
     <aside class="left-panel" id="chat-panel">
-      <button class="btn-nvidia" id="new-chat">+ NEW CHAT</button>
-      <input class="search-input" placeholder="Search conversations..." id="chat-search">
-      <div class="conversation-list" id="conversation-list">
-        <!-- Filled by JS -->
+      <!-- Chat sidebar (default) -->
+      <div class="left-panel-chat" id="left-panel-chat">
+        <button class="btn-nvidia" id="new-chat">+ NEW CHAT</button>
+        <input class="search-input" placeholder="Search conversations..." id="chat-search">
+        <div class="conversation-list" id="conversation-list">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+      <!-- Training sidebar (visible only when view=training) -->
+      <div class="left-panel-training" id="left-panel-training" style="display:none">
+        <!-- Filled by JS: renderTrainingSidebar() -->
       </div>
     </aside>
 
@@ -143,6 +150,8 @@
         <span class="mini-footer-tagline">crafted with <span class="mini-footer-heart">♥</span> by <a href="https://jasonbrashear.com" target="_blank" rel="noopener">Jason</a></span>
       </div>
       <div class="mini-footer-right">
+        <span class="mini-footer-link" style="color:var(--text-muted)">Powered by <a href="https://argentos.ai" target="_blank" rel="noopener" class="mini-footer-link">argentos.ai</a></span>
+        <span class="mini-footer-sep">·</span>
         <a href="https://ainode.dev" target="_blank" rel="noopener" class="mini-footer-link">ainode.dev</a>
         <span class="mini-footer-sep">·</span>
         <a href="https://github.com/getainode/ainode" target="_blank" rel="noopener" class="mini-footer-link">GitHub</a>

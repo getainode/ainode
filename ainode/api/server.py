@@ -20,6 +20,8 @@ from ainode.metrics.collector import MetricsCollector
 from ainode.metrics.api_routes import register_metrics_routes
 from ainode.training.engine import TrainingManager
 from ainode.training.api_routes import setup_training_routes
+from ainode.datasets.manager import DatasetManager
+from ainode.datasets.api_routes import setup_dataset_routes
 from ainode.discovery.broadcast import (
     BroadcastSender,
     BroadcastListener,
@@ -53,7 +55,8 @@ def create_app(
     app = web.Application(middlewares=[cors_middleware, auth_middleware])
     # Instantiate shared services
     collector = MetricsCollector()
-    manager = TrainingManager()
+    dataset_manager = DatasetManager()
+    manager = TrainingManager(dataset_manager=dataset_manager)
 
     # Build local node announcement for discovery
     announcement = _build_announcement(config, engine)
@@ -66,6 +69,7 @@ def create_app(
     app["client_session"] = None  # lazy-init in startup
     app["metrics_collector"] = collector
     app["training_manager"] = manager
+    app["dataset_manager"] = dataset_manager
     app["cluster_state"] = cluster
     app["announcement"] = announcement
     app["broadcast_sender"] = None
@@ -95,6 +99,9 @@ def create_app(
 
     # --- Training routes -----------------------------------------------------
     setup_training_routes(app, manager)
+
+    # --- Dataset routes ------------------------------------------------------
+    setup_dataset_routes(app, dataset_manager)
 
     # --- Sharding routes ----------------------------------------------------
     register_sharding_routes(app)

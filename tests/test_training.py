@@ -41,10 +41,16 @@ class TestTrainingConfig:
 
     def test_invalid_method(self):
         config = TrainingConfig(
-            base_model="model", dataset_path="user/dataset", method="qlora"
+            base_model="model", dataset_path="user/dataset", method="bogus"
         )
         errors = config.validate()
         assert any("method" in e for e in errors)
+
+    def test_qlora_method_valid(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", method="qlora"
+        )
+        assert config.validate() == []
 
     def test_invalid_num_epochs(self):
         config = TrainingConfig(
@@ -293,6 +299,42 @@ class TestTrainingManager:
     def test_active_job_none(self):
         mgr = TrainingManager()
         assert mgr.active_job is None
+
+    def test_stats_empty(self):
+        mgr = TrainingManager()
+        s = mgr.stats()
+        assert s["total"] == 0 and s["running"] == 0
+
+    def test_estimate_returns_expected_keys(self):
+        mgr = TrainingManager()
+        cfg = TrainingConfig(base_model="x/Llama-3.1-8B", dataset_path="user/d")
+        est = mgr.estimate(cfg, sample_count=500)
+        for key in ("params_b", "memory_gb_per_node", "samples_per_sec", "estimated_seconds"):
+            assert key in est
+
+    def test_estimate_distributed_scales(self):
+        mgr = TrainingManager()
+        c1 = TrainingConfig(base_model="m", dataset_path="user/d", distributed=False)
+        c2 = TrainingConfig(base_model="m", dataset_path="user/d", distributed=True, num_nodes=4)
+        s1 = mgr.estimate(c1)["samples_per_sec"]
+        s2 = mgr.estimate(c2)["samples_per_sec"]
+        assert s2 > s1
+
+    def test_dataset_id_resolution(self, tmp_path, monkeypatch):
+        """TrainingManager should resolve dataset_id to an absolute path via DatasetManager."""
+        from ainode.datasets.manager import DatasetManager
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        ds_mgr = DatasetManager(root=tmp_path / "ds")
+        ds = ds_mgr.add_upload("x.jsonl", b'{"text":"a"}\n', name="x")
+        mgr = TrainingManager(dataset_manager=ds_mgr)
+        config = TrainingConfig(
+            base_model="m",
+            dataset_path="placeholder",  # will be overwritten
+            dataset_id=ds.id,
+        )
+        job = mgr.submit_job(config)
+        assert job.config.dataset_path == ds.path
+        assert job.config.dataset_id == ds.id
 
     def test_submit_preserves_order(self):
         mgr = TrainingManager()
@@ -555,6 +597,53 @@ class TestTrainingAPI:
         resp = await training_client.get("/api/training/jobs")
         data = await resp.json()
         assert len(data["jobs"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_templates_endpoint(self, training_client):
+        resp = await training_client.get("/api/training/templates")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "templates" in data
+        assert isinstance(data["templates"], list)
+        assert len(data["templates"]) >= 1
+        assert all("id" in t and "name" in t for t in data["templates"])
+
+    @pytest.mark.asyncio
+    async def test_stats_endpoint_empty(self, training_client):
+        resp = await training_client.get("/api/training/stats")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["total"] == 0
+        assert data["running"] == 0
+        assert data["total_gpu_hours"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_estimate_endpoint(self, training_client):
+        resp = await training_client.post(
+            "/api/training/estimate",
+            json={
+                "base_model": "meta-llama/Llama-3.1-8B-Instruct",
+                "dataset_path": "ignored",
+                "method": "lora",
+                "num_epochs": 1,
+                "batch_size": 4,
+                "max_seq_length": 2048,
+                "sample_count": 1000,
+            },
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["params_b"] >= 1.0
+        assert data["memory_gb_per_node"] > 0
+        assert data["samples_per_sec"] > 0
+
+    @pytest.mark.asyncio
+    async def test_estimate_invalid(self, training_client):
+        resp = await training_client.post(
+            "/api/training/estimate", data=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
 
     @pytest.mark.asyncio
     async def test_cancel_already_cancelled(self, training_client):

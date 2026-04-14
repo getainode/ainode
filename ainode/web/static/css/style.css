@@ -3765,3 +3765,792 @@ select {
 }
 
 .hidden { display: none !important; }
+
+/* ============================================================
+   TRAINING — LEFT SIDEBAR (context-swap)
+   ============================================================ */
+.left-panel-chat,
+.left-panel-training {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.left-panel-training .btn-nvidia {
+  margin: 16px 16px 12px;
+  padding: 14px 20px;
+  font-size: 13px;
+  letter-spacing: 1px;
+  border-radius: var(--radius-lg);
+}
+
+.training-sidebar-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text-muted);
+  padding: 16px 20px 8px;
+  text-transform: uppercase;
+}
+
+.training-sidebar-section {
+  padding: 4px 12px 12px;
+}
+
+.training-sidebar-section + .training-sidebar-section {
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+  padding-top: 10px;
+}
+
+.training-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.training-subnav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.training-subnav-item:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+.training-subnav-item.active {
+  background: var(--bg-card);
+  color: var(--nvidia-green);
+  border-color: var(--nvidia-green);
+  box-shadow: inset 3px 0 0 var(--nvidia-green);
+}
+
+.training-subnav-item .sub-icon {
+  width: 16px;
+  display: inline-flex;
+  opacity: 0.75;
+}
+
+.training-recent-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  background: var(--bg-card);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.training-recent-item:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-card-hover);
+}
+
+.training-recent-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.training-recent-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.training-recent-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.training-guide-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.training-guide-link:hover {
+  background: var(--bg-card);
+  color: var(--nvidia-green);
+  border-color: var(--border);
+}
+
+/* ============================================================
+   TRAINING — OVERVIEW (center stage)
+   ============================================================ */
+.training-overview {
+  padding: 20px 28px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.training-stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.training-stat-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s ease;
+}
+
+.training-stat-tile:hover {
+  border-color: var(--border-hover);
+}
+
+.training-stat-tile .stat-label {
+  font-size: 10.5px;
+  letter-spacing: 1.2px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.training-stat-tile .stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.training-stat-tile.accent .stat-value {
+  color: var(--nvidia-green);
+  text-shadow: 0 0 20px var(--nvidia-green-glow);
+}
+
+.training-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.training-section-head h3 {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+
+.training-section-head .muted {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.quickstart-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.quickstart-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 22px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.quickstart-tile:hover {
+  border-color: var(--nvidia-green);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px var(--nvidia-green-glow);
+}
+
+.quickstart-tile::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--nvidia-green), transparent);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.quickstart-tile:hover::before { opacity: 1; }
+
+.quickstart-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(118, 185, 0, 0.1);
+  color: var(--nvidia-green);
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.quickstart-tile h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quickstart-tile p {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  flex: 1;
+}
+
+.quickstart-tile .btn-nvidia {
+  align-self: flex-start;
+  padding: 8px 18px;
+  font-size: 12px;
+}
+
+.recent-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ============================================================
+   TRAINING — DATASETS VIEW
+   ============================================================ */
+.dataset-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  gap: 10px;
+}
+
+.dataset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.dataset-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  transition: border-color 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dataset-card:hover {
+  border-color: var(--border-hover);
+}
+
+.dataset-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.dataset-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.dataset-card-id {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+
+.dataset-badge {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  background: rgba(118, 185, 0, 0.12);
+  color: var(--nvidia-green);
+  border: 1px solid rgba(118, 185, 0, 0.25);
+  white-space: nowrap;
+}
+
+.dataset-badge.src-upload     { background: rgba(255,184,0,0.08);  color: var(--amber); border-color: rgba(255,184,0,0.25); }
+.dataset-badge.src-huggingface { background: rgba(255,210,0,0.08);  color: #ffd21e;      border-color: rgba(255,210,0,0.2); }
+.dataset-badge.src-local      { background: rgba(0,212,170,0.08);  color: var(--cyan);  border-color: rgba(0,212,170,0.25); }
+.dataset-badge.src-url        { background: rgba(118,185,0,0.08);  color: var(--nvidia-green); border-color: rgba(118,185,0,0.25); }
+
+.dataset-card-stats {
+  display: flex;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.dataset-card-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dataset-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.dataset-preview-samples {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ============================================================
+   TRAINING — RUNS TABLE
+   ============================================================ */
+.runs-filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.runs-filter-bar .pill {
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+.runs-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.runs-table th {
+  text-align: left;
+  padding: 10px 14px;
+  font-size: 10.5px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.runs-table td {
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.runs-table tr:last-child td { border-bottom: none; }
+
+.runs-table tr.run-row {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.runs-table tr.run-row:hover {
+  background: var(--bg-card-hover);
+}
+
+.runs-table .mono { font-family: var(--font-mono); }
+
+.sparkline-cell {
+  width: 80px;
+}
+
+/* ============================================================
+   TRAINING — TEMPLATES GALLERY
+   ============================================================ */
+.templates-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.template-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: all 0.15s ease;
+}
+
+.template-card:hover {
+  border-color: var(--nvidia-green);
+  box-shadow: 0 4px 24px var(--nvidia-green-glow);
+}
+
+.template-card h4 {
+  font-size: 15px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.template-card p {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.template-shape {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.template-meta-row {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  flex-wrap: wrap;
+}
+
+/* ============================================================
+   TRAINING — BENCHMARKS
+   ============================================================ */
+.benchmark-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.benchmark-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.benchmark-card h4 {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.benchmark-value {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--nvidia-green);
+}
+
+.benchmark-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
+   NEW RUN WIZARD MODAL
+   ============================================================ */
+.wizard-modal {
+  width: min(920px, 95vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.wizard-body {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 480px;
+  max-height: 70vh;
+}
+
+.wizard-steps {
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  padding: 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wizard-step-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: default;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.wizard-step-nav .step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.wizard-step-nav.active {
+  background: var(--bg-card);
+  color: var(--nvidia-green);
+  border-color: var(--nvidia-green);
+}
+
+.wizard-step-nav.active .step-num {
+  background: var(--nvidia-green);
+  color: #000;
+  border-color: var(--nvidia-green);
+}
+
+.wizard-step-nav.done {
+  color: var(--text-primary);
+}
+
+.wizard-step-nav.done .step-num {
+  background: var(--nvidia-green-dim);
+  color: #000;
+  border-color: var(--nvidia-green-dim);
+}
+
+.wizard-panel {
+  padding: 22px 28px;
+  overflow-y: auto;
+}
+
+.wizard-panel h3 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+
+.wizard-panel .panel-sub {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.wizard-option-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.wizard-option {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wizard-option:hover { border-color: var(--border-hover); }
+
+.wizard-option.active {
+  border-color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.05);
+  box-shadow: inset 3px 0 0 var(--nvidia-green);
+}
+
+.wizard-option-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wizard-option-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.wizard-summary {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 8px 16px;
+  font-size: 12.5px;
+}
+
+.wizard-summary .k {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10.5px;
+}
+
+.wizard-summary .v {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.wizard-footer {
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-surface);
+}
+
+.wizard-footer .spacer { flex: 1; }
+
+.estimate-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.08);
+  border: 1px solid rgba(118, 185, 0, 0.25);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+}
+
+/* ============================================================
+   TRAINING — MARKDOWN GUIDE MODAL
+   ============================================================ */
+.guide-modal {
+  width: min(820px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  padding: 24px 30px;
+  line-height: 1.65;
+}
+
+.guide-modal h2 { color: var(--nvidia-green); margin-bottom: 12px; }
+.guide-modal h3 { color: var(--text-primary); margin-top: 18px; margin-bottom: 8px; font-size: 15px; }
+.guide-modal p  { color: var(--text-secondary); margin-bottom: 10px; font-size: 13px; }
+.guide-modal code { font-family: var(--font-mono); background: var(--bg-primary); padding: 2px 6px; border-radius: 4px; color: var(--nvidia-green); }
+.guide-modal ul, .guide-modal ol { margin-left: 24px; color: var(--text-secondary); margin-bottom: 12px; }
+.guide-modal li { margin-bottom: 4px; }
+
+/* ============================================================
+   DRAG & DROP UPLOAD ZONE
+   ============================================================ */
+.upload-drop-zone {
+  border: 2px dashed var(--border-hover);
+  border-radius: var(--radius-lg);
+  padding: 32px 18px;
+  text-align: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  background: var(--bg-primary);
+}
+
+.upload-drop-zone:hover,
+.upload-drop-zone.drag-over {
+  border-color: var(--nvidia-green);
+  color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.04);
+}
+
+.upload-drop-zone strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .training-stat-tiles { grid-template-columns: repeat(2, 1fr); }
+  .quickstart-grid { grid-template-columns: 1fr; }
+  .wizard-body { grid-template-columns: 1fr; }
+  .wizard-steps { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); }
+}

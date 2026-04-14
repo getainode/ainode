@@ -26,6 +26,7 @@ JOBS_DIR = TRAINING_DIR / "jobs"
 class TrainingMethod(str, Enum):
     LORA = "lora"
     FULL = "full"
+    QLORA = "qlora"
 
 
 class JobStatus(str, Enum):
@@ -50,6 +51,17 @@ class TrainingConfig:
     lora_rank: int = 16
     lora_alpha: int = 32
     max_seq_length: int = 2048
+    # Extended (optional) fields — enable premium UI & richer runs.
+    dataset_id: Optional[str] = None  # references a Dataset in DatasetManager
+    run_name: Optional[str] = None
+    description: str = ""
+    gradient_accumulation_steps: int = 1
+    warmup_steps: int = 0
+    weight_decay: float = 0.0
+    use_gradient_checkpointing: bool = False
+    distributed: bool = False
+    num_nodes: int = 1
+    template_id: Optional[str] = None  # training template used
 
     def validate(self) -> list[str]:
         """Return a list of validation errors (empty means valid)."""
@@ -64,13 +76,24 @@ class TrainingConfig:
             ds = self.dataset_path.strip()
             if ".." in ds:
                 errors.append("dataset_path must not contain '..'")
-            elif ds.startswith("/"):
+            elif ds.startswith("/") and not self.dataset_id:
+                # Absolute paths are only accepted under the known datasets dir
+                # unless the path was resolved via a registered dataset_id.
                 datasets_dir = str(AINODE_HOME / "datasets")
                 if not ds.startswith(datasets_dir):
                     errors.append(f"dataset_path absolute paths must be under {datasets_dir}")
 
-        if self.method not in ("lora", "full"):
-            errors.append(f"method must be 'lora' or 'full', got '{self.method}'")
+        if self.method not in ("lora", "full", "qlora"):
+            errors.append(f"method must be 'lora', 'qlora' or 'full', got '{self.method}'")
+
+        if self.num_nodes < 1:
+            errors.append("num_nodes must be >= 1")
+        if self.gradient_accumulation_steps < 1:
+            errors.append("gradient_accumulation_steps must be >= 1")
+        if self.warmup_steps < 0:
+            errors.append("warmup_steps must be >= 0")
+        if self.weight_decay < 0:
+            errors.append("weight_decay must be >= 0")
 
         if self.num_epochs < 1:
             errors.append("num_epochs must be >= 1")
@@ -292,13 +315,179 @@ class TrainingJob:
         self.logs.append(f"[{ts}] {msg}")
 
 
+TRAINING_TEMPLATES: list[dict] = [
+    {
+        "id": "alpaca-instruct",
+        "name": "Alpaca-style instruction tuning",
+        "description": "Fine-tune on instruction/output pairs. Classic Alpaca format.",
+        "method": "lora",
+        "sample_shape": {"instruction": "str", "input": "str (optional)", "output": "str"},
+        "recommended_epochs": 3,
+        "recommended_batch_size": 4,
+        "recommended_lr": 2e-4,
+        "estimated_time": "20-60 min (3B model, ~1k samples)",
+    },
+    {
+        "id": "sharegpt-chat",
+        "name": "Chat fine-tune (ShareGPT format)",
+        "description": "Multi-turn conversation tuning — human/gpt turns.",
+        "method": "lora",
+        "sample_shape": {"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]},
+        "recommended_epochs": 2,
+        "recommended_batch_size": 2,
+        "recommended_lr": 1e-4,
+        "estimated_time": "30-90 min (3B model, ~1k samples)",
+    },
+    {
+        "id": "classification-head",
+        "name": "Classification head",
+        "description": "Train a lightweight classifier on labeled text.",
+        "method": "lora",
+        "sample_shape": {"text": "str", "label": "str"},
+        "recommended_epochs": 5,
+        "recommended_batch_size": 8,
+        "recommended_lr": 3e-4,
+        "estimated_time": "10-30 min (small dataset)",
+    },
+    {
+        "id": "dpo-preference",
+        "name": "DPO / Preference learning",
+        "description": "Align a model with chosen/rejected preference pairs.",
+        "method": "lora",
+        "sample_shape": {"prompt": "str", "chosen": "str", "rejected": "str"},
+        "recommended_epochs": 1,
+        "recommended_batch_size": 2,
+        "recommended_lr": 5e-5,
+        "estimated_time": "1-3 hours",
+    },
+    {
+        "id": "distributed-ddp",
+        "name": "Distributed DDP (multi-node)",
+        "description": "Multi-node data-parallel full or LoRA fine-tune via torchrun.",
+        "method": "lora",
+        "sample_shape": {"text": "str"},
+        "recommended_epochs": 1,
+        "recommended_batch_size": 2,
+        "recommended_lr": 2e-4,
+        "distributed": True,
+        "estimated_time": "varies — scales with nodes",
+    },
+]
+
+
+def get_training_templates() -> list[dict]:
+    """Return the hard-coded list of training templates shown in the UI."""
+    return list(TRAINING_TEMPLATES)
+
+
 class TrainingManager:
     """Manage training jobs — one active at a time (GPU shared with inference)."""
 
-    def __init__(self):
+    def __init__(self, dataset_manager=None):
         self._jobs: dict[str, TrainingJob] = {}
         self._queue: list[str] = []  # job_ids in queue order
         self._active_job_id: Optional[str] = None
+        self.dataset_manager = dataset_manager
+
+    # ------------------------------------------------------------------
+    # Stats / estimates
+    # ------------------------------------------------------------------
+    def stats(self) -> dict:
+        """Return aggregate counters for the overview dashboard."""
+        total = len(self._jobs)
+        running = completed = failed = cancelled = pending = 0
+        completed_today = 0
+        total_gpu_seconds = 0.0
+        now = time.time()
+        for j in self._jobs.values():
+            if j.status == JobStatus.RUNNING:
+                running += 1
+            elif j.status == JobStatus.COMPLETED:
+                completed += 1
+                if j.end_time and (now - j.end_time) < 86400:
+                    completed_today += 1
+            elif j.status == JobStatus.FAILED:
+                failed += 1
+            elif j.status == JobStatus.CANCELLED:
+                cancelled += 1
+            else:
+                pending += 1
+            if j.start_time:
+                end = j.end_time or now
+                total_gpu_seconds += max(0.0, end - j.start_time)
+        return {
+            "total": total,
+            "running": running,
+            "completed": completed,
+            "completed_today": completed_today,
+            "failed": failed,
+            "cancelled": cancelled,
+            "pending": pending,
+            "total_gpu_hours": round(total_gpu_seconds / 3600.0, 2),
+            "active_job_id": self._active_job_id,
+            "queue_size": self.queue_size,
+        }
+
+    @staticmethod
+    def estimate(config: TrainingConfig, sample_count: Optional[int] = None) -> dict:
+        """Cheap heuristic estimates for time / memory / throughput.
+
+        These are intentionally coarse — meant for UI hints, not billing.
+        """
+        # Pull a rough param count from the model string
+        model = (config.base_model or "").lower()
+        params_b = 3.0  # default to ~3B
+        for key, val in (("405b", 405.0), ("70b", 70.0), ("34b", 34.0),
+                          ("8b", 8.0), ("7b", 7.0), ("3b", 3.0), ("1b", 1.0)):
+            if key in model:
+                params_b = val
+                break
+
+        # Memory (GB) — very approximate
+        bytes_per_param = 2  # fp16
+        base_mem = params_b * bytes_per_param  # weights in GB
+        if config.method == "lora" or config.method == "qlora":
+            training_mem = base_mem * 1.2  # small overhead for LoRA adapters + activations
+            if config.method == "qlora":
+                training_mem = base_mem * 0.35  # 4-bit quantized
+        else:
+            training_mem = base_mem * 4.0  # weights + grads + optimizer state
+
+        # Throughput — samples/sec (handwave on GB10)
+        tokens_per_sec = max(500.0, 50000.0 / max(1.0, params_b))
+        tokens_per_sample = config.max_seq_length
+        samples_per_sec = tokens_per_sec / max(1, tokens_per_sample)
+        if config.distributed and config.num_nodes > 1:
+            samples_per_sec *= config.num_nodes * 0.85  # imperfect scaling
+
+        # Time estimate
+        if sample_count and sample_count > 0:
+            total_samples = sample_count * config.num_epochs
+            effective_batch = max(1, config.batch_size * config.gradient_accumulation_steps)
+            steps = total_samples / effective_batch
+            seconds = steps / max(0.01, samples_per_sec / max(1, effective_batch))
+        else:
+            seconds = None
+
+        return {
+            "params_b": params_b,
+            "memory_gb_per_node": round(training_mem, 1),
+            "samples_per_sec": round(samples_per_sec, 2),
+            "estimated_seconds": round(seconds, 0) if seconds else None,
+            "distributed": config.distributed,
+            "num_nodes": config.num_nodes,
+        }
+
+    # ------------------------------------------------------------------
+    # Submission
+    # ------------------------------------------------------------------
+    def _resolve_dataset(self, config: TrainingConfig) -> None:
+        """Resolve ``dataset_id`` (if set) to an absolute dataset_path."""
+        if not config.dataset_id or self.dataset_manager is None:
+            return
+        ds = self.dataset_manager.get(config.dataset_id)
+        if ds is not None and ds.path:
+            config.dataset_path = ds.path
 
     def submit_job(self, config: TrainingConfig) -> TrainingJob:
         """Validate config and queue a new training job.
@@ -306,6 +495,9 @@ class TrainingManager:
         Returns the created TrainingJob.
         Raises ValueError if config is invalid.
         """
+        # Resolve dataset_id -> dataset_path BEFORE validating so the path is set.
+        self._resolve_dataset(config)
+
         errors = config.validate()
         if errors:
             raise ValueError(f"Invalid training config: {'; '.join(errors)}")
