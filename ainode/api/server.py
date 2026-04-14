@@ -258,17 +258,32 @@ async def handle_status(request: web.Request) -> web.Response:
     config: NodeConfig = request.app["config"]
     engine = request.app["engine"]
     start_time: float = request.app["start_time"]
+    session: Optional[aiohttp.ClientSession] = request.app.get("client_session")
 
     gpu: Optional[GPUInfo] = detect_gpu()
     gpu_info = asdict(gpu) if gpu else None
 
     engine_ready = False
     models_loaded: list[str] = []
+
+    # First try our managed engine
     if engine is not None:
         engine_ready = getattr(engine, "ready", False)
         try:
             hc = engine.health_check()
             models_loaded = hc.get("models_loaded", [])
+        except Exception:
+            pass
+
+    # Fallback: probe vLLM directly (handles Docker-managed vLLM)
+    if not models_loaded and session is not None:
+        try:
+            vllm_url = f"http://localhost:{config.api_port}/v1/models"
+            async with session.get(vllm_url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    models_loaded = [m.get("id", "") for m in data.get("data", [])]
+                    engine_ready = len(models_loaded) > 0
         except Exception:
             pass
 
