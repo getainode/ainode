@@ -91,11 +91,13 @@ elif command -v nvcc &>/dev/null; then
     log "CUDA ${CUDA_VER}"
 fi
 
-# Determine build strategy
+# Determine engine strategy:
+#   - GB10 / CUDA 13 → Docker container (pip vLLM wheels don't target CUDA 13)
+#   - Everything else → pip vLLM
+ENGINE_STRATEGY="pip"
 if [[ "$GPU_NAME" =~ "GB10" ]] || [[ "$GPU_COMPUTE" == "12.1" ]] || [[ "$CUDA_MAJOR" == "13" ]]; then
-    NEEDS_SOURCE_BUILD=true
-    info "Blackwell GB10 detected — will build vLLM from source for CUDA 13"
-    info "This takes 20-30 minutes (one-time build)"
+    ENGINE_STRATEGY="docker"
+    info "Blackwell GB10 / CUDA 13 detected — will use Docker-based vLLM"
 fi
 
 ARCH=$(uname -m)
@@ -129,93 +131,38 @@ log "AINode installed"
 
 # ── Install inference engine ──────────────────────────────────────────────
 
-if [ "$NEEDS_SOURCE_BUILD" = true ]; then
-    step "4/5" "Building vLLM for Blackwell GB10 (CUDA ${CUDA_VER})..."
-    info "Installing PyTorch with CUDA 13.0..."
+if [ "$ENGINE_STRATEGY" = "docker" ]; then
+    step "4/5" "Setting up Docker-based vLLM for Blackwell GB10..."
 
-    uv pip install \
-        "torch>=2.9.0" torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu130 \
-        --quiet 2>&1 | tail -1
-
-    log "PyTorch with CUDA 13.0 installed"
-
-    # Build Triton from source (required for sm_121a)
-    info "Building Triton from source (Blackwell support)..."
-    BUILD_DIR=$(mktemp -d)
-    cd "$BUILD_DIR"
-
-    git clone https://github.com/triton-lang/triton.git 2>/dev/null
-    cd triton
-    git checkout "$TRITON_COMMIT" 2>/dev/null
-
-    # Build with Blackwell target
-    cd python
-    pip install --quiet ninja cmake
-    TRITON_BUILD_WITH_CCACHE=true pip install -e . --quiet 2>&1 | tail -3
-    cd "$AINODE_HOME"
-    log "Triton built for Blackwell"
-
-    # Build vLLM from source
-    info "Building vLLM from source (this is the long step)..."
-    cd "$BUILD_DIR"
-
-    git clone https://github.com/vllm-project/vllm.git 2>/dev/null
-    cd vllm
-    git checkout "$VLLM_COMMIT" 2>/dev/null
-
-    # Apply Blackwell patches if available
-    PATCH_DIR="$AINODE_HOME/patches"
-    if [ -d "$PATCH_DIR" ]; then
-        for patch in "$PATCH_DIR"/*.patch; do
-            [ -f "$patch" ] && git apply "$patch" 2>/dev/null && info "Applied patch: $(basename "$patch")"
-        done
+    if ! command -v docker &>/dev/null; then
+        info "Docker not found — installing Docker..."
+        curl -fsSL https://get.docker.com | sudo sh 2>&1 | tail -3 || warn "Docker install failed"
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
     fi
 
-    # Build with CUDA 13 targeting sm_121
-    export TORCH_CUDA_ARCH_LIST="12.1"
-    export VLLM_TARGET_DEVICE=cuda
-    export MAX_JOBS=$(( $(nproc) / 2 ))
+    if ! sudo docker info &>/dev/null; then
+        info "Starting Docker..."
+        sudo systemctl reset-failed docker.service 2>/dev/null || true
+        sudo rm -rf /var/lib/docker/buildkit 2>/dev/null || true
+        sudo systemctl start docker 2>&1 | tail -3 || warn "Could not start Docker — you may need to start it manually"
+    fi
 
-    pip install -e . --quiet 2>&1 | tail -3
-    cd "$AINODE_HOME"
-    log "vLLM built for Blackwell GB10"
-
-    # Clean up build dir
-    rm -rf "$BUILD_DIR"
-
-else
-    step "4/5" "Installing vLLM inference engine..."
-
-    if [ "$ARCH" = "aarch64" ] && [ "$CUDA_MAJOR" = "12" ]; then
-        # ARM64 with CUDA 12 — standard pip install
-        pip install --quiet vllm
-    elif [ "$ARCH" = "x86_64" ]; then
-        # x86_64 — standard pip install
-        pip install --quiet vllm
+    if sudo docker info &>/dev/null; then
+        log "Docker is running"
+        info "Pulling vLLM container for GB10 (this may take several minutes)..."
+        sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5 2>&1 | tail -3 || warn "Container pull failed — AINode will still install"
+        log "vLLM container ready"
     else
-        # Fallback
-        pip install --quiet vllm 2>/dev/null || {
-            warn "vLLM pip install failed — trying from source"
-            pip install --quiet "vllm @ git+https://github.com/vllm-project/vllm.git"
-        }
+        warn "Docker not available — AINode will install without inference engine"
+        warn "You can install Docker later and run: ainode engine install"
     fi
 
-    log "vLLM installed"
-fi
-
-# Verify torch + CUDA
-TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda or 'cpu')" 2>/dev/null)
-TORCH_AVAIL=$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null)
-if [ "$TORCH_AVAIL" = "True" ]; then
-    log "PyTorch CUDA ${TORCH_CUDA} — GPU acceleration active"
 else
-    warn "PyTorch running in CPU mode (CUDA: ${TORCH_CUDA})"
+    step "4/5" "Installing vLLM inference engine (pip)..."
+    pip install --quiet vllm 2>&1 | tail -3 || warn "vLLM pip install failed — AINode will still install without it"
+    VLLM_VER=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null) && \
+        log "vLLM ${VLLM_VER}" || warn "vLLM import failed — check logs"
 fi
-
-# Verify vLLM
-VLLM_VER=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null) && \
-    log "vLLM ${VLLM_VER}" || warn "vLLM import failed — check logs"
 
 # ── PATH setup ────────────────────────────────────────────────────────────
 
