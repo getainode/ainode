@@ -50,12 +50,20 @@ class NodeConfig:
     # Optional explicit master address for workers (e.g. "10.0.0.1:3000").
     master_address: Optional[str] = None
 
-    # Distributed inference (TP/PP across nodes via eugr's launch-cluster.sh).
-    # Only "solo" and "head" are valid ainode startup modes; peer workers are
-    # launched by the head's distributed launcher and run the eugr worker-side
-    # container directly — not a full ainode process.
-    distributed_mode: str = "solo"  # "solo" | "head"
+    # Distributed inference mode:
+    #   "solo"    — run a single vLLM locally. No Ray, no peers.
+    #   "head"    — run vLLM sharded (TP/PP) across this node + peer_ips via
+    #               eugr's launch-cluster.sh. The head additionally launches
+    #               the Ray worker containers on each peer over SSH/docker
+    #               socket. UI + API served here.
+    #   "member"  — run AINode discovery + aiohttp API + UI on this node, but
+    #               do NOT start any vLLM. Serves as a cluster member so the
+    #               head's eugr launcher can place a Ray worker container
+    #               directly on this box. Expected to announce itself via
+    #               UDP discovery so the head's UI sees it.
+    distributed_mode: str = "solo"  # "solo" | "head" | "member"
     # IPs of peer workers (on the cluster_interface subnet) when distributed.
+    # Used only when distributed_mode="head".
     peer_ips: List[str] = field(default_factory=list)
     # SSH user for head-to-worker passwordless login (eugr launcher uses it).
     ssh_user: str = "ubuntu"

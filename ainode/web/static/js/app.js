@@ -474,24 +474,44 @@ const AINode = {
     var s = this.state.status;
     var instances = [];
 
-    // Collect from models_loaded
+    // Distributed instance (authoritative from /api/cluster/resources) —
+    // when the head broadcasts one, render it before anything else and
+    // skip adding its model as a "single" duplicate.
+    var cr = this.state.clusterResources;
+    var distModel = null;
+    if (cr && cr.distributed_instance && cr.distributed_instance.model) {
+      var di = cr.distributed_instance;
+      distModel = di.model;
+      instances.push({
+        model: di.model,
+        strategy: 'distributed',
+        tp_size: di.tensor_parallel_size,
+        nodes: [di.head_node_id].concat(di.peer_ips || []),
+        status: 'READY',
+        badge: 'DISTRIBUTED · TP=' + di.tensor_parallel_size,
+      });
+    }
+
+    // Collect from models_loaded (skip the one we already rendered distributed)
     if (s && s.models_loaded) {
       s.models_loaded.forEach(function (modelName) {
+        if (distModel && modelName === distModel) return;
         instances.push({
           model: modelName,
           strategy: 'single',
           nodes: [s.node_id || 'local'],
           status: 'READY',
+          badge: 'SINGLE',
         });
       });
     }
 
-    // Collect from sharding status
+    // Collect from sharding status (legacy — keep for pipeline/tensor runs
+    // that don't come through the cluster/resources distributed_instance)
     var sharding = this.state.shardingStatus;
     if (sharding && sharding.active_sharding && sharding.active_sharding.model) {
       var sh = sharding.active_sharding;
       var shardNodes = sh.shard_map ? Object.keys(sh.shard_map) : [];
-      // Avoid duplicating if already in models_loaded
       var already = instances.find(function (inst) { return inst.model === sh.model; });
       if (!already) {
         instances.push({
@@ -499,6 +519,7 @@ const AINode = {
           strategy: sh.strategy || 'pipeline',
           nodes: shardNodes,
           status: 'READY',
+          badge: (sh.strategy || 'pipeline').toUpperCase(),
         });
       } else {
         already.strategy = sh.strategy || 'pipeline';
@@ -513,10 +534,11 @@ const AINode = {
 
     container.innerHTML = instances.map(function (inst, idx) {
       var nodeList = inst.nodes.map(function (n) { return self.esc(n); }).join(', ');
+      var badgeClass = inst.strategy === 'distributed' ? 'distributed' : 'single';
       return '<div class="instance-card" data-idx="' + idx + '">' +
         '<div class="instance-model">' + self.esc(inst.model) + '</div>' +
         '<div class="instance-meta">' +
-        '<span class="instance-strategy">' + self.esc(inst.strategy) + '</span>' +
+        '<span class="instance-strategy ' + badgeClass + '">' + self.esc(inst.badge || inst.strategy) + '</span>' +
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
         '<div class="instance-footer">' +

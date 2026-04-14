@@ -42,6 +42,15 @@ class NodeAnnouncement:
     # elected master for its cluster. Informational only; workers make their
     # own decision based on the full announcement set.
     is_master: bool = False
+    # Distributed inference mode: "solo" (own vLLM) | "head" (runs sharded
+    # vLLM across self + members) | "member" (GPU reserved for Ray workers
+    # placed by the head, no local vLLM).
+    distributed_mode: str = "solo"
+    # When this node is a head with an active distributed instance, this is
+    # the instance id + participating peer node_ids so the UI can render
+    # "DISTRIBUTED across N nodes" and know which topology members are busy.
+    distributed_instance_id: Optional[str] = None
+    distributed_peers: List[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

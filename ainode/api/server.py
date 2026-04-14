@@ -155,19 +155,44 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     if engine is not None:
         engine_ready = getattr(engine, "ready", False)
 
+    distributed_mode = getattr(config, "distributed_mode", "solo") or "solo"
+    # Member nodes report "member-ready" so the UI can distinguish them
+    # from solo nodes that just haven't loaded a model yet.
+    if distributed_mode == "member":
+        status = "member-ready"
+    elif engine_ready:
+        status = "serving"
+    else:
+        status = "starting"
+
+    # Head nodes with an active distributed instance advertise the instance id
+    # and the peer node ids it spans so the UI can paint "DISTRIBUTED TP=N".
+    # We use peer_ips as the peer key here — the UI resolves them against
+    # discovered members.
+    distributed_instance_id = None
+    distributed_peers: list = []
+    if distributed_mode == "head" and engine_ready:
+        peer_ips = list(getattr(config, "peer_ips", []) or [])
+        if peer_ips:
+            distributed_instance_id = f"{config.node_id or 'head'}:{config.model}"
+            distributed_peers = peer_ips
+
     return NodeAnnouncement(
         node_id=config.node_id or "unknown",
         node_name=config.node_name or socket.gethostname() or "unknown",
         gpu_name=gpu_name,
         gpu_memory_gb=gpu_memory_gb,
         unified_memory=unified_memory,
-        model=config.model or "",
-        status="serving" if engine_ready else "starting",
+        model=config.model or "" if distributed_mode != "member" else "",
+        status=status,
         api_port=config.api_port,
         web_port=config.web_port,
         cluster_id=getattr(config, "cluster_id", "default"),
         role=getattr(config, "cluster_role", "auto"),
         is_master=False,  # runtime flag, updated by sync loop
+        distributed_mode=distributed_mode,
+        distributed_instance_id=distributed_instance_id,
+        distributed_peers=distributed_peers,
     )
 
 
@@ -255,10 +280,29 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                     "is_master": is_master,
                     "cluster_id": getattr(config, "cluster_id", "default"),
                     "role": getattr(config, "cluster_role", "auto"),
+                    "distributed_mode": getattr(config, "distributed_mode", "solo") or "solo",
                 }
-                if engine is not None:
-                    engine_ready = getattr(engine, "ready", False)
+                dmode = updates["distributed_mode"]
+                engine_ready = bool(engine is not None and getattr(engine, "ready", False))
+                if dmode == "member":
+                    updates["status"] = "member-ready"
+                elif engine is not None:
                     updates["status"] = "serving" if engine_ready else "starting"
+
+                # Advertise distributed instance metadata once the head's
+                # sharded engine is serving — the UI uses this to render
+                # "DISTRIBUTED TP=N across X nodes".
+                if dmode == "head" and engine_ready:
+                    peer_ips = list(getattr(config, "peer_ips", []) or [])
+                    if peer_ips:
+                        updates["distributed_instance_id"] = f"{config.node_id or 'head'}:{config.model}"
+                        updates["distributed_peers"] = peer_ips
+                    else:
+                        updates["distributed_instance_id"] = None
+                        updates["distributed_peers"] = []
+                elif dmode != "head":
+                    updates["distributed_instance_id"] = None
+                    updates["distributed_peers"] = []
                 if sender:
                     sender.update_announcement(**updates)
                     # Keep the app-level announcement in sync so /api/status sees fresh values
@@ -403,8 +447,16 @@ async def handle_nodes(request: web.Request) -> web.Response:
 
     cluster_nodes = cluster.get_nodes(include_offline=False)
     if cluster_nodes:
-        nodes_list = [
-            {
+        nodes_list = []
+        for n in cluster_nodes:
+            status_str = n.status.value if hasattr(n.status, "value") else str(n.status)
+            dmode = getattr(n, "distributed_mode", "solo") or "solo"
+            # Members are "ready for work" once discovered, even though they
+            # don't run a local vLLM.
+            ready = status_str in ("online", "serving") or (
+                dmode == "member" and status_str in ("online", "member-ready")
+            )
+            nodes_list.append({
                 "node_id": n.node_id,
                 "node_name": n.node_name,
                 "host": "localhost",
@@ -414,16 +466,18 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "gpu_name": n.gpu_name,
                 "gpu_memory_gb": n.gpu_memory_gb,
                 "unified_memory": n.unified_memory,
-                "status": n.status.value if hasattr(n.status, "value") else str(n.status),
-                "engine_ready": (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "serving"),
-            }
-            for n in cluster_nodes
-        ]
+                "status": status_str,
+                "engine_ready": ready,
+                "distributed_mode": dmode,
+                "distributed_instance_id": getattr(n, "distributed_instance_id", None),
+                "distributed_peers": list(getattr(n, "distributed_peers", []) or []),
+            })
     else:
         # Fallback: return this node
         engine_ready = False
         if engine is not None:
             engine_ready = getattr(engine, "ready", False)
+        dmode = getattr(config, "distributed_mode", "solo") or "solo"
         nodes_list = [{
             "node_id": config.node_id,
             "node_name": config.node_name,
@@ -431,7 +485,8 @@ async def handle_nodes(request: web.Request) -> web.Response:
             "api_port": config.api_port,
             "web_port": config.web_port,
             "model": config.model,
-            "engine_ready": engine_ready,
+            "engine_ready": engine_ready or dmode == "member",
+            "distributed_mode": dmode,
         }]
     return web.json_response({"nodes": nodes_list})
 
@@ -548,12 +603,33 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
     ray_state: RayAutostartState = request.app.get("ray_autostart_state") or RayAutostartState()
 
     members = cluster.members()
+    # Include member-ready too: those nodes have reserved their GPU for
+    # Ray workers launched by the head, so they contribute to total VRAM
+    # even though they don't run their own local vLLM.
     ready = [
         n for n in members
-        if (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "serving", "starting")
+        if (n.status.value if hasattr(n.status, "value") else str(n.status))
+        in ("online", "serving", "starting", "member-ready")
     ]
     total_vram = sum(float(n.gpu_memory_gb or 0) for n in ready)
     total_gpus = len(ready)  # one GPU per node today; future: per-node GPU count
+
+    # Surface the distributed instance (if any) — the head broadcasts it;
+    # everybody else can tell from cluster state.
+    distributed_instance = None
+    for n in ready:
+        iid = getattr(n, "distributed_instance_id", None)
+        if iid:
+            peers = list(getattr(n, "distributed_peers", []) or [])
+            distributed_instance = {
+                "instance_id": iid,
+                "head_node_id": n.node_id,
+                "head_node_name": n.node_name,
+                "peer_ips": peers,
+                "tensor_parallel_size": 1 + len(peers),
+                "model": n.model,
+            }
+            break
 
     nodes_payload = []
     for n in ready:
@@ -565,6 +641,7 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
             "gpu_name": n.gpu_name,
             "unified_memory": n.unified_memory,
             "status": n.status.value if hasattr(n.status, "value") else str(n.status),
+            "distributed_mode": getattr(n, "distributed_mode", "solo") or "solo",
             "ray_status": (
                 "head" if (ray_state.is_head and cluster.is_master_of_cluster() and n.node_id == (cluster._local_announcement.node_id if cluster._local_announcement else ""))
                 else ("joined" if ray_state.joined_as_worker and cluster._local_announcement and n.node_id == cluster._local_announcement.node_id
@@ -578,6 +655,7 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         "total_gpus": total_gpus,
         "total_nodes": len(ready),
         "nodes": nodes_payload,
+        "distributed_instance": distributed_instance,
         "ray": ray_state.to_dict(),
     })
 

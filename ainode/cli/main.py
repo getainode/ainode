@@ -149,13 +149,30 @@ def cmd_start(args):
     # Write PID file
     _write_pid()
 
-    # Start inference engine.
-    #
-    # As of v0.4.0 AINode ships as a single container that bundles vLLM + the
-    # Python server, so ``DockerEngine`` is the only runtime path. The legacy
-    # pip-venv ``VLLMEngine`` branch is retained only for developer use (tests,
-    # non-GB10 workstations) and kicks in when AINODE_IN_CONTAINER is unset.
+    # Select engine path:
+    #   distributed_mode="member"  → no local vLLM. aiohttp + discovery only so
+    #                                the head can place a Ray worker on us via
+    #                                eugr's launcher.
+    #   distributed_mode="solo"    → single-node vLLM on this host.
+    #   distributed_mode="head"    → vLLM sharded across this host + peer_ips
+    #                                via eugr's launch-cluster.sh.
+    mode = (config.distributed_mode or "solo").lower()
     in_container = os.environ.get("AINODE_IN_CONTAINER") == "1" or getattr(args, "in_container", False)
+
+    if mode == "member":
+        console.print(
+            "  [bold cyan]Member mode[/bold cyan] — no local inference engine. "
+            "Awaiting work from the cluster head.\n"
+        )
+        from ainode.api.server import run_server
+        try:
+            run_server(config=config, engine=None)
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]Shutting down...[/yellow]")
+        finally:
+            _remove_pid()
+        return
+
     if in_container or config.engine_strategy == "docker":
         from ainode.engine.docker_engine import build_engine
         engine = build_engine(config)

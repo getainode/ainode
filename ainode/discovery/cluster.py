@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from ainode.discovery.broadcast import (
@@ -29,6 +29,9 @@ class ClusterNode:
     cluster_id: str = "default"
     role: str = "auto"  # raw config role
     is_master: bool = False  # broadcast-declared
+    distributed_mode: str = "solo"
+    distributed_instance_id: Optional[str] = None
+    distributed_peers: list = field(default_factory=list)
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -47,6 +50,9 @@ class ClusterNode:
             cluster_id=getattr(a, "cluster_id", "default"),
             role=getattr(a, "role", "auto"),
             is_master=getattr(a, "is_master", False),
+            distributed_mode=getattr(a, "distributed_mode", "solo"),
+            distributed_instance_id=getattr(a, "distributed_instance_id", None),
+            distributed_peers=list(getattr(a, "distributed_peers", []) or []),
         )
 
     @classmethod
@@ -65,6 +71,9 @@ class ClusterNode:
             cluster_id=getattr(announcement, "cluster_id", "default"),
             role=getattr(announcement, "role", "auto"),
             is_master=getattr(announcement, "is_master", False),
+            distributed_mode=getattr(announcement, "distributed_mode", "solo"),
+            distributed_instance_id=getattr(announcement, "distributed_instance_id", None),
+            distributed_peers=list(getattr(announcement, "distributed_peers", []) or []),
         )
 
 
