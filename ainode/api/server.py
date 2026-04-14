@@ -31,6 +31,11 @@ from ainode.discovery.cluster import ClusterState
 from ainode.engine.sharding_routes import register_sharding_routes
 from ainode.secrets import SecretsManager
 from ainode.secrets.api_routes import register_secrets_routes
+from ainode.api.server_routes import (
+    register_server_routes,
+    request_log_middleware,
+    init_server_state,
+)
 
 from ainode import __version__
 
@@ -54,7 +59,8 @@ def create_app(
 
     auth_config = AuthConfig.load()
 
-    app = web.Application(middlewares=[cors_middleware, auth_middleware])
+    app = web.Application(middlewares=[cors_middleware, request_log_middleware, auth_middleware])
+    init_server_state(app)
     # Instantiate shared services
     collector = MetricsCollector()
     dataset_manager = DatasetManager()
@@ -116,6 +122,9 @@ def create_app(
 
     # --- Secrets routes ------------------------------------------------------
     register_secrets_routes(app)
+
+    # --- Server view routes --------------------------------------------------
+    register_server_routes(app)
 
     app.router.add_static("/static", get_static_path(), name="static")
 
@@ -397,6 +406,11 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
             model = body_json.get("model", model)
         except Exception:
             pass
+    # Tag the request so the server-view log middleware can capture the model
+    try:
+        request["_log_model"] = model
+    except Exception:
+        pass
 
     # Build upstream request kwargs
     kwargs: dict = {

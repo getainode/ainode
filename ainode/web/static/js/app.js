@@ -240,7 +240,28 @@ const AINode = {
     if (target) target.style.display = '';
     // Context-switch left panel: training shows training sidebar, else chat sidebar.
     this.updateLeftPanelContext(view);
+    // Context-switch right panel: server view swaps to Model Info
+    this.updateRightPanelContext(view);
+    // Start/stop Server log polling
+    if (view === 'server') {
+      this.startServerLogPolling();
+    } else {
+      this.stopServerLogPolling();
+    }
     this.refresh();
+  },
+
+  updateRightPanelContext(view) {
+    var def = document.getElementById('right-panel-default');
+    var srv = document.getElementById('right-panel-server');
+    if (!def || !srv) return;
+    if (view === 'server') {
+      def.style.display = 'none';
+      srv.style.display = '';
+    } else {
+      def.style.display = '';
+      srv.style.display = 'none';
+    }
   },
 
   updateLeftPanelContext(view) {
@@ -307,6 +328,9 @@ const AINode = {
         break;
       case 'config':
         this.renderConfig();
+        break;
+      case 'server':
+        this.renderServer();
         break;
     }
 
@@ -4319,6 +4343,424 @@ const AINode = {
     } else {
       this.toast('Saved', 'success');
     }
+  },
+
+  // ========================================================================
+  //  SERVER VIEW (LM Studio-style console)
+  // ========================================================================
+
+  _serverState: {
+    logsSince: 0,
+    logsPoll: null,
+    autoScroll: true,
+    selectedModelId: null,
+    lastStatus: null,
+    endpoints: null,
+    endpointTab: 'openai',
+    logs: [],
+  },
+
+  async renderServer() {
+    var mount = document.getElementById('server-content');
+    if (!mount) return;
+    var self = this;
+
+    // Fetch status + endpoints in parallel (endpoints cached)
+    var status = await this.fetchJSON('/api/server/status');
+    this._serverState.lastStatus = status;
+    if (!this._serverState.endpoints) {
+      this._serverState.endpoints = await this.fetchJSON('/api/server/endpoints');
+    }
+
+    var s = status || { status: 'stopped', reachable_at: [], loaded_models: [] };
+    var primaryUrl = (s.reachable_at && s.reachable_at.length > 1)
+      ? s.reachable_at[1]
+      : (s.reachable_at && s.reachable_at[0]) || '—';
+
+    var html = '';
+
+    // --- Top status bar ---
+    html += '<div class="server-status-bar">';
+    html += '  <div class="server-status-left">';
+    html += '    <span class="server-status-indicator"><span class="server-status-dot running"></span> Running</span>';
+    html += '    <button class="btn-ghost server-btn-sm" id="server-toggle">Stop</button>';
+    html += '    <button class="btn-ghost server-btn-sm" id="server-settings-btn">Server Settings</button>';
+    html += '    <button class="btn-ghost server-btn-sm" id="server-mcp-btn">mcp.json</button>';
+    html += '  </div>';
+    html += '  <div class="server-status-center">';
+    html += '    <span class="server-reachable-label">Reachable at:</span>';
+    html += '    <span class="server-reachable-url mono" id="server-reachable-url">' + this.esc(primaryUrl) + '</span>';
+    html += '    <button class="server-copy-btn" data-copy="' + this.esc(primaryUrl) + '" title="Copy">⧉</button>';
+    html += '  </div>';
+    html += '  <div class="server-status-right">';
+    html += '    <button class="btn-nvidia server-btn-sm" id="server-load-model">+ Load Model</button>';
+    html += '  </div>';
+    html += '</div>';
+
+    // --- Loaded Models ---
+    html += '<section class="server-section">';
+    html += '  <div class="server-section-header">';
+    html += '    <h3 class="server-section-title">Loaded Models</h3>';
+    html += '    <span class="server-section-meta">' + ((s.loaded_models || []).length) + ' loaded · ' + this.esc(this.formatUptime(Math.floor(s.uptime_seconds || 0))) + ' uptime</span>';
+    html += '  </div>';
+    if (!s.loaded_models || s.loaded_models.length === 0) {
+      html += '  <div class="server-empty">No models loaded — click <strong>+ Load Model</strong> to start one</div>';
+    } else {
+      html += '  <div class="server-loaded-list" id="server-loaded-list">';
+      s.loaded_models.forEach(function (m, idx) {
+        html += self._renderLoadedCard(m, idx);
+      });
+      html += '  </div>';
+    }
+    html += '</section>';
+
+    // --- Supported Endpoints ---
+    html += '<section class="server-section">';
+    html += '  <div class="server-section-header">';
+    html += '    <h3 class="server-section-title">Supported endpoints</h3>';
+    html += '    <span class="badge-new">NEW REST API v1</span>';
+    html += '  </div>';
+    html += '  <div class="server-tab-pills" id="server-endpoint-tabs">';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'openai' ? ' active' : '') + '" data-tab="openai">OpenAI-compatible</button>';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'lmstudio' ? ' active' : '') + '" data-tab="lmstudio">LM Studio API</button>';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'anthropic' ? ' active' : '') + '" data-tab="anthropic">Anthropic-compatible</button>';
+    html += '  </div>';
+    html += '  <div class="server-endpoints-list" id="server-endpoints-list">';
+    html += this._renderEndpointRows(primaryUrl);
+    html += '  </div>';
+    html += '</section>';
+
+    // --- Developer Logs ---
+    html += '<section class="server-section">';
+    html += '  <div class="server-section-header">';
+    html += '    <h3 class="server-section-title">Developer Logs</h3>';
+    html += '    <div class="server-log-controls">';
+    html += '      <label class="server-log-toggle"><input type="checkbox" id="server-log-autoscroll"' + (this._serverState.autoScroll ? ' checked' : '') + '> auto-scroll</label>';
+    html += '      <button class="btn-ghost server-btn-sm" id="server-log-clear">Clear</button>';
+    html += '    </div>';
+    html += '  </div>';
+    html += '  <div class="server-log-panel" id="server-log-panel">';
+    html += this._renderLogEntries(this._serverState.logs);
+    html += '  </div>';
+    html += '</section>';
+
+    mount.innerHTML = html;
+
+    this._bindServerEvents();
+    this._renderServerRightPanel(this._serverState.selectedModelId);
+  },
+
+  _renderLoadedCard(m, idx) {
+    var id = m.id || 'unknown';
+    var nodeHost = m.node_hostname || m.node_id || 'local';
+    var type = m.type || 'llm';
+    var sizeStr = m.size_bytes > 0 ? this.formatBytes(m.size_bytes) : '—';
+    var parallel = m.parallel || 1;
+    var selected = (this._serverState.selectedModelId === id) ? ' selected' : '';
+    return '<div class="server-loaded-card' + selected + '" data-model-id="' + this.esc(id) + '" data-idx="' + idx + '">' +
+      '<div class="server-loaded-left">' +
+      '  <span class="server-badge ready">READY</span>' +
+      '  <span class="server-node-pill">' + this.esc(nodeHost) + '</span>' +
+      '  <span class="server-type-tag">' + this.esc(type) + '</span>' +
+      '  <span class="server-model-id mono" data-copy="' + this.esc(id) + '" title="Click to copy">' + this.esc(id) + '</span>' +
+      '</div>' +
+      '<div class="server-loaded-right">' +
+      '  <span class="server-meta">' + this.esc(sizeStr) + '</span>' +
+      '  <span class="server-meta">· ' + parallel + 'x</span>' +
+      '  <button class="server-icon-btn" data-action="preview" title="Preview">👁</button>' +
+      '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>' +
+      '  <button class="server-icon-btn" data-action="copy-curl" data-model="' + this.esc(id) + '" title="Copy curl">⎘</button>' +
+      '  <button class="server-eject-btn" data-action="eject" data-model="' + this.esc(id) + '">Eject</button>' +
+      '</div>' +
+      '</div>';
+  },
+
+  _renderEndpointRows(baseUrl) {
+    var self = this;
+    var tab = this._serverState.endpointTab;
+    var catalog = this._serverState.endpoints || {};
+    var rows = catalog[tab] || [];
+    if (!rows.length) return '<div class="server-empty">No endpoints</div>';
+    return rows.map(function (ep) {
+      var planned = ep.status === 'planned';
+      var methodClass = 'server-method-' + ep.method.toLowerCase();
+      var dim = planned ? ' planned' : '';
+      return '<div class="server-endpoint-row' + dim + '">' +
+        '<span class="server-method-badge ' + methodClass + '">' + self.esc(ep.method) + '</span>' +
+        '<span class="server-endpoint-path mono">' + self.esc(ep.path) + '</span>' +
+        '<span class="server-endpoint-desc">' + self.esc(ep.description || '') + '</span>' +
+        (planned ? '<span class="server-endpoint-planned">planned</span>' : '') +
+        '<button class="server-copy-btn" data-copy="curl -X ' + self.esc(ep.method) + ' ' + self.esc(baseUrl) + self.esc(ep.path) + '" title="Copy curl">⧉</button>' +
+        '</div>';
+    }).join('');
+  },
+
+  _renderLogEntries(entries) {
+    var self = this;
+    if (!entries || entries.length === 0) {
+      return '<div class="server-log-empty">Waiting for API requests…</div>';
+    }
+    return entries.map(function (e) {
+      var ts = new Date((e.timestamp || 0) * 1000);
+      var tsStr = ts.toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
+      var levelCls = 'log-' + (e.level || 'INFO').toLowerCase();
+      var modelStr = e.model ? ' [' + self.esc(e.model) + ']' : '';
+      var sizeStr = e.content_length ? ' ' + self.formatBytes(e.content_length) : '';
+      return '<div class="server-log-entry ' + levelCls + '">' +
+        '<span class="log-ts mono">' + tsStr + '</span> ' +
+        '<span class="log-level">[' + self.esc(e.level || 'INFO') + ']</span>' +
+        modelStr +
+        ' <span class="log-method mono">' + self.esc(e.method) + '</span> ' +
+        '<span class="log-path mono">' + self.esc(e.path) + '</span> ' +
+        '<span class="log-status mono">' + (e.status || 0) + '</span> ' +
+        '<span class="log-dur mono">' + (e.duration_ms || 0) + 'ms</span>' +
+        '<span class="log-size mono">' + sizeStr + '</span>' +
+        '</div>';
+    }).join('');
+  },
+
+  _bindServerEvents() {
+    var self = this;
+    var root = document.getElementById('server-content');
+    if (!root) return;
+
+    // Copy buttons
+    root.querySelectorAll('[data-copy]').forEach(function (el) {
+      el.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var text = el.dataset.copy || '';
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(function () {
+          self.toast('Copied to clipboard', 'success');
+        }).catch(function () { self.toast('Copy failed', 'error'); });
+      });
+    });
+
+    // Endpoint tab pills
+    root.querySelectorAll('.server-tab-pill').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self._serverState.endpointTab = btn.dataset.tab;
+        var s = self._serverState.lastStatus || {};
+        var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || '';
+        var list = document.getElementById('server-endpoints-list');
+        if (list) list.innerHTML = self._renderEndpointRows(primary);
+        root.querySelectorAll('.server-tab-pill').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.tab === self._serverState.endpointTab);
+        });
+        // Rebind copy buttons in newly rendered rows
+        self._bindServerEvents();
+      });
+    });
+
+    // Loaded card click → select + update right panel
+    root.querySelectorAll('.server-loaded-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        var id = card.dataset.modelId;
+        self._serverState.selectedModelId = id;
+        root.querySelectorAll('.server-loaded-card').forEach(function (c) { c.classList.remove('selected'); });
+        card.classList.add('selected');
+        self._renderServerRightPanel(id);
+      });
+    });
+
+    // Loaded card actions
+    root.querySelectorAll('.server-loaded-card [data-action]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var action = btn.dataset.action;
+        var model = btn.dataset.model;
+        if (action === 'eject') self._serverEjectModel(model);
+        else if (action === 'open-chat') {
+          self.state.chatModel = model;
+          self.navigate('chat');
+        }
+        else if (action === 'copy-curl') self._serverShowCurl(model);
+        else if (action === 'preview') self.toast('Preview coming soon', 'info');
+      });
+    });
+
+    // Top-bar buttons
+    var toggleBtn = document.getElementById('server-toggle');
+    if (toggleBtn) toggleBtn.addEventListener('click', function () { self.toast('Server toggle not yet implemented', 'info'); });
+    var settingsBtn = document.getElementById('server-settings-btn');
+    if (settingsBtn) settingsBtn.addEventListener('click', function () { self.navigate('config'); });
+    var mcpBtn = document.getElementById('server-mcp-btn');
+    if (mcpBtn) mcpBtn.addEventListener('click', function () { self.toast('mcp.json export coming soon', 'info'); });
+    var loadBtn = document.getElementById('server-load-model');
+    if (loadBtn) loadBtn.addEventListener('click', function () { self.navigate('downloads'); });
+
+    // Logs
+    var clearBtn = document.getElementById('server-log-clear');
+    if (clearBtn) clearBtn.addEventListener('click', function () { self._serverClearLogs(); });
+    var autoScroll = document.getElementById('server-log-autoscroll');
+    if (autoScroll) autoScroll.addEventListener('change', function () { self._serverState.autoScroll = autoScroll.checked; });
+  },
+
+  async _serverEjectModel(modelId) {
+    if (!modelId) return;
+    if (!confirm('Eject model ' + modelId + '?')) return;
+    try {
+      var resp = await fetch('/api/server/models/' + encodeURIComponent(modelId) + '/eject', { method: 'POST' });
+      var body = await resp.json().catch(function () { return {}; });
+      if (resp.ok) this.toast(body.message || 'Model ejected', 'success');
+      else this.toast(body.message || 'Eject not available', 'info');
+      this.renderServer();
+    } catch (err) {
+      this.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  _serverShowCurl(modelId) {
+    var s = this._serverState.lastStatus || {};
+    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || 'http://localhost:3000';
+    var curl = 'curl ' + primary + '/v1/chat/completions \\\n' +
+      '  -H "Content-Type: application/json" \\\n' +
+      '  -d \'{"model":"' + modelId + '","messages":[{"role":"user","content":"Hello!"}]}\'';
+    navigator.clipboard.writeText(curl).then(function () {
+      AINode.toast('curl example copied', 'success');
+    }).catch(function () { AINode.toast('Copy failed', 'error'); });
+  },
+
+  async _serverClearLogs() {
+    try {
+      await fetch('/api/server/logs', { method: 'DELETE' });
+      this._serverState.logs = [];
+      this._serverState.logsSince = 0;
+      var panel = document.getElementById('server-log-panel');
+      if (panel) panel.innerHTML = this._renderLogEntries([]);
+      this.toast('Logs cleared', 'success');
+    } catch (err) {
+      this.toast('Failed to clear logs', 'error');
+    }
+  },
+
+  startServerLogPolling() {
+    var self = this;
+    if (this._serverState.logsPoll) return;
+    this._serverState.logsPoll = setInterval(function () { self._pollServerLogs(); }, 2000);
+    this._pollServerLogs();
+  },
+
+  stopServerLogPolling() {
+    if (this._serverState.logsPoll) {
+      clearInterval(this._serverState.logsPoll);
+      this._serverState.logsPoll = null;
+    }
+  },
+
+  async _pollServerLogs() {
+    var since = this._serverState.logsSince || 0;
+    var data = await this.fetchJSON('/api/server/logs?since=' + since);
+    if (!data || !data.entries) return;
+    if (data.entries.length > 0) {
+      this._serverState.logs = this._serverState.logs.concat(data.entries).slice(-500);
+      this._serverState.logsSince = data.entries[data.entries.length - 1].timestamp || data.now;
+      var panel = document.getElementById('server-log-panel');
+      if (panel) {
+        panel.innerHTML = this._renderLogEntries(this._serverState.logs);
+        if (this._serverState.autoScroll) panel.scrollTop = panel.scrollHeight;
+      }
+    } else if (!this._serverState.logsSince) {
+      this._serverState.logsSince = data.now || Date.now() / 1000;
+    }
+  },
+
+  _renderServerRightPanel(modelId) {
+    var mount = document.getElementById('right-panel-server');
+    if (!mount) return;
+    var s = this._serverState.lastStatus || {};
+    var models = s.loaded_models || [];
+    var model = null;
+    if (modelId) model = models.find(function (m) { return m.id === modelId; });
+    if (!model && models.length > 0) {
+      model = models[0];
+      this._serverState.selectedModelId = model.id;
+    }
+    if (!model) {
+      mount.innerHTML = '<div class="panel-section"><h3 class="panel-title">MODEL INFO</h3>' +
+        '<div class="server-empty" style="margin:12px 16px">No model selected</div></div>';
+      return;
+    }
+    var self = this;
+    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || '—';
+    var arch = (model.id || '').split('/')[0] || 'unknown';
+    var fileName = (model.id || '').split('/').pop();
+    var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes) : '—';
+
+    var html = '';
+    html += '<div class="panel-section">';
+    html += '  <h3 class="panel-title">MODEL INFO</h3>';
+    html += '  <div class="server-info-host">';
+    html += '    <span class="label">Hosted on</span>';
+    html += '    <span class="mono">' + this.esc(model.node_hostname || '') + '</span>';
+    html += '    <button class="server-copy-btn" data-copy="' + this.esc(model.node_hostname || '') + '">⧉</button>';
+    html += '  </div>';
+    html += '  <div class="server-tab-pills server-info-tabs" id="server-info-tabs">';
+    html += '    <button class="server-tab-pill active" data-info-tab="info">Info</button>';
+    html += '    <button class="server-tab-pill" data-info-tab="load">Load</button>';
+    html += '    <button class="server-tab-pill" data-info-tab="inference">Inference</button>';
+    html += '  </div>';
+    html += '  <div id="server-info-body">';
+    html += this._renderServerInfoTab('info', model, arch, fileName, sizeStr);
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="panel-section">';
+    html += '  <h3 class="panel-title">API USAGE</h3>';
+    html += '  <div class="server-info-section">';
+    html += '    <div class="server-info-row"><span class="label">Model ID</span><span class="mono val">' + this.esc(model.id) + '</span><button class="server-copy-btn" data-copy="' + this.esc(model.id) + '">⧉</button></div>';
+    html += '    <div class="server-info-row"><span class="label">Reachable at</span><span class="mono val">' + this.esc(primary) + '</span><button class="server-copy-btn" data-copy="' + this.esc(primary) + '">⧉</button></div>';
+    html += '  </div>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    mount.querySelectorAll('[data-copy]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var text = el.dataset.copy || '';
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(function () { self.toast('Copied', 'success'); });
+      });
+    });
+    mount.querySelectorAll('[data-info-tab]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        mount.querySelectorAll('[data-info-tab]').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var body = document.getElementById('server-info-body');
+        if (body) body.innerHTML = self._renderServerInfoTab(btn.dataset.infoTab, model, arch, fileName, sizeStr);
+      });
+    });
+  },
+
+  _renderServerInfoTab(tab, model, arch, fileName, sizeStr) {
+    if (tab === 'load') {
+      return '<div class="server-info-section">' +
+        '<div class="server-info-row"><span class="label">Context length</span><input class="form-input server-slider-stub" type="number" value="4096" disabled></div>' +
+        '<div class="server-info-row"><span class="label">GPU layers</span><input class="form-input server-slider-stub" type="number" value="-1" disabled></div>' +
+        '<div class="server-info-row"><span class="label">Parallel</span><input class="form-input server-slider-stub" type="number" value="' + (model.parallel || 1) + '" disabled></div>' +
+        '<div class="server-hint">Load parameters are read-only for Docker-managed engines.</div>' +
+        '</div>';
+    }
+    if (tab === 'inference') {
+      return '<div class="server-info-section">' +
+        '<div class="server-info-row"><span class="label">Temperature</span><input class="form-input server-slider-stub" type="number" step="0.01" value="0.7" disabled></div>' +
+        '<div class="server-info-row"><span class="label">Top-p</span><input class="form-input server-slider-stub" type="number" step="0.01" value="0.95" disabled></div>' +
+        '<div class="server-info-row"><span class="label">Top-k</span><input class="form-input server-slider-stub" type="number" value="40" disabled></div>' +
+        '<div class="server-hint">Override these per-request via the API.</div>' +
+        '</div>';
+    }
+    // Info tab
+    var caps = (model.capabilities || []).map(function (c) { return '<span class="server-cap-badge">' + AINode.esc(c) + '</span>'; }).join('');
+    return '<div class="server-info-section">' +
+      '<div class="server-info-row"><span class="label">Model</span><span class="mono val">' + AINode.esc(model.id) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">File</span><span class="mono val">' + AINode.esc(fileName) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Format</span><span class="val">' + AINode.esc(model.format || 'SafeTensors') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Quantization</span><span class="val">' + AINode.esc(model.quantization || 'none') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Arch</span><span class="val">' + AINode.esc(arch) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Capabilities</span><span class="val">' + (caps || '—') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Domain</span><span class="val">' + AINode.esc(model.type || 'llm') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Size on disk</span><span class="val">' + AINode.esc(sizeStr) + '</span></div>' +
+      '</div>';
   },
 };
 

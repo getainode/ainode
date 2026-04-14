@@ -4990,3 +4990,453 @@ select {
   .config-form-grid { grid-template-columns: 1fr; }
   .config-member-row { grid-template-columns: 1fr 1fr; }
 }
+
+/* ==========================================================================
+   SERVER VIEW (LM Studio-style)
+   ========================================================================== */
+
+#view-server { padding: 16px; overflow-y: auto; }
+#server-content { display: flex; flex-direction: column; gap: 16px; }
+
+.server-status-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.server-status-left, .server-status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.server-status-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  min-width: 0;
+}
+.server-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.server-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #555;
+  display: inline-block;
+}
+.server-status-dot.running {
+  background: var(--nvidia-green);
+  box-shadow: 0 0 6px var(--nvidia-green-glow);
+}
+.server-reachable-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.server-reachable-url {
+  color: var(--nvidia-green);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-btn-sm {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+/* Generic server buttons */
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.btn-ghost:hover {
+  border-color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.05);
+}
+
+.server-copy-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.server-copy-btn:hover {
+  border-color: var(--nvidia-green);
+  color: var(--nvidia-green);
+}
+
+.server-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.server-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.server-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 0;
+}
+.server-section-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.badge-new {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--nvidia-green-dim);
+  color: #000;
+}
+.server-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* Loaded model cards */
+.server-loaded-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.server-loaded-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.server-loaded-card:hover { background: var(--bg-card-hover); }
+.server-loaded-card.selected {
+  border-color: var(--nvidia-green);
+  box-shadow: 0 0 0 1px var(--nvidia-green-glow);
+}
+.server-loaded-left, .server-loaded-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.server-loaded-left { flex: 1; min-width: 0; }
+.server-badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.server-badge.ready {
+  background: rgba(118, 185, 0, 0.15);
+  color: var(--nvidia-green);
+  border: 1px solid var(--nvidia-green-dim);
+}
+.server-node-pill {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.server-type-tag {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.server-model-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-model-id:hover { color: var(--nvidia-green); cursor: pointer; }
+.server-meta { color: var(--text-muted); font-size: 12px; }
+.server-icon-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.server-icon-btn:hover { color: var(--nvidia-green); border-color: var(--border); }
+.server-eject-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 51, 51, 0.4);
+  color: var(--red, #ff3333);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.server-eject-btn:hover {
+  background: rgba(255, 51, 51, 0.1);
+}
+
+/* Endpoint tabs + rows */
+.server-tab-pills {
+  display: inline-flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.server-tab-pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+}
+.server-tab-pill.active {
+  background: var(--nvidia-green-dim);
+  border-color: var(--nvidia-green);
+  color: #000;
+}
+.server-endpoints-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.server-endpoint-row {
+  display: grid;
+  grid-template-columns: 60px 260px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.server-endpoint-row.planned { opacity: 0.55; }
+.server-endpoint-path { color: var(--text-primary); }
+.server-endpoint-desc { color: var(--text-muted); }
+.server-endpoint-planned {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.server-method-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  text-align: center;
+  letter-spacing: 0.5px;
+  font-family: var(--font-mono);
+}
+.server-method-get {
+  background: rgba(118, 185, 0, 0.15);
+  color: var(--nvidia-green);
+  border: 1px solid var(--nvidia-green-dim);
+}
+.server-method-post {
+  background: rgba(64, 140, 220, 0.15);
+  color: #5aa3e0;
+  border: 1px solid rgba(64, 140, 220, 0.4);
+}
+.server-method-delete {
+  background: rgba(255, 51, 51, 0.15);
+  color: #ff6060;
+  border: 1px solid rgba(255, 51, 51, 0.4);
+}
+.server-method-patch {
+  background: rgba(220, 140, 40, 0.15);
+  color: #e0a040;
+  border: 1px solid rgba(220, 140, 40, 0.4);
+}
+
+/* Developer log panel */
+.server-log-panel {
+  max-height: 340px;
+  min-height: 160px;
+  overflow-y: auto;
+  background: #050505;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.server-log-empty {
+  color: var(--text-muted);
+  padding: 12px;
+  text-align: center;
+  font-style: italic;
+}
+.server-log-entry {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 1px 0;
+}
+.server-log-entry .log-ts { color: var(--text-muted); }
+.server-log-entry .log-level { font-weight: 700; }
+.server-log-entry.log-info .log-level { color: var(--nvidia-green); }
+.server-log-entry.log-warn .log-level { color: #e0a040; }
+.server-log-entry.log-error .log-level { color: #ff6060; }
+.server-log-entry .log-method { color: #5aa3e0; }
+.server-log-entry .log-path { color: var(--text-primary); }
+.server-log-entry .log-status { color: var(--text-secondary); }
+.server-log-entry .log-dur { color: var(--text-muted); }
+.server-log-entry .log-size { color: var(--text-muted); }
+.server-log-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.server-log-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+/* Right panel Model Info */
+#right-panel-server .panel-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+#right-panel-server .panel-title {
+  margin: 0 0 10px 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--nvidia-green);
+}
+.server-info-host {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 10px;
+  font-size: 12px;
+}
+.server-info-host .label {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.server-info-tabs { margin-bottom: 8px; display: flex; gap: 4px; }
+.server-info-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.server-info-row {
+  display: grid;
+  grid-template-columns: 110px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+}
+.server-info-row .label {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.server-info-row .val {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-cap-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-card-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  margin-right: 4px;
+}
+.server-slider-stub {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  width: 100%;
+}
+.server-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+  padding-top: 4px;
+}
+
+@media (max-width: 1100px) {
+  .server-status-bar { grid-template-columns: 1fr; }
+  .server-status-center { justify-content: flex-start; }
+  .server-endpoint-row { grid-template-columns: 60px 1fr auto; }
+  .server-endpoint-row .server-endpoint-desc { display: none; }
+}

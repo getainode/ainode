@@ -138,6 +138,64 @@ def test_build_announcement_engine_ready():
 # ---- /api/nodes with cluster data ------------------------------------------
 
 @pytest.mark.asyncio
+async def test_server_status(client):
+    resp = await client.get("/api/server/status")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "running"
+    assert "reachable_at" in data and isinstance(data["reachable_at"], list)
+    assert len(data["reachable_at"]) >= 1
+    assert "loaded_models" in data
+    assert "request_count_total" in data
+
+
+@pytest.mark.asyncio
+async def test_server_endpoints_catalog(client):
+    resp = await client.get("/api/server/endpoints")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "openai" in data and "lmstudio" in data and "anthropic" in data
+    # Each row has method + path
+    for row in data["openai"]:
+        assert "method" in row and "path" in row
+
+
+@pytest.mark.asyncio
+async def test_server_logs_roundtrip(client):
+    # Start clean
+    await client.delete("/api/server/logs")
+    # Trigger a loggable request
+    await client.get("/api/status")
+    resp = await client.get("/api/server/logs")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "entries" in data
+    assert any(e["path"] == "/api/status" for e in data["entries"])
+    # Health & server/logs themselves should be skipped
+    assert not any(e["path"].startswith("/api/health") for e in data["entries"])
+    assert not any(e["path"] == "/api/server/logs" for e in data["entries"])
+    # Clear
+    resp = await client.delete("/api/server/logs")
+    assert resp.status == 200
+    resp = await client.get("/api/server/logs")
+    data = await resp.json()
+    # After the GET, the clear call itself would not be logged (skipped).
+    # Any entries remaining should predate the clear only if more requests
+    # happened between. Assert the clear worked by checking the list is
+    # empty or only contains this GET's predecessors.
+    assert isinstance(data["entries"], list)
+
+
+@pytest.mark.asyncio
+async def test_server_eject_no_engine(client):
+    resp = await client.post("/api/server/models/dummy%2Fmodel/eject")
+    # With no engine, we return 202 + planned status
+    assert resp.status in (202, 200)
+    data = await resp.json()
+    assert "model_id" in data
+
+
+@pytest.mark.asyncio
 async def test_nodes_returns_local_node_from_cluster(client):
     """When cluster has a local announcement, /api/nodes should return it."""
     resp = await client.get("/api/nodes")

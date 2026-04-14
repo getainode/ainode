@@ -29,6 +29,7 @@
       <nav class="top-nav">
         <button class="nav-pill active" data-view="dashboard">Cluster</button>
         <button class="nav-pill" data-view="chat">Chat</button>
+        <button class="nav-pill" data-view="server">Server</button>
         <button class="nav-pill" data-view="downloads">Downloads</button>
         <button class="nav-pill" data-view="training">Training</button>
         <button class="nav-pill" data-view="config">Config</button>
@@ -90,6 +91,10 @@
         </div>
         <div id="models-list"></div>
       </div>
+      <!-- Server view -->
+      <div id="view-server" class="view" style="display:none">
+        <div id="server-content"></div>
+      </div>
       <!-- Training view -->
       <div id="view-training" class="view" style="display:none">
         <div class="view-header">
@@ -121,6 +126,8 @@
 
     <!-- Right Panel: Instances + Launch -->
     <aside class="right-panel" id="right-panel">
+      <!-- Default: Instances + Launch -->
+      <div id="right-panel-default">
       <div class="panel-section">
         <h3 class="panel-title"><span class="status-dot online"></span> INSTANCES</h3>
         <div id="instances-list">
@@ -148,6 +155,9 @@
           <button class="btn-nvidia btn-full" id="launch-btn">LAUNCH</button>
         </div>
       </div>
+      </div>
+      <!-- Server view: Model Info panel -->
+      <div id="right-panel-server" style="display:none"></div>
     </aside>
 
     <!-- Bottom Bar: Chat Input -->
