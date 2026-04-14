@@ -165,6 +165,31 @@ body {
   animation: green-pulse 2s ease-in-out infinite;
 }
 
+.top-bar-status.offline .status-dot {
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red-glow);
+  animation: red-pulse 2s ease-in-out infinite;
+}
+
+.top-bar-status.offline .node-count {
+  color: var(--red);
+}
+
+.top-bar-status.offline {
+  border-color: rgba(255, 51, 51, 0.3);
+}
+
+@keyframes red-pulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 8px var(--red-glow);
+  }
+  50% {
+    opacity: 0.6;
+    box-shadow: 0 0 14px rgba(255, 51, 51, 0.4);
+  }
+}
+
 .top-bar-status .node-count {
   font-weight: 600;
   color: var(--nvidia-green);

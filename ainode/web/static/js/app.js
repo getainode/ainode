@@ -284,15 +284,28 @@ const AINode = {
   updateTopBar() {
     var nodes = this.state.nodes;
     var s = this.state.status;
-    var count = nodes.length || 1;
-    var el = document.getElementById('top-node-count');
-    if (el) el.textContent = count + ' node' + (count !== 1 ? 's' : '');
+    var onlineCount = 0;
+    if (s && s.engine_ready) onlineCount = 1;
+    onlineCount = Math.max(onlineCount, nodes.filter(function (n) {
+      return n.status === 'online' || n.status === 'serving' || n.engine_ready;
+    }).length);
 
-    // Update status indicator
-    var indicator = document.querySelector('.top-status .status-indicator');
-    if (indicator && s) {
-      indicator.classList.toggle('online', !!s.engine_ready);
-      indicator.classList.toggle('offline', !s.engine_ready);
+    var pill = document.querySelector('.top-bar-status');
+    var countEl = document.getElementById('top-node-count');
+    var labelEl = document.querySelector('.top-bar-status .node-label');
+
+    if (!pill) return;
+
+    if (onlineCount > 0) {
+      pill.classList.remove('offline');
+      pill.classList.add('online');
+      if (countEl) countEl.textContent = onlineCount;
+      if (labelEl) labelEl.textContent = onlineCount === 1 ? 'node online' : 'nodes online';
+    } else {
+      pill.classList.remove('online');
+      pill.classList.add('offline');
+      if (countEl) countEl.textContent = '0';
+      if (labelEl) labelEl.textContent = 'offline';
     }
   },
 
@@ -870,17 +883,29 @@ const AINode = {
     var totalCount = catalog.length;
     var filteredCount = models.length;
 
-    var html = '<div class="downloads-header">' +
-      '<h2 class="view-title">Model Catalog</h2>' +
-      '<div class="downloads-count">' + filteredCount + ' of ' + totalCount + ' models</div>' +
-      '</div>' +
-      '<div class="downloads-toolbar">' +
-      '<input type="text" id="downloads-search" class="search-input" placeholder="Search models, families, or descriptions..." value="' + this.esc(this.state.modelsSearch) + '">' +
-      '<div class="pill-group downloads-filters">' + filterPills + '</div>' +
-      '</div>';
+    // Render toolbar once; only results re-render on search
+    var needsToolbar = !container.querySelector('#downloads-search');
+    var html = '';
+    if (needsToolbar) {
+      html += '<div class="downloads-header">' +
+        '<h2 class="view-title">Model Catalog</h2>' +
+        '<div class="downloads-count" id="downloads-count">' + filteredCount + ' of ' + totalCount + ' models</div>' +
+        '</div>' +
+        '<div class="downloads-toolbar">' +
+        '<input type="text" id="downloads-search" class="search-input" placeholder="Search models, families, or descriptions..." value="' + this.esc(this.state.modelsSearch) + '">' +
+        '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
+        '</div>' +
+        '<div id="downloads-results"></div>';
+    } else {
+      // Just update count + filter pills
+      var countEl = container.querySelector('#downloads-count');
+      if (countEl) countEl.textContent = filteredCount + ' of ' + totalCount + ' models';
+      var pillsEl = container.querySelector('#downloads-filters');
+      if (pillsEl) pillsEl.innerHTML = filterPills;
+    }
 
-    html += '<div class="downloads-grid">';
-    html += models.map(function (model) {
+    // Results list HTML (rebuilt on every render, but appended separately)
+    var resultsRows = models.map(function (model) {
       var isLoaded = loaded.includes(model.id);
       var fits = gpuMem >= (model.minMem || model.sizeGb);
       var fitBadge = gpuMem > 0 ? (fits ?
@@ -912,24 +937,33 @@ const AINode = {
         '</div>' +
         '</div>';
     }).join('');
-    html += '</div>';
 
+    var resultsHtml = '<div class="downloads-grid">' + resultsRows + '</div>';
     if (models.length === 0) {
-      html += '<div class="downloads-empty">No models match your filters.</div>';
+      resultsHtml = '<div class="downloads-empty">No models match your filters.</div>';
     }
 
-    container.innerHTML = html;
+    // First render: inject full toolbar + results
+    if (needsToolbar) {
+      container.innerHTML = html;
+    }
+    // Update only the results area so search input keeps focus
+    var resultsContainer = container.querySelector('#downloads-results');
+    if (resultsContainer) {
+      resultsContainer.innerHTML = resultsHtml;
+    }
 
-    // Bind search
+    // Bind search (only once, on first render)
     var searchInput = document.getElementById('downloads-search');
-    if (searchInput) {
+    if (searchInput && !searchInput.dataset.bound) {
+      searchInput.dataset.bound = '1';
       searchInput.addEventListener('input', function () {
         self.state.modelsSearch = searchInput.value;
         self.renderDownloads();
       });
     }
 
-    // Bind filter pills
+    // Bind filter pills (rebind each time since innerHTML was replaced)
     container.querySelectorAll('.downloads-filter').forEach(function (btn) {
       btn.addEventListener('click', function () {
         self.state.modelsFilter = btn.dataset.filter;
@@ -942,30 +976,31 @@ const AINode = {
       btn.addEventListener('click', function (e) {
         e.stopPropagation();
         var modelId = btn.dataset.modelId;
+        // Find the catalog slug from the HF repo ID
+        var modelEntry = (self.state.catalog || []).find(function (m) { return m.id === modelId; });
+        var slug = modelEntry ? modelEntry.slug : modelId;
         btn.disabled = true;
         btn.textContent = 'Starting...';
-        fetch('/api/models/download', {
+        fetch('/api/models/' + encodeURIComponent(slug) + '/download', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model_id: modelId }),
-        }).then(function (resp) { return resp.json(); }).then(function (data) {
+        }).then(function (resp) {
+          if (!resp.ok) {
+            return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t.slice(0, 100)); });
+          }
+          return resp.json();
+        }).then(function (data) {
           if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Download'; return; }
           btn.textContent = 'Downloading...';
           var pollId = setInterval(function () {
-            fetch('/api/models/download/status?model_id=' + encodeURIComponent(modelId))
+            fetch('/api/models/' + encodeURIComponent(slug))
               .then(function (r) { return r.json(); })
               .then(function (st) {
-                if (st.status === 'completed') {
+                if (st.downloaded) {
                   clearInterval(pollId);
                   self.toast('Model downloaded: ' + modelId, 'success');
                   self.refresh();
-                } else if (st.status === 'failed') {
-                  clearInterval(pollId);
-                  self.toast('Download failed', 'error');
-                  btn.disabled = false;
-                  btn.textContent = 'Download';
-                } else if (st.progress != null) {
-                  btn.textContent = Math.round(st.progress) + '%';
+                  btn.textContent = 'Downloaded';
                 }
               }).catch(function () { clearInterval(pollId); btn.disabled = false; btn.textContent = 'Download'; });
           }, 2000);
