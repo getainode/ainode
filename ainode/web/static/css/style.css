@@ -277,10 +277,9 @@ html, body {
   overflow: hidden;
 }
 
+/* Override command-center height: 48px top-bar + 32px mini-footer = 80px reserved */
 .command-center {
-  height: calc(100vh - 32px) !important;
-  margin-top: 0;
-  padding-bottom: 0;
+  height: calc(100vh - 80px) !important;
 }
 
 .mini-footer {
