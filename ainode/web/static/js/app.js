@@ -586,6 +586,97 @@ const AINode = {
     if (searchInput) {
       searchInput.addEventListener('input', function () { self.renderConversationList(); });
     }
+
+    // Drag-and-drop image support on the center-stage area
+    var stage = document.getElementById('center-stage');
+    if (stage) {
+      stage.addEventListener('dragover', function (e) {
+        if (e.dataTransfer && Array.from(e.dataTransfer.items || []).some(function (i) { return i.kind === 'file'; })) {
+          e.preventDefault();
+          stage.classList.add('drag-over');
+        }
+      });
+      stage.addEventListener('dragleave', function (e) {
+        if (e.target === stage) stage.classList.remove('drag-over');
+      });
+      stage.addEventListener('drop', function (e) {
+        e.preventDefault();
+        stage.classList.remove('drag-over');
+        var files = Array.from(e.dataTransfer.files || []).filter(function (f) {
+          return f.type.startsWith('image/');
+        });
+        if (files.length > 0) self.attachImages(files);
+        else self.toast('Only image files are supported', 'warning');
+      });
+    }
+
+    // Also support paste of images
+    if (input) {
+      input.addEventListener('paste', function (e) {
+        var items = Array.from((e.clipboardData || {}).items || []);
+        var imgs = items.filter(function (i) { return i.type.startsWith('image/'); }).map(function (i) { return i.getAsFile(); }).filter(Boolean);
+        if (imgs.length > 0) {
+          e.preventDefault();
+          self.attachImages(imgs);
+        }
+      });
+    }
+  },
+
+  attachImages(files) {
+    var self = this;
+    if (!this.state.pendingAttachments) this.state.pendingAttachments = [];
+    files.forEach(function (file) {
+      if (file.size > 10 * 1024 * 1024) {
+        self.toast(file.name + ' is too large (max 10 MB)', 'error');
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        self.state.pendingAttachments.push({
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          dataUrl: e.target.result,
+        });
+        self.renderAttachmentPreview();
+      };
+      reader.readAsDataURL(file);
+    });
+    self.toast(files.length + ' image' + (files.length > 1 ? 's' : '') + ' attached', 'success');
+  },
+
+  renderAttachmentPreview() {
+    var wrapper = document.querySelector('.chat-input-wrapper');
+    if (!wrapper) return;
+    var existing = document.getElementById('chat-attachments');
+    var attachments = this.state.pendingAttachments || [];
+    if (attachments.length === 0) {
+      if (existing) existing.remove();
+      return;
+    }
+    var self = this;
+    var html = attachments.map(function (att, i) {
+      return '<div class="chat-attachment">' +
+        '<img src="' + att.dataUrl + '" alt="' + self.esc(att.name) + '">' +
+        '<button class="chat-attachment-remove" data-idx="' + i + '" title="Remove">×</button>' +
+        '</div>';
+    }).join('');
+    if (existing) {
+      existing.innerHTML = html;
+    } else {
+      var div = document.createElement('div');
+      div.id = 'chat-attachments';
+      div.className = 'chat-attachments';
+      div.innerHTML = html;
+      wrapper.insertBefore(div, wrapper.firstChild);
+    }
+    document.querySelectorAll('.chat-attachment-remove').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.state.pendingAttachments.splice(parseInt(btn.dataset.idx), 1);
+        self.renderAttachmentPreview();
+      });
+    });
   },
 
   handleSendClick() {
@@ -803,6 +894,28 @@ const AINode = {
             self.toast('Failed to copy', 'error');
           });
         }
+      });
+    });
+
+    // Code block copy buttons
+    container.querySelectorAll('.code-copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var codeEl = document.getElementById(btn.dataset.codeId);
+        if (!codeEl) return;
+        var code = codeEl.textContent;
+        navigator.clipboard.writeText(code).then(function () {
+          var label = btn.querySelector('span');
+          if (label) {
+            var orig = label.textContent;
+            label.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(function () {
+              label.textContent = orig;
+              btn.classList.remove('copied');
+            }, 1500);
+          }
+          self.toast('Code copied', 'success');
+        }).catch(function () { self.toast('Failed to copy', 'error'); });
       });
     });
 
@@ -1800,11 +1913,81 @@ const AINode = {
 
   formatMarkdown(text) {
     if (!text) return '';
-    return text
-      .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="code-block"><code>$2</code></pre>')
-      .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+    var self = this;
+    var placeholders = [];
+    var codeBlockIndex = 0;
+
+    // 1. Extract fenced code blocks first (so inner content isn't re-parsed)
+    var html = text.replace(/```(\w*)\n?([\s\S]*?)```/g, function (match, lang, code) {
+      var language = (lang || 'plaintext').toLowerCase();
+      var escapedCode = self.esc(code.replace(/\n$/, ''));
+      var id = 'code-' + Date.now() + '-' + (codeBlockIndex++);
+      var block =
+        '<div class="code-block-wrapper">' +
+          '<div class="code-block-header">' +
+            '<span class="code-block-lang">' + self.esc(language) + '</span>' +
+            '<button class="code-copy-btn" data-code-id="' + id + '" title="Copy code">' +
+              '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">' +
+                '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
+                '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>' +
+              '</svg>' +
+              '<span>Copy</span>' +
+            '</button>' +
+          '</div>' +
+          '<pre class="code-block"><code id="' + id + '" class="language-' + self.esc(language) + '">' + escapedCode + '</code></pre>' +
+        '</div>';
+      placeholders.push(block);
+      return '\u0001CB' + (placeholders.length - 1) + '\u0001';
+    });
+
+    // 2. Extract inline code
+    html = html.replace(/`([^`\n]+)`/g, function (m, code) {
+      placeholders.push('<code class="inline-code">' + self.esc(code) + '</code>');
+      return '\u0001IC' + (placeholders.length - 1) + '\u0001';
+    });
+
+    // 3. Escape remaining HTML
+    html = self.esc(html);
+
+    // 4. Markdown inline formatting
+    html = html
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\n/g, '<br>');
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/~~(.+?)~~/g, '<del>$1</del>');
+
+    // 5. Auto-link URLs
+    html = html.replace(
+      /(https?:\/\/[^\s<]+[^\s<.,;:?!\)])/g,
+      '<a href="$1" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>'
+    );
+
+    // 6. Markdown-style links [text](url)
+    html = html.replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>'
+    );
+
+    // 7. Headers (#, ##, ###)
+    html = html
+      .replace(/^### (.+)$/gm, '<h4 class="chat-h">$1</h4>')
+      .replace(/^## (.+)$/gm, '<h3 class="chat-h">$1</h3>')
+      .replace(/^# (.+)$/gm, '<h2 class="chat-h">$1</h2>');
+
+    // 8. Lists
+    html = html.replace(/^(\s*)[-*] (.+)$/gm, '$1• $2');
+
+    // 9. Newlines to <br> (but not inside code blocks which are already placeholders)
+    html = html.replace(/\n/g, '<br>');
+
+    // 10. Restore code blocks / inline code
+    html = html.replace(/\u0001CB(\d+)\u0001/g, function (_, idx) {
+      return placeholders[parseInt(idx)];
+    });
+    html = html.replace(/\u0001IC(\d+)\u0001/g, function (_, idx) {
+      return placeholders[parseInt(idx)];
+    });
+
+    return html;
   },
 
   skeletonCards(n) {
