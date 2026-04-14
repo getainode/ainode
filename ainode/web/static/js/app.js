@@ -297,12 +297,15 @@ const AINode = {
       this.fetchJSON('/api/status'),
       this.fetchJSON('/api/nodes'),
       this.fetchJSON('/api/sharding/status'),
+      this.fetchJSON('/api/cluster/resources'),
     ]);
     this.state.status = results[0];
     this.state.nodes = results[1]?.nodes || [];
     this.state.shardingStatus = results[2];
+    this.state.clusterResources = results[3];
 
     this.updateTopBar();
+    this.updateClusterHero();
     this.updateChatModelSelect();
 
     switch (this.state.currentView) {
@@ -383,6 +386,31 @@ const AINode = {
       pill.classList.add('offline');
       if (countEl) countEl.textContent = '0';
       if (labelEl) labelEl.textContent = 'offline';
+    }
+  },
+
+  // ========================================================================
+  //  CLUSTER HERO PILL (aggregated VRAM/GPUs)
+  // ========================================================================
+
+  updateClusterHero() {
+    var r = this.state.clusterResources;
+    var pill = document.getElementById('cluster-hero-pill');
+    if (!pill) return;
+    if (!r || !r.total_nodes) { pill.style.display = 'none'; return; }
+    pill.style.display = '';
+    var nodesEl = document.getElementById('hero-nodes');
+    var vramEl = document.getElementById('hero-vram');
+    var gpusEl = document.getElementById('hero-gpus');
+    if (nodesEl) nodesEl.textContent = r.total_nodes + (r.total_nodes === 1 ? ' node' : ' nodes');
+    if (vramEl) vramEl.textContent = Math.round(r.total_vram_gb) + ' GB VRAM';
+    if (gpusEl) gpusEl.textContent = r.total_gpus + (r.total_gpus === 1 ? ' GPU' : ' GPUs');
+
+    // Also surface on the Server view top bar (if the element exists).
+    var srvEl = document.getElementById('server-cluster-summary');
+    if (srvEl) {
+      srvEl.textContent = 'Cluster: ' + r.total_nodes + ' nodes · '
+        + Math.round(r.total_vram_gb) + ' GB VRAM · ' + r.total_gpus + ' GPUs';
     }
   },
 
@@ -4391,6 +4419,7 @@ const AINode = {
     html += '    <span class="server-reachable-label">Reachable at:</span>';
     html += '    <span class="server-reachable-url mono" id="server-reachable-url">' + this.esc(primaryUrl) + '</span>';
     html += '    <button class="server-copy-btn" data-copy="' + this.esc(primaryUrl) + '" title="Copy">⧉</button>';
+    html += '    <span class="server-cluster-summary mono" id="server-cluster-summary" style="margin-left:16px;color:#76B900"></span>';
     html += '  </div>';
     html += '  <div class="server-status-right">';
     html += '    <button class="btn-nvidia server-btn-sm" id="server-load-model">+ Load Model</button>';

@@ -47,6 +47,11 @@ def _ray_executable() -> str:
     return ray_path
 
 
+def is_ray_available() -> bool:
+    """Return True if the ``ray`` CLI is present on PATH."""
+    return shutil.which("ray") is not None
+
+
 def start_ray_head(
     port: int = RAY_DEFAULT_PORT,
     dashboard_port: int = RAY_DASHBOARD_PORT,

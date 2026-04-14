@@ -121,6 +121,15 @@ else
     warn "sentence-transformers install failed — embeddings endpoint will be unavailable"
 fi
 
+# Distributed inference (Ray) — required for multi-node tensor-parallel.
+# Failure is non-fatal: single-node inference still works.
+info "Installing Ray (distributed inference)..."
+if pip install --quiet 'ray[default]>=2.9' 2>&1 | tail -3; then
+    log "Ray ready"
+else
+    warn "Ray install failed — multi-node sharding disabled until: pip install 'ray[default]'"
+fi
+
 # ── Install inference engine ──────────────────────────────────────────────
 
 if [ "$ENGINE_STRATEGY" = "docker" ]; then
