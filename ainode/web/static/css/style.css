@@ -1716,11 +1716,59 @@ select {
 }
 
 .download-card-actions .btn-sm {
-  padding: 8px 16px;
+  padding: 8px 18px;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.5px;
   border-radius: var(--radius);
+}
+
+/* Download buttons: subtler outlined style, not competing with SEND */
+.downloads-download-btn,
+.hf-download-btn {
+  background: transparent !important;
+  color: var(--nvidia-green) !important;
+  border: 1px solid var(--nvidia-green-dim) !important;
+  font-weight: 600 !important;
+}
+
+.downloads-download-btn:hover,
+.hf-download-btn:hover {
+  background: rgba(118, 185, 0, 0.08) !important;
+  border-color: var(--nvidia-green) !important;
+  color: var(--nvidia-green-bright) !important;
+  box-shadow: 0 0 12px var(--nvidia-green-glow) !important;
+}
+
+.downloads-download-btn:disabled,
+.hf-download-btn:disabled {
+  opacity: 0.6 !important;
+  cursor: wait !important;
+  color: var(--text-muted) !important;
+  border-color: var(--border-hover) !important;
+  background: var(--bg-card-hover) !important;
+  box-shadow: none !important;
+}
+
+/* Shard button — purple accent to differentiate the cluster action */
+.downloads-shard-btn {
+  background: transparent;
+  color: #b794f6;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  font-weight: 600;
+  padding: 8px 18px;
+  font-size: 12px;
+  border-radius: var(--radius);
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.downloads-shard-btn:hover {
+  background: rgba(139, 92, 246, 0.1);
+  color: #c8acfc;
+  border-color: #8b5cf6;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.25);
 }
 
 .fit-badge {
