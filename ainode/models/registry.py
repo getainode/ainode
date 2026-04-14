@@ -229,6 +229,124 @@ class CatalogAggregator:
             recommended=self._is_recommended(m.id, downloads),
         )
 
+    # -- Source: HuggingFace trending ---------------------------------------
+
+    def fetch_trending(self, limit: int = 30) -> list[ModelInfo]:
+        """Models trending on HF in the last day."""
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            # HF sort by "trending" is via their API
+            models = api.list_models(
+                task="text-generation",
+                sort="trending",
+                limit=limit,
+                direction=-1,
+            )
+            results: list[ModelInfo] = []
+            for m in models:
+                try:
+                    results.append(self._hf_model_to_info(m))
+                except Exception:
+                    continue
+            return results
+        except Exception:
+            return []
+
+    # Alias matching task spec naming
+    def _hf_model_to_info(self, m) -> ModelInfo:
+        return self._hf_to_model_info(m)
+
+    # -- Source: OpenRouter popular -----------------------------------------
+
+    def fetch_openrouter_popular(self, limit: int = 30) -> list[ModelInfo]:
+        """Models ranked by OpenRouter's actual API usage across their network."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "https://openrouter.ai/api/v1/models",
+                headers={"User-Agent": "AINode/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            models: list[ModelInfo] = []
+            for m in data.get("data", [])[:limit]:
+                hf_repo = m.get("id", "")
+                # Skip proprietary ones (openai/, anthropic/, google/gemini)
+                if hf_repo.startswith(("openai/", "anthropic/", "google/gemini", "cohere/", "perplexity/")):
+                    continue
+                context_length = m.get("context_length", 0)
+                name = m.get("name", hf_repo)
+                slug = hf_repo.replace("/", "--").lower()
+                family = hf_repo.split("/")[0].lower() if "/" in hf_repo else ""
+                params_b = self._estimate_params_from_name(name)
+                size_gb = params_b * 2 if params_b else 0
+                models.append(ModelInfo(
+                    id=slug,
+                    name=name,
+                    hf_repo=hf_repo,
+                    size_gb=size_gb,
+                    description=m.get("description", "OpenRouter-ranked model") or "Text generation model",
+                    quantization=None,
+                    min_memory_gb=max(size_gb * 1.2, 2.0),
+                    family=family,
+                    params_b=params_b,
+                    context_length=context_length,
+                    license="",
+                    recommended=True,
+                ))
+            return models
+        except Exception:
+            return []
+
+    def _estimate_params_from_name(self, name: str) -> float:
+        match = re.search(r'(\d+(?:\.\d+)?)\s*[Bb]', name)
+        if match:
+            return float(match.group(1))
+        match = re.search(r'(\d+)\s*[Mm](?![a-zA-Z])', name)
+        if match:
+            return float(match.group(1)) / 1000
+        return 0.0
+
+    # -- Source: Ollama library (live) --------------------------------------
+
+    def fetch_ollama_library(self, limit: int = 30) -> list[ModelInfo]:
+        """Ollama's curated library -- scrape their public library page."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "https://ollama.com/api/library",
+                headers={"User-Agent": "AINode/0.1", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                content = resp.read().decode()
+            try:
+                data = json.loads(content)
+            except Exception:
+                return []
+            models: list[ModelInfo] = []
+            for item in (data if isinstance(data, list) else [])[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name", "")
+                if not name:
+                    continue
+                models.append(ModelInfo(
+                    id=f"ollama-{name}".lower(),
+                    name=name,
+                    hf_repo=name,
+                    size_gb=0,
+                    description=item.get("description", "Ollama library model"),
+                    family=name.split(":")[0].lower() if ":" in name else name.lower(),
+                    params_b=0,
+                    context_length=0,
+                    license="",
+                    recommended=True,
+                ))
+            return models
+        except Exception:
+            return []
+
     # -- Source: Ollama library ----------------------------------------------
 
     def _fetch_ollama_library(self) -> list[ModelInfo]:

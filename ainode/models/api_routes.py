@@ -25,6 +25,9 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_post("/api/models/refresh", handle_refresh_catalog)
     app.router.add_get("/api/models/recommended", handle_recommended)
     app.router.add_get("/api/models/search", handle_search_models)
+    app.router.add_get("/api/models/trending", handle_trending_models)
+    app.router.add_get("/api/models/openrouter", handle_openrouter_models)
+    app.router.add_get("/api/models/ollama", handle_ollama_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
     app.router.add_post("/api/models/{model_id}/download", handle_download_model)
     app.router.add_delete("/api/models/{model_id}", handle_delete_model)
@@ -140,6 +143,51 @@ async def handle_recommended(request: web.Request) -> web.Response:
     return web.json_response({
         "gpu_memory_gb": round(gpu_memory_gb, 1),
         "models": models,
+    })
+
+
+async def handle_trending_models(request: web.Request) -> web.Response:
+    """GET /api/models/trending -- HuggingFace trending models."""
+    manager: ModelManager = request.app["model_manager"]
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(
+        None, lambda: manager._aggregator.fetch_trending(30)
+    )
+    payload = [m.to_dict() for m in models]
+    return web.json_response({
+        "models": payload,
+        "source": "trending",
+        "count": len(payload),
+    })
+
+
+async def handle_openrouter_models(request: web.Request) -> web.Response:
+    """GET /api/models/openrouter -- OpenRouter popular models."""
+    manager: ModelManager = request.app["model_manager"]
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(
+        None, lambda: manager._aggregator.fetch_openrouter_popular(30)
+    )
+    payload = [m.to_dict() for m in models]
+    return web.json_response({
+        "models": payload,
+        "source": "openrouter",
+        "count": len(payload),
+    })
+
+
+async def handle_ollama_models(request: web.Request) -> web.Response:
+    """GET /api/models/ollama -- Ollama library models."""
+    manager: ModelManager = request.app["model_manager"]
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(
+        None, lambda: manager._aggregator.fetch_ollama_library(30)
+    )
+    payload = [m.to_dict() for m in models]
+    return web.json_response({
+        "models": payload,
+        "source": "ollama",
+        "count": len(payload),
     })
 
 
