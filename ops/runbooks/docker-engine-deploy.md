@@ -1,6 +1,6 @@
 # Docker Engine Deploy — AINode on GB10 / CUDA 13
 
-**Status:** Ready for deploy (2026-04-14). Target: demo-ready week of 2026-04-20.
+**Status:** Ready for deploy (2026-04-14, updated with NFS shared models layout). Target: demo-ready week of 2026-04-20.
 **Author:** Claude (Opus 4.6, 1M context) working with Jason Brashear.
 
 This runbook is the source of truth for how AINode is installed and started
@@ -194,6 +194,85 @@ curl -s http://localhost:3000/api/cluster/resources | jq
 6. **ASUS GX10** (100.72.9.84, SSH user TBD from Jason) — re-run one-liner. Stop the old manual container first.
 7. Verify cluster forms with 3 nodes, ~384 GB total VRAM.
 8. Demo the Launch Instance → sharded across 3 nodes flow.
+
+## 10.5. Shared model storage (NFS from master)
+
+AINode is designed to **download a model once and use it everywhere** on the cluster.
+NVMe-over-TCP exported from our MikroTik RDS2216 ROSA array presents each host
+with its own block namespace — ext4 on those namespaces is **not multi-writer
+safe**. So we put NFS on top for file-level sharing; NVMe-TCP still provides the
+backing speed on the master.
+
+### Topology
+
+```
+    ROSA / RDS2216
+    ├─ namespace-A  ────(NVMe-TCP)───►  Spark 1 : /mnt/rosa-models (ext4)
+    │                                       │
+    │                                       ├── NFS server exports /mnt/rosa-models
+    │                                       │
+    │                                       ├── Spark 2 mounts as /mnt/rosa-shared
+    │                                       └── GX10   mounts as /mnt/rosa-shared
+```
+
+Spark 1 is the **explicit master**: serves NFS, runs AINode as `cluster_role=master`.
+Spark 2 and GX10 run as workers; their existing local `/mnt/rosa-models` ext4 (where
+present) is **untouched** — we add a new mountpoint `/mnt/rosa-shared` that points
+at Spark 1's export.
+
+### Spark 1 (NFS server)
+
+```bash
+sudo apt-get install -y nfs-kernel-server
+sudo chown -R sem:sem /mnt/rosa-models
+cat /etc/exports   # must contain:
+# /mnt/rosa-models  <gx10-ip>(rw,sync,no_subtree_check,no_root_squash) \
+#                   <spark2-ip>(rw,sync,no_subtree_check,no_root_squash)
+sudo exportfs -ra
+sudo systemctl enable --now nfs-kernel-server
+```
+
+### Spark 2 + GX10 (NFS clients)
+
+```bash
+sudo apt-get install -y nfs-common
+sudo mkdir -p /mnt/rosa-shared
+# Add to /etc/fstab (survives reboot):
+# <spark1-ip>:/mnt/rosa-models /mnt/rosa-shared nfs \
+#   rw,noatime,nodiratime,rsize=1048576,wsize=1048576,nconnect=16,hard,vers=4.2,_netdev 0 0
+sudo mount /mnt/rosa-shared
+```
+
+### AINode wiring
+
+- Master (Spark 1): compose volume `/mnt/rosa-models:/models`
+- Workers: compose volume `/mnt/rosa-shared:/models`
+- All nodes: `config.json` → `"models_dir": "/models-shared"` (the in-container
+  path already served by the volume above — HF_HOME points there).
+- Explicit roles: Spark 1 `cluster_role=master`, Spark 2 + GX10 `worker`.
+
+### Why this layout
+
+- **Block-level NVMe-TCP** can't be multi-mounted ext4 safely (no DLM on generic
+  Linux). File-level NFS on top adds the needed coordination.
+- **NFS over the 100G fabric** delivers ~3–8 GB/s sequential reads — vLLM model
+  loading is a one-shot sequential read, so the penalty vs local-NVMe is
+  noticeable only for 100 GB+ models and can be further optimised later with a
+  hybrid rsync-to-local staging step.
+- **Single writer = single source of truth.** Downloads initiated on any node
+  land on the master's NVMe; all nodes read the same file.
+
+### Future: hybrid staging for huge models
+
+For 100 GB+ models where load latency matters:
+
+1. Download once into `/mnt/rosa-shared/models--org--name/`
+2. On first use, worker rsyncs the snapshot into a local scratch (e.g.
+   `/var/lib/ainode/hot/`) and points vLLM there
+3. Subsequent loads hit local Gen5 NVMe (~10–14 GB/s)
+
+Not implemented yet; file this as a follow-up slice when it becomes a
+bottleneck.
 
 ## 11. Known issues / gotchas
 

@@ -110,6 +110,60 @@ AINode discovers the first node automatically. Models too large for one GPU are 
 
 ---
 
+## Shared Model Storage Across a Cluster
+
+Downloading a 70 GB model three times on a three-node cluster is wasteful. AINode
+supports a shared models directory so every node in the cluster pulls from the
+same cache.
+
+**Why this isn't automatic:** block-level shared storage (NVMe-over-TCP, iSCSI,
+Fibre Channel) is great for speed but **unsafe for multiple Linux kernels to
+write at the same time** — ext4/XFS have no distributed lock manager. Use a file
+protocol on top:
+
+```
+  Storage array (NVMe-oF, SAN, local NVMe, …)
+          │
+          ▼
+   MASTER NODE  ← ext4/XFS mounted here, owns the disk
+     │   │
+     │   └── NFS server exports /mnt/ai-models
+     ▼
+  WORKERS       ← mount the NFS share at /mnt/ai-shared
+```
+
+### Set it up (two commands per side)
+
+**On the master:**
+```bash
+sudo apt-get install -y nfs-kernel-server
+echo "/mnt/ai-models <worker1-ip>(rw,sync,no_subtree_check,no_root_squash) \
+                     <worker2-ip>(rw,sync,no_subtree_check,no_root_squash)" \
+  | sudo tee -a /etc/exports
+sudo exportfs -ra && sudo systemctl enable --now nfs-kernel-server
+```
+
+**On each worker:**
+```bash
+sudo apt-get install -y nfs-common
+sudo mkdir -p /mnt/ai-shared
+echo "<master-ip>:/mnt/ai-models /mnt/ai-shared nfs \
+  rw,noatime,nodiratime,rsize=1048576,wsize=1048576,nconnect=16,hard,vers=4.2,_netdev 0 0" \
+  | sudo tee -a /etc/fstab
+sudo mount /mnt/ai-shared
+```
+
+Then point AINode at the shared path: edit `~/.ainode/docker-compose.yml` volume
+line from `- ${HOME}/.ainode/models:/models` to `- /mnt/ai-models:/models`
+(master) or `- /mnt/ai-shared:/models` (workers). Restart the service.
+
+**Performance note:** NFS over a 100G fabric typically reads at 3–8 GB/s — vLLM
+model loading is a one-shot sequential read, so you won't notice for most
+models. For 100 GB+ models where load time hurts, add an rsync-to-local staging
+step on the worker.
+
+---
+
 ## Supported Models
 
 AINode works with any model vLLM supports. Some popular choices:
