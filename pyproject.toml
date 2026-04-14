@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ainode"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning in your browser."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -62,7 +62,12 @@ Repository = "https://github.com/getainode/ainode"
 "Powered By" = "https://argentos.ai"
 
 [tool.setuptools.packages.find]
-include = ["ainode*"]
+where = ["."]
+include = ["ainode", "ainode.*"]
+exclude = ["tests*", "ops*", "scripts*"]
+
+[tool.setuptools.package-data]
+"ainode.web" = ["**/*"]
 
 [tool.ruff]
 target-version = "py310"
