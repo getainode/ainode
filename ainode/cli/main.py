@@ -177,22 +177,19 @@ def cmd_start(args):
 
     console.print("  [bold green]Engine ready.[/bold green] Open your browser to get started.\n")
 
-    # Start API/web server in a background thread
-    import threading
-
-    def run_server_blocking():
-        from ainode.api.server import run_server
-        run_server(config=config, engine=engine)
-
-    threading.Thread(target=run_server_blocking, daemon=True).start()
-
-    # Keep running until interrupted
+    # Run API/web server in the main thread (aiohttp needs main thread for signal handlers).
+    # Engine lifecycle is managed by the engine itself (Docker compose restart policy for
+    # DockerEngine, Popen for VLLMEngine) — we just hand off to the web server here.
+    from ainode.api.server import run_server
     try:
-        engine.process.wait()
+        run_server(config=config, engine=engine)
     except KeyboardInterrupt:
         console.print("\n  [yellow]Shutting down...[/yellow]")
-        engine.stop()
     finally:
+        try:
+            engine.stop()
+        except Exception:
+            pass
         _remove_pid()
 
 

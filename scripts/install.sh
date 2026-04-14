@@ -179,7 +179,8 @@ services:
       AINODE_TP_SIZE: ${AINODE_TP_SIZE:-1}
       AINODE_RAY_ADDRESS: ${AINODE_RAY_ADDRESS:-}
     command:
-      - --model
+      - vllm
+      - serve
       - ${AINODE_MODEL:-meta-llama/Llama-3.2-3B-Instruct}
       - --host
       - 0.0.0.0
