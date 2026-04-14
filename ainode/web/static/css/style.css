@@ -1708,6 +1708,20 @@ select {
   line-height: 1.5;
 }
 
+.download-card-tagline {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: inline-block;
+  margin-top: 2px;
+}
+
+.live-catalog-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  letter-spacing: 0.2px;
+}
+
 .download-card-actions {
   display: flex;
   gap: 8px;

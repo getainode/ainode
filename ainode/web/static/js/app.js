@@ -815,6 +815,130 @@ const AINode = {
   //  DOWNLOADS VIEW (center-stage)
   // ========================================================================
 
+  renderLiveCatalog(container, loaded, gpuMem, filterPills, source) {
+    var self = this;
+    var titles = {
+      trending: '🔥 Trending Models',
+      openrouter: '🚀 Most Used in Production',
+      latest: '✨ Latest Releases',
+    };
+    var subtitles = {
+      trending: 'Hot on HuggingFace right now',
+      openrouter: 'Ranked by real API traffic on OpenRouter',
+      latest: 'Newest text-generation models on HuggingFace',
+    };
+
+    // Clear if switching from another mode
+    if (container.querySelector('#downloads-search') || container.querySelector('#hf-search-input')) {
+      container.innerHTML = '';
+    }
+
+    var needsToolbar = !container.querySelector('#live-catalog-title');
+    if (needsToolbar) {
+      container.innerHTML =
+        '<div class="downloads-header">' +
+        '<h2 class="view-title" id="live-catalog-title">' + titles[source] + '</h2>' +
+        '<div class="downloads-count" id="live-count">Loading...</div>' +
+        '</div>' +
+        '<div class="downloads-toolbar">' +
+        '<div class="live-catalog-subtitle">' + subtitles[source] + '</div>' +
+        '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
+        '</div>' +
+        '<div id="downloads-results"><div class="downloads-empty">Fetching live data...</div></div>';
+    } else {
+      var titleEl = container.querySelector('#live-catalog-title');
+      if (titleEl) titleEl.textContent = titles[source];
+      var subEl = container.querySelector('.live-catalog-subtitle');
+      if (subEl) subEl.textContent = subtitles[source];
+      var pillsEl = container.querySelector('#downloads-filters');
+      if (pillsEl) pillsEl.innerHTML = filterPills;
+    }
+
+    var resultsContainer = container.querySelector('#downloads-results');
+    var countEl = container.querySelector('#live-count');
+
+    // Rebind filter pills
+    container.querySelectorAll('.downloads-filter').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.state.modelsFilter = btn.dataset.filter;
+        self.renderDownloads();
+      });
+    });
+
+    fetch('/api/models/' + source)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var models = data.models || [];
+        if (countEl) countEl.textContent = models.length + ' models';
+        if (!resultsContainer) return;
+        if (models.length === 0) {
+          resultsContainer.innerHTML = '<div class="downloads-empty">No data available from ' + source + '.</div>';
+          return;
+        }
+        var rows = models.map(function (m) {
+          var isLoaded = loaded.includes(m.hf_repo);
+          var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
+          var paramsStr = m.params_b ? m.params_b + 'B params' : '';
+          var fits = gpuMem > 0 && m.size_gb > 0 && gpuMem >= (m.min_memory_gb || m.size_gb);
+          var fitBadge = (gpuMem > 0 && m.size_gb > 0) ? (fits ?
+            '<span class="fit-badge fits">Fits GPU</span>' :
+            '<span class="fit-badge no-fit">Too large</span>') : '';
+          var recBadge = m.recommended ? '<span class="fit-badge rec">Recommended</span>' : '';
+          var quantBadge = m.quantization ? '<span class="fit-badge quant">' + self.esc(m.quantization.toUpperCase()) + '</span>' : '';
+          var statusBadge = isLoaded ?
+            '<span class="model-badge loaded">Loaded</span>' :
+            '<span class="model-badge available">Available</span>';
+          var ageStr = m.created_at ? self.relativeTime(m.created_at) : '';
+          var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' ⬇' : '';
+          var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
+          var metaParts = [paramsStr, sizeStr, ageStr, downloadsStr, likesStr].filter(Boolean);
+          var downloadBtn = !isLoaded ?
+            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>' : '';
+          return '<div class="download-card">' +
+            '<div class="download-card-main">' +
+            '<div class="download-card-info">' +
+            '<div class="download-card-header">' +
+            '<div class="download-card-name">' + self.esc(m.name || m.hf_repo) + '</div>' +
+            '<div class="download-card-badges">' + recBadge + quantBadge + fitBadge + statusBadge + '</div>' +
+            '</div>' +
+            '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
+            '<div class="download-card-desc">' + metaParts.join(' · ') + '</div>' +
+            '</div>' +
+            '<div class="download-card-actions">' + downloadBtn + '</div>' +
+            '</div>' +
+            '</div>';
+        }).join('');
+        resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
+      })
+      .catch(function (err) {
+        if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Failed to fetch: ' + self.esc(err.message || 'network error') + '</div>';
+      });
+  },
+
+  relativeTime(isoString) {
+    if (!isoString) return '';
+    try {
+      var then = new Date(isoString);
+      var now = new Date();
+      var diffMs = now - then;
+      if (isNaN(diffMs) || diffMs < 0) return '';
+      var seconds = Math.floor(diffMs / 1000);
+      var minutes = Math.floor(seconds / 60);
+      var hours = Math.floor(minutes / 60);
+      var days = Math.floor(hours / 24);
+      var months = Math.floor(days / 30);
+      var years = Math.floor(days / 365);
+      if (years > 0) return 'released ' + years + 'y ago';
+      if (months > 0) return 'released ' + months + 'mo ago';
+      if (days > 0) return 'released ' + days + 'd ago';
+      if (hours > 0) return 'released ' + hours + 'h ago';
+      if (minutes > 0) return 'released ' + minutes + 'm ago';
+      return 'just now';
+    } catch (e) {
+      return '';
+    }
+  },
+
   renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, filterPills, totalCount) {
     var self = this;
     var query = this.state.hfSearchQuery || '';
@@ -958,6 +1082,9 @@ const AINode = {
             quantization: m.quantization,
             minMem: m.min_memory_gb || m.size_gb,
             recommended: m.recommended || false,
+            created_at: m.created_at || '',
+            downloads: m.downloads || 0,
+            likes: m.likes || 0,
           };
         });
         self.renderDownloads();
@@ -971,20 +1098,25 @@ const AINode = {
     var totalCount = catalog.length;
 
     // Build filter pills now so HF branch can use them
-    var allFilters = ['all', 'recommended', 'downloaded', 'trending', 'openrouter', 'ollama', 'huggingface'];
+    var allFilters = ['all', 'recommended', 'downloaded', 'trending', 'openrouter', 'latest', 'huggingface'];
     var filterLabels = {
       all: 'All',
       recommended: 'Recommended',
       downloaded: 'Downloaded',
       trending: '🔥 Trending',
       openrouter: '🚀 Most Used',
-      ollama: '🦙 Ollama',
+      latest: '✨ Latest',
       huggingface: '🤗 Search HF',
     };
     var filterPills = allFilters.map(function (f) {
       var active = self.state.modelsFilter === f ? ' active' : '';
       return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + filterLabels[f] + '</button>';
     }).join('');
+
+    // Live-fetch filters — delegate to renderLiveCatalog
+    if (['trending', 'openrouter', 'latest'].indexOf(this.state.modelsFilter) !== -1) {
+      return this.renderLiveCatalog(container, loaded, gpuMem, filterPills, this.state.modelsFilter);
+    }
 
     // HuggingFace live search mode
     if (this.state.modelsFilter === 'huggingface') {
@@ -1053,7 +1185,10 @@ const AINode = {
         '<span class="model-badge available">Available</span>';
       var recBadge = model.recommended ? '<span class="fit-badge rec">Recommended</span>' : '';
       var quantBadge = model.quantization ? '<span class="fit-badge quant">' + self.esc(model.quantization.toUpperCase()) + '</span>' : '';
-      var paramsText = model.params ? model.params + ' params · ' : '';
+      var paramsText = model.params ? model.params + ' params' : '';
+      var ageText = model.created_at ? self.relativeTime(model.created_at) : '';
+      var downloadsText = model.downloads ? self.formatNumber(model.downloads) + ' ⬇' : '';
+      var descParts = [paramsText, model.size, ageText, downloadsText].filter(Boolean);
       var downloadBtn = !isLoaded ?
         '<button class="btn-nvidia btn-sm downloads-download-btn" data-model-id="' + self.esc(model.id) + '">Download</button>' : '';
       var shardBtn = '';
@@ -1068,7 +1203,7 @@ const AINode = {
         '<div class="download-card-badges">' + recBadge + quantBadge + fitBadge + statusBadge + '</div>' +
         '</div>' +
         '<div class="download-card-repo">' + self.esc(model.id) + '</div>' +
-        '<div class="download-card-desc">' + paramsText + model.size + ' &middot; ' + self.esc(model.desc) + '</div>' +
+        '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
         '</div>' +
         '<div class="download-card-actions">' + downloadBtn + shardBtn + '</div>' +
         '</div>' +

@@ -26,6 +26,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_get("/api/models/recommended", handle_recommended)
     app.router.add_get("/api/models/search", handle_search_models)
     app.router.add_get("/api/models/trending", handle_trending_models)
+    app.router.add_get("/api/models/latest", handle_latest_models)
     app.router.add_get("/api/models/openrouter", handle_openrouter_models)
     app.router.add_get("/api/models/ollama", handle_ollama_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
@@ -157,6 +158,21 @@ async def handle_trending_models(request: web.Request) -> web.Response:
     return web.json_response({
         "models": payload,
         "source": "trending",
+        "count": len(payload),
+    })
+
+
+async def handle_latest_models(request: web.Request) -> web.Response:
+    """GET /api/models/latest -- most recently released HF models."""
+    manager: ModelManager = request.app["model_manager"]
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(
+        None, lambda: manager._aggregator.fetch_latest(30)
+    )
+    payload = [m.to_dict() for m in models]
+    return web.json_response({
+        "models": payload,
+        "source": "latest",
         "count": len(payload),
     })
 

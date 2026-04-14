@@ -34,6 +34,9 @@ class ModelInfo:
     context_length: int = 0
     license: str = ""
     recommended: bool = False
+    created_at: str = ""
+    downloads: int = 0
+    likes: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -213,6 +216,19 @@ class CatalogAggregator:
                 break
 
         downloads = getattr(m, "downloads", 0) or 0
+        likes = getattr(m, "likes", 0) or 0
+
+        # Extract ISO timestamp from createdAt or lastModified
+        created_at = ""
+        for attr in ("createdAt", "created_at", "lastModified", "last_modified"):
+            val = getattr(m, attr, None)
+            if val:
+                # Handle datetime objects and strings
+                if hasattr(val, "isoformat"):
+                    created_at = val.isoformat()
+                else:
+                    created_at = str(val)
+                break
 
         return ModelInfo(
             id=slug,
@@ -227,6 +243,9 @@ class CatalogAggregator:
             context_length=context_length,
             license=license_str,
             recommended=self._is_recommended(m.id, downloads),
+            created_at=created_at,
+            downloads=downloads,
+            likes=likes,
         )
 
     # -- Source: HuggingFace trending ---------------------------------------
@@ -256,6 +275,35 @@ class CatalogAggregator:
     # Alias matching task spec naming
     def _hf_model_to_info(self, m) -> ModelInfo:
         return self._hf_to_model_info(m)
+
+    # -- Source: HuggingFace latest (newest releases) -----------------------
+
+    def fetch_latest(self, limit: int = 30) -> list[ModelInfo]:
+        """Most recently created text-generation models on HF."""
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            models = api.list_models(
+                task="text-generation",
+                sort="createdAt",
+                limit=limit * 3,  # overfetch because many will lack metadata
+                direction=-1,
+            )
+            results: list[ModelInfo] = []
+            for m in models:
+                try:
+                    info = self._hf_to_model_info(m)
+                    # Only keep models with real size/param info or high download count
+                    # so we filter out abandoned uploads
+                    if info.params_b > 0 or info.downloads > 100:
+                        results.append(info)
+                    if len(results) >= limit:
+                        break
+                except Exception:
+                    continue
+            return results
+        except Exception:
+            return []
 
     # -- Source: OpenRouter popular -----------------------------------------
 
