@@ -1,13 +1,21 @@
-"""Model registry and manager — catalog, download, delete, and recommend models."""
+"""Model registry and manager — dynamic catalog + download/delete/recommend.
+
+The catalog is now assembled dynamically from live sources (HuggingFace Hub,
+Ollama library, NVIDIA NIM) with a 24-hour on-disk cache and a small static
+fallback for offline/error situations.
+"""
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from ainode.core.config import MODELS_DIR
+from ainode.core.config import AINODE_HOME, MODELS_DIR
 
 
 @dataclass
@@ -31,25 +39,11 @@ class ModelInfo:
         return asdict(self)
 
 
-# ---- Curated model catalog --------------------------------------------------
+# ---- Fallback catalog ------------------------------------------------------
 #
-# Entries are grouped by family. Sizes are approximate: roughly params_b * 2 GB
-# for bf16/fp16 weights and params_b * 0.5 GB for int4/AWQ/GPTQ variants.
+# Used when all live sources fail (offline, rate-limited, etc.). Kept small.
 
-MODEL_CATALOG: dict[str, ModelInfo] = {
-    # ---- Llama family -------------------------------------------------------
-    "llama-3.2-1b": ModelInfo(
-        id="llama-3.2-1b",
-        name="Llama 3.2 1B Instruct",
-        hf_repo="meta-llama/Llama-3.2-1B-Instruct",
-        size_gb=2.5,
-        description="Tiny Llama model for edge devices and ultra-fast inference.",
-        min_memory_gb=4,
-        family="llama",
-        params_b=1.23,
-        context_length=131072,
-        license="Llama 3.2",
-    ),
+FALLBACK_CATALOG: dict[str, ModelInfo] = {
     "llama-3.2-3b": ModelInfo(
         id="llama-3.2-3b",
         name="Llama 3.2 3B Instruct",
@@ -62,133 +56,6 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         context_length=131072,
         license="Llama 3.2",
         recommended=True,
-    ),
-    "llama-3.1-8b": ModelInfo(
-        id="llama-3.1-8b",
-        name="Llama 3.1 8B Instruct",
-        hf_repo="meta-llama/Llama-3.1-8B-Instruct",
-        size_gb=16.0,
-        description="Strong general-purpose model. Good balance of quality and speed.",
-        min_memory_gb=16,
-        family="llama",
-        params_b=8.03,
-        context_length=131072,
-        license="Llama 3.1",
-        recommended=True,
-    ),
-    "llama-3.1-8b-awq": ModelInfo(
-        id="llama-3.1-8b-awq",
-        name="Llama 3.1 8B Instruct AWQ",
-        hf_repo="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
-        size_gb=5.5,
-        description="AWQ-quantized Llama 3.1 8B. Fits on consumer GPUs.",
-        quantization="awq",
-        min_memory_gb=8,
-        family="llama",
-        params_b=8.03,
-        context_length=131072,
-        license="Llama 3.1",
-    ),
-    "llama-3.1-70b": ModelInfo(
-        id="llama-3.1-70b",
-        name="Llama 3.1 70B Instruct",
-        hf_repo="meta-llama/Llama-3.1-70B-Instruct",
-        size_gb=141.0,
-        description="Full-precision Llama 3.1 70B. Needs multi-GPU or large VRAM.",
-        min_memory_gb=160,
-        family="llama",
-        params_b=70.6,
-        context_length=131072,
-        license="Llama 3.1",
-    ),
-    "llama-3.1-70b-awq": ModelInfo(
-        id="llama-3.1-70b-awq",
-        name="Llama 3.1 70B Instruct AWQ",
-        hf_repo="hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4",
-        size_gb=38.0,
-        description="Quantized 70B for high-quality output on single-node hardware.",
-        quantization="awq",
-        min_memory_gb=48,
-        family="llama",
-        params_b=70.6,
-        context_length=131072,
-        license="Llama 3.1",
-    ),
-    "llama-3.1-70b-gptq": ModelInfo(
-        id="llama-3.1-70b-gptq",
-        name="Llama 3.1 70B Instruct GPTQ",
-        hf_repo="hugging-quants/Meta-Llama-3.1-70B-Instruct-GPTQ-INT4",
-        size_gb=40.0,
-        description="GPTQ-quantized 70B alternative to AWQ variant.",
-        quantization="gptq",
-        min_memory_gb=48,
-        family="llama",
-        params_b=70.6,
-        context_length=131072,
-        license="Llama 3.1",
-    ),
-    "llama-3.3-70b": ModelInfo(
-        id="llama-3.3-70b",
-        name="Llama 3.3 70B Instruct",
-        hf_repo="meta-llama/Llama-3.3-70B-Instruct",
-        size_gb=141.0,
-        description="Latest Llama flagship. Near-405B quality at 70B size.",
-        min_memory_gb=160,
-        family="llama",
-        params_b=70.6,
-        context_length=131072,
-        license="Llama 3.3",
-    ),
-    "llama-3.3-70b-awq": ModelInfo(
-        id="llama-3.3-70b-awq",
-        name="Llama 3.3 70B Instruct AWQ",
-        hf_repo="casperhansen/llama-3.3-70b-instruct-awq",
-        size_gb=39.0,
-        description="AWQ-quantized Llama 3.3 70B for single-GPU deployment.",
-        quantization="awq",
-        min_memory_gb=48,
-        family="llama",
-        params_b=70.6,
-        context_length=131072,
-        license="Llama 3.3",
-    ),
-
-    # ---- Qwen family --------------------------------------------------------
-    "qwen-2.5-0.5b": ModelInfo(
-        id="qwen-2.5-0.5b",
-        name="Qwen 2.5 0.5B Instruct",
-        hf_repo="Qwen/Qwen2.5-0.5B-Instruct",
-        size_gb=1.0,
-        description="Ultra-small Qwen. Perfect for embedded and testing.",
-        min_memory_gb=2,
-        family="qwen",
-        params_b=0.5,
-        context_length=32768,
-        license="Qwen",
-    ),
-    "qwen-2.5-1.5b": ModelInfo(
-        id="qwen-2.5-1.5b",
-        name="Qwen 2.5 1.5B Instruct",
-        hf_repo="Qwen/Qwen2.5-1.5B-Instruct",
-        size_gb=3.1,
-        description="Small Qwen with strong multilingual support.",
-        min_memory_gb=4,
-        family="qwen",
-        params_b=1.54,
-        context_length=32768,
-        license="Qwen",
-    ),
-    "qwen-2.5-3b": ModelInfo(
-        id="qwen-2.5-3b",
-        name="Qwen 2.5 3B Instruct",
-        hf_repo="Qwen/Qwen2.5-3B-Instruct",
-        size_gb=6.2,
-        description="Compact Qwen balancing quality and speed.",
-        min_memory_gb=8,
-        family="qwen",
-        params_b=3.09,
-        context_length=32768,
-        license="Qwen",
     ),
     "qwen-2.5-7b": ModelInfo(
         id="qwen-2.5-7b",
@@ -203,205 +70,6 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         license="Qwen",
         recommended=True,
     ),
-    "qwen-2.5-14b": ModelInfo(
-        id="qwen-2.5-14b",
-        name="Qwen 2.5 14B Instruct",
-        hf_repo="Qwen/Qwen2.5-14B-Instruct",
-        size_gb=29.0,
-        description="Mid-size Qwen, competitive with much larger models.",
-        min_memory_gb=32,
-        family="qwen",
-        params_b=14.7,
-        context_length=131072,
-        license="Qwen",
-    ),
-    "qwen-2.5-32b": ModelInfo(
-        id="qwen-2.5-32b",
-        name="Qwen 2.5 32B Instruct",
-        hf_repo="Qwen/Qwen2.5-32B-Instruct",
-        size_gb=65.0,
-        description="Large Qwen for high-quality reasoning.",
-        min_memory_gb=72,
-        family="qwen",
-        params_b=32.5,
-        context_length=131072,
-        license="Qwen",
-    ),
-    "qwen-2.5-72b": ModelInfo(
-        id="qwen-2.5-72b",
-        name="Qwen 2.5 72B Instruct",
-        hf_repo="Qwen/Qwen2.5-72B-Instruct",
-        size_gb=145.0,
-        description="Flagship multilingual model. Excellent reasoning and code.",
-        min_memory_gb=160,
-        family="qwen",
-        params_b=72.7,
-        context_length=131072,
-        license="Qwen",
-    ),
-    "qwen-2.5-coder-7b": ModelInfo(
-        id="qwen-2.5-coder-7b",
-        name="Qwen 2.5 Coder 7B Instruct",
-        hf_repo="Qwen/Qwen2.5-Coder-7B-Instruct",
-        size_gb=15.0,
-        description="Code-specialized Qwen. Great for autocomplete and code gen.",
-        min_memory_gb=16,
-        family="qwen",
-        params_b=7.62,
-        context_length=131072,
-        license="Apache 2.0",
-        recommended=True,
-    ),
-    "qwen-2.5-coder-32b": ModelInfo(
-        id="qwen-2.5-coder-32b",
-        name="Qwen 2.5 Coder 32B Instruct",
-        hf_repo="Qwen/Qwen2.5-Coder-32B-Instruct",
-        size_gb=65.0,
-        description="State-of-the-art open-weight code model.",
-        min_memory_gb=72,
-        family="qwen",
-        params_b=32.5,
-        context_length=131072,
-        license="Apache 2.0",
-    ),
-    "qwen-3-8b": ModelInfo(
-        id="qwen-3-8b",
-        name="Qwen 3 8B",
-        hf_repo="Qwen/Qwen3-8B",
-        size_gb=16.4,
-        description="Next-gen Qwen with hybrid thinking/non-thinking modes.",
-        min_memory_gb=20,
-        family="qwen",
-        params_b=8.2,
-        context_length=131072,
-        license="Apache 2.0",
-    ),
-    "qwen-3-32b": ModelInfo(
-        id="qwen-3-32b",
-        name="Qwen 3 32B",
-        hf_repo="Qwen/Qwen3-32B",
-        size_gb=65.5,
-        description="Qwen 3 dense 32B with thinking-mode reasoning.",
-        min_memory_gb=72,
-        family="qwen",
-        params_b=32.8,
-        context_length=131072,
-        license="Apache 2.0",
-    ),
-
-    # ---- DeepSeek family ----------------------------------------------------
-    "deepseek-r1-distill-qwen-1.5b": ModelInfo(
-        id="deepseek-r1-distill-qwen-1.5b",
-        name="DeepSeek R1 Distill Qwen 1.5B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        size_gb=3.5,
-        description="Tiny reasoning model distilled from R1.",
-        min_memory_gb=4,
-        family="deepseek",
-        params_b=1.78,
-        context_length=131072,
-        license="MIT",
-    ),
-    "deepseek-r1-distill-qwen-7b": ModelInfo(
-        id="deepseek-r1-distill-qwen-7b",
-        name="DeepSeek R1 Distill Qwen 7B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-        size_gb=14.0,
-        description="Reasoning-focused 7B distilled from DeepSeek R1.",
-        min_memory_gb=16,
-        family="deepseek",
-        params_b=7.0,
-        context_length=131072,
-        license="MIT",
-        recommended=True,
-    ),
-    # Legacy alias kept so older clients/tests keep working.
-    "deepseek-r1-7b": ModelInfo(
-        id="deepseek-r1-7b",
-        name="DeepSeek R1 Distill Qwen 7B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-        size_gb=14.0,
-        description="Reasoning-focused model distilled from DeepSeek R1.",
-        min_memory_gb=16,
-        family="deepseek",
-        params_b=7.0,
-        context_length=131072,
-        license="MIT",
-    ),
-    "deepseek-r1-distill-qwen-14b": ModelInfo(
-        id="deepseek-r1-distill-qwen-14b",
-        name="DeepSeek R1 Distill Qwen 14B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
-        size_gb=28.0,
-        description="Mid-size reasoning distillation of R1.",
-        min_memory_gb=32,
-        family="deepseek",
-        params_b=14.8,
-        context_length=131072,
-        license="MIT",
-    ),
-    "deepseek-r1-distill-qwen-32b": ModelInfo(
-        id="deepseek-r1-distill-qwen-32b",
-        name="DeepSeek R1 Distill Qwen 32B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-        size_gb=65.0,
-        description="Large reasoning distillation of R1, rivals GPT-4 on math.",
-        min_memory_gb=72,
-        family="deepseek",
-        params_b=32.8,
-        context_length=131072,
-        license="MIT",
-    ),
-    "deepseek-r1-distill-llama-8b": ModelInfo(
-        id="deepseek-r1-distill-llama-8b",
-        name="DeepSeek R1 Distill Llama 8B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        size_gb=16.0,
-        description="R1 reasoning distilled onto Llama 3.1 8B base.",
-        min_memory_gb=16,
-        family="deepseek",
-        params_b=8.03,
-        context_length=131072,
-        license="Llama 3.1",
-    ),
-    "deepseek-r1-distill-llama-70b": ModelInfo(
-        id="deepseek-r1-distill-llama-70b",
-        name="DeepSeek R1 Distill Llama 70B",
-        hf_repo="deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        size_gb=141.0,
-        description="Top-tier reasoning distillation on Llama 3.3 70B base.",
-        min_memory_gb=160,
-        family="deepseek",
-        params_b=70.6,
-        context_length=131072,
-        license="Llama 3.3",
-    ),
-    "deepseek-v2.5": ModelInfo(
-        id="deepseek-v2.5",
-        name="DeepSeek V2.5",
-        hf_repo="deepseek-ai/DeepSeek-V2.5",
-        size_gb=472.0,
-        description="236B MoE chat model (21B active). Requires cluster deployment.",
-        min_memory_gb=480,
-        family="deepseek",
-        params_b=236.0,
-        context_length=131072,
-        license="DeepSeek",
-    ),
-    "deepseek-coder-v2-lite": ModelInfo(
-        id="deepseek-coder-v2-lite",
-        name="DeepSeek Coder V2 Lite Instruct",
-        hf_repo="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
-        size_gb=31.0,
-        description="16B MoE code model (2.4B active). Fast and strong at code.",
-        min_memory_gb=32,
-        family="deepseek",
-        params_b=15.7,
-        context_length=163840,
-        license="DeepSeek",
-    ),
-
-    # ---- Mistral family -----------------------------------------------------
     "mistral-7b": ModelInfo(
         id="mistral-7b",
         name="Mistral 7B Instruct v0.3",
@@ -415,56 +83,6 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         license="Apache 2.0",
         recommended=True,
     ),
-    "mistral-small-24b": ModelInfo(
-        id="mistral-small-24b",
-        name="Mistral Small 24B Instruct",
-        hf_repo="mistralai/Mistral-Small-24B-Instruct-2501",
-        size_gb=47.0,
-        description="Mistral Small 3 — Apache-licensed 24B with GPT-4o-class quality.",
-        min_memory_gb=52,
-        family="mistral",
-        params_b=23.6,
-        context_length=32768,
-        license="Apache 2.0",
-    ),
-    "mistral-large-2411": ModelInfo(
-        id="mistral-large-2411",
-        name="Mistral Large 2411",
-        hf_repo="mistralai/Mistral-Large-Instruct-2411",
-        size_gb=246.0,
-        description="Mistral flagship 123B dense model.",
-        min_memory_gb=260,
-        family="mistral",
-        params_b=123.0,
-        context_length=131072,
-        license="Mistral Research",
-    ),
-    "mixtral-8x7b": ModelInfo(
-        id="mixtral-8x7b",
-        name="Mixtral 8x7B Instruct v0.1",
-        hf_repo="mistralai/Mixtral-8x7B-Instruct-v0.1",
-        size_gb=93.0,
-        description="Sparse MoE model. 46.7B total, 12.9B active per token.",
-        min_memory_gb=100,
-        family="mixtral",
-        params_b=46.7,
-        context_length=32768,
-        license="Apache 2.0",
-    ),
-    "mixtral-8x22b": ModelInfo(
-        id="mixtral-8x22b",
-        name="Mixtral 8x22B Instruct v0.1",
-        hf_repo="mistralai/Mixtral-8x22B-Instruct-v0.1",
-        size_gb=281.0,
-        description="Large MoE. 141B total, 39B active. High throughput.",
-        min_memory_gb=300,
-        family="mixtral",
-        params_b=141.0,
-        context_length=65536,
-        license="Apache 2.0",
-    ),
-
-    # ---- Phi family ---------------------------------------------------------
     "phi-3-mini": ModelInfo(
         id="phi-3-mini",
         name="Phi-3 Mini 4K Instruct",
@@ -477,44 +95,6 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         context_length=4096,
         license="MIT",
         recommended=True,
-    ),
-    "phi-3-medium": ModelInfo(
-        id="phi-3-medium",
-        name="Phi-3 Medium 4K Instruct",
-        hf_repo="microsoft/Phi-3-medium-4k-instruct",
-        size_gb=28.0,
-        description="14B Phi-3 with stronger reasoning at mid-size cost.",
-        min_memory_gb=32,
-        family="phi",
-        params_b=14.0,
-        context_length=4096,
-        license="MIT",
-    ),
-    "phi-4": ModelInfo(
-        id="phi-4",
-        name="Phi-4",
-        hf_repo="microsoft/phi-4",
-        size_gb=29.0,
-        description="Microsoft Phi-4 (14B). Strong reasoning, math, and coding.",
-        min_memory_gb=32,
-        family="phi",
-        params_b=14.7,
-        context_length=16384,
-        license="MIT",
-    ),
-
-    # ---- Gemma family -------------------------------------------------------
-    "gemma-2-2b": ModelInfo(
-        id="gemma-2-2b",
-        name="Gemma 2 2B IT",
-        hf_repo="google/gemma-2-2b-it",
-        size_gb=5.2,
-        description="Tiny Gemma 2 for fast local inference.",
-        min_memory_gb=6,
-        family="gemma",
-        params_b=2.61,
-        context_length=8192,
-        license="Gemma",
     ),
     "gemma-2-9b": ModelInfo(
         id="gemma-2-9b",
@@ -529,114 +109,339 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         license="Gemma",
         recommended=True,
     ),
-    "gemma-2-27b": ModelInfo(
-        id="gemma-2-27b",
-        name="Gemma 2 27B IT",
-        hf_repo="google/gemma-2-27b-it",
-        size_gb=54.0,
-        description="Google Gemma 2 flagship. Competitive with Llama 3 70B.",
-        min_memory_gb=60,
-        family="gemma",
-        params_b=27.2,
-        context_length=8192,
-        license="Gemma",
-    ),
-
-    # ---- CodeLlama ----------------------------------------------------------
-    "codellama-7b": ModelInfo(
-        id="codellama-7b",
-        name="CodeLlama 7B Instruct",
-        hf_repo="meta-llama/CodeLlama-7b-Instruct-hf",
-        size_gb=13.5,
-        description="Small code generation model based on Llama 2.",
-        min_memory_gb=16,
-        family="llama",
-        params_b=6.74,
-        context_length=16384,
-        license="Llama 2",
-    ),
-    "codellama-13b": ModelInfo(
-        id="codellama-13b",
-        name="CodeLlama 13B Instruct",
-        hf_repo="meta-llama/CodeLlama-13b-Instruct-hf",
-        size_gb=26.0,
-        description="Mid-size code generation model based on Llama 2.",
-        min_memory_gb=32,
-        family="llama",
-        params_b=13.0,
-        context_length=16384,
-        license="Llama 2",
-    ),
-    "codellama-34b": ModelInfo(
-        id="codellama-34b",
-        name="CodeLlama 34B Instruct",
-        hf_repo="meta-llama/CodeLlama-34b-Instruct-hf",
-        size_gb=63.0,
-        description="Specialized code generation and understanding model.",
-        min_memory_gb=72,
-        family="llama",
-        params_b=33.7,
-        context_length=16384,
-        license="Llama 2",
-    ),
-
-    # ---- Specialty ----------------------------------------------------------
-    "nemotron-super-49b": ModelInfo(
-        id="nemotron-super-49b",
-        name="Llama 3.3 Nemotron Super 49B",
-        hf_repo="nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-        size_gb=99.0,
-        description="NVIDIA Nemotron Super. Llama 3.3 70B pruned to 49B.",
-        min_memory_gb=110,
-        family="llama",
-        params_b=49.0,
-        context_length=131072,
-        license="NVIDIA Open Model",
-    ),
-    "glm-4-9b": ModelInfo(
-        id="glm-4-9b",
-        name="GLM-4 9B Chat",
-        hf_repo="THUDM/glm-4-9b-chat",
-        size_gb=19.0,
-        description="Zhipu GLM-4 9B chat. Strong bilingual (EN/ZH) model.",
-        min_memory_gb=24,
-        family="glm",
-        params_b=9.4,
-        context_length=131072,
-        license="GLM",
-    ),
-    "yi-1.5-34b": ModelInfo(
-        id="yi-1.5-34b",
-        name="Yi 1.5 34B Chat",
-        hf_repo="01-ai/Yi-1.5-34B-Chat",
-        size_gb=69.0,
-        description="01.AI Yi 1.5 34B. Strong English/Chinese reasoning.",
-        min_memory_gb=76,
-        family="yi",
-        params_b=34.4,
-        context_length=32768,
-        license="Apache 2.0",
-    ),
 }
 
 
+# Backward-compat alias — external code may still import MODEL_CATALOG.
+MODEL_CATALOG: dict[str, ModelInfo] = FALLBACK_CATALOG
+
+
+# ---- Dynamic catalog aggregator --------------------------------------------
+
+
+class CatalogAggregator:
+    """Fetch and merge model metadata from HuggingFace, Ollama, NVIDIA NIM."""
+
+    CACHE_TTL = 86400  # 24 hours
+    CACHE_FILE = AINODE_HOME / "catalog-cache.json"
+
+    def fetch(self, force_refresh: bool = False) -> list[ModelInfo]:
+        """Fetch the merged catalog. Uses cache if fresh, else all sources."""
+        if not force_refresh and self._cache_valid():
+            cached = self._load_cache()
+            if cached:
+                return cached
+
+        models: list[ModelInfo] = []
+        models.extend(self._fetch_huggingface_popular(limit=100))
+        models.extend(self._fetch_ollama_library())
+        models.extend(self._fetch_nvidia_nim())
+
+        # Dedupe by hf_repo (case-insensitive)
+        seen: set[str] = set()
+        unique: list[ModelInfo] = []
+        for m in models:
+            key = m.hf_repo.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(m)
+
+        if unique:
+            self._save_cache(unique)
+        return unique
+
+    # -- Source: HuggingFace Hub ---------------------------------------------
+
+    def _fetch_huggingface_popular(self, limit: int = 100) -> list[ModelInfo]:
+        """Top text-generation models on HF Hub by downloads."""
+        try:
+            from huggingface_hub import HfApi
+        except ImportError:
+            return []
+
+        try:
+            api = HfApi()
+            queries = [
+                {"task": "text-generation", "sort": "downloads", "limit": 50},
+                {"task": "text-generation", "tags": "instruct", "sort": "downloads", "limit": 30},
+                {"task": "text-generation", "tags": "chat", "sort": "downloads", "limit": 20},
+            ]
+            results: list[ModelInfo] = []
+            seen_ids: set[str] = set()
+            for q in queries:
+                try:
+                    iterator = api.list_models(direction=-1, **q)
+                except Exception:
+                    continue
+                for m in iterator:
+                    if m.id in seen_ids:
+                        continue
+                    seen_ids.add(m.id)
+                    try:
+                        results.append(self._hf_to_model_info(m))
+                    except Exception:
+                        continue
+            return results
+        except Exception:
+            return []
+
+    def _hf_to_model_info(self, m) -> ModelInfo:
+        """Convert a HF ModelInfo-like object to our ModelInfo."""
+        size_gb = self._estimate_size_gb(m)
+        params_b = self._estimate_params(m)
+        family = m.id.split("/")[0].lower() if "/" in m.id else "unknown"
+        slug = m.id.replace("/", "--").lower()
+        name = m.id.split("/")[-1].replace("-", " ")
+
+        card_data = getattr(m, "cardData", None) or {}
+        if not isinstance(card_data, dict):
+            card_data = {}
+
+        license_str = ""
+        raw_license = card_data.get("license", "")
+        if isinstance(raw_license, str):
+            license_str = raw_license
+        elif isinstance(raw_license, list) and raw_license:
+            license_str = str(raw_license[0])
+
+        context_length = 0
+        for key in ("context_length", "max_position_embeddings"):
+            val = card_data.get(key, 0)
+            if isinstance(val, (int, float)) and val > 0:
+                context_length = int(val)
+                break
+
+        downloads = getattr(m, "downloads", 0) or 0
+
+        return ModelInfo(
+            id=slug,
+            name=name,
+            hf_repo=m.id,
+            size_gb=size_gb,
+            description=self._derive_description(m),
+            quantization=self._detect_quantization(m.id),
+            min_memory_gb=max(size_gb * 1.2, 2.0) if size_gb > 0 else 2.0,
+            family=family,
+            params_b=params_b,
+            context_length=context_length,
+            license=license_str,
+            recommended=self._is_recommended(m.id, downloads),
+        )
+
+    # -- Source: Ollama library ----------------------------------------------
+
+    def _fetch_ollama_library(self) -> list[ModelInfo]:
+        """Ollama's curated set. They don't publish a JSON catalog, so we return
+        a small hand-curated list that maps Ollama tags to HF repos. The
+        aggregator dedupes against HF results by hf_repo, so duplicates are OK.
+        """
+        try:
+            known = [
+                ("llama3.2:3b", "meta-llama/Llama-3.2-3B-Instruct", 3.21, 6.0, "llama"),
+                ("llama3.1:8b", "meta-llama/Llama-3.1-8B-Instruct", 8.03, 16.0, "llama"),
+                ("qwen2.5:7b", "Qwen/Qwen2.5-7B-Instruct", 7.62, 15.0, "qwen"),
+                ("mistral:7b", "mistralai/Mistral-7B-Instruct-v0.3", 7.25, 14.0, "mistral"),
+                ("gemma2:9b", "google/gemma-2-9b-it", 9.24, 18.5, "gemma"),
+                ("phi3:mini", "microsoft/Phi-3-mini-4k-instruct", 3.82, 7.5, "phi"),
+                ("codellama:7b", "codellama/CodeLlama-7b-Instruct-hf", 6.74, 13.5, "llama"),
+                ("deepseek-r1:7b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 7.0, 14.0, "deepseek"),
+            ]
+            results: list[ModelInfo] = []
+            for tag, repo, params_b, size_gb, family in known:
+                slug = repo.replace("/", "--").lower()
+                results.append(ModelInfo(
+                    id=slug,
+                    name=repo.split("/")[-1].replace("-", " "),
+                    hf_repo=repo,
+                    size_gb=size_gb,
+                    description=f"Available via Ollama tag '{tag}'.",
+                    quantization=self._detect_quantization(repo),
+                    min_memory_gb=max(size_gb * 1.2, 2.0),
+                    family=family,
+                    params_b=params_b,
+                    context_length=0,
+                    license="",
+                    recommended=True,
+                ))
+            return results
+        except Exception:
+            return []
+
+    # -- Source: NVIDIA NIM --------------------------------------------------
+
+    def _fetch_nvidia_nim(self) -> list[ModelInfo]:
+        """NVIDIA NIM catalog. Public JSON API requires auth, so we return an
+        empty list unless we can successfully hit a public endpoint.
+        """
+        try:
+            # Placeholder: NVIDIA's build.nvidia.com catalog requires auth for
+            # programmatic access. Return empty to avoid spurious failures.
+            return []
+        except Exception:
+            return []
+
+    # -- Parsing / heuristic helpers -----------------------------------------
+
+    def _estimate_size_gb(self, model) -> float:
+        """Estimate on-disk size in GB from safetensors metadata or model id."""
+        safetensors = getattr(model, "safetensors", None)
+        if safetensors and isinstance(safetensors, dict):
+            total = safetensors.get("total", 0)
+            if total and total > 0:
+                # assume bf16 = 2 bytes/param as a rough disk size
+                return round((total * 2) / (1024 ** 3), 1)
+
+        match = re.search(r'(\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])', model.id)
+        if match:
+            params_b = float(match.group(1))
+            if re.search(r'awq|gptq|int4|4bit|4-bit', model.id, re.IGNORECASE):
+                return round(params_b * 0.6, 1)
+            if re.search(r'int8|8bit|8-bit|fp8', model.id, re.IGNORECASE):
+                return round(params_b * 1.1, 1)
+            return round(params_b * 2, 1)
+        return 0.0
+
+    def _estimate_params(self, model) -> float:
+        match = re.search(r'(\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])', model.id)
+        if match:
+            return float(match.group(1))
+        match = re.search(r'(\d+)\s*[Mm](?![a-zA-Z])', model.id)
+        if match:
+            return float(match.group(1)) / 1000
+        return 0.0
+
+    def _detect_quantization(self, model_id: str) -> Optional[str]:
+        if re.search(r'awq', model_id, re.IGNORECASE):
+            return "awq"
+        if re.search(r'gptq', model_id, re.IGNORECASE):
+            return "gptq"
+        if re.search(r'fp8', model_id, re.IGNORECASE):
+            return "fp8"
+        if re.search(r'int4|4bit|4-bit', model_id, re.IGNORECASE):
+            return "int4"
+        if re.search(r'int8|8bit|8-bit', model_id, re.IGNORECASE):
+            return "int8"
+        if re.search(r'gguf', model_id, re.IGNORECASE):
+            return "gguf"
+        return None
+
+    def _is_recommended(self, model_id: str, downloads: int) -> bool:
+        prefixes = [
+            "meta-llama/Llama-3",
+            "Qwen/Qwen2.5",
+            "Qwen/Qwen3",
+            "mistralai/Mistral",
+            "google/gemma",
+            "microsoft/Phi",
+            "microsoft/phi",
+            "deepseek-ai/DeepSeek-R1",
+        ]
+        if not any(model_id.startswith(p) for p in prefixes):
+            return False
+        if downloads and downloads < 100_000:
+            return False
+        lower = model_id.lower()
+        return ("instruct" in lower) or ("chat" in lower) or lower.endswith("-it")
+
+    def _derive_description(self, model) -> str:
+        card = getattr(model, "cardData", None) or {}
+        if not isinstance(card, dict):
+            card = {}
+        tags = card.get("tags", []) or []
+        if isinstance(tags, str):
+            tags = [tags]
+        joined_tags = " ".join(str(t).lower() for t in tags)
+
+        pieces: list[str] = []
+        if "chat" in joined_tags or "conversational" in joined_tags:
+            pieces.append("Conversational model")
+        elif "code" in joined_tags:
+            pieces.append("Code generation model")
+        else:
+            pieces.append("Text generation model")
+
+        lang = card.get("language", [])
+        if isinstance(lang, list) and lang and "en" not in lang:
+            pieces.append(f"Languages: {', '.join(str(x) for x in lang[:3])}")
+        return " · ".join(pieces)
+
+    # -- Cache management ----------------------------------------------------
+
+    def _cache_valid(self) -> bool:
+        if not self.CACHE_FILE.exists():
+            return False
+        try:
+            age = time.time() - self.CACHE_FILE.stat().st_mtime
+            return age < self.CACHE_TTL
+        except Exception:
+            return False
+
+    def _load_cache(self) -> list[ModelInfo]:
+        try:
+            data = json.loads(self.CACHE_FILE.read_text())
+            return [ModelInfo(**m) for m in data]
+        except Exception:
+            return []
+
+    def _save_cache(self, models: list[ModelInfo]) -> None:
+        try:
+            self.CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.CACHE_FILE.write_text(
+                json.dumps([asdict(m) for m in models], indent=2)
+            )
+        except Exception:
+            pass
+
+
+# ---- Model manager ---------------------------------------------------------
+
+
 class ModelManager:
-    """Manage model downloads, listing, and deletion."""
+    """Manage model downloads, listing, and deletion against a live catalog."""
 
     def __init__(self, models_dir: Optional[str | Path] = None):
         self.models_dir = Path(models_dir) if models_dir else MODELS_DIR
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self._active_downloads: dict[str, dict] = {}
+        self._aggregator = CatalogAggregator()
+        self._catalog_cache: Optional[dict[str, ModelInfo]] = None
 
-    # -- Catalog queries -------------------------------------------------------
+    # -- Catalog access -------------------------------------------------------
+
+    def get_catalog(self, refresh: bool = False) -> list[ModelInfo]:
+        """Return the live merged catalog (uses memory + disk cache)."""
+        if self._catalog_cache is None or refresh:
+            models = self._aggregator.fetch(force_refresh=refresh)
+            if not models:
+                models = list(FALLBACK_CATALOG.values())
+            self._catalog_cache = {m.id: m for m in models}
+        return list(self._catalog_cache.values())
+
+    def get_catalog_map(self, refresh: bool = False) -> dict[str, ModelInfo]:
+        """Same as get_catalog but indexed by id."""
+        self.get_catalog(refresh=refresh)
+        return dict(self._catalog_cache or {})
+
+    def _catalog_lookup(self, model_id: str) -> Optional[ModelInfo]:
+        catalog = self.get_catalog_map()
+        if model_id in catalog:
+            return catalog[model_id]
+        # Also allow lookup by hf_repo directly
+        for info in catalog.values():
+            if info.hf_repo == model_id or info.hf_repo.lower() == model_id.lower():
+                return info
+        return None
+
+    # -- Catalog queries ------------------------------------------------------
 
     def list_available(self) -> list[dict]:
         """Return catalog models annotated with download status."""
         results = []
-        for model_id, info in MODEL_CATALOG.items():
+        for info in self.get_catalog():
             entry = info.to_dict()
-            entry["downloaded"] = self._is_downloaded(model_id)
-            local_size = self._local_size_gb(model_id)
+            entry["downloaded"] = self._is_downloaded_info(info)
+            local_size = self._local_size_gb_info(info)
             if local_size is not None:
                 entry["local_size_gb"] = round(local_size, 2)
             results.append(entry)
@@ -644,14 +449,13 @@ class ModelManager:
 
     def list_downloaded(self) -> list[dict]:
         """Scan models_dir and return info for every downloaded model."""
-        downloaded = []
+        downloaded: list[dict] = []
         if not self.models_dir.exists():
             return downloaded
 
         for child in sorted(self.models_dir.iterdir()):
             if not child.is_dir():
                 continue
-            # Map directory name back to catalog entry
             catalog_entry = self._find_catalog_by_dir(child.name)
             if catalog_entry:
                 entry = catalog_entry.to_dict()
@@ -659,7 +463,6 @@ class ModelManager:
                 entry["local_size_gb"] = round(self._dir_size_gb(child), 2)
                 downloaded.append(entry)
             else:
-                # Not in catalog — user-added model
                 downloaded.append({
                     "id": child.name,
                     "name": child.name,
@@ -675,29 +478,28 @@ class ModelManager:
 
     def get_model_info(self, model_id: str) -> Optional[dict]:
         """Return catalog info for a model, plus local size if downloaded."""
-        info = MODEL_CATALOG.get(model_id)
+        info = self._catalog_lookup(model_id)
         if info is None:
             return None
         entry = info.to_dict()
-        entry["downloaded"] = self._is_downloaded(model_id)
-        local_size = self._local_size_gb(model_id)
+        entry["downloaded"] = self._is_downloaded_info(info)
+        local_size = self._local_size_gb_info(info)
         if local_size is not None:
             entry["local_size_gb"] = round(local_size, 2)
         return entry
 
     def recommend_for_gpu(self, gpu_memory_gb: float) -> list[dict]:
-        """Return models that fit within the given GPU memory."""
+        """Return catalog models that fit within the given GPU memory."""
         results = []
-        for model_id, info in MODEL_CATALOG.items():
+        for info in self.get_catalog():
             if info.min_memory_gb <= gpu_memory_gb:
                 entry = info.to_dict()
-                entry["downloaded"] = self._is_downloaded(model_id)
+                entry["downloaded"] = self._is_downloaded_info(info)
                 results.append(entry)
-        # Sort by size descending so the most capable fitting model is first
         results.sort(key=lambda m: m["size_gb"], reverse=True)
         return results
 
-    # -- Download / Delete -----------------------------------------------------
+    # -- Download / Delete ----------------------------------------------------
 
     def download_model(
         self,
@@ -705,9 +507,11 @@ class ModelManager:
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> Path:
         """Download a model from HuggingFace Hub and return the local path."""
-        info = MODEL_CATALOG.get(model_id)
+        info = self._catalog_lookup(model_id)
         if info is None:
-            raise ValueError(f"Unknown model: {model_id}. Use a key from MODEL_CATALOG.")
+            raise ValueError(
+                f"Unknown model: {model_id}. Use an id from the catalog."
+            )
 
         try:
             from huggingface_hub import snapshot_download
@@ -729,7 +533,7 @@ class ModelManager:
 
     def delete_model(self, model_id: str) -> bool:
         """Delete a downloaded model from disk; return True if deleted."""
-        info = MODEL_CATALOG.get(model_id)
+        info = self._catalog_lookup(model_id)
         if info is None:
             raise ValueError(f"Unknown model: {model_id}")
 
@@ -739,27 +543,23 @@ class ModelManager:
             return True
         return False
 
-    # -- Internal helpers ------------------------------------------------------
+    # -- Internal helpers -----------------------------------------------------
 
     @staticmethod
     def _repo_to_dirname(hf_repo: str) -> str:
         """Convert 'org/model-name' to 'org--model-name' for filesystem safety."""
         return hf_repo.replace("/", "--")
 
-    def _model_dir(self, model_id: str) -> Optional[Path]:
-        """Return the local directory for a catalog model, or None."""
-        info = MODEL_CATALOG.get(model_id)
-        if info is None:
-            return None
+    def _model_dir_info(self, info: ModelInfo) -> Path:
         return self.models_dir / self._repo_to_dirname(info.hf_repo)
 
-    def _is_downloaded(self, model_id: str) -> bool:
-        d = self._model_dir(model_id)
-        return d is not None and d.exists() and any(d.iterdir())
+    def _is_downloaded_info(self, info: ModelInfo) -> bool:
+        d = self._model_dir_info(info)
+        return d.exists() and any(d.iterdir())
 
-    def _local_size_gb(self, model_id: str) -> Optional[float]:
-        d = self._model_dir(model_id)
-        if d is None or not d.exists():
+    def _local_size_gb_info(self, info: ModelInfo) -> Optional[float]:
+        d = self._model_dir_info(info)
+        if not d.exists():
             return None
         return self._dir_size_gb(d)
 
@@ -769,11 +569,7 @@ class ModelManager:
         return total / (1024**3)
 
     def search_huggingface(self, query: str, limit: int = 50) -> list[dict]:
-        """Search HuggingFace Hub for text-generation models matching the query.
-
-        Returns list of dicts with same shape as catalog entries:
-        {id, name, hf_repo, size_gb, description, family, params_b, context_length, license, recommended, in_catalog}
-        """
+        """Search HuggingFace Hub for text-generation models matching the query."""
         try:
             from huggingface_hub import HfApi
             api = HfApi()
@@ -784,17 +580,21 @@ class ModelManager:
                 sort="downloads",
                 direction=-1,
             )
+            catalog_ids = set(self.get_catalog_map().keys())
             results = []
             for m in models:
                 repo = m.id
-                # Skip base models (we want instruct/chat variants primarily)
-                # but let user see everything they search for
                 slug = repo.replace("/", "--").lower()
-                # Estimate size from safetensors metadata if available
                 size_gb = 0.0
                 if hasattr(m, "safetensors") and m.safetensors:
                     total_params = m.safetensors.get("total", 0)
-                    size_gb = (total_params * 2) / (1024 ** 3)  # bf16 = 2 bytes/param
+                    size_gb = (total_params * 2) / (1024 ** 3)
+                card_data = getattr(m, "cardData", None)
+                license_str = ""
+                if isinstance(card_data, dict):
+                    lic = card_data.get("license", "")
+                    if isinstance(lic, str):
+                        license_str = lic
                 results.append({
                     "id": slug,
                     "name": repo.split("/")[-1],
@@ -804,18 +604,18 @@ class ModelManager:
                     "family": repo.split("/")[0].lower(),
                     "params_b": round((size_gb / 2), 2) if size_gb > 0 else 0,
                     "context_length": 0,
-                    "license": getattr(m, "cardData", {}).get("license", "") if getattr(m, "cardData", None) else "",
+                    "license": license_str,
                     "recommended": False,
                     "downloads": getattr(m, "downloads", 0),
                     "likes": getattr(m, "likes", 0),
-                    "in_catalog": slug in MODEL_CATALOG,
+                    "in_catalog": slug in catalog_ids,
                 })
             return results
-        except Exception as e:
+        except Exception:
             return []
 
     def _find_catalog_by_dir(self, dirname: str) -> Optional[ModelInfo]:
-        for info in MODEL_CATALOG.values():
+        for info in self.get_catalog():
             if ModelManager._repo_to_dirname(info.hf_repo) == dirname:
                 return info
         return None

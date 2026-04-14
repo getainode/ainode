@@ -10,7 +10,7 @@ from typing import Optional
 from aiohttp import web
 
 from ainode.core.gpu import detect_gpu
-from ainode.models.registry import ModelManager, MODEL_CATALOG
+from ainode.models.registry import ModelManager
 
 
 def register_model_routes(app: web.Application, manager: Optional[ModelManager] = None) -> None:
@@ -22,6 +22,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app["download_jobs"] = {}
 
     app.router.add_get("/api/models", handle_list_models)
+    app.router.add_post("/api/models/refresh", handle_refresh_catalog)
     app.router.add_get("/api/models/recommended", handle_recommended)
     app.router.add_get("/api/models/search", handle_search_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
@@ -32,10 +33,20 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
 # -- Handlers ------------------------------------------------------------------
 
 async def handle_list_models(request: web.Request) -> web.Response:
-    """GET /api/models -- list all catalog models with download status."""
+    """GET /api/models -- list the dynamic catalog with download status."""
     manager: ModelManager = request.app["model_manager"]
-    models = manager.list_available()
-    return web.json_response({"models": models})
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(None, manager.list_available)
+    return web.json_response({"models": models, "count": len(models)})
+
+
+async def handle_refresh_catalog(request: web.Request) -> web.Response:
+    """POST /api/models/refresh -- force re-fetch of dynamic catalog."""
+    manager: ModelManager = request.app["model_manager"]
+    loop = asyncio.get_event_loop()
+    # refresh=True bypasses both in-memory and on-disk caches
+    models = await loop.run_in_executor(None, lambda: manager.get_catalog(refresh=True))
+    return web.json_response({"status": "refreshed", "count": len(models)})
 
 
 async def handle_get_model(request: web.Request) -> web.Response:
@@ -56,7 +67,7 @@ async def handle_download_model(request: web.Request) -> web.Response:
     model_id = request.match_info["model_id"]
     manager: ModelManager = request.app["model_manager"]
 
-    if model_id not in MODEL_CATALOG:
+    if manager.get_model_info(model_id) is None:
         return web.json_response(
             {"error": f"Model '{model_id}' not found in catalog"},
             status=404,
@@ -66,7 +77,6 @@ async def handle_download_model(request: web.Request) -> web.Response:
     jobs: dict = request.app["download_jobs"]
     jobs[job_id] = {"model_id": model_id, "status": "downloading", "error": None, "finished_at": None}
 
-    # Clean up old completed/failed jobs
     _cleanup_old_jobs(jobs)
 
     loop = asyncio.get_event_loop()
@@ -83,7 +93,7 @@ async def handle_delete_model(request: web.Request) -> web.Response:
     model_id = request.match_info["model_id"]
     manager: ModelManager = request.app["model_manager"]
 
-    if model_id not in MODEL_CATALOG:
+    if manager.get_model_info(model_id) is None:
         return web.json_response(
             {"error": f"Model '{model_id}' not found in catalog"},
             status=404,
@@ -109,7 +119,6 @@ async def handle_search_models(request: web.Request) -> web.Response:
     if not query:
         return web.json_response({"models": []})
     limit = int(request.query.get("limit", "30"))
-    # Run the blocking HF call in executor
     loop = asyncio.get_event_loop()
     results = await loop.run_in_executor(None, manager.search_huggingface, query, limit)
     return web.json_response({"models": results, "query": query})
@@ -126,7 +135,8 @@ async def handle_recommended(request: web.Request) -> web.Response:
 
     gpu_memory_gb = gpu.memory_total_mb / 1024
     manager: ModelManager = request.app["model_manager"]
-    models = manager.recommend_for_gpu(gpu_memory_gb)
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(None, manager.recommend_for_gpu, gpu_memory_gb)
     return web.json_response({
         "gpu_memory_gb": round(gpu_memory_gb, 1),
         "models": models,

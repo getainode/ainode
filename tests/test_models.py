@@ -1,15 +1,24 @@
-"""Tests for the model registry, manager, and API routes."""
+"""Tests for the model registry, manager, and API routes.
+
+The catalog is now dynamic (fetched from HuggingFace Hub, Ollama, NVIDIA NIM
+with a 24h cache). Tests use the in-memory FALLBACK_CATALOG by mocking the
+aggregator so they are deterministic and don't hit the network.
+"""
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from ainode.models.registry import MODEL_CATALOG, ModelInfo, ModelManager
+from ainode.models.registry import (
+    FALLBACK_CATALOG,
+    MODEL_CATALOG,
+    CatalogAggregator,
+    ModelInfo,
+    ModelManager,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +33,21 @@ def tmp_models_dir(tmp_path: Path) -> Path:
     return d
 
 
+@pytest.fixture(autouse=True)
+def _force_fallback_catalog(tmp_path, monkeypatch):
+    """Default: all tests get the small deterministic fallback catalog.
+
+    This both avoids network calls and keeps legacy model-id assertions happy.
+    Tests that want to exercise the live aggregator can opt in.
+    """
+    # Redirect the cache file away from the user's home dir
+    monkeypatch.setattr(
+        CatalogAggregator, "CACHE_FILE", tmp_path / "catalog-cache.json"
+    )
+    # Force fetch() to return [] so ModelManager falls back.
+    monkeypatch.setattr(CatalogAggregator, "fetch", lambda self, force_refresh=False: [])
+
+
 @pytest.fixture
 def manager(tmp_models_dir: Path) -> ModelManager:
     return ModelManager(models_dir=tmp_models_dir)
@@ -31,7 +55,7 @@ def manager(tmp_models_dir: Path) -> ModelManager:
 
 def _fake_downloaded(manager: ModelManager, model_id: str) -> Path:
     """Create a fake downloaded model directory with a dummy file."""
-    info = MODEL_CATALOG[model_id]
+    info = manager.get_catalog_map()[model_id]
     dirname = ModelManager._repo_to_dirname(info.hf_repo)
     model_dir = manager.models_dir / dirname
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -45,24 +69,22 @@ def _fake_downloaded(manager: ModelManager, model_id: str) -> Path:
 # ---------------------------------------------------------------------------
 
 class TestCatalog:
-    def test_catalog_has_expected_models(self):
-        # Original 8 entries must remain (tests and clients depend on these IDs).
-        expected_subset = {
+    def test_fallback_catalog_has_core_models(self):
+        expected = {
             "llama-3.2-3b",
-            "llama-3.1-8b",
-            "llama-3.1-70b-awq",
-            "qwen-2.5-72b",
-            "deepseek-r1-7b",
+            "qwen-2.5-7b",
             "mistral-7b",
             "phi-3-mini",
-            "codellama-34b",
+            "gemma-2-9b",
         }
-        assert expected_subset.issubset(set(MODEL_CATALOG.keys()))
-        # Catalog should be meaningfully expanded beyond the original 8.
-        assert len(MODEL_CATALOG) >= 40
+        assert expected.issubset(set(FALLBACK_CATALOG.keys()))
 
-    def test_all_entries_are_model_info(self):
-        for model_id, info in MODEL_CATALOG.items():
+    def test_model_catalog_alias(self):
+        # MODEL_CATALOG is kept as a backward-compat alias for FALLBACK_CATALOG.
+        assert MODEL_CATALOG is FALLBACK_CATALOG
+
+    def test_all_fallback_entries_are_model_info(self):
+        for model_id, info in FALLBACK_CATALOG.items():
             assert isinstance(info, ModelInfo), f"{model_id} is not ModelInfo"
             assert info.id == model_id
             assert info.hf_repo
@@ -70,11 +92,51 @@ class TestCatalog:
             assert info.min_memory_gb > 0
 
     def test_model_info_to_dict(self):
-        info = MODEL_CATALOG["llama-3.2-3b"]
+        info = FALLBACK_CATALOG["llama-3.2-3b"]
         d = info.to_dict()
         assert d["id"] == "llama-3.2-3b"
         assert "hf_repo" in d
         assert "size_gb" in d
+
+
+# ---------------------------------------------------------------------------
+# Aggregator tests (unit — mocked, no network)
+# ---------------------------------------------------------------------------
+
+class TestAggregator:
+    def test_estimate_size_from_id(self):
+        agg = CatalogAggregator()
+        m = MagicMock(id="meta-llama/Llama-3.1-8B-Instruct", safetensors=None)
+        assert agg._estimate_size_gb(m) == pytest.approx(16.0)
+
+    def test_estimate_size_awq(self):
+        agg = CatalogAggregator()
+        m = MagicMock(id="Some/Llama-70B-AWQ", safetensors=None)
+        # 70 * 0.6 = 42.0
+        assert agg._estimate_size_gb(m) == pytest.approx(42.0)
+
+    def test_detect_quantization(self):
+        agg = CatalogAggregator()
+        assert agg._detect_quantization("foo/model-AWQ") == "awq"
+        assert agg._detect_quantization("foo/model-gptq-int4") == "gptq"
+        assert agg._detect_quantization("foo/plain-model") is None
+
+    def test_is_recommended(self):
+        agg = CatalogAggregator()
+        assert agg._is_recommended("meta-llama/Llama-3.2-3B-Instruct", 1_000_000) is True
+        assert agg._is_recommended("random/base-model", 1_000_000) is False
+        # Known family, but base (non-instruct) → not recommended
+        assert agg._is_recommended("meta-llama/Llama-3.1-8B", 1_000_000) is False
+
+    def test_cache_roundtrip(self, tmp_path):
+        agg = CatalogAggregator()
+        agg.CACHE_FILE = tmp_path / "cache.json"
+        sample = [FALLBACK_CATALOG["llama-3.2-3b"]]
+        agg._save_cache(sample)
+        assert agg._cache_valid()
+        loaded = agg._load_cache()
+        assert len(loaded) == 1
+        assert loaded[0].id == "llama-3.2-3b"
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +146,7 @@ class TestCatalog:
 class TestManagerList:
     def test_list_available_all_not_downloaded(self, manager: ModelManager):
         models = manager.list_available()
-        assert len(models) == len(MODEL_CATALOG)
+        assert len(models) == len(FALLBACK_CATALOG)
         for m in models:
             assert m["downloaded"] is False
 
@@ -144,21 +206,18 @@ class TestRecommendations:
         ids = {r["id"] for r in recs}
         assert "llama-3.2-3b" in ids
         assert "phi-3-mini" in ids
-        # 70B should NOT fit
-        assert "llama-3.1-70b-awq" not in ids
 
     def test_recommend_large_gpu(self, manager: ModelManager):
-        # Pick a value larger than any catalog entry's min_memory_gb so all fit.
-        huge = max(info.min_memory_gb for info in MODEL_CATALOG.values()) + 1
+        huge = max(info.min_memory_gb for info in FALLBACK_CATALOG.values()) + 1
         recs = manager.recommend_for_gpu(huge)
-        assert len(recs) == len(MODEL_CATALOG)
+        assert len(recs) == len(FALLBACK_CATALOG)
 
     def test_recommend_tiny_gpu(self, manager: ModelManager):
         recs = manager.recommend_for_gpu(1)
         assert len(recs) == 0
 
     def test_recommend_sorted_by_size_desc(self, manager: ModelManager):
-        huge = max(info.min_memory_gb for info in MODEL_CATALOG.values()) + 1
+        huge = max(info.min_memory_gb for info in FALLBACK_CATALOG.values()) + 1
         recs = manager.recommend_for_gpu(huge)
         sizes = [r["size_gb"] for r in recs]
         assert sizes == sorted(sizes, reverse=True)
@@ -210,13 +269,13 @@ class TestDownload:
 
 class TestDelete:
     def test_delete_downloaded_model(self, manager: ModelManager):
-        model_dir = _fake_downloaded(manager, "deepseek-r1-7b")
+        model_dir = _fake_downloaded(manager, "mistral-7b")
         assert model_dir.exists()
-        assert manager.delete_model("deepseek-r1-7b") is True
+        assert manager.delete_model("mistral-7b") is True
         assert not model_dir.exists()
 
     def test_delete_not_downloaded(self, manager: ModelManager):
-        assert manager.delete_model("deepseek-r1-7b") is False
+        assert manager.delete_model("mistral-7b") is False
 
     def test_delete_unknown_raises(self, manager: ModelManager):
         with pytest.raises(ValueError, match="Unknown model"):
@@ -228,7 +287,6 @@ class TestDelete:
 # ---------------------------------------------------------------------------
 
 pytest.importorskip("aiohttp")
-from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
 from aiohttp import web
 from ainode.models.api_routes import register_model_routes
 
@@ -242,11 +300,6 @@ class TestModelAPI:
         register_model_routes(app, manager=manager)
         return app
 
-    @pytest.fixture
-    def client(self, app, aiohttp_client, event_loop):
-        """Create aiohttp test client. Requires pytest-aiohttp."""
-        return event_loop.run_until_complete(aiohttp_client(app))
-
     @pytest.mark.asyncio
     async def test_list_models(self, app, aiohttp_client):
         client = await aiohttp_client(app)
@@ -254,7 +307,8 @@ class TestModelAPI:
         assert resp.status == 200
         data = await resp.json()
         assert "models" in data
-        assert len(data["models"]) == len(MODEL_CATALOG)
+        assert len(data["models"]) == len(FALLBACK_CATALOG)
+        assert data["count"] == len(FALLBACK_CATALOG)
 
     @pytest.mark.asyncio
     async def test_get_model(self, app, aiohttp_client):
@@ -308,3 +362,12 @@ class TestModelAPI:
             assert resp.status == 200
             data = await resp.json()
             assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_refresh_catalog(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.post("/api/models/refresh")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "refreshed"
+        assert "count" in data

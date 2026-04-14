@@ -5,7 +5,7 @@ from aiohttp import web
 
 from ainode.core.config import NodeConfig
 from ainode.core.gpu import detect_gpu
-from ainode.models.registry import MODEL_CATALOG
+from ainode.models.registry import ModelManager
 
 
 def register_onboarding_routes(app: web.Application) -> None:
@@ -39,9 +39,10 @@ async def handle_onboarding_suggestions(request: web.Request) -> web.Response:
             "unified_memory": gpu.unified_memory,
         }
 
-    # Build model list with fit indicators
+    # Build model list with fit indicators using the live dynamic catalog.
+    manager: ModelManager = request.app.get("model_manager") or ModelManager()
     models = []
-    for model_id, info in MODEL_CATALOG.items():
+    for info in manager.get_catalog():
         entry = info.to_dict()
         entry["fits_gpu"] = gpu_memory_gb >= info.min_memory_gb if gpu else False
         models.append(entry)
