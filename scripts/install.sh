@@ -1,42 +1,49 @@
 #!/usr/bin/env bash
-# AINode installer — v0.4.0 container-native.
-#
-# Does four things:
-#   1. sanity-check the host (Linux + docker + nvidia runtime)
-#   2. docker pull ghcr.io/getainode/ainode:<version>
-#   3. (optional, --setup-ssh or AINODE_PEERS set) passwordless SSH bootstrap
-#      from this host to peer workers so distributed mode can launch them
-#   4. write + enable the systemd unit that does `docker run ... ainode`
-#
-# Host Python venv + vLLM source build are gone — everything lives in the
-# image. Upgrade is `docker pull` + `systemctl restart ainode`.
+# AINode installer — v0.4.1 container-native.
 #
 # Usage:
 #   curl -fsSL https://ainode.dev/install | bash
-#   AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash
-#   scripts/install.sh --setup-ssh           # explicit SSH bootstrap
-#   scripts/install.sh --user                # install as --user systemd service
+#   curl -fsSL https://ainode.dev/install | bash -s -- --job master
+#   curl -fsSL https://ainode.dev/install | bash -s -- --job worker
+#   AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
+#
+# --job master  Head node: runs the inference engine, serves the web UI,
+#               manages the cluster. Set a model via the web UI after install.
+# --job worker  Worker node: no model, no engine on startup. Announces itself
+#               to the cluster and waits for the head to assign work.
+# (default)     Solo node: standalone, pick a model via the web UI.
 
 set -euo pipefail
 
 # -- Defaults ---------------------------------------------------------------
-AINODE_VERSION="${AINODE_VERSION:-0.4.0}"
-AINODE_IMAGE="${AINODE_IMAGE:-ghcr.io/getainode/ainode:${AINODE_VERSION}}"
+AINODE_VERSION="${AINODE_VERSION:-0.4.1}"
+AINODE_IMAGE="${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
 AINODE_PEERS="${AINODE_PEERS:-}"           # comma-separated IPs
 AINODE_SSH_USER="${AINODE_SSH_USER:-$USER}"
+AINODE_JOB="${AINODE_JOB:-solo}"          # solo | master | worker
 SETUP_SSH="false"
 USER_MODE="false"
 
 # -- Arg parsing ------------------------------------------------------------
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --job)
+            shift
+            case "${1:-}" in
+                master) AINODE_JOB="master" ;;
+                worker) AINODE_JOB="worker" ;;
+                solo)   AINODE_JOB="solo" ;;
+                *) echo "Unknown --job value: ${1:-} (use master, worker, or solo)" >&2; exit 2 ;;
+            esac
+            ;;
         --setup-ssh) SETUP_SSH="true" ;;
         --user)      USER_MODE="true" ;;
         -h|--help)
-            sed -n '1,25p' "$0"; exit 0 ;;
-        *) echo "Unknown arg: $arg" >&2; exit 2 ;;
+            sed -n '1,20p' "$0"; exit 0 ;;
+        *) echo "Unknown arg: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
 log() { printf "\033[1;32m==>\033[0m %s\n" "$*"; }
@@ -56,12 +63,51 @@ if ! docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu22.04 nvidia-smi >
     warn "Continuing — AINode will error at start time if the GPU isn't accessible."
 fi
 
-# -- 2. Create config dir + pull image --------------------------------------
+# -- 2. Create config dir, pull image, write initial config ----------------
 log "Preparing $AINODE_HOME"
 mkdir -p "$AINODE_HOME"/{models,logs,datasets,training}
 
 log "Pulling $AINODE_IMAGE (this is a one-time ~18 GB download)"
 docker pull "$AINODE_IMAGE"
+
+# Write initial config.json if not already present.
+# No model is set — the user picks one via the web UI after install.
+# Job role determines whether this node runs an engine (master/solo)
+# or just announces itself and waits for work (worker).
+if [ ! -f "$AINODE_HOME/config.json" ]; then
+    log "Writing initial config (job: $AINODE_JOB)"
+    case "$AINODE_JOB" in
+        master)
+            DIST_MODE="head"
+            PEER_IPS=$([ -n "$AINODE_PEERS" ] && echo "\"$(echo "$AINODE_PEERS" | sed 's/,/","/g')\"" || echo "")
+            ;;
+        worker)
+            DIST_MODE="member"
+            PEER_IPS=""
+            ;;
+        *)
+            DIST_MODE="solo"
+            PEER_IPS=""
+            ;;
+    esac
+
+    cat > "$AINODE_HOME/config.json" << CONFIG
+{
+  "node_name": "$(hostname)",
+  "onboarded": true,
+  "distributed_mode": "${DIST_MODE}",
+  "peer_ips": [${PEER_IPS}],
+  "cluster_id": "ainode-cluster",
+  "cluster_interface": "enP2p1s0f1np1",
+  "ssh_user": "${AINODE_SSH_USER}",
+  "api_port": 8000,
+  "web_port": 3000,
+  "discovery_port": 5679,
+  "gpu_memory_utilization": 0.9
+}
+CONFIG
+    log "Node configured as: $AINODE_JOB (distributed_mode=$DIST_MODE)"
+fi
 
 # -- 3. Optional passwordless SSH bootstrap ---------------------------------
 # Needed only for distributed (multi-node) mode: the head runs eugr's

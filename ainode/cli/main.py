@@ -125,16 +125,15 @@ def cmd_start(args):
             from ainode.onboarding.setup import run_onboarding
             config = run_onboarding(config)
         else:
-            # Non-interactive: set safe defaults and continue.
-            # User completes setup via the web UI on first visit.
-            if not config.model:
-                config.model = "Qwen/Qwen2.5-7B-Instruct"
+            # Non-interactive (systemd, CI, docker without -it).
+            # Do NOT auto-assign a model — leave it null so the server
+            # starts immediately with no engine. User picks a model from
+            # the web UI. Workers never need a model at all.
             if not config.node_id:
                 config.node_id = str(uuid.uuid4())[:8]
             config.onboarded = True
             config.save()
-            console.print("  [dim]Non-interactive start — defaults applied.[/dim]")
-            console.print("  [dim]Open http://localhost:3000 to complete setup.[/dim]\n")
+            console.print("  [dim]Non-interactive start — open http://localhost:3000 to configure.[/dim]\n")
 
     # Assign node ID if needed
     if not config.node_id:
@@ -484,6 +483,48 @@ def cmd_logs(args):
 
 
 
+def cmd_role(args):
+    """Set or show this node's cluster role."""
+    config = NodeConfig.load()
+
+    job = getattr(args, "job", None)
+
+    _JOB_TO_MODE = {
+        "master": "head",
+        "worker": "member",
+        "solo":   "solo",
+    }
+    _MODE_TO_JOB = {v: k for k, v in _JOB_TO_MODE.items()}
+
+    if job is None:
+        # Show current role
+        current = config.distributed_mode or "solo"
+        label = _MODE_TO_JOB.get(current, current)
+        console.print(f"\n  This node is: [bold cyan]{label}[/bold cyan]  (distributed_mode={current})\n")
+        console.print("  To change:  [dim]ainode role master | worker | solo[/dim]\n")
+        return
+
+    mode = _JOB_TO_MODE[job]
+    config.distributed_mode = mode
+
+    # Workers don't need a model — clear it so the engine is skipped on start
+    if job == "worker":
+        config.model = None
+        console.print(f"\n  [bold cyan]Role set to: worker[/bold cyan]")
+        console.print("  This node will start immediately and wait for the")
+        console.print("  master to assign work. No model required.\n")
+    elif job == "master":
+        console.print(f"\n  [bold green]Role set to: master[/bold green]")
+        console.print("  This node will manage the cluster and run the inference")
+        console.print("  engine. Pick a model via the web UI at http://localhost:3000\n")
+    else:
+        console.print(f"\n  [bold]Role set to: solo[/bold]")
+        console.print("  Standalone node — not part of a cluster.\n")
+
+    config.save()
+    console.print("  [dim]Restart AINode to apply: sudo systemctl restart ainode[/dim]\n")
+
+
 def cmd_service(args):
     """Manage AINode systemd service."""
     from ainode.service.systemd import (
@@ -617,6 +658,18 @@ def main():
         help="Signal that the CLI is running inside the AINode image (docker-entrypoint.sh sets this).",
     )
     start_parser.set_defaults(func=cmd_start)
+
+    # role
+    role_parser = subparsers.add_parser("role", help="Set or show this node's cluster role")
+    role_parser.add_argument(
+        "job",
+        nargs="?",
+        choices=["master", "worker", "solo"],
+        help="master = head node (runs engine, manages cluster), "
+             "worker = member node (no engine, waits for head), "
+             "solo = standalone (default)",
+    )
+    role_parser.set_defaults(func=cmd_role)
 
     # stop
     stop_parser = subparsers.add_parser("stop", help="Stop AINode")
