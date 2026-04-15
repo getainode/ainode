@@ -25,7 +25,13 @@ def detect_gpu(use_cache: bool = True) -> Optional[GPUInfo]:
     if use_cache and _gpu_cache is not None:
         return _gpu_cache
     try:
-        import pynvml
+        import warnings
+        # pynvml is deprecated upstream; nvidia-ml-py is the maintained fork
+        # but has the same API. Suppress the warning — users shouldn't see it.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            warnings.simplefilter("ignore", FutureWarning)
+            import pynvml
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         name = pynvml.nvmlDeviceGetName(handle)

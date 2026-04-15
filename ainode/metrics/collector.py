@@ -74,7 +74,11 @@ class MetricsCollector:
         and temperature_c.  Returns an error dict if pynvml is unavailable.
         """
         try:
-            import pynvml
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                warnings.simplefilter("ignore", FutureWarning)
+                import pynvml
 
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
