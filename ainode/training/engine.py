@@ -242,23 +242,35 @@ class TrainingJob:
         }
 
     def _build_command(self, config_path: Path) -> list[str]:
-        """Build the CLI command to run training."""
+        """Build the CLI command to run training.
+
+        Single-GPU (solo or LoRA/QLoRA on one card) runs as plain Python.
+        Multi-GPU / multi-node runs go through ``torch.distributed.run``
+        (aka ``torchrun``) so the HF Trainer picks up RANK/LOCAL_RANK/
+        WORLD_SIZE and does DDP automatically.
+        """
         c = self.config
 
-        if c.method == "lora":
-            # Use a Python training script via module invocation
+        nproc = max(1, int(_detect_local_gpu_count()))
+        needs_ddp = c.distributed or c.num_nodes > 1 or (c.method == "full" and nproc > 1)
+
+        if not needs_ddp:
             return [
                 sys.executable, "-m", "ainode.training._run_training",
                 "--config", str(config_path),
             ]
-        else:
-            # Full fine-tuning — use torchrun for potential multi-GPU
-            return [
-                sys.executable, "-m", "torch.distributed.run",
-                "--nproc_per_node=1",
-                "-m", "ainode.training._run_training",
-                "--config", str(config_path),
-            ]
+
+        # Multi-GPU / multi-node path. ``torch.distributed.run`` handles
+        # --nproc_per_node locally; cross-node rendezvous is the caller's
+        # responsibility (set MASTER_ADDR / MASTER_PORT / NODE_RANK /
+        # NNODES in the environment before spawning).
+        return [
+            sys.executable, "-m", "torch.distributed.run",
+            f"--nproc_per_node={nproc}",
+            f"--nnodes={max(1, c.num_nodes)}",
+            "-m", "ainode.training._run_training",
+            "--config", str(config_path),
+        ]
 
     async def _monitor(self) -> None:
         """Read subprocess output and update progress."""
@@ -378,6 +390,23 @@ TRAINING_TEMPLATES: list[dict] = [
 def get_training_templates() -> list[dict]:
     """Return the hard-coded list of training templates shown in the UI."""
     return list(TRAINING_TEMPLATES)
+
+
+def _detect_local_gpu_count() -> int:
+    """Return the number of CUDA-visible GPUs on this host.
+
+    Never raises — falls back to 1 when torch is missing or CUDA is
+    unavailable, so command construction stays deterministic on
+    CPU-only dev boxes.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return max(1, torch.cuda.device_count())
+    except Exception:
+        pass
+    return 1
 
 
 class TrainingManager:

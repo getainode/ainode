@@ -11,13 +11,16 @@ from ainode.cli.main import (
 
 
 def test_version(capsys):
+    from ainode import __version__
+
     with patch.object(sys, "argv", ["ainode", "--version"]):
         try:
             main()
         except SystemExit:
             pass
     captured = capsys.readouterr()
-    assert "0.1.0" in captured.out
+    assert __version__ in captured.out
+    assert captured.out.startswith("ainode ")
 
 
 def test_no_args_calls_start(monkeypatch):

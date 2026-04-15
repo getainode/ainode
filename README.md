@@ -213,8 +213,8 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 | Multi-node auto-discovery (UDP broadcast) | ✅ |
 | Distributed tensor-parallel inference across nodes | ✅ (2-node verified) |
 | Cluster topology UI (members, VRAM aggregate, instance badges) | ✅ |
-| Browser-based fine-tuning (LoRA / QLoRA / DDP templates) | ⚠️ UI scaffolded, real-GPU validation in progress |
-| Prometheus metrics endpoint | 🔜 |
+| Browser-based fine-tuning (LoRA / QLoRA / DDP templates) | ✅ all three methods wired — real-GPU validation ongoing |
+| Prometheus metrics endpoint (`/metrics`) | ✅ |
 | 4+ node sharding on dedicated switch | 🔜 (next milestone) |
 
 ---
@@ -447,6 +447,34 @@ print(resp.choices[0].message.content)
 Works with Open WebUI, LiteLLM, LangChain, llama.cpp clients, and
 anything else that speaks OpenAI.
 
+### Metrics — `/metrics` (Prometheus) and `/api/metrics` (JSON)
+
+AINode exposes its own metrics on the same port as the API:
+
+```bash
+curl http://localhost:8000/metrics           # Prometheus text exposition
+curl http://localhost:8000/api/metrics       # JSON snapshot
+curl http://localhost:8000/api/metrics/gpu   # GPU subset
+```
+
+Key series:
+
+- `ainode_uptime_seconds`, `ainode_build_info{version=...}`
+- `ainode_requests_total`, `ainode_request_errors_total`
+- `ainode_tokens_generated_total`, `ainode_tokens_per_second`
+- `ainode_request_latency_milliseconds{quantile="0.5|0.95|0.99"}`
+- `ainode_requests_by_model_total{model=...}`
+- `ainode_gpu_utilization_percent`, `ainode_gpu_memory_used_bytes`, `ainode_gpu_temperature_celsius`
+
+Scrape config for Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: ainode
+    static_configs:
+      - targets: ["ainode-host:8000"]
+```
+
 ---
 
 ## Requirements
@@ -484,9 +512,9 @@ anything else that speaks OpenAI.
 - [x] Automatic model sharding across nodes (TP=2 verified)
 - [x] NFS-shared model storage
 - [x] Unified container image + systemd install
-- [ ] Browser-driven fine-tuning end-to-end validation
+- [x] Browser-driven fine-tuning runner (LoRA / QLoRA / Full + DDP) — real-GPU run ongoing
+- [x] Prometheus metrics endpoint (`/metrics`)
 - [ ] 4-node TP on dedicated switch
-- [ ] Prometheus metrics endpoint
 - [ ] Model marketplace (quantized variants, custom registries)
 - [ ] Mobile-friendly UI
 
