@@ -21,8 +21,8 @@ platform, open source ChatGPT alternative.
   <a href="https://github.com/getainode/ainode/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/getainode/ainode?display_name=tag&style=flat-square&color=76B900&label=release"></a>
   <a href="https://github.com/getainode/ainode/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache%202.0-76B900?style=flat-square"></a>
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
-  <a href="https://hub.docker.com/r/argentos/ainode"><img alt="docker" src="https://img.shields.io/badge/docker-argentos%2Fainode-2496ED?style=flat-square&logo=docker&logoColor=white"></a>
-  <img alt="ghcr" src="https://img.shields.io/badge/ghcr-getainode%2Fainode-24292e?style=flat-square&logo=github">
+  <a href="https://hub.docker.com/r/argentaios/ainode"><img alt="docker pulls" src="https://img.shields.io/docker/pulls/argentaios/ainode?style=flat-square&logo=docker&logoColor=white&label=dockerhub&color=2496ED"></a>
+  <a href="https://github.com/orgs/getainode/packages/container/package/ainode"><img alt="ghcr" src="https://img.shields.io/badge/ghcr-getainode%2Fainode-24292e?style=flat-square&logo=github"></a>
   <img alt="CUDA" src="https://img.shields.io/badge/CUDA-13-76B900?style=flat-square&logo=nvidia&logoColor=white">
   <img alt="vLLM" src="https://img.shields.io/badge/vLLM-0.19-7C3AED?style=flat-square">
   <img alt="Ray" src="https://img.shields.io/badge/Ray-2.54-028CF3?style=flat-square">
@@ -146,7 +146,16 @@ current member list with per-node role, address, and last-seen.
    you through picking a model. Click a model card → click **Launch** →
    chat.
 
-Upgrade is `docker pull` + `systemctl restart ainode`.
+Upgrade is `ainode update` (pulls the latest image and restarts).
+
+**Prefer to pull the image yourself?** Both registries serve identical
+images — GHCR is canonical (what the installer uses), Docker Hub is a
+public mirror:
+
+```bash
+docker pull ghcr.io/getainode/ainode:0.4.0      # canonical
+docker pull argentaios/ainode:0.4.0              # Docker Hub mirror
+```
 
 ### Two nodes (distributed mode)
 
