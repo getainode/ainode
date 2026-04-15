@@ -173,10 +173,27 @@ def cmd_start(args):
     mode = (config.distributed_mode or "solo").lower()
     in_container = os.environ.get("AINODE_IN_CONTAINER") == "1" or getattr(args, "in_container", False)
 
+    # Member mode: no local engine — just run the API server and wait for
+    # the head to assign a distributed shard via eugr's launcher.
     if mode == "member":
         console.print(
             "  [bold cyan]Member mode[/bold cyan] — no local inference engine. "
             "Awaiting work from the cluster head.\n"
+        )
+        from ainode.api.server import run_server
+        try:
+            run_server(config=config, engine=None)
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]Shutting down...[/yellow]")
+        finally:
+            _remove_pid()
+        return
+
+    # Solo/head mode with no model configured: start the server and wait.
+    # The user picks a model from the web UI — no model required at startup.
+    if not config.model:
+        console.print(
+            "  [dim]No model configured — open http://localhost:3000 to pick one.[/dim]\n"
         )
         from ainode.api.server import run_server
         try:
