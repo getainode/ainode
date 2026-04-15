@@ -117,10 +117,24 @@ def cmd_start(args):
         config.api_port = args.port
         config.save()
 
-    # First run — onboarding
+    # First run — onboarding.
+    # Skip when there is no TTY (e.g. running as a systemd service).
+    # The web UI at :3000 handles onboarding for non-interactive starts.
     if not config.onboarded:
-        from ainode.onboarding.setup import run_onboarding
-        config = run_onboarding(config)
+        if sys.stdin.isatty():
+            from ainode.onboarding.setup import run_onboarding
+            config = run_onboarding(config)
+        else:
+            # Non-interactive: set safe defaults and continue.
+            # User completes setup via the web UI on first visit.
+            if not config.model:
+                config.model = "Qwen/Qwen2.5-7B-Instruct"
+            if not config.node_id:
+                config.node_id = str(uuid.uuid4())[:8]
+            config.onboarded = True
+            config.save()
+            console.print("  [dim]Non-interactive start — defaults applied.[/dim]")
+            console.print("  [dim]Open http://localhost:3000 to complete setup.[/dim]\n")
 
     # Assign node ID if needed
     if not config.node_id:

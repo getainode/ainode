@@ -238,18 +238,16 @@ WRAPPER
 $WRAPPER_SUDO chmod +x "$WRAPPER_PATH"
 
 # -- Banner -----------------------------------------------------------------
-cat <<BANNER
-
-    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
-    \033[1;32m  AINode v${AINODE_VERSION} installed!\033[0m
-    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
-
-    Web:     http://localhost:3000
-    API:     http://localhost:8000/v1
-    Status:  ainode status
-    Logs:    ainode logs -f
-    Update:  ainode update
-
-    Powered by \033[0;34margentos.ai\033[0m
-
-BANNER
+printf '\n'
+printf '    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
+printf '    \033[1;32m  AINode v%s installed!\033[0m\n' "${AINODE_VERSION}"
+printf '    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
+printf '\n'
+printf '    Web:     http://localhost:3000\n'
+printf '    API:     http://localhost:8000/v1\n'
+printf '    Status:  ainode status\n'
+printf '    Logs:    ainode logs -f\n'
+printf '    Update:  ainode update\n'
+printf '\n'
+printf '    Powered by \033[0;34margentos.ai\033[0m\n'
+printf '\n'
