@@ -2820,6 +2820,34 @@ select {
 .queue-item.done .queue-item-status { color: var(--nvidia-green-bright); }
 .queue-item.failed .queue-item-status { color: var(--red); }
 
+.queue-item-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0;
+  background: rgba(255, 80, 80, 0.15);
+  border: 1px solid rgba(255, 80, 80, 0.4);
+  border-radius: 3px;
+  color: #ff5050;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 0.15s, border-color 0.15s;
+}
+.queue-item-cancel:hover {
+  background: rgba(255, 80, 80, 0.35);
+  border-color: rgba(255, 80, 80, 0.8);
+}
+.queue-item-cancel:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .queue-item-bar {
   width: 200px;
   height: 6px;

@@ -33,6 +33,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_get("/api/models/ollama", handle_ollama_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
     app.router.add_post("/api/models/download-repo", handle_download_repo)
+    app.router.add_post("/api/models/download-cancel", handle_cancel_download)
     app.router.add_get("/api/models/download/status", handle_download_status)
     app.router.add_get("/api/models/downloads/active", handle_active_downloads)
     app.router.add_post("/api/models/delete-repo", handle_delete_repo)
@@ -327,8 +328,38 @@ def _get_dir_bytes(path: Path) -> int:
     return total
 
 
+class _DownloadCancelled(Exception):
+    pass
+
+
+async def handle_cancel_download(request: web.Request) -> web.Response:
+    """POST /api/models/download-cancel -- cancel an in-progress download."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    job_id = (body.get("job_id") or "").strip()
+    jobs: dict = request.app["download_jobs"]
+
+    if not job_id or job_id not in jobs:
+        return web.json_response({"error": "job not found"}, status=404)
+
+    job = jobs[job_id]
+    if job.get("status") != "downloading":
+        return web.json_response(
+            {"error": f"job is {job.get('status')}, not downloading"}, status=409
+        )
+
+    # Signal the download thread to stop
+    job["_cancel"] = True
+    job["status"] = "cancelling"
+    return web.json_response({"job_id": job_id, "status": "cancelling"})
+
+
 async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str, jobs: dict) -> None:
     """Download an arbitrary HF repo that may not be in our catalog."""
+    import shutil
     loop = asyncio.get_event_loop()
     target = Path(manager.models_dir) / hf_repo.replace("/", "--")
     target.mkdir(parents=True, exist_ok=True)
@@ -363,14 +394,37 @@ async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str,
     try:
         def _do_download():
             from huggingface_hub import snapshot_download
-            snapshot_download(repo_id=hf_repo, local_dir=str(target))
+
+            def _progress_callback(info):
+                # Check cancel flag on every chunk callback
+                if jobs.get(job_id, {}).get("_cancel"):
+                    raise _DownloadCancelled("Download cancelled by user")
+
+            try:
+                snapshot_download(
+                    repo_id=hf_repo,
+                    local_dir=str(target),
+                    tqdm_class=None,
+                )
+            except _DownloadCancelled:
+                raise
             return str(target)
+
         await loop.run_in_executor(None, _do_download)
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["finished_at"] = time.time()
         jobs[job_id]["progress"] = 100.0
         if total_bytes > 0:
             jobs[job_id]["downloaded_bytes"] = total_bytes
+    except _DownloadCancelled:
+        jobs[job_id]["status"] = "cancelled"
+        jobs[job_id]["finished_at"] = time.time()
+        # Clean up partial download
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+        except Exception:
+            pass
     except Exception as exc:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(exc)

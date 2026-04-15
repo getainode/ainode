@@ -1607,6 +1607,41 @@ const AINode = {
           return self.renderQueueItem(dl);
         }).join('') +
       '</div>';
+
+    // Wire cancel buttons (event delegation)
+    container.querySelectorAll('.queue-item-cancel').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var jobId = btn.getAttribute('data-job-id');
+        if (!jobId) return;
+        btn.disabled = true;
+        btn.textContent = '…';
+        self.cancelDownload(jobId);
+      });
+    });
+  },
+
+  cancelDownload(jobId) {
+    var self = this;
+    fetch('/api/models/download-cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: jobId }),
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data.status === 'cancelling') {
+        // Mark the local state so the UI updates immediately
+        Object.keys(self.state.activeDownloads || {}).forEach(function (repo) {
+          var dl = self.state.activeDownloads[repo];
+          if (dl.jobId === jobId) {
+            dl.status = 'cancelling';
+            self.renderQueueItemInPlace(repo);
+          }
+        });
+      }
+    })
+    .catch(function () { /* server will clean up */ });
   },
 
   renderQueueItem(dl) {
@@ -1642,16 +1677,22 @@ const AINode = {
 
     var statusLabel;
     var barHtml = '';
+    var cancelBtn = '';
     if (dl.status === 'completed') {
       statusLabel = '✓ Complete · ' + (total > 0 ? this.formatBytes(total) : elapsedStr);
     } else if (dl.status === 'failed') {
       statusLabel = '⚠ Failed' + (dl.error ? ' — ' + this.esc(dl.error) : '');
+    } else if (dl.status === 'cancelled') {
+      statusLabel = '✕ Cancelled';
+    } else if (dl.status === 'cancelling') {
+      statusLabel = 'Cancelling...';
     } else if (hasPct) {
       statusLabel = pctStr + ' · ' + sizeStr + (rateStr ? ' · ' + rateStr : '') + (etaStr ? ' · ' + etaStr : '');
       barHtml =
         '<div class="queue-item-bar">' +
           '<div class="queue-item-bar-progress" style="width:' + pct.toFixed(2) + '%"></div>' +
         '</div>';
+      cancelBtn = '<button class="queue-item-cancel" data-job-id="' + this.esc(dl.jobId) + '" title="Cancel download">✕</button>';
     } else {
       // No total yet — show indeterminate shimmer
       statusLabel = 'Starting... ' + elapsedStr + (sizeStr ? ' · ' + sizeStr : '');
@@ -1659,11 +1700,12 @@ const AINode = {
         '<div class="queue-item-bar">' +
           '<div class="queue-item-bar-fill"></div>' +
         '</div>';
+      cancelBtn = '<button class="queue-item-cancel" data-job-id="' + this.esc(dl.jobId) + '" title="Cancel download">✕</button>';
     }
 
     return '<div class="queue-item ' + statusClass + '" data-queue-repo="' + this.esc(dl.hfRepo) + '">' +
       '<div class="queue-item-info">' +
-        '<div class="queue-item-repo">' + this.esc(dl.hfRepo) + '</div>' +
+        '<div class="queue-item-repo">' + this.esc(dl.hfRepo) + (cancelBtn ? ' ' + cancelBtn : '') + '</div>' +
         '<div class="queue-item-status">' + statusLabel + '</div>' +
       '</div>' +
       barHtml +
