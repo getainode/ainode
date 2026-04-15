@@ -393,6 +393,19 @@ def cmd_config(args):
         console.print(f"  [green]API port set to:[/green] {args.port}")
         return
 
+    if getattr(args, "hf_token", None) is not None:
+        token = args.hf_token.strip()
+        if token:
+            config.hf_token = token
+            config.save()
+            console.print("  [green]Hugging Face token saved.[/green]")
+            console.print("  [dim]Gated models (Llama, Gemma, etc.) will now be accessible.[/dim]")
+        else:
+            config.hf_token = None
+            config.save()
+            console.print("  [yellow]Hugging Face token cleared.[/yellow]")
+        return
+
     # Default: --show
     console.print(_banner())
 
@@ -596,6 +609,12 @@ def main():
     config_parser.add_argument("--show", action="store_true", default=True, help="Show current config")
     config_parser.add_argument("--model", help="Set the model")
     config_parser.add_argument("--port", type=int, help="Set the API port")
+    config_parser.add_argument(
+        "--hf-token",
+        dest="hf_token",
+        metavar="TOKEN",
+        help="Set Hugging Face token for gated models (Llama, Gemma, etc.). Pass empty string to clear.",
+    )
     config_parser.set_defaults(func=cmd_config)
 
     # logs

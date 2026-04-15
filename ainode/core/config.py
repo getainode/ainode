@@ -89,6 +89,11 @@ class NodeConfig:
     email: Optional[str] = None
     onboarded: bool = False
 
+    # Hugging Face credentials — needed for gated repos (e.g. Llama variants).
+    # Stored in config.json; not exported to the environment by default.
+    # Set via onboarding or manually: ainode config --hf-token <token>
+    hf_token: Optional[str] = None
+
     # Telemetry (opt-in)
     telemetry: bool = False
 

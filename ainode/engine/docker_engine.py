@@ -306,6 +306,11 @@ class DockerEngine:
         env = os.environ.copy()
         env.setdefault("HF_HOME", self.config.models_dir or "/root/.ainode/models")
 
+        # Propagate HF token if configured — needed for gated repos (Llama etc.)
+        if self.config.hf_token:
+            env["HUGGING_FACE_HUB_TOKEN"] = self.config.hf_token
+            env["HF_TOKEN"] = self.config.hf_token
+
         iface = self.config.cluster_interface
         if iface:
             env["NCCL_SOCKET_IFNAME"] = iface

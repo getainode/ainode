@@ -200,6 +200,7 @@ def test_cmd_config_show(tmp_path, monkeypatch):
     args = MagicMock()
     args.model = None
     args.port = None
+    args.hf_token = None
     args.show = True
 
     cmd_config(args)

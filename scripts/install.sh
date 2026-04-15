@@ -97,13 +97,16 @@ fi
 
 # Use the CLI baked into the image to write the unit file — the template
 # lives in ainode/service/systemd.py and is version-locked with the image.
+# IMPORTANT: override the entrypoint so we call `ainode` directly instead
+# of going through docker-entrypoint.sh (which does `ainode start ...`).
 docker run --rm \
+    --entrypoint ainode \
     -v "$AINODE_HOME":/root/.ainode \
     -v "$HOME":"$HOME" \
     -e "AINODE_HOME=$AINODE_HOME" \
     -e "HOME=$HOME" \
     "$AINODE_IMAGE" \
-    ainode service install "${SERVICE_ARGS[@]}"
+    service install "${SERVICE_ARGS[@]}"
 
 if [ "$USER_MODE" = "true" ]; then
     systemctl --user daemon-reload

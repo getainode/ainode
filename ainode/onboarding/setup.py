@@ -36,25 +36,33 @@ def run_onboarding(config: NodeConfig) -> NodeConfig:
         print("  Invalid email, skipping.\n")
 
     # Step 3: Model selection
+    # All defaults are open-access (no Hugging Face login required).
+    # Llama variants require a gated HF token — we don't prompt for that
+    # here so we default to Qwen 2.5 which is fully open.
     print("\n  Step 2/3 — Choose your model")
-    print("  [1] Llama 3.2 3B  (quick start, ~6 GB)")
-    print("  [2] Llama 3.1 8B  (recommended, ~16 GB)")
-    print("  [3] Llama 3.1 70B (advanced, ~35 GB AWQ)")
-    print("  [4] Custom model")
+    print("  [1] Qwen 2.5 1.5B  (quick start, ~3 GB, no login required)")
+    print("  [2] Qwen 2.5 7B    (recommended, ~15 GB, no login required)")
+    print("  [3] Qwen 2.5 72B   (advanced, ~40 GB AWQ, no login required)")
+    print("  [4] Custom model   (Hugging Face repo ID — gated repos need HF_TOKEN)")
     print()
 
     choice = input("  Choice [2]: ").strip() or "2"
 
     models = {
-        "1": "meta-llama/Llama-3.2-3B-Instruct",
-        "2": "meta-llama/Llama-3.1-8B-Instruct",
-        "3": "meta-llama/Llama-3.1-70B-Instruct-AWQ",
+        "1": "Qwen/Qwen2.5-1.5B-Instruct",
+        "2": "Qwen/Qwen2.5-7B-Instruct",
+        "3": "Qwen/Qwen2.5-72B-Instruct-AWQ",
     }
 
     if choice == "4":
-        custom = input("  Model name (HuggingFace): ").strip()
+        custom = input("  Model name (HuggingFace repo ID): ").strip()
         if custom:
             config.model = custom
+            hf_token = input(
+                "  HF token (leave blank if model is public): "
+            ).strip()
+            if hf_token:
+                config.hf_token = hf_token
     elif choice in models:
         config.model = models[choice]
         if choice == "3":
