@@ -106,6 +106,9 @@ def create_app(
     app.router.add_post("/api/cluster/role", handle_cluster_set_role)
     app.router.add_post("/api/cluster/id", handle_cluster_set_id)
     app.router.add_get("/api/config", handle_get_config)
+    app.router.add_post("/api/engine/set-model", handle_set_model)
+    app.router.add_get("/api/version/check", handle_version_check)
+    app.router.add_post("/api/engine/update", handle_engine_update)
     app.router.add_patch("/api/config", handle_patch_config)
 
     app.router.add_get("/v1/models", proxy_to_vllm)
@@ -764,6 +767,119 @@ def _safe_config_dict(config: NodeConfig) -> dict:
 async def handle_get_config(request: web.Request) -> web.Response:
     config: NodeConfig = request.app["config"]
     return web.json_response(_safe_config_dict(config))
+
+
+async def handle_set_model(request: web.Request) -> web.Response:
+    """POST /api/engine/set-model — switch to a different model and restart engine."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    model = (body.get("model") or "").strip()
+    if not model or "/" not in model:
+        return web.json_response({"error": "model must be a HF repo ID (org/name)"}, status=400)
+
+    config: NodeConfig = request.app["config"]
+    engine = request.app.get("engine")
+
+    # Persist the new model choice
+    config.model = model
+    config.save()
+
+    # Stop current engine and start fresh with new model
+    if engine is not None:
+        try:
+            engine.stop()
+        except Exception:
+            pass
+        try:
+            engine.config.model = model
+            engine.start()
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    return web.json_response({"status": "restarting", "model": model})
+
+
+async def handle_version_check(request: web.Request) -> web.Response:
+    """GET /api/version/check — compare local version against latest GHCR tag."""
+    import subprocess as _sp
+    current = __version__
+    try:
+        # Ask the registry for the digest of :latest, then find which
+        # version tag matches. We do this without auth (public image).
+        loop = asyncio.get_event_loop()
+        def _fetch():
+            import urllib.request, json as _json
+            token_url = "https://ghcr.io/token?service=ghcr.io&scope=repository:getainode/ainode:pull"
+            with urllib.request.urlopen(token_url, timeout=5) as r:
+                token = _json.loads(r.read())["token"]
+            tags_url = "https://ghcr.io/v2/getainode/ainode/tags/list"
+            req = urllib.request.Request(tags_url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = _json.loads(r.read())
+            # Return sorted version tags (ignore 'latest')
+            versions = sorted(
+                [t for t in data.get("tags", []) if t != "latest" and t[0].isdigit()],
+                key=lambda v: tuple(int(x) for x in v.split(".") if x.isdigit()),
+                reverse=True,
+            )
+            return versions[0] if versions else None
+
+        latest = await loop.run_in_executor(None, _fetch)
+    except Exception:
+        latest = None
+
+    update_available = False
+    if latest and latest != current:
+        try:
+            cur_parts = tuple(int(x) for x in current.split(".") if x.isdigit())
+            lat_parts = tuple(int(x) for x in latest.split(".") if x.isdigit())
+            update_available = lat_parts > cur_parts
+        except Exception:
+            update_available = latest != current
+
+    return web.json_response({
+        "current": current,
+        "latest": latest,
+        "update_available": update_available,
+    })
+
+
+async def handle_engine_update(request: web.Request) -> web.Response:
+    """POST /api/engine/update — trigger ainode update (docker pull + systemctl restart).
+
+    This runs the host wrapper command from inside the container by writing
+    a trigger file that the host systemd service can detect, OR by calling
+    docker pull + systemctl directly via the mounted docker socket.
+    """
+    import subprocess as _sp
+    loop = asyncio.get_event_loop()
+
+    async def _do_update():
+        # Pull the latest image using the docker CLI (mounted socket)
+        result = await loop.run_in_executor(
+            None,
+            lambda: _sp.run(
+                ["docker", "pull", "ghcr.io/getainode/ainode:latest"],
+                capture_output=True, text=True, timeout=600
+            )
+        )
+        if result.returncode != 0:
+            return False, result.stderr
+        # Restart the systemd service via the host socket
+        restart = await loop.run_in_executor(
+            None,
+            lambda: _sp.run(
+                ["systemctl", "restart", "ainode"],
+                capture_output=True, text=True, timeout=30
+            )
+        )
+        return True, "Update complete — restarting"
+
+    asyncio.get_event_loop().create_task(_do_update())
+    return web.json_response({"status": "updating", "message": "Pulling latest image and restarting service"})
 
 
 async def handle_patch_config(request: web.Request) -> web.Response:

@@ -32,6 +32,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_get("/api/models/openrouter", handle_openrouter_models)
     app.router.add_get("/api/models/ollama", handle_ollama_models)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
+    app.router.add_get("/api/models/downloaded", handle_list_downloaded)
     app.router.add_post("/api/models/download-repo", handle_download_repo)
     app.router.add_post("/api/models/download-cancel", handle_cancel_download)
     app.router.add_get("/api/models/download/status", handle_download_status)
@@ -230,6 +231,16 @@ async def handle_download_repo(request: web.Request) -> web.Response:
         {"job_id": job_id, "hf_repo": hf_repo, "status": "downloading"},
         status=202,
     )
+
+
+async def handle_list_downloaded(request: web.Request) -> web.Response:
+    """GET /api/models/downloaded — list all models present on disk."""
+    manager: ModelManager = request.app["model_manager"]
+    try:
+        models = manager.list_downloaded()
+    except Exception as exc:
+        return web.json_response({"error": str(exc), "models": []}, status=500)
+    return web.json_response({"models": models})
 
 
 async def handle_download_status(request: web.Request) -> web.Response:

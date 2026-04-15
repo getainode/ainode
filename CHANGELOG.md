@@ -12,6 +12,25 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.2] — 2026-04-15
+
+### Added
+- **Cancel download button** — red `✕` button on every in-progress download. `POST /api/models/download-cancel` signals the thread to stop and cleans up partial files.
+- **"Downloaded" filter now shows disk-present models** — previously the Downloads tab "Downloaded" filter only showed models loaded in vLLM. Now correctly scans the filesystem.
+- **`/api/models/downloaded` endpoint** — returns all models present on disk (HF cache, flat cache, and direct-download layouts).
+- **"Launch Model" button** — downloaded-but-not-loaded models show "◉ Downloaded — click Launch to run" and a Launch button instead of Download. Sets the model in config and restarts the engine.
+- **`/api/engine/set-model`** — switch the active model and restart the engine without touching the terminal.
+- **Version update polling** — UI checks `GET /api/version/check` every 30 minutes. When a newer version is on GHCR, a pulsing green `⬆ Update available: vX.Y.Z` badge appears in the top bar. Click to update in place.
+- **`/api/engine/update`** — triggers `docker pull + systemctl restart` from the browser.
+- **`list_downloaded()` rewrite** — scans all three HF layout conventions: `hub/models--org--name/`, `models--org--name/`, and `org--name/` (direct download).
+
+### Fixed
+- `pynvml FutureWarning` suppressed at import time — no longer floods logs on every start. (Reported by Chennu@riai360, getainode/ainode#33)
+- Downloaded model not appearing in chat model selector after download (Chennu@riai360 report).
+- "Downloaded" filter in model catalog showed empty for disk-present models not loaded in vLLM.
+
+---
+
 ## [0.4.1] — 2026-04-15
 
 ### Added

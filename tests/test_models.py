@@ -175,8 +175,9 @@ class TestManagerList:
         (custom_dir / "weights.bin").write_bytes(b"\x00" * 512)
         downloaded = manager.list_downloaded()
         assert len(downloaded) == 1
-        assert downloaded[0]["id"] == "some-org--custom-model"
-        assert "not in catalog" in downloaded[0]["description"].lower()
+        assert downloaded[0]["id"] == "some-org/custom-model"
+        assert downloaded[0]["hf_repo"] == "some-org/custom-model"
+        assert downloaded[0]["downloaded"] is True
 
 
 class TestManagerInfo:

@@ -363,8 +363,62 @@ const AINode = {
     this.state.pollInterval = setInterval(function () { self.refresh(); }, 5000);
     // Metrics every 3s
     this.state.metricsInterval = setInterval(function () { self.pollMetrics(); }, 3000);
+    // Version check every 30 minutes
+    this.checkVersion();
+    this.state.versionInterval = setInterval(function () { self.checkVersion(); }, 30 * 60 * 1000);
     // Initial fetch
     this.refresh();
+  },
+
+  checkVersion() {
+    var self = this;
+    fetch('/api/version/check')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        self.state.versionInfo = data;
+        self.renderVersionBadge();
+      })
+      .catch(function () {});
+  },
+
+  renderVersionBadge() {
+    var info = this.state.versionInfo;
+    var self = this;
+
+    // Remove existing badge
+    var existing = document.getElementById('update-badge');
+    if (existing) existing.remove();
+
+    if (!info || !info.update_available) return;
+
+    // Inject update badge into top bar
+    var topBar = document.querySelector('.top-bar') || document.querySelector('nav');
+    if (!topBar) return;
+
+    var badge = document.createElement('button');
+    badge.id = 'update-badge';
+    badge.className = 'update-badge';
+    badge.innerHTML = '⬆ Update available: v' + info.latest;
+    badge.title = 'Click to update to v' + info.latest;
+    badge.addEventListener('click', function () {
+      if (!confirm('Update AINode to v' + info.latest + '? The service will restart.')) return;
+      badge.textContent = 'Updating...';
+      badge.disabled = true;
+      fetch('/api/engine/update', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          self.toast('Update started — service will restart in a moment', 'success');
+          badge.textContent = 'Restarting...';
+          // Re-check version in 60 seconds
+          setTimeout(function () { self.checkVersion(); }, 60000);
+        })
+        .catch(function () {
+          badge.textContent = '⬆ Update available: v' + info.latest;
+          badge.disabled = false;
+          self.toast('Update failed — try ainode update from terminal', 'error');
+        });
+    });
+    topBar.appendChild(badge);
   },
 
   async pollMetrics() {
@@ -1824,6 +1878,7 @@ const AINode = {
     var repo = m.hf_repo || m.id;
     var name = m.name || repo;
     var isLoaded = ((this.state.status && this.state.status.models_loaded) || []).includes(repo);
+    var isDownloaded = isLoaded || !!(this.state.downloadedModels && this.state.downloadedModels[repo]);
     var capDefs = {
       vision:       { label: 'Vision',       icon: '👁',  cls: 'cap-vision' },
       tool_use:     { label: 'Tool Use',     icon: '🔧', cls: 'cap-tool' },
@@ -1857,7 +1912,9 @@ const AINode = {
 
     var primaryCta = isLoaded
       ? '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>'
-      : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
+      : isDownloaded
+        ? '<button class="btn-nvidia md-cta" id="md-launch" data-hf-repo="' + self.esc(repo) + '">▶ Launch Model</button>'
+        : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
 
     var modal = document.createElement('div');
     modal.id = 'model-detail-modal';
@@ -1882,7 +1939,7 @@ const AINode = {
         metaRow +
         (caps ? '<div class="md-capabilities"><span class="md-section-label">Capabilities</span><div class="md-cap-list">' + caps + '</div></div>' : '') +
         '<div class="md-footer">' +
-          '<div class="md-footer-status">' + (isLoaded ? '● Model loaded and ready' : '○ Not yet downloaded') + '</div>' +
+          '<div class="md-footer-status">' + (isLoaded ? '● Model loaded and ready' : isDownloaded ? '◉ Downloaded — click Launch to run' : '○ Not yet downloaded') + '</div>' +
           primaryCta +
         '</div>' +
       '</div>';
@@ -1909,6 +1966,30 @@ const AINode = {
       dlBtn.addEventListener('click', function () {
         self.startRepoDownload(dlBtn.dataset.hfRepo);
         close();
+      });
+    }
+
+    // Launch downloaded model (set as active model + restart engine)
+    var launchBtn = modal.querySelector('#md-launch');
+    if (launchBtn) {
+      launchBtn.addEventListener('click', function () {
+        launchBtn.disabled = true;
+        launchBtn.textContent = 'Launching...';
+        fetch('/api/engine/set-model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: repo }),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          self.toast('Launching ' + repo + ' — engine restarting', 'success');
+          close();
+        })
+        .catch(function () {
+          self.toast('Failed to launch model', 'error');
+          launchBtn.disabled = false;
+          launchBtn.textContent = '▶ Launch Model';
+        });
       });
     }
 
@@ -2085,6 +2166,20 @@ const AINode = {
     var totalClusterMem = nodes.reduce(function (sum, n) { return sum + (n.gpu_memory_gb || 0); }, 0);
     var clusterNodeCount = nodes.length;
 
+    // Fetch downloaded models from disk — lazy load, refresh periodically
+    if (!this.state.downloadedModels) {
+      this.state.downloadedModels = {};
+      fetch('/api/models/downloaded').then(function (r) { return r.json(); }).then(function (data) {
+        var map = {};
+        (data.models || data || []).forEach(function (m) {
+          var repo = m.hf_repo || m.id || '';
+          if (repo) map[repo] = true;
+        });
+        self.state.downloadedModels = map;
+        self.renderDownloads();
+      }).catch(function () {});
+    }
+
     // Fetch catalog from API (42+ models) — lazy load once
     if (!this.state.catalog) {
       this.state.catalog = [];
@@ -2154,7 +2249,8 @@ const AINode = {
           m.desc.toLowerCase().indexOf(query) === -1 &&
           (m.family || '').toLowerCase().indexOf(query) === -1) return false;
       var isLoaded = loaded.includes(m.id);
-      if (self.state.modelsFilter === 'downloaded' && !isLoaded) return false;
+      var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.id]);
+      if (self.state.modelsFilter === 'downloaded' && !isOnDisk) return false;
       if (self.state.modelsFilter === 'available' && isLoaded) return false;
       if (self.state.modelsFilter === 'recommended' && !m.recommended) return false;
       return true;

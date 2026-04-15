@@ -709,15 +709,24 @@ class ModelManager:
         return results
 
     def list_downloaded(self) -> list[dict]:
-        """Scan models_dir and return info for every downloaded model."""
+        """Scan models_dir and return info for every model present on disk.
+
+        Handles three directory layouts:
+          1. HF cache:   models_dir/hub/models--org--name/
+          2. Flat cache: models_dir/models--org--name/
+          3. Direct:     models_dir/org--name/   (written by _run_download_repo)
+        """
         downloaded: list[dict] = []
         if not self.models_dir.exists():
             return downloaded
 
-        for child in sorted(self.models_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            catalog_entry = self._find_catalog_by_dir(child.name)
+        seen: set[str] = set()
+
+        def _add(child: "Path", hf_repo: str) -> None:
+            if hf_repo in seen:
+                return
+            seen.add(hf_repo)
+            catalog_entry = self._find_catalog_by_hf_repo(hf_repo)
             if catalog_entry:
                 entry = catalog_entry.to_dict()
                 entry["downloaded"] = True
@@ -725,17 +734,45 @@ class ModelManager:
                 downloaded.append(entry)
             else:
                 downloaded.append({
-                    "id": child.name,
-                    "name": child.name,
-                    "hf_repo": child.name.replace("--", "/", 1),
-                    "size_gb": None,
-                    "description": "User-downloaded model (not in catalog)",
+                    "id": hf_repo,
+                    "name": hf_repo.split("/")[-1] if "/" in hf_repo else hf_repo,
+                    "hf_repo": hf_repo,
+                    "size_gb": round(self._dir_size_gb(child), 2),
+                    "description": "Downloaded model",
                     "quantization": None,
                     "min_memory_gb": 0,
                     "downloaded": True,
                     "local_size_gb": round(self._dir_size_gb(child), 2),
                 })
+
+        # Scan top-level models_dir
+        for child in sorted(self.models_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            name = child.name
+            if name.startswith("models--"):
+                # HF flat cache: models--org--name
+                _add(child, name[len("models--"):].replace("--", "/", 1))
+            elif "--" in name and not name.startswith(".") and name != "hub":
+                # Direct download: org--name
+                _add(child, name.replace("--", "/", 1))
+
+        # Also scan hub/ subdirectory (HF nested cache layout)
+        hub = self.models_dir / "hub"
+        if hub.is_dir():
+            for child in sorted(hub.iterdir()):
+                if child.is_dir() and child.name.startswith("models--"):
+                    _add(child, child.name[len("models--"):].replace("--", "/", 1))
+
         return downloaded
+
+    def _find_catalog_by_hf_repo(self, hf_repo: str):
+        """Find a catalog entry by HF repo ID (case-insensitive)."""
+        hf_lower = hf_repo.lower()
+        for info in self.get_catalog():
+            if info.hf_repo.lower() == hf_lower:
+                return info
+        return None
 
     def get_model_info(self, model_id: str) -> Optional[dict]:
         """Return catalog info for a model, plus local size if downloaded."""
