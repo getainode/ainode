@@ -27,6 +27,7 @@ platform, open source ChatGPT alternative.
   <img alt="vLLM" src="https://img.shields.io/badge/vLLM-0.19-7C3AED?style=flat-square">
   <img alt="Ray" src="https://img.shields.io/badge/Ray-2.54-028CF3?style=flat-square">
   <a href="https://github.com/getainode/ainode/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/getainode/ainode?style=flat-square&color=FFD700"></a>
+  <a href="https://releasebot.io/updates/getainode/ainode"><img alt="Release Bot" src="https://releasebot.io/Full.svg" height="20"></a>
 </p>
 
 <p align="center">
