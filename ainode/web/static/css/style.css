@@ -898,6 +898,33 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
   background-size: 20px 20px;
 }
 
+.cluster-hero-pill {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border: 1px solid #4a7a00;
+  border-radius: 999px;
+  background: rgba(10, 10, 10, 0.78);
+  color: #e0e0e0;
+  font: 500 12px/1 'JetBrains Mono', 'Fira Code', SF Mono, monospace;
+  letter-spacing: 0.5px;
+  z-index: 5;
+  box-shadow: 0 0 18px rgba(118, 185, 0, 0.18);
+}
+.cluster-hero-pill .hero-label {
+  color: #76B900;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+.cluster-hero-pill .hero-sep {
+  color: #555;
+}
+
 /* ============================================================
    RIGHT PANEL — Instances + Launch
    ============================================================ */
@@ -944,6 +971,22 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
 .launch-form .form-label {
   margin-top: 12px;
   margin-bottom: 6px;
+}
+
+.launch-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin: 10px 0 12px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.06);
+  letter-spacing: 0.2px;
+}
+.launch-hint.warn {
+  color: #ffb84d;
+  border-left-color: #ffb84d;
+  background: rgba(255, 184, 77, 0.06);
 }
 
 /* ============================================================

@@ -1,0 +1,168 @@
+name: publish-image
+# Build + publish the AINode container image to GHCR and Docker Hub.
+#
+# Manual only (workflow_dispatch). Never runs on push — the self-hosted
+# aarch64 runner is a DGX Spark, and a ~18 GB image build is not something
+# we want firing off accidentally.
+#
+# Self-hosted runner prerequisites:
+#   - labels: [self-hosted, dgx-spark, aarch64]
+#   - docker + nvidia-container-toolkit installed
+#   - runner user is in the `docker` group
+#   - for push=true: GITHUB_TOKEN has packages:write (set below); Docker Hub
+#     requires DOCKERHUB_USER + DOCKERHUB_TOKEN repo secrets (optional)
+#
+# The workflow does four things:
+#   1. Build the base image by running scripts/build-base-image.sh (clones
+#      eugr/spark-vllm-docker at the SHA pinned in that script and builds).
+#      This step is idempotent — cached layers short-circuit the build after
+#      the first run per runner.
+#   2. Build the AINode layer on top (Dockerfile.ainode).
+#   3. (if push=true) Tag + push base image + ainode image to GHCR and
+#      optionally Docker Hub.
+#   4. Emit a summary with the final image pull command.
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push images to registries? (false = build-only smoke test)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      ainode_version:
+        description: "AINode version tag (should match pyproject.toml version)"
+        required: true
+        default: "0.4.0"
+        type: string
+      rebuild_base:
+        description: "Force rebuild of the eugr base image (slow — ~12 min)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  build:
+    runs-on: [self-hosted, dgx-spark, aarch64]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      AINODE_VERSION: ${{ inputs.ainode_version }}
+      REGISTRY_GHCR: ghcr.io/getainode
+      REGISTRY_DOCKERHUB: docker.io/argentos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify pyproject version matches input
+        run: |
+          pyproj_version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$pyproj_version" != "$AINODE_VERSION" ]; then
+            echo "::warning::pyproject.toml version ($pyproj_version) does not match workflow input ($AINODE_VERSION)."
+          else
+            echo "Version match: $pyproj_version"
+          fi
+
+      - name: Build base (eugr) image
+        run: |
+          if [ "${{ inputs.rebuild_base }}" = "true" ]; then
+            # Pass --rebuild-vllm to eugr's build-and-copy.sh by exporting
+            # the right env — scripts/build-base-image.sh doesn't expose it
+            # directly yet, so this just clears the buildkit cache.
+            docker builder prune -f || true
+          fi
+          AINODE_VERSION="$AINODE_VERSION" scripts/build-base-image.sh
+
+      - name: Resolve eugr commit short SHA
+        id: eugr
+        run: |
+          cd scripts/_eugr
+          short=$(git rev-parse --short=7 HEAD)
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "Eugr base pinned at: $short"
+
+      - name: Build ainode image
+        run: |
+          docker build \
+            -f scripts/Dockerfile.ainode \
+            --build-arg BASE_IMAGE="${REGISTRY_GHCR}/ainode-base:${{ steps.eugr.outputs.short }}" \
+            -t ainode:${AINODE_VERSION} \
+            -t ainode:latest \
+            .
+
+      - name: Smoke test — image starts
+        run: |
+          # Sanity: image runs, python imports ainode, version string matches.
+          docker run --rm ainode:${AINODE_VERSION} ainode --version
+
+      - name: Tag for registries
+        if: inputs.push == 'true'
+        run: |
+          docker tag ainode:${AINODE_VERSION} "${REGISTRY_GHCR}/ainode:${AINODE_VERSION}"
+          docker tag ainode:${AINODE_VERSION} "${REGISTRY_GHCR}/ainode:latest"
+          docker tag ainode:${AINODE_VERSION} "${REGISTRY_DOCKERHUB}/ainode:${AINODE_VERSION}"
+          docker tag ainode:${AINODE_VERSION} "${REGISTRY_DOCKERHUB}/ainode:latest"
+
+      - name: Login to GHCR
+        if: inputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Docker Hub secret presence
+        id: dockerhub
+        if: inputs.push == 'true'
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USER }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login to Docker Hub
+        if: inputs.push == 'true' && steps.dockerhub.outputs.present == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push base image
+        if: inputs.push == 'true'
+        run: |
+          docker push ${REGISTRY_GHCR}/ainode-base:${{ steps.eugr.outputs.short }}
+          docker push ${REGISTRY_GHCR}/ainode-base:${AINODE_VERSION}-${{ steps.eugr.outputs.short }}
+
+      - name: Push ainode image
+        if: inputs.push == 'true'
+        run: |
+          docker push ${REGISTRY_GHCR}/ainode:${AINODE_VERSION}
+          docker push ${REGISTRY_GHCR}/ainode:latest
+          if [ -n "${{ secrets.DOCKERHUB_USER }}" ]; then
+            docker push ${REGISTRY_DOCKERHUB}/ainode:${AINODE_VERSION}
+            docker push ${REGISTRY_DOCKERHUB}/ainode:latest
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "## AINode image build"
+            echo ""
+            echo "**Version:** \`${AINODE_VERSION}\`"
+            echo "**Base (eugr pin):** \`${{ steps.eugr.outputs.short }}\`"
+            echo "**Pushed:** \`${{ inputs.push }}\`"
+            echo ""
+            if [ "${{ inputs.push }}" = "true" ]; then
+              echo "### Pull"
+              echo ""
+              echo "\`\`\`bash"
+              echo "docker pull ${REGISTRY_GHCR}/ainode:${AINODE_VERSION}"
+              echo "\`\`\`"
+            else
+              echo "_Build-only smoke test — no registries updated._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

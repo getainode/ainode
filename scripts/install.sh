@@ -1,206 +1,131 @@
-#!/bin/bash
-# AINode installer — https://ainode.dev
-# Usage: curl -fsSL https://ainode.dev/install | bash
-#        AINODE_REPO=webdevtodayjason/ainode bash scripts/install.sh   (use a fork)
-set -e
+#!/usr/bin/env bash
+# AINode installer — v0.4.0 container-native.
+#
+# Does four things:
+#   1. sanity-check the host (Linux + docker + nvidia runtime)
+#   2. docker pull ghcr.io/getainode/ainode:<version>
+#   3. (optional, --setup-ssh or AINODE_PEERS set) passwordless SSH bootstrap
+#      from this host to peer workers so distributed mode can launch them
+#   4. write + enable the systemd unit that does `docker run ... ainode`
+#
+# Host Python venv + vLLM source build are gone — everything lives in the
+# image. Upgrade is `docker pull` + `systemctl restart ainode`.
+#
+# Usage:
+#   curl -fsSL https://ainode.dev/install | bash
+#   AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash
+#   scripts/install.sh --setup-ssh           # explicit SSH bootstrap
+#   scripts/install.sh --user                # install as --user systemd service
 
-AINODE_VERSION="0.2.0"
+set -euo pipefail
+
+# -- Defaults ---------------------------------------------------------------
+AINODE_VERSION="${AINODE_VERSION:-0.4.0}"
+AINODE_IMAGE="${AINODE_IMAGE:-ghcr.io/getainode/ainode:${AINODE_VERSION}}"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
-VENV_DIR="$AINODE_HOME/venv"
-AINODE_REPO="${AINODE_REPO:-webdevtodayjason/ainode}"
-AINODE_BRANCH="${AINODE_BRANCH:-main}"
+AINODE_PEERS="${AINODE_PEERS:-}"           # comma-separated IPs
+AINODE_SSH_USER="${AINODE_SSH_USER:-$USER}"
+SETUP_SSH="false"
+USER_MODE="false"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-banner() {
-    echo ""
-    echo -e "${CYAN}    ╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}    ║            A I N o d e               ║${NC}"
-    echo -e "${CYAN}    ║   Your local AI platform for NVIDIA  ║${NC}"
-    echo -e "${CYAN}    ╚══════════════════════════════════════╝${NC}"
-    echo -e "    ${BLUE}Powered by argentos.ai${NC}"
-    echo ""
-}
-
-log()   { echo -e "    ${GREEN}✓${NC} $1"; }
-info()  { echo -e "    ${BLUE}→${NC} $1"; }
-warn()  { echo -e "    ${YELLOW}!${NC} $1"; }
-fail()  { echo -e "    ${RED}✗${NC} $1"; exit 1; }
-step()  { echo ""; echo -e "    ${CYAN}[$1]${NC} $2"; }
-
-banner
-echo "    Installing AINode v${AINODE_VERSION}..."
-echo "    Source: ${AINODE_REPO}@${AINODE_BRANCH}"
-echo ""
-
-# ── System checks ─────────────────────────────────────────────────────────
-
-[[ "$(uname)" != "Linux" ]] && fail "AINode requires Linux."
-
-command -v python3 &>/dev/null || fail "Python 3 required. Install: sudo apt install python3 python3-venv python3-pip"
-
-PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-log "Python ${PYTHON_VER}"
-
-# Ensure python3-dev + venv tools are present (needed for pip-from-source builds)
-if ! python3 -c "import sysconfig, ensurepip" 2>/dev/null; then
-    info "Installing python3-dev / python3-venv..."
-    sudo apt-get install -y python3-dev python3-venv python3-pip 2>/dev/null || warn "apt install skipped — make sure these are present"
-fi
-
-command -v git &>/dev/null || { info "Installing git..."; sudo apt-get install -y git 2>/dev/null || fail "git required"; }
-
-# ── GPU + CUDA detection ─────────────────────────────────────────────────
-
-GPU_NAME=""
-GPU_COMPUTE=""
-CUDA_MAJOR=""
-ENGINE_STRATEGY="pip"
-
-if command -v nvidia-smi &>/dev/null; then
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-    GPU_COMPUTE=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
-    if [ -n "$GPU_NAME" ]; then
-        log "GPU: ${GPU_NAME} (sm_${GPU_COMPUTE/./})"
-    fi
-else
-    warn "No NVIDIA GPU detected — AINode will install but inference will be unavailable"
-fi
-
-NVCC_PATH=""
-for p in /usr/local/cuda/bin/nvcc /usr/local/cuda-13.0/bin/nvcc /usr/local/cuda-12.*/bin/nvcc; do
-    [ -x "$p" ] && NVCC_PATH="$p" && break
+# -- Arg parsing ------------------------------------------------------------
+for arg in "$@"; do
+    case "$arg" in
+        --setup-ssh) SETUP_SSH="true" ;;
+        --user)      USER_MODE="true" ;;
+        -h|--help)
+            sed -n '1,25p' "$0"; exit 0 ;;
+        *) echo "Unknown arg: $arg" >&2; exit 2 ;;
+    esac
 done
 
-if [ -n "$NVCC_PATH" ]; then
-    CUDA_VER=$("$NVCC_PATH" --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//')
-    CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
-    log "CUDA ${CUDA_VER}"
+log() { printf "\033[1;32m==>\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m!!\033[0m %s\n" "$*"; }
+die() { printf "\033[1;31mXX\033[0m %s\n" "$*" >&2; exit 1; }
+
+# -- 1. Preflight -----------------------------------------------------------
+log "Checking prerequisites"
+[ "$(uname -s)" = "Linux" ] || die "AINode requires Linux (detected $(uname -s))"
+command -v docker >/dev/null 2>&1 || die "docker not found. Install: https://docs.docker.com/engine/install/"
+docker info >/dev/null 2>&1 || die "docker daemon not reachable — run 'sudo systemctl start docker' or add \$USER to the 'docker' group"
+
+# GPU check (nvidia-container-toolkit). AINode targets NVIDIA GB10; skip if
+# missing, let the container fail fast with a clear error.
+if ! docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+    warn "Could not run a GPU container. Install nvidia-container-toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/"
+    warn "Continuing — AINode will error at start time if the GPU isn't accessible."
 fi
 
-ARCH=$(uname -m)
-log "Architecture: ${ARCH}"
-
-# Engine strategy:
-#   GB10 / sm_121 / CUDA 13 → Docker container (pip wheels don't target CUDA 13)
-#   Everything else        → pip vLLM (pre-built wheels)
-if [[ "$GPU_NAME" =~ "GB10" ]] || [[ "$GPU_COMPUTE" == "12.1" ]] || [[ "$CUDA_MAJOR" == "13" ]]; then
-    ENGINE_STRATEGY="docker"
-    info "Blackwell GB10 / CUDA 13 detected — will use Docker-based vLLM"
-fi
-
-# ── Create AINode home + venv ────────────────────────────────────────────
-
+# -- 2. Create config dir + pull image --------------------------------------
+log "Preparing $AINODE_HOME"
 mkdir -p "$AINODE_HOME"/{models,logs,datasets,training}
 
-step "1/4" "Creating virtual environment..."
-python3 -m venv "$VENV_DIR"
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-pip install --quiet --upgrade pip setuptools wheel
-log "Virtual environment ready: ${VENV_DIR}"
+log "Pulling $AINODE_IMAGE (this is a one-time ~18 GB download)"
+docker pull "$AINODE_IMAGE"
 
-# ── Install AINode ────────────────────────────────────────────────────────
-
-step "2/4" "Installing AINode from ${AINODE_REPO}..."
-pip install --quiet "git+https://github.com/${AINODE_REPO}.git@${AINODE_BRANCH}"
-log "AINode installed"
-
-# ── Install inference engine ──────────────────────────────────────────────
-
-if [ "$ENGINE_STRATEGY" = "docker" ]; then
-    step "3/4" "Setting up Docker-based vLLM (Blackwell GB10)..."
-
-    if ! command -v docker &>/dev/null; then
-        info "Docker not found — installing..."
-        curl -fsSL https://get.docker.com | sudo sh 2>&1 | tail -3 || warn "Docker install failed"
-        sudo usermod -aG docker "$USER" 2>/dev/null || true
+# -- 3. Optional passwordless SSH bootstrap ---------------------------------
+# Needed only for distributed (multi-node) mode: the head runs eugr's
+# launcher which SSHes into each peer and `docker run`s a worker container.
+if [ "$SETUP_SSH" = "true" ] || [ -n "$AINODE_PEERS" ]; then
+    log "Setting up passwordless SSH for distributed mode"
+    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+        ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" >/dev/null
+        log "Generated $HOME/.ssh/id_ed25519"
     fi
+    IFS=',' read -ra PEER_LIST <<< "$AINODE_PEERS"
+    for peer in "${PEER_LIST[@]}"; do
+        [ -z "$peer" ] && continue
+        log "ssh-copy-id ${AINODE_SSH_USER}@${peer} (you may be prompted once)"
+        ssh-copy-id -o StrictHostKeyChecking=accept-new \
+            -i "$HOME/.ssh/id_ed25519.pub" \
+            "${AINODE_SSH_USER}@${peer}" || warn "ssh-copy-id to $peer failed"
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+                "${AINODE_SSH_USER}@${peer}" true 2>/dev/null; then
+            log "  verified passwordless SSH to $peer"
+        else
+            warn "  passwordless SSH to $peer NOT working — distributed launch will fail"
+        fi
+    done
+fi
 
-    if ! sudo docker info &>/dev/null; then
-        info "Starting Docker..."
-        sudo systemctl reset-failed docker.service 2>/dev/null || true
-        sudo rm -rf /var/lib/docker/buildkit 2>/dev/null || true
-        sudo systemctl start docker 2>&1 | tail -3 || warn "Could not start Docker — start it manually with: sudo systemctl start docker"
-    fi
+# -- 4. Install systemd unit ------------------------------------------------
+log "Installing systemd service"
+SERVICE_ARGS=()
+if [ "$USER_MODE" = "true" ]; then
+    SERVICE_ARGS+=("--user")
+fi
 
-    if sudo docker info &>/dev/null; then
-        log "Docker is running"
-        info "Pulling vLLM container for GB10 (a few minutes)..."
-        sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5 2>&1 | tail -3 || warn "Container pull failed — re-run: sudo docker pull scitrera/dgx-spark-vllm:0.17.0-t5"
-        log "vLLM container ready: scitrera/dgx-spark-vllm:0.17.0-t5"
-    else
-        warn "Docker not available — AINode will install without inference engine"
-    fi
+# Use the CLI baked into the image to write the unit file — the template
+# lives in ainode/service/systemd.py and is version-locked with the image.
+docker run --rm \
+    -v "$AINODE_HOME":/root/.ainode \
+    -v "$HOME":"$HOME" \
+    -e "AINODE_HOME=$AINODE_HOME" \
+    -e "HOME=$HOME" \
+    "$AINODE_IMAGE" \
+    ainode service install "${SERVICE_ARGS[@]}"
+
+if [ "$USER_MODE" = "true" ]; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now ainode.service
+    log "  (consider: sudo loginctl enable-linger $USER  — so the service survives logout)"
 else
-    step "3/4" "Installing vLLM (pip)..."
-    pip install --quiet vllm 2>&1 | tail -3 || warn "vLLM pip install failed — install it later with: pip install vllm"
-    VLLM_VER=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null) && \
-        log "vLLM ${VLLM_VER}" || warn "vLLM import failed"
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now ainode.service
 fi
 
-# Verify torch
-TORCH_AVAIL=$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
-if [ "$TORCH_AVAIL" = "True" ]; then
-    TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null)
-    log "PyTorch CUDA ${TORCH_CUDA}"
-fi
+# -- Banner -----------------------------------------------------------------
+cat <<BANNER
 
-# ── PATH setup ────────────────────────────────────────────────────────────
+    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
+    \033[1;32m  AINode v${AINODE_VERSION} installed!\033[0m
+    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
 
-step "4/4" "Finishing up..."
+    Web:     http://localhost:3000
+    API:     http://localhost:8000/v1
+    Status:  systemctl status ainode
+    Logs:    journalctl -u ainode -f
 
-AINODE_BIN="$VENV_DIR/bin"
-SHELL_RC=""
-[ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
-[ -f "$HOME/.zshrc" ] && SHELL_RC="$HOME/.zshrc"
+    Powered by \033[0;34margentos.ai\033[0m
 
-if [ -n "$SHELL_RC" ] && ! grep -q "AINode" "$SHELL_RC" 2>/dev/null; then
-    {
-        echo ""
-        echo "# AINode — https://ainode.dev"
-        echo "export PATH=\"$AINODE_BIN:\$PATH\""
-    } >> "$SHELL_RC"
-    log "Added to PATH in ${SHELL_RC}"
-fi
-
-# ── systemd service (optional) ────────────────────────────────────────────
-
-INSTALL_SERVICE="${AINODE_SERVICE:-}"
-if [ -z "$INSTALL_SERVICE" ] && [ -t 0 ]; then
-    echo ""
-    echo -n "    Install as systemd service (auto-start on boot)? [y/N] "
-    read -r INSTALL_SERVICE
-fi
-
-if [[ "$INSTALL_SERVICE" =~ ^[Yy]$ ]]; then
-    echo ""
-    if [ "$(id -u)" -eq 0 ]; then
-        "$AINODE_BIN/ainode" service install
-    else
-        "$AINODE_BIN/ainode" service install --user
-    fi
-    log "AINode service installed and enabled"
-fi
-
-# ── Done ──────────────────────────────────────────────────────────────────
-
-echo ""
-echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "    ${GREEN}  AINode v${AINODE_VERSION} installed!${NC}"
-echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-echo "    To start:"
-echo ""
-echo -e "      ${CYAN}source ${SHELL_RC:-~/.bashrc}${NC}"
-echo -e "      ${CYAN}ainode start${NC}"
-echo ""
-echo "    Open http://localhost:3000 in your browser."
-echo ""
-echo -e "    Powered by ${BLUE}argentos.ai${NC}"
-echo ""
+BANNER

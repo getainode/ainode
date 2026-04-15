@@ -176,7 +176,7 @@ ENDPOINT_CATALOG = {
         {"method": "GET", "path": "/v1/models", "description": "List models (OpenAI-compatible)"},
         {"method": "POST", "path": "/v1/chat/completions", "description": "Chat completions (OpenAI)"},
         {"method": "POST", "path": "/v1/completions", "description": "Text completions (OpenAI)"},
-        {"method": "POST", "path": "/v1/embeddings", "description": "Generate embeddings (proxied if vLLM supports)", "status": "planned"},
+        {"method": "POST", "path": "/v1/embeddings", "description": "Generate embeddings — OpenAI-compatible, served in-process via sentence-transformers"},
     ],
     "anthropic": [
         {"method": "POST", "path": "/v1/messages", "description": "Anthropic Messages API", "status": "planned"},
@@ -214,6 +214,30 @@ async def handle_server_status(request: web.Request) -> web.Response:
             "capabilities": ["chat", "completions"],
             "loaded_at": start_time,
         })
+
+    # Include loaded embedding models (in-process, via EmbeddingManager)
+    embedding_manager = request.app.get("embedding_manager")
+    if embedding_manager is not None:
+        try:
+            hostname = socket.gethostname()
+            for emb in embedding_manager.list_loaded():
+                size_mb = emb.get("size_mb") or 0
+                loaded_models.append({
+                    "id": emb["id"],
+                    "node_hostname": hostname,
+                    "node_id": config.node_id or "local",
+                    "type": "embed",
+                    "format": "SafeTensors",
+                    "quantization": None,
+                    "size_bytes": int(size_mb) * 1024 * 1024,
+                    "parallel": 1,
+                    "capabilities": ["embeddings"],
+                    "loaded_at": emb.get("loaded_at", start_time),
+                    "dimensions": emb.get("dimensions"),
+                    "max_seq_length": emb.get("max_seq_length"),
+                })
+        except Exception:
+            logger.exception("failed to list loaded embedding models")
 
     # Include models from cluster members (via ClusterState announcements)
     cluster = request.app.get("cluster_state")
@@ -310,6 +334,16 @@ async def handle_server_eject(request: web.Request) -> web.Response:
     model_id = request.match_info.get("model_id", "")
     engine = request.app.get("engine")
 
+    # Delegate to embedding manager if this is a loaded embedding model
+    embedding_manager = request.app.get("embedding_manager")
+    if embedding_manager is not None and embedding_manager.is_loaded(model_id):
+        unloaded = embedding_manager.unload(model_id)
+        return web.json_response({
+            "ok": bool(unloaded),
+            "model_id": model_id,
+            "message": "Embedding model unloaded" if unloaded else "Not loaded",
+        })
+
     # Try calling engine.unload if present
     unloaded = False
     message = ""
@@ -353,4 +387,4 @@ def register_server_routes(app: web.Application) -> None:
     app.router.add_get("/api/server/endpoints", handle_server_endpoints)
     app.router.add_get("/api/server/logs", handle_server_logs_get)
     app.router.add_delete("/api/server/logs", handle_server_logs_clear)
-    app.router.add_post("/api/server/models/{model_id}/eject", handle_server_eject)
+    app.router.add_post("/api/server/models/{model_id:.+}/eject", handle_server_eject)

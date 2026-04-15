@@ -42,6 +42,15 @@ class NodeAnnouncement:
     # elected master for its cluster. Informational only; workers make their
     # own decision based on the full announcement set.
     is_master: bool = False
+    # Distributed inference mode: "solo" (own vLLM) | "head" (runs sharded
+    # vLLM across self + members) | "member" (GPU reserved for Ray workers
+    # placed by the head, no local vLLM).
+    distributed_mode: str = "solo"
+    # When this node is a head with an active distributed instance, this is
+    # the instance id + participating peer node_ids so the UI can render
+    # "DISTRIBUTED across N nodes" and know which topology members are busy.
+    distributed_instance_id: Optional[str] = None
+    distributed_peers: List[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -60,6 +69,10 @@ class DiscoveredNode:
     """A node discovered on the network, with health tracking."""
     announcement: NodeAnnouncement
     last_seen: float = field(default_factory=time.time)
+    # IP address the announcement arrived from (captured via recvfrom).
+    # This is authoritative for head→peer connectivity because the
+    # announcement payload itself doesn't carry a routable IP.
+    peer_ip: Optional[str] = None
 
     @property
     def age(self) -> float:
@@ -166,7 +179,7 @@ class BroadcastListener:
         """Get a specific discovered node by ID."""
         return self._registry.get(node_id)
 
-    def _process_announcement(self, announcement: NodeAnnouncement):
+    def _process_announcement(self, announcement: NodeAnnouncement, peer_ip: Optional[str] = None):
         """Process a received announcement."""
         if announcement.node_id == self.local_node_id:
             return
@@ -175,6 +188,7 @@ class BroadcastListener:
         self._registry[announcement.node_id] = DiscoveredNode(
             announcement=announcement,
             last_seen=time.time(),
+            peer_ip=peer_ip,
         )
 
         if is_new and self.on_node_found:
@@ -213,9 +227,13 @@ class BroadcastListener:
         try:
             while self._running:
                 try:
-                    data = await loop.run_in_executor(None, lambda: sock.recv(4096))
+                    # recvfrom exposes the sender's (ip, port) — we persist
+                    # the IP on DiscoveredNode so the head can use it as the
+                    # authoritative address for SSH + Ray bootstrap.
+                    data, addr = await loop.run_in_executor(None, lambda: sock.recvfrom(4096))
                     announcement = NodeAnnouncement.from_json(data.decode())
-                    self._process_announcement(announcement)
+                    peer_ip = addr[0] if addr else None
+                    self._process_announcement(announcement, peer_ip=peer_ip)
                 except Exception:
                     await asyncio.sleep(1)
         finally:

@@ -22,6 +22,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app["model_manager"] = manager
     app["download_jobs"] = {}
 
+    app.router.add_post("/api/models/load", handle_model_load)
     app.router.add_get("/api/models", handle_list_models)
     app.router.add_post("/api/models/refresh", handle_refresh_catalog)
     app.router.add_get("/api/models/recommended", handle_recommended)
@@ -40,6 +41,112 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
 
 
 # -- Handlers ------------------------------------------------------------------
+
+async def handle_model_load(request: web.Request) -> web.Response:
+    """POST /api/models/load — launch a model on this engine.
+
+    Body: {"model": "<hf_repo>", "strategy": "auto|tensor_parallel|pipeline_parallel"}
+
+    Behaviour:
+      - If the local cluster has workers AND Ray is available, derive a
+        ShardingConfig via ShardingPlanner and hand off to
+        ``engine.launch_distributed``.
+      - Otherwise, launch single-node (tensor_parallel = local GPU count).
+      - Falls back gracefully when vLLM/Ray are missing.
+    """
+    from ainode.engine.sharding import ShardingPlanner, ShardingStrategy
+    from ainode.engine.ray_autostart import RayAutostartState
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    model = (body.get("model") or "").strip()
+    if not model:
+        return web.json_response({"error": "model field required"}, status=400)
+
+    strategy_str = body.get("strategy", "auto")
+    try:
+        strategy = ShardingStrategy(strategy_str)
+    except ValueError:
+        strategy = ShardingStrategy.AUTO
+
+    engine = request.app.get("engine")
+    cluster = request.app.get("cluster_state")
+    config = request.app.get("config")
+    ray_state: Optional[RayAutostartState] = request.app.get("ray_autostart_state")
+
+    if engine is None:
+        # Create a lazy engine so launch is possible even when `ainode start`
+        # didn't pre-instantiate one (e.g. headless server boot).
+        try:
+            from ainode.engine.vllm_engine import VLLMEngine
+            if config is None:
+                return web.json_response({"error": "Engine not initialized"}, status=503)
+            engine = VLLMEngine(config)
+            request.app["engine"] = engine
+        except Exception as exc:
+            return web.json_response({"error": f"Engine unavailable: {exc}"}, status=503)
+
+    # Update the running config so downstream proxying to vLLM points at the new model
+    if config is not None and getattr(config, "model", None) != model:
+        config.model = model
+        try:
+            config.save()
+        except Exception:
+            pass
+
+    # Decide: single-node or distributed?
+    sharding_config = None
+    if cluster is not None:
+        try:
+            worker_count = max(0, len(cluster.members()) - 1)
+        except Exception:
+            worker_count = 0
+        ray_ready = bool(ray_state and (ray_state.is_head or ray_state.joined_as_worker))
+        if worker_count > 0 and ray_ready:
+            try:
+                planner = ShardingPlanner()
+                sharding_config = planner.plan_sharding(model, cluster, strategy)
+                if ray_state and ray_state.head_address:
+                    sharding_config.ray_head_address = ray_state.head_address
+            except Exception as exc:
+                return web.json_response(
+                    {"error": f"Sharding plan failed: {exc}"}, status=422
+                )
+
+    # If running, stop first so we can relaunch
+    try:
+        if engine.is_running():
+            engine.stop()
+    except Exception:
+        pass
+
+    # Launch path
+    success = False
+    plan_dict = None
+    try:
+        if sharding_config is not None:
+            success = engine.launch_distributed(sharding_config)
+            plan_dict = sharding_config.to_dict()
+        else:
+            # Single-node fallback: tensor_parallel_size = local GPU count
+            # Current VLLMEngine.build_cmd already handles single-GPU; just start.
+            success = engine.start()
+    except Exception as exc:
+        return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
+
+    if not success:
+        return web.json_response({"error": "Failed to launch engine"}, status=500)
+
+    return web.json_response({
+        "status": "launching",
+        "model": model,
+        "distributed": sharding_config is not None,
+        "plan": plan_dict,
+    })
+
 
 async def handle_list_models(request: web.Request) -> web.Response:
     """GET /api/models -- list the dynamic catalog with download status."""

@@ -13,37 +13,68 @@ AINode — Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning
 
 ## Tech Stack
 
-- Python 3.10+
-- vLLM (inference engine)
+- Python 3.10+ (shipped inside the container image)
+- vLLM (inference engine) via eugr/spark-vllm-docker base
+- Ray (cross-node orchestration, via eugr's launch-cluster.sh)
+- NCCL (patched `dgxspark-3node-ring`) for cross-node all-reduce
 - aiohttp (API server + web UI serving)
 - pynvml + psutil (GPU detection)
 - Rich (terminal UI)
 
+## Distribution
+
+AINode ships as a single container image: `ghcr.io/getainode/ainode:<version>`
+(mirrored on Docker Hub as `argentos/ainode`). End users only ever
+`docker pull` — no host venv, no vLLM source build. Our CI builds on a
+self-hosted aarch64 runner (a Spark) via `.github/workflows/publish-image.yml`.
+
 ## Key Commands
 
 ```bash
-pip install -e .            # Install in dev mode
-pip install -e ".[engine]"  # Install with vLLM
-pip install -e ".[dev]"     # Install with test deps
-ainode start                # Start AINode
-ainode status               # Show cluster status
-ainode models               # List models
-pytest tests/               # Run tests
+# End-user install (one node):
+curl -fsSL https://ainode.dev/install | bash
+
+# Distributed (head + peers, SSH bootstrap):
+AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash
+
+# Dev (inside repo):
+pip install -e ".[dev]"              # tests + ruff
+scripts/build-base-image.sh          # build eugr base locally
+docker build -f scripts/Dockerfile.ainode -t ainode:dev .
+systemctl status ainode              # after install
+pytest tests/                        # unit tests
 ```
 
 ## Architecture
 
+One container per node — web UI, API, vLLM engine, and cross-node
+orchestrator are version-locked in a single image.
+
 ```
 ainode/
 ├── core/          # Config, GPU detection
-├── engine/        # vLLM wrapper
-├── api/           # API proxy (OpenAI-compatible)
-├── web/           # Embedded chat UI
-├── discovery/     # UDP node discovery
-├── cli/           # CLI entry point
+├── engine/
+│   ├── docker_engine.py   # Solo: direct vllm serve. Distributed: shell-out to eugr's launch-cluster.sh.
+│   └── vllm_engine.py     # Legacy host-venv path; retained for dev only.
+├── api/           # API proxy (OpenAI-compatible) + aiohttp routes
+├── web/           # Embedded chat UI (served by aiohttp)
+├── discovery/     # UDP node discovery (port 5679)
+├── cli/           # `ainode start`, `ainode service ...`, etc.
+├── service/       # systemd unit renderer (ExecStart = docker run ...)
 ├── onboarding/    # First-run setup
-└── training/      # Fine-tuning (future)
+└── training/      # Fine-tuning (LoRA / DDP)
+
+scripts/
+├── Dockerfile.ainode         # FROM ainode-base + pip install ainode
+├── build-base-image.sh       # Clone eugr @ pinned SHA, build base image
+├── docker-entrypoint.sh      # exec ainode start --in-container
+├── install.sh                # End-user installer (~80 lines)
+└── _eugr/                    # Shallow checkout of eugr/spark-vllm-docker at pinned SHA
 ```
+
+Distributed mode (`config.distributed_mode == "head"`) calls
+`/opt/spark-vllm-docker/launch-cluster.sh` inside the container — eugr's
+launcher handles SSH to peers, Ray head/worker formation, and NCCL.
 
 ## Working Conventions
 

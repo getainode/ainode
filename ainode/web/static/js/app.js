@@ -297,13 +297,22 @@ const AINode = {
       this.fetchJSON('/api/status'),
       this.fetchJSON('/api/nodes'),
       this.fetchJSON('/api/sharding/status'),
+      this.fetchJSON('/api/cluster/resources'),
     ]);
     this.state.status = results[0];
     this.state.nodes = results[1]?.nodes || [];
     this.state.shardingStatus = results[2];
+    this.state.clusterResources = results[3];
 
     this.updateTopBar();
+    this.updateClusterHero();
     this.updateChatModelSelect();
+
+    // Preserve scroll position of the main content area across periodic
+    // re-renders — the 5s poll was rebuilding innerHTML and bouncing the
+    // user back to the top of long lists.
+    var mainEl = document.querySelector('.main-content') || document.querySelector('#main') || document.scrollingElement;
+    var savedScroll = mainEl ? mainEl.scrollTop : 0;
 
     switch (this.state.currentView) {
       case 'dashboard':
@@ -337,6 +346,15 @@ const AINode = {
     // Always update right panel
     this.renderInstances();
     this.populateLaunchModels();
+    // Keep the distributed/solo hint in sync with the latest cluster state.
+    if (typeof this._launchHintUpdater === 'function') {
+      try { this._launchHintUpdater(); } catch (_) {}
+    }
+
+    // Restore scroll
+    if (mainEl && savedScroll) {
+      try { mainEl.scrollTop = savedScroll; } catch (_) {}
+    }
   },
 
   startPolling() {
@@ -383,6 +401,31 @@ const AINode = {
       pill.classList.add('offline');
       if (countEl) countEl.textContent = '0';
       if (labelEl) labelEl.textContent = 'offline';
+    }
+  },
+
+  // ========================================================================
+  //  CLUSTER HERO PILL (aggregated VRAM/GPUs)
+  // ========================================================================
+
+  updateClusterHero() {
+    var r = this.state.clusterResources;
+    var pill = document.getElementById('cluster-hero-pill');
+    if (!pill) return;
+    if (!r || !r.total_nodes) { pill.style.display = 'none'; return; }
+    pill.style.display = '';
+    var nodesEl = document.getElementById('hero-nodes');
+    var vramEl = document.getElementById('hero-vram');
+    var gpusEl = document.getElementById('hero-gpus');
+    if (nodesEl) nodesEl.textContent = r.total_nodes + (r.total_nodes === 1 ? ' node' : ' nodes');
+    if (vramEl) vramEl.textContent = Math.round(r.total_vram_gb) + ' GB VRAM';
+    if (gpusEl) gpusEl.textContent = r.total_gpus + (r.total_gpus === 1 ? ' GPU' : ' GPUs');
+
+    // Also surface on the Server view top bar (if the element exists).
+    var srvEl = document.getElementById('server-cluster-summary');
+    if (srvEl) {
+      srvEl.textContent = 'Cluster: ' + r.total_nodes + ' nodes · '
+        + Math.round(r.total_vram_gb) + ' GB VRAM · ' + r.total_gpus + ' GPUs';
     }
   },
 
@@ -435,24 +478,44 @@ const AINode = {
     var s = this.state.status;
     var instances = [];
 
-    // Collect from models_loaded
+    // Distributed instance (authoritative from /api/cluster/resources) —
+    // when the head broadcasts one, render it before anything else and
+    // skip adding its model as a "single" duplicate.
+    var cr = this.state.clusterResources;
+    var distModel = null;
+    if (cr && cr.distributed_instance && cr.distributed_instance.model) {
+      var di = cr.distributed_instance;
+      distModel = di.model;
+      instances.push({
+        model: di.model,
+        strategy: 'distributed',
+        tp_size: di.tensor_parallel_size,
+        nodes: [di.head_node_id].concat(di.peer_ips || []),
+        status: 'READY',
+        badge: 'DISTRIBUTED · TP=' + di.tensor_parallel_size,
+      });
+    }
+
+    // Collect from models_loaded (skip the one we already rendered distributed)
     if (s && s.models_loaded) {
       s.models_loaded.forEach(function (modelName) {
+        if (distModel && modelName === distModel) return;
         instances.push({
           model: modelName,
           strategy: 'single',
           nodes: [s.node_id || 'local'],
           status: 'READY',
+          badge: 'SINGLE',
         });
       });
     }
 
-    // Collect from sharding status
+    // Collect from sharding status (legacy — keep for pipeline/tensor runs
+    // that don't come through the cluster/resources distributed_instance)
     var sharding = this.state.shardingStatus;
     if (sharding && sharding.active_sharding && sharding.active_sharding.model) {
       var sh = sharding.active_sharding;
       var shardNodes = sh.shard_map ? Object.keys(sh.shard_map) : [];
-      // Avoid duplicating if already in models_loaded
       var already = instances.find(function (inst) { return inst.model === sh.model; });
       if (!already) {
         instances.push({
@@ -460,6 +523,7 @@ const AINode = {
           strategy: sh.strategy || 'pipeline',
           nodes: shardNodes,
           status: 'READY',
+          badge: (sh.strategy || 'pipeline').toUpperCase(),
         });
       } else {
         already.strategy = sh.strategy || 'pipeline';
@@ -474,10 +538,11 @@ const AINode = {
 
     container.innerHTML = instances.map(function (inst, idx) {
       var nodeList = inst.nodes.map(function (n) { return self.esc(n); }).join(', ');
+      var badgeClass = inst.strategy === 'distributed' ? 'distributed' : 'single';
       return '<div class="instance-card" data-idx="' + idx + '">' +
         '<div class="instance-model">' + self.esc(inst.model) + '</div>' +
         '<div class="instance-meta">' +
-        '<span class="instance-strategy">' + self.esc(inst.strategy) + '</span>' +
+        '<span class="instance-strategy ' + badgeClass + '">' + self.esc(inst.badge || inst.strategy) + '</span>' +
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
         '<div class="instance-footer">' +
@@ -537,14 +602,47 @@ const AINode = {
 
     // Node selector dots
     var nodeSelector = document.getElementById('node-selector');
+    var launchHint = document.getElementById('launch-hint');
+    var self = this;
+    function updateLaunchHint() {
+      if (!launchHint) return;
+      var activeDot = nodeSelector && nodeSelector.querySelector('.node-dot.active');
+      var n = activeDot ? parseInt(activeDot.dataset.value) || 1 : 1;
+      var strategyPill = document.querySelector('#sharding-pills .pill.active');
+      var strat = strategyPill ? strategyPill.dataset.value : 'pipeline';
+      if (n <= 1) {
+        launchHint.textContent = 'Solo mode — runs on this node only.';
+        launchHint.className = 'launch-hint';
+      } else {
+        // Count available member peers for honesty.
+        var cr = self.state.clusterResources;
+        var members = 0;
+        if (cr && cr.nodes) {
+          members = cr.nodes.filter(function (x) { return x.distributed_mode === 'member'; }).length;
+        }
+        var enough = members >= (n - 1);
+        launchHint.textContent = 'Distributed ' + strat.toUpperCase() + ' · ' + n + ' nodes'
+          + (enough ? ' — will place ' + (n - 1) + ' Ray worker(s) on discovered member node(s).'
+                    : ' — need ' + (n - 1) + ' member peer(s), ' + members + ' discovered.');
+        launchHint.className = 'launch-hint' + (enough ? '' : ' warn');
+      }
+    }
     if (nodeSelector) {
       nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
         dot.addEventListener('click', function () {
           nodeSelector.querySelectorAll('.node-dot').forEach(function (d) { d.classList.remove('active'); });
           dot.classList.add('active');
+          updateLaunchHint();
         });
       });
     }
+    // Update hint when strategy pill changes too
+    document.querySelectorAll('#sharding-pills .pill').forEach(function (pill) {
+      pill.addEventListener('click', updateLaunchHint);
+    });
+    // And on every refresh (cluster state may change)
+    this._launchHintUpdater = updateLaunchHint;
+    updateLaunchHint();
 
     // Launch button
     var launchBtn = document.getElementById('launch-btn');
@@ -4391,6 +4489,7 @@ const AINode = {
     html += '    <span class="server-reachable-label">Reachable at:</span>';
     html += '    <span class="server-reachable-url mono" id="server-reachable-url">' + this.esc(primaryUrl) + '</span>';
     html += '    <button class="server-copy-btn" data-copy="' + this.esc(primaryUrl) + '" title="Copy">⧉</button>';
+    html += '    <span class="server-cluster-summary mono" id="server-cluster-summary" style="margin-left:16px;color:#76B900"></span>';
     html += '  </div>';
     html += '  <div class="server-status-right">';
     html += '    <button class="btn-nvidia server-btn-sm" id="server-load-model">+ Load Model</button>';
@@ -4454,22 +4553,33 @@ const AINode = {
     var id = m.id || 'unknown';
     var nodeHost = m.node_hostname || m.node_id || 'local';
     var type = m.type || 'llm';
+    var isEmbed = type === 'embed';
     var sizeStr = m.size_bytes > 0 ? this.formatBytes(m.size_bytes) : '—';
     var parallel = m.parallel || 1;
     var selected = (this._serverState.selectedModelId === id) ? ' selected' : '';
+    var typeTagStyle = isEmbed
+      ? ' style="color:var(--cyan);border-color:var(--cyan)"'
+      : '';
+    var dimsMeta = isEmbed && m.dimensions
+      ? '  <span class="server-meta">· ' + m.dimensions + 'd</span>'
+      : '';
+    var primaryIconBtn = isEmbed
+      ? '  <button class="server-icon-btn" data-action="show-info" data-model="' + this.esc(id) + '" title="Embedding info">ℹ</button>'
+      : '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>';
     return '<div class="server-loaded-card' + selected + '" data-model-id="' + this.esc(id) + '" data-idx="' + idx + '">' +
       '<div class="server-loaded-left">' +
       '  <span class="server-badge ready">READY</span>' +
       '  <span class="server-node-pill">' + this.esc(nodeHost) + '</span>' +
-      '  <span class="server-type-tag">' + this.esc(type) + '</span>' +
+      '  <span class="server-type-tag"' + typeTagStyle + '>' + this.esc(type) + '</span>' +
       '  <span class="server-model-id mono" data-copy="' + this.esc(id) + '" title="Click to copy">' + this.esc(id) + '</span>' +
       '</div>' +
       '<div class="server-loaded-right">' +
       '  <span class="server-meta">' + this.esc(sizeStr) + '</span>' +
       '  <span class="server-meta">· ' + parallel + 'x</span>' +
+      dimsMeta +
       '  <button class="server-icon-btn" data-action="preview" title="Preview">👁</button>' +
-      '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>' +
-      '  <button class="server-icon-btn" data-action="copy-curl" data-model="' + this.esc(id) + '" title="Copy curl">⎘</button>' +
+      primaryIconBtn +
+      '  <button class="server-icon-btn" data-action="copy-curl" data-model="' + this.esc(id) + '" data-type="' + this.esc(type) + '" title="Copy curl">⎘</button>' +
       '  <button class="server-eject-btn" data-action="eject" data-model="' + this.esc(id) + '">Eject</button>' +
       '</div>' +
       '</div>';
@@ -4574,7 +4684,8 @@ const AINode = {
           self.state.chatModel = model;
           self.navigate('chat');
         }
-        else if (action === 'copy-curl') self._serverShowCurl(model);
+        else if (action === 'show-info') self._serverShowEmbedInfo(model);
+        else if (action === 'copy-curl') self._serverShowCurl(model, btn.dataset.type || 'llm');
         else if (action === 'preview') self.toast('Preview coming soon', 'info');
       });
     });
@@ -4587,7 +4698,7 @@ const AINode = {
     var mcpBtn = document.getElementById('server-mcp-btn');
     if (mcpBtn) mcpBtn.addEventListener('click', function () { self.toast('mcp.json export coming soon', 'info'); });
     var loadBtn = document.getElementById('server-load-model');
-    if (loadBtn) loadBtn.addEventListener('click', function () { self.navigate('downloads'); });
+    if (loadBtn) loadBtn.addEventListener('click', function () { self._openLoadModelModal(); });
 
     // Logs
     var clearBtn = document.getElementById('server-log-clear');
@@ -4610,15 +4721,217 @@ const AINode = {
     }
   },
 
-  _serverShowCurl(modelId) {
+  _serverShowCurl(modelId, modelType) {
     var s = this._serverState.lastStatus || {};
     var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || 'http://localhost:3000';
-    var curl = 'curl ' + primary + '/v1/chat/completions \\\n' +
-      '  -H "Content-Type: application/json" \\\n' +
-      '  -d \'{"model":"' + modelId + '","messages":[{"role":"user","content":"Hello!"}]}\'';
+    var curl;
+    if (modelType === 'embed') {
+      curl = 'curl ' + primary + '/v1/embeddings \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        '  -d \'{"model":"' + modelId + '","input":"The quick brown fox"}\'';
+    } else {
+      curl = 'curl ' + primary + '/v1/chat/completions \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        '  -d \'{"model":"' + modelId + '","messages":[{"role":"user","content":"Hello!"}]}\'';
+    }
     navigator.clipboard.writeText(curl).then(function () {
       AINode.toast('curl example copied', 'success');
     }).catch(function () { AINode.toast('Copy failed', 'error'); });
+  },
+
+  _serverShowEmbedInfo(modelId) {
+    var s = this._serverState.lastStatus || {};
+    var models = s.loaded_models || [];
+    var m = models.find(function (x) { return x.id === modelId; }) || { id: modelId };
+    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || 'http://localhost:3000';
+    var self = this;
+
+    var existing = document.getElementById('embed-info-modal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'embed-info-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal" style="max-width:560px">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon" style="color:var(--cyan);border-color:var(--cyan)">ℹ</div>' +
+            '<div class="md-title">Embedding Model</div>' +
+          '</div>' +
+          '<button class="md-close">×</button>' +
+        '</div>' +
+        '<div class="md-description">' +
+          '<div style="margin-bottom:8px" class="mono">' + self.esc(m.id) + '</div>' +
+          '<div style="color:var(--text-muted);font-size:13px;margin-bottom:12px">' +
+          'Embedding models turn text into vectors. They are an API surface for external apps ' +
+          '(RAG, semantic search, clustering) — not used directly by the chat UI.' +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:13px">' +
+            '<div style="color:var(--text-muted)">Dimensions</div><div>' + (m.dimensions || '—') + '</div>' +
+            '<div style="color:var(--text-muted)">Max seq length</div><div>' + (m.max_seq_length || '—') + '</div>' +
+            '<div style="color:var(--text-muted)">Endpoint</div><div class="mono">' + self.esc(primary) + '/v1/embeddings</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="md-footer">' +
+          '<button class="btn-sm" id="embed-info-close" style="background:transparent;color:var(--text-secondary);border:1px solid var(--border-hover)">Close</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.querySelector('#embed-info-close').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  },
+
+  _openLoadModelModal() {
+    var self = this;
+    var existing = document.getElementById('load-model-modal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'load-model-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal" style="max-width:720px">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon">+</div>' +
+            '<div class="md-title">Load Model</div>' +
+          '</div>' +
+          '<button class="md-close">×</button>' +
+        '</div>' +
+        '<div class="md-description" style="padding-bottom:0">' +
+          '<div class="server-tab-pills" id="load-model-tabs">' +
+            '<button class="server-tab-pill active" data-tab="llms">LLMs</button>' +
+            '<button class="server-tab-pill" data-tab="embeddings">Embeddings</button>' +
+          '</div>' +
+          '<div id="load-model-body" style="margin-top:12px;max-height:420px;overflow:auto"></div>' +
+        '</div>' +
+        '<div class="md-footer">' +
+          '<button class="btn-sm" id="load-model-close" style="background:transparent;color:var(--text-secondary);border:1px solid var(--border-hover)">Close</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.querySelector('#load-model-close').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+    var currentTab = 'llms';
+    var render = function () { self._renderLoadModelTab(modal, currentTab); };
+    modal.querySelectorAll('#load-model-tabs .server-tab-pill').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        currentTab = btn.dataset.tab;
+        modal.querySelectorAll('#load-model-tabs .server-tab-pill').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.tab === currentTab);
+        });
+        render();
+      });
+    });
+    render();
+  },
+
+  async _renderLoadModelTab(modal, tab) {
+    var self = this;
+    var body = modal.querySelector('#load-model-body');
+    if (!body) return;
+    body.innerHTML = '<div class="server-empty">Loading…</div>';
+
+    if (tab === 'llms') {
+      try {
+        var data = await this.fetchJSON('/api/models');
+        var models = (data && data.models) || [];
+        var downloaded = models.filter(function (m) { return m.downloaded; });
+        if (!downloaded.length) {
+          body.innerHTML = '<div class="server-empty">No LLMs downloaded yet. Use the Downloads view to get one.</div>';
+          return;
+        }
+        var html = '<div class="server-loaded-list">';
+        downloaded.forEach(function (m) {
+          var id = m.hf_repo || m.id || m.name || 'unknown';
+          html += '<div class="server-loaded-card">' +
+            '<div class="server-loaded-left">' +
+            '  <span class="server-type-tag">llm</span>' +
+            '  <span class="server-model-id mono">' + self.esc(id) + '</span>' +
+            '</div>' +
+            '<div class="server-loaded-right">' +
+            '  <button class="btn-nvidia server-btn-sm" data-action="llm-load" data-model="' + self.esc(id) + '">Load</button>' +
+            '</div>' +
+            '</div>';
+        });
+        html += '</div>';
+        body.innerHTML = html;
+        body.querySelectorAll('[data-action="llm-load"]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            self.toast('LLM load requires a restart with --model ' + btn.dataset.model + ' (coming soon via engine swap)', 'info');
+          });
+        });
+      } catch (err) {
+        body.innerHTML = '<div class="server-empty">Failed to load models: ' + self.esc(err.message) + '</div>';
+      }
+      return;
+    }
+
+    // Embeddings tab
+    try {
+      var edata = await this.fetchJSON('/api/embeddings/models');
+      var emodels = (edata && edata.models) || [];
+      if (!emodels.length) {
+        body.innerHTML = '<div class="server-empty">No embedding models in the catalog.</div>';
+        return;
+      }
+      var ehtml = '<div class="server-loaded-list">';
+      emodels.forEach(function (m) {
+        var loaded = !!m.loaded;
+        ehtml += '<div class="server-loaded-card">' +
+          '<div class="server-loaded-left" style="flex-direction:column;align-items:flex-start;gap:4px">' +
+          '  <div>' +
+          '    <span class="server-type-tag" style="color:var(--cyan);border-color:var(--cyan)">embed</span> ' +
+          '    <span class="server-model-id mono">' + self.esc(m.id) + '</span>' +
+          '  </div>' +
+          '  <div style="font-size:12px;color:var(--text-muted)">' +
+          (m.dimensions || '?') + 'd · ' + (m.max_seq_length || '?') + ' ctx · ' + (m.size_mb || '?') + ' MB' +
+          '  </div>' +
+          '  <div style="font-size:12px;color:var(--text-muted);max-width:480px">' + self.esc(m.description || '') + '</div>' +
+          '</div>' +
+          '<div class="server-loaded-right">' +
+          (loaded
+            ? '  <span class="server-badge ready">LOADED</span>'
+            : '  <button class="btn-nvidia server-btn-sm" data-action="embed-load" data-model="' + self.esc(m.id) + '">Load</button>'
+          ) +
+          '</div>' +
+          '</div>';
+      });
+      ehtml += '</div>';
+      body.innerHTML = ehtml;
+      body.querySelectorAll('[data-action="embed-load"]').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          var id = btn.dataset.model;
+          btn.disabled = true;
+          btn.textContent = 'Loading…';
+          try {
+            var resp = await fetch('/api/embeddings/models/' + encodeURIComponent(id) + '/load', { method: 'POST' });
+            var payload = await resp.json().catch(function () { return {}; });
+            if (resp.ok) {
+              self.toast('Loaded ' + id, 'success');
+              self._renderLoadModelTab(modal, 'embeddings');
+              self.renderServer();
+            } else {
+              self.toast((payload.error && payload.error.message) || 'Load failed', 'error');
+              btn.disabled = false;
+              btn.textContent = 'Load';
+            }
+          } catch (err) {
+            self.toast('Load failed: ' + err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = 'Load';
+          }
+        });
+      });
+    } catch (err) {
+      body.innerHTML = '<div class="server-empty">Failed to load embeddings: ' + self.esc(err.message) + '</div>';
+    }
   },
 
   async _serverClearLogs() {

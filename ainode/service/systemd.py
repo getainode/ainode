@@ -1,7 +1,13 @@
 """Systemd service management for AINode.
 
+As of v0.4.0 the unit runs the AINode container via ``docker run`` rather
+than a host-venv ``ainode start``. The unit template mounts ``~/.ainode``
+(config + model cache), the host docker socket (so the head container can
+launch peer workers via eugr's launcher), and ``~/.ssh`` (read-only, for
+passwordless SSH from head to workers).
+
 Provides install, uninstall, enable, disable, start, stop, restart,
-status, and is_installed operations for running AINode as a systemd service.
+status, and is_installed operations.
 """
 
 import os
@@ -15,35 +21,49 @@ SERVICE_NAME = "ainode.service"
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 
+# Image tag bumped when we cut a release and republish to GHCR.
+AINODE_IMAGE_TAG = "0.4.0"
+AINODE_IMAGE = f"ghcr.io/getainode/ainode:{AINODE_IMAGE_TAG}"
+
 UNIT_FILE_TEMPLATE = """\
 [Unit]
 Description=AINode — Local AI inference platform
 Documentation=https://ainode.dev
-After=network.target nvidia-persistenced.service nvidia-fabricmanager.service
-Wants=nvidia-persistenced.service
+After=network.target docker.service nvidia-persistenced.service
+Wants=docker.service nvidia-persistenced.service
+Requires=docker.service
 
 [Service]
 Type=simple
+# docker run in foreground so systemd tracks the container lifecycle.
+ExecStartPre=-/usr/bin/docker rm -f ainode
 ExecStart={exec_start}
+ExecStop=/usr/bin/docker stop -t 30 ainode
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=600
-TimeoutStopSec=30
+TimeoutStopSec=45
 
-# GPU environment
+# GPU environment (docker run also passes --gpus all).
 Environment=NVIDIA_VISIBLE_DEVICES=all
 Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
 Environment=AINODE_HOME={ainode_home}
 
-# Hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths={ainode_home} {home}/.cache/huggingface
+# No host-filesystem-protection stanza intentionally — see ainode/service/
+# systemd.py source for rationale (docker socket + peer worker launch).
 
 [Install]
 WantedBy={wanted_by}
 """
+
+DOCKER_RUN_CMD = (
+    "/usr/bin/docker run --rm --name ainode"
+    " --network=host --gpus all --ipc=host --shm-size=64g"
+    " -v {ainode_home}:/root/.ainode"
+    " -v /var/run/docker.sock:/var/run/docker.sock"
+    " -v {home}/.ssh:/root/.ssh:ro"
+    " {image}"
+)
 
 
 def _ainode_bin() -> str:
@@ -79,12 +99,23 @@ def _systemctl(args: list[str], user_mode: bool = False, capture: bool = False):
 
 
 def generate_unit_file(user_mode: bool = False) -> str:
-    """Generate the systemd unit file content."""
+    """Generate the systemd unit file content.
+
+    Renders ``DOCKER_RUN_CMD`` as the ExecStart so the service is literally
+    ``docker run ... ghcr.io/getainode/ainode:<ver>``. No more host venv.
+    """
     wanted_by = "default.target" if user_mode else "multi-user.target"
+    ainode_home = _ainode_home()
+    home = str(Path.home())
+    exec_start = DOCKER_RUN_CMD.format(
+        ainode_home=ainode_home,
+        home=home,
+        image=AINODE_IMAGE,
+    )
     return UNIT_FILE_TEMPLATE.format(
-        exec_start=f"{_ainode_bin()} start",
-        ainode_home=_ainode_home(),
-        home=str(Path.home()),
+        exec_start=exec_start,
+        ainode_home=ainode_home,
+        home=home,
         wanted_by=wanted_by,
     )
 

@@ -149,10 +149,36 @@ def cmd_start(args):
     # Write PID file
     _write_pid()
 
-    # Start vLLM engine
-    from ainode.engine.vllm_engine import VLLMEngine
+    # Select engine path:
+    #   distributed_mode="member"  → no local vLLM. aiohttp + discovery only so
+    #                                the head can place a Ray worker on us via
+    #                                eugr's launcher.
+    #   distributed_mode="solo"    → single-node vLLM on this host.
+    #   distributed_mode="head"    → vLLM sharded across this host + peer_ips
+    #                                via eugr's launch-cluster.sh.
+    mode = (config.distributed_mode or "solo").lower()
+    in_container = os.environ.get("AINODE_IN_CONTAINER") == "1" or getattr(args, "in_container", False)
 
-    engine = VLLMEngine(config)
+    if mode == "member":
+        console.print(
+            "  [bold cyan]Member mode[/bold cyan] — no local inference engine. "
+            "Awaiting work from the cluster head.\n"
+        )
+        from ainode.api.server import run_server
+        try:
+            run_server(config=config, engine=None)
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]Shutting down...[/yellow]")
+        finally:
+            _remove_pid()
+        return
+
+    if in_container or config.engine_strategy == "docker":
+        from ainode.engine.docker_engine import build_engine
+        engine = build_engine(config)
+    else:
+        from ainode.engine.vllm_engine import VLLMEngine
+        engine = VLLMEngine(config)
     if not engine.start():
         console.print("  [red]Failed to start engine.[/red] Check logs in ~/.ainode/logs/")
         _remove_pid()
@@ -174,22 +200,19 @@ def cmd_start(args):
 
     console.print("  [bold green]Engine ready.[/bold green] Open your browser to get started.\n")
 
-    # Start API/web server in a background thread
-    import threading
-
-    def run_server_blocking():
-        from ainode.api.server import run_server
-        run_server(config=config, engine=engine)
-
-    threading.Thread(target=run_server_blocking, daemon=True).start()
-
-    # Keep running until interrupted
+    # Run API/web server in the main thread (aiohttp needs main thread for signal handlers).
+    # Engine lifecycle is managed by the engine itself (Docker compose restart policy for
+    # DockerEngine, Popen for VLLMEngine) — we just hand off to the web server here.
+    from ainode.api.server import run_server
     try:
-        engine.process.wait()
+        run_server(config=config, engine=engine)
     except KeyboardInterrupt:
         console.print("\n  [yellow]Shutting down...[/yellow]")
-        engine.stop()
     finally:
+        try:
+            engine.stop()
+        except Exception:
+            pass
         _remove_pid()
 
 
@@ -274,9 +297,13 @@ def cmd_status(args):
     console.print(table)
     console.print()
 
-    # Engine health check
-    from ainode.engine.vllm_engine import VLLMEngine
-    engine = VLLMEngine(config)
+    # Engine health check — dispatch by engine_strategy for parity with cmd_start.
+    if config.engine_strategy == "docker":
+        from ainode.engine.docker_engine import DockerEngine
+        engine = DockerEngine(config)
+    else:
+        from ainode.engine.vllm_engine import VLLMEngine
+        engine = VLLMEngine(config)
     health = engine.health_check()
 
     if health["api_responding"]:
@@ -545,6 +572,11 @@ def main():
     start_parser = subparsers.add_parser("start", help="Start AINode")
     start_parser.add_argument("--model", help="Model to serve")
     start_parser.add_argument("--port", type=int, help="API port")
+    start_parser.add_argument(
+        "--in-container",
+        action="store_true",
+        help="Signal that the CLI is running inside the AINode image (docker-entrypoint.sh sets this).",
+    )
     start_parser.set_defaults(func=cmd_start)
 
     # stop
