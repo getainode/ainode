@@ -95,25 +95,63 @@ if [ "$USER_MODE" = "true" ]; then
     SERVICE_ARGS+=("--user")
 fi
 
-# Use the CLI baked into the image to write the unit file — the template
-# lives in ainode/service/systemd.py and is version-locked with the image.
-# IMPORTANT: override the entrypoint so we call `ainode` directly instead
-# of going through docker-entrypoint.sh (which does `ainode start ...`).
-docker run --rm \
-    --entrypoint ainode \
-    -v "$AINODE_HOME":/root/.ainode \
-    -v "$HOME":"$HOME" \
-    -e "AINODE_HOME=$AINODE_HOME" \
-    -e "HOME=$HOME" \
-    -e "AINODE_IN_CONTAINER=1" \
-    "$AINODE_IMAGE" \
-    service install "${SERVICE_ARGS[@]}"
+# Write the systemd unit file directly from install.sh.
+# We do NOT use `docker run ... ainode service install` here because the
+# container has no systemd bus. The unit content is simple enough to
+# generate inline — it's just a docker run command as ExecStart.
+log "Writing systemd unit file"
+
+WANTED_BY="multi-user.target"
+UNIT_DIR="/etc/systemd/system"
+if [ "$USER_MODE" = "true" ]; then
+    WANTED_BY="default.target"
+    UNIT_DIR="$HOME/.config/systemd/user"
+fi
+
+mkdir -p "$UNIT_DIR"
+
+EXEC_START="/usr/bin/docker run --rm --name ainode \
+ --network=host --gpus all --ipc=host --shm-size=64g \
+ -v ${AINODE_HOME}:/root/.ainode \
+ -v /var/run/docker.sock:/var/run/docker.sock \
+ -v ${HOME}/.ssh:/host-ssh:ro \
+ -e AINODE_HOME=/root/.ainode \
+ -e NVIDIA_VISIBLE_DEVICES=all \
+ -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
+ ${AINODE_IMAGE}"
+
+cat > /tmp/ainode.service << UNIT
+[Unit]
+Description=AINode — Local AI inference platform
+Documentation=https://ainode.dev
+After=network.target docker.service nvidia-persistenced.service
+Wants=docker.service nvidia-persistenced.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f ainode
+ExecStart=${EXEC_START}
+ExecStop=/usr/bin/docker stop -t 30 ainode
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+TimeoutStopSec=45
+Environment=NVIDIA_VISIBLE_DEVICES=all
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+Environment=AINODE_HOME=${AINODE_HOME}
+
+[Install]
+WantedBy=${WANTED_BY}
+UNIT
 
 if [ "$USER_MODE" = "true" ]; then
+    mv /tmp/ainode.service "$UNIT_DIR/ainode.service"
     systemctl --user daemon-reload
     systemctl --user enable --now ainode.service
     log "  (consider: sudo loginctl enable-linger $USER  — so the service survives logout)"
 else
+    sudo mv /tmp/ainode.service "$UNIT_DIR/ainode.service"
     sudo systemctl daemon-reload
     sudo systemctl enable --now ainode.service
 fi
