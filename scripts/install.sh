@@ -118,7 +118,7 @@ EXEC_START="/usr/bin/docker run --rm --name ainode \
  -e AINODE_HOME=/root/.ainode \
  -e NVIDIA_VISIBLE_DEVICES=all \
  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
- ${AINODE_IMAGE}"
+ ghcr.io/getainode/ainode:latest"
 
 cat > /tmp/ainode.service << UNIT
 [Unit]
@@ -171,7 +171,7 @@ $WRAPPER_SUDO tee "$WRAPPER_PATH" >/dev/null <<WRAPPER
 #!/usr/bin/env bash
 # AINode host wrapper — installed by install.sh. Not user-editable.
 set -euo pipefail
-AINODE_IMAGE="\${AINODE_IMAGE:-$AINODE_IMAGE}"
+AINODE_IMAGE="\${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
 AINODE_SERVICE="ainode.service"
 
 is_user_mode() {
