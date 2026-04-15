@@ -193,30 +193,20 @@ def cmd_start(args):
     else:
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)
+
+    # Start the engine in the background — do NOT block the web server.
+    # The web UI comes up immediately and shows a loading state while the
+    # model warms up. Users should never have to stare at a terminal.
     if not engine.start():
-        console.print("  [red]Failed to start engine.[/red] Check logs in ~/.ainode/logs/")
+        console.print("  [red]Failed to launch engine process.[/red] Check logs in ~/.ainode/logs/")
         _remove_pid()
         sys.exit(1)
 
-    # Wait for readiness with spinner
-    with Live(Spinner("dots", text="Starting inference engine..."), console=console, transient=True):
-        ready = engine.wait_ready(timeout=300)
+    console.print("  [dim]Engine starting in background — web UI is ready now.[/dim]\n")
+    console.print("  [bold green]Open http://localhost:3000 to get started.[/bold green]\n")
 
-    if not ready:
-        console.print("  [red]Engine failed to become ready within 5 minutes.[/red]")
-        if engine.log_path and engine.log_path.exists():
-            console.print("  [dim]Last log lines:[/dim]")
-            for line in _tail_log(engine.log_path, lines=10):
-                console.print(f"    [dim]{line.rstrip()}[/dim]")
-        engine.stop()
-        _remove_pid()
-        sys.exit(1)
-
-    console.print("  [bold green]Engine ready.[/bold green] Open your browser to get started.\n")
-
-    # Run API/web server in the main thread (aiohttp needs main thread for signal handlers).
-    # Engine lifecycle is managed by the engine itself (Docker compose restart policy for
-    # DockerEngine, Popen for VLLMEngine) — we just hand off to the web server here.
+    # Run the API/web server immediately — it handles the engine's loading
+    # state and surfaces it to the browser (spinner, status endpoint, etc.).
     from ainode.api.server import run_server
     try:
         run_server(config=config, engine=engine)
