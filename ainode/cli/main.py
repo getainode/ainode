@@ -479,11 +479,16 @@ def cmd_service(args):
     action = getattr(args, "service_action", None)
 
     if action == "install":
+        # When running inside the container (install.sh uses `docker run
+        # --entrypoint ainode ... service install`), there is no systemd
+        # bus available so daemon-reload must be skipped here and handled
+        # by the host after the docker run returns.
+        in_container = os.environ.get("AINODE_IN_CONTAINER") == "1"
         if is_installed(user_mode=user_mode):
             console.print("  [yellow]AINode service is already installed.[/yellow]")
         else:
             console.print("  Installing AINode service...")
-            install_service(user_mode=user_mode)
+            install_service(user_mode=user_mode, reload=not in_container)
             console.print("  [green]✓[/green] Unit file written")
         console.print("  Enabling service...")
         enable_service(user_mode=user_mode)

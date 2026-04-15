@@ -125,8 +125,13 @@ def is_installed(user_mode: bool = False) -> bool:
     return _unit_path(user_mode).exists()
 
 
-def install_service(user_mode: bool = False) -> None:
-    """Write the unit file and reload the systemd daemon."""
+def install_service(user_mode: bool = False, reload: bool = True) -> None:
+    """Write the unit file and optionally reload the systemd daemon.
+
+    When called from inside a container (e.g. during install.sh), pass
+    ``reload=False`` — the container has no systemd bus, so daemon-reload
+    must be run by the host after the docker run completes.
+    """
     unit_dir = _unit_dir(user_mode)
     unit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,7 +139,8 @@ def install_service(user_mode: bool = False) -> None:
     unit_content = generate_unit_file(user_mode=user_mode)
     unit_path.write_text(unit_content)
 
-    _systemctl(["daemon-reload"], user_mode=user_mode)
+    if reload:
+        _systemctl(["daemon-reload"], user_mode=user_mode)
 
 
 def uninstall_service(user_mode: bool = False) -> None:

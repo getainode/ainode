@@ -105,6 +105,7 @@ docker run --rm \
     -v "$HOME":"$HOME" \
     -e "AINODE_HOME=$AINODE_HOME" \
     -e "HOME=$HOME" \
+    -e "AINODE_IN_CONTAINER=1" \
     "$AINODE_IMAGE" \
     service install "${SERVICE_ARGS[@]}"
 
