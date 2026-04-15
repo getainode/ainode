@@ -14,6 +14,26 @@ _Next release — changes accumulate here until tagged._
 
 ## [0.4.1] — 2026-04-15
 
+### Added
+- **`ainode role master|worker|solo`** — set or show this node's cluster role from the CLI. Persistent, saved to `config.json`, applies on next restart.
+- **`--job master|worker|solo` install flag** — `curl -fsSL https://ainode.dev/install | bash -s -- --job worker` installs with the correct role from the first boot.
+- **Worker nodes start instantly** — `distributed_mode=member` and no model configured skips the vLLM engine entirely. Web server is up in seconds.
+- **Web portal starts immediately** — engine now launches in the background. Browser is accessible the moment the container starts, not after 2-10 minutes of model warmup.
+- **4-node cluster verified** — 3× DGX Spark + 1× ASUS GX10, 487 GB aggregated VRAM, all four discovered automatically via UDP broadcast.
+- Initial config written at install time based on `--job` flag — no manual `config.json` editing required.
+
+### Fixed
+- `systemctl daemon-reload` running inside the container during install (no systemd bus available). Unit file now written directly by `install.sh` on the host.
+- Banner `\033[` escape codes printed literally. Switched from `cat <<HEREDOC` to `printf`.
+- `EOFError` when onboarding called `input()` as a systemd service (no TTY). Non-interactive starts now skip onboarding and mark `onboarded=true` immediately.
+- Host wrapper `ainode update` pinned to `:0.4.0` forever. Wrapper now defaults to `:latest`.
+- All `docker run` fallback paths in the wrapper double-prefixed `ainode` (entrypoint collision). Fixed with `--entrypoint ainode` on every fallback.
+- `__version__` in `ainode/__init__.py` was not updated alongside `pyproject.toml`.
+
+---
+
+## [0.4.1-pre] — 2026-04-15
+
 ### Fixed
 - **Install entrypoint collision** — `install.sh` was calling `docker run $IMAGE ainode service install`, which passed through `docker-entrypoint.sh` (which prepends `ainode start --in-container`), resulting in `ainode: error: unrecognized arguments: ainode service install`. Fixed by adding `--entrypoint ainode` to the `docker run` call so the CLI is invoked directly. ([#32](https://github.com/getainode/ainode/issues/32) — reported by @Chennu)
 - **Gated model 401 on first install** — onboarding defaulted to `meta-llama/Llama-3.1-8B-Instruct` (HF-gated). Users without a token got an OSError and the engine timed out. Defaults are now **Qwen 2.5** (1.5B / 7B / 72B-AWQ) — fully open-access, no token required.
