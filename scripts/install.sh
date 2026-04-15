@@ -197,7 +197,7 @@ case "\${1:-}" in
         fi
         echo "==> Update complete. Version:"
         docker exec ainode ainode --version 2>/dev/null || \\
-            docker run --rm "\$AINODE_IMAGE" ainode --version
+            docker run --rm --entrypoint ainode "\$AINODE_IMAGE" --version
         ;;
     "" | -h | --help)
         cat <<HELP
@@ -218,7 +218,8 @@ HELP
         ;;
     --version)
         echo "ainode wrapper (image: \$AINODE_IMAGE)"
-        docker exec ainode ainode --version 2>/dev/null || true
+        docker exec ainode ainode --version 2>/dev/null || \\
+            docker run --rm --entrypoint ainode "\$AINODE_IMAGE" --version 2>/dev/null || true
         ;;
     *)
         # Forward everything else into the running container. If the
@@ -228,8 +229,9 @@ HELP
             exec docker exec -it ainode ainode "\$@"
         else
             exec docker run --rm -it \\
+                --entrypoint ainode \\
                 -v "\$HOME/.ainode":/root/.ainode \\
-                "\$AINODE_IMAGE" ainode "\$@"
+                "\$AINODE_IMAGE" "\$@"
         fi
         ;;
 esac
