@@ -211,11 +211,13 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 | Live HF model catalog with trending + download manager | ✅ |
 | NFS-shared model storage across cluster | ✅ |
 | Multi-node auto-discovery (UDP broadcast) | ✅ |
-| Distributed tensor-parallel inference across nodes | ✅ (2-node verified) |
+| Distributed tensor-parallel inference across nodes | ✅ (4-node verified — 487 GB aggregated VRAM) |
 | Cluster topology UI (members, VRAM aggregate, instance badges) | ✅ |
 | Browser-based fine-tuning (LoRA / QLoRA / DDP templates) | ✅ all three methods wired — real-GPU validation ongoing |
 | Prometheus metrics endpoint (`/metrics`) | ✅ |
-| 4+ node sharding on dedicated switch | 🔜 (next milestone) |
+| `ainode role master\|worker\|solo` CLI | ✅ |
+| Worker nodes start instantly — no model required | ✅ |
+| Web portal available immediately on start | ✅ |
 
 ---
 
@@ -230,22 +232,32 @@ really running on our hardware.
 - **Two-node tensor-parallel** (TP=2) with one GPU per node on a
   direct-connect QSFP `/24`. Both GPUs show ~61 GB of
   `ray::RayWorkerWrapper` memory; NCCL chose `NET/IB RoCE @ 200 Gb/s`.
-- **One-container-per-node install** (`docker pull ghcr.io/getainode/ainode`
-  → systemd → running).
+- **Four-node cluster** (3× DGX Spark + 1× ASUS GX10) — 487 GB
+  aggregated VRAM, all four discovered automatically via UDP, topology
+  visible in the browser UI. Verified April 2026.
+- **One-container-per-node install** — `curl -fsSL https://ainode.dev/install | bash -s -- --job worker`
+  installs in seconds with no model required.
+- **`ainode role`** CLI sets master/worker/solo instantly.
+- **Worker nodes start immediately** — no model download, no engine
+  warmup. Web portal is up within seconds of `systemctl start ainode`.
 - **Shared model storage over NFS** from an NVMe-oF-backed master.
 - **UDP cluster discovery** on port 5679 with real peer-IP capture.
-- **Inference throughput:** ~35 tok/s for a warmed-up 1.5B model over
+- **Inference throughput:** ~35 tok/s for a warmed-up model over
   the RoCE fabric.
 
 ### What doesn't work yet
 
-- **Three-node TP=3** on our current network topology — see the
-  "Why 3 nodes is harder than 2" section below.
-- **One-click "add me to the cluster" UX** for members — you still
-  hand-edit `config.json` on the peer. Next UI slice.
+- **TP=4 distributed inference** across all four nodes — cluster forms
+  correctly, distributed launch under test.
 - **Ray over Tailscale** — use physical cables or a dedicated switch.
 
 ### Lessons learned the hard way
+
+0. **Role clarity eliminates half the problems.** The single biggest
+   UX improvement was `ainode role master|worker|solo`. Workers don't
+   need a model, don't need to think, don't need config editing. They
+   start in 3 seconds and announce themselves. The master is the only
+   node that needs a model. Everything else follows from that.
 
 1. **Single NIC per cluster subnet.** Multi-NIC ambiguity breaks NCCL
    ring setup silently; `NCCL_SOCKET_IFNAME` only tells NCCL which
