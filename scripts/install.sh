@@ -114,6 +114,87 @@ else
     sudo systemctl enable --now ainode.service
 fi
 
+# -- 5. Install host-side `ainode` wrapper ----------------------------------
+# The ainode CLI lives inside the container. This thin wrapper on the host
+# dispatches `ainode update` to docker-pull + systemctl-restart (the only
+# operations that must happen outside the container), and forwards every
+# other command to `docker exec ainode ainode ...` so users never need to
+# type the docker command themselves.
+log "Installing /usr/local/bin/ainode host wrapper"
+WRAPPER_PATH="/usr/local/bin/ainode"
+WRAPPER_SUDO="sudo"
+[ -w "$(dirname "$WRAPPER_PATH")" ] && WRAPPER_SUDO=""
+
+$WRAPPER_SUDO tee "$WRAPPER_PATH" >/dev/null <<WRAPPER
+#!/usr/bin/env bash
+# AINode host wrapper — installed by install.sh. Not user-editable.
+set -euo pipefail
+AINODE_IMAGE="\${AINODE_IMAGE:-$AINODE_IMAGE}"
+AINODE_SERVICE="ainode.service"
+
+is_user_mode() {
+    systemctl --user is-enabled "\$AINODE_SERVICE" >/dev/null 2>&1
+}
+restart_service() {
+    if is_user_mode; then
+        systemctl --user restart "\$AINODE_SERVICE"
+    else
+        sudo systemctl restart "\$AINODE_SERVICE"
+    fi
+}
+
+case "\${1:-}" in
+    update)
+        echo "==> Pulling \$AINODE_IMAGE"
+        docker pull "\$AINODE_IMAGE"
+        echo "==> Restarting \$AINODE_SERVICE"
+        if is_user_mode || systemctl is-active --quiet "\$AINODE_SERVICE" 2>/dev/null; then
+            restart_service
+        else
+            echo "   (service not running — start it with: sudo systemctl start ainode)"
+        fi
+        echo "==> Update complete. Version:"
+        docker exec ainode ainode --version 2>/dev/null || \\
+            docker run --rm "\$AINODE_IMAGE" ainode --version
+        ;;
+    "" | -h | --help)
+        cat <<HELP
+AINode host CLI. Commands that change the running container (update,
+restart) run on the host; everything else is forwarded to the container.
+
+Usage: ainode <command> [args...]
+
+Host-side:
+  update                  docker pull \$AINODE_IMAGE and restart service
+  --version               print the wrapper's pinned image tag
+
+Container-side (forwarded via docker exec):
+  status, models, config, logs, service, auth, ...
+
+Run \`ainode status\` to see the live container commands.
+HELP
+        ;;
+    --version)
+        echo "ainode wrapper (image: \$AINODE_IMAGE)"
+        docker exec ainode ainode --version 2>/dev/null || true
+        ;;
+    *)
+        # Forward everything else into the running container. If the
+        # container isn't up, fall back to a one-shot docker run so
+        # \`ainode --help\`, \`ainode service install\`, etc. still work.
+        if docker exec ainode true 2>/dev/null; then
+            exec docker exec -it ainode ainode "\$@"
+        else
+            exec docker run --rm -it \\
+                -v "\$HOME/.ainode":/root/.ainode \\
+                "\$AINODE_IMAGE" ainode "\$@"
+        fi
+        ;;
+esac
+WRAPPER
+
+$WRAPPER_SUDO chmod +x "$WRAPPER_PATH"
+
 # -- Banner -----------------------------------------------------------------
 cat <<BANNER
 
@@ -123,8 +204,9 @@ cat <<BANNER
 
     Web:     http://localhost:3000
     API:     http://localhost:8000/v1
-    Status:  systemctl status ainode
-    Logs:    journalctl -u ainode -f
+    Status:  ainode status
+    Logs:    ainode logs -f
+    Update:  ainode update
 
     Powered by \033[0;34margentos.ai\033[0m
 

@@ -376,7 +376,13 @@ where load time hurts, add an rsync-to-local staging step.
 
 ## CLI reference
 
+The installer puts a thin `ainode` wrapper at `/usr/local/bin/ainode`.
+Host-side commands (`update`) run directly; everything else is forwarded
+into the running container via `docker exec`. You never need to type
+`docker` yourself.
+
 ```bash
+ainode update                # docker pull + restart service (upgrade in place)
 ainode start                 # Start AINode (inference + web UI)
 ainode stop                  # Stop AINode
 ainode status                # Show cluster status
@@ -384,6 +390,26 @@ ainode models                # List available models
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
+ainode logs -f               # Tail the engine log
+```
+
+### Updating AINode
+
+New releases ship as a new container image tag. To upgrade in place:
+
+```bash
+ainode update
+```
+
+That runs `docker pull ghcr.io/getainode/ainode:latest` and restarts
+the systemd service. Your config (`~/.ainode/config.json`), models
+(`~/.ainode/models/`), and fine-tune outputs are on the host — the
+container is stateless, so upgrades never touch your data.
+
+To pin a specific version instead of `:latest`:
+
+```bash
+AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.1 ainode update
 ```
 
 ---
