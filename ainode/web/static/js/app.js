@@ -590,9 +590,12 @@ const AINode = {
         node_id: s.node_id || 'local',
         node_name: s.node_name || 'This Node',
         gpu_name: s.gpu?.name || 'GPU',
-        gpu_memory_gb: s.gpu?.memory_gb || 0,
-        model: s.model || 'none',
+        gpu_memory_gb: s.gpu?.memory_total_mb ? (s.gpu.memory_total_mb / 1024).toFixed(1) : 0,
+        model: s.model || '',
         status: s.engine_ready ? 'online' : (s.model ? 'starting' : 'online'),
+        version: s.version || '',
+        api_port: s.api_port || 8000,
+        engine_ready: s.engine_ready,
       }];
 
       // Annotate with sharding info

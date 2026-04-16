@@ -624,41 +624,81 @@
 
     _drawTooltip(n) {
       const ctx = this.ctx;
-      const lines = [
-        n.data.node_name || n.data.node_id,
-        (n.data.gpu_name || '?'),
-      ];
-      const util = Number(n.data.gpu_utilization || 0);
-      const temp = Number(n.data.gpu_temp || 0);
-      const watts = Number(n.data.gpu_wattage || 0);
-      if (util > 0) lines.push('Util ' + util.toFixed(0) + '%');
-      if (temp > 0) lines.push('Temp ' + temp.toFixed(0) + '°C');
-      if (watts > 0) lines.push(watts.toFixed(0) + ' W');
-      lines.push((n.role || '').toUpperCase());
+      const d = n.data;
 
-      const padX = 10, padY = 8, lineH = 14;
+      // Build info lines: label + value pairs
+      const pairs = [];
+      pairs.push({ label: d.node_name || d.node_id, value: '', highlight: true });
+      pairs.push({ label: 'Role', value: (n.role || '').toUpperCase(), green: true });
+      pairs.push({ label: 'GPU', value: d.gpu_name || '?' });
+
+      const memGb = Number(d.gpu_memory_gb || 0);
+      const memPct = Number(d.gpu_memory_used_pct || 0);
+      if (memGb > 0) {
+        const usedGb = (memGb * memPct / 100).toFixed(1);
+        pairs.push({ label: 'VRAM', value: usedGb + ' / ' + memGb.toFixed(0) + ' GB (' + Math.round(memPct) + '%)' });
+      }
+
+      const util = Number(d.gpu_utilization || 0);
+      if (util > 0) pairs.push({ label: 'GPU util', value: util.toFixed(0) + '%' });
+
+      const temp = Number(d.gpu_temp || 0);
+      if (temp > 0) pairs.push({ label: 'Temp', value: temp.toFixed(0) + '°C' });
+
+      if (d.model) pairs.push({ label: 'Model', value: this._shortText(d.model, 30) });
+
+      const status = d.status || (d.engine_ready ? 'online' : 'idle');
+      pairs.push({ label: 'Status', value: status, green: status === 'online' || status === 'serving' });
+
+      if (d.version) pairs.push({ label: 'Version', value: 'v' + d.version });
+      if (d.api_port) pairs.push({ label: 'API', value: ':' + d.api_port });
+      if (d.peer_ip) pairs.push({ label: 'IP', value: d.peer_ip });
+
+      // Render
+      const padX = 12, padY = 10, lineH = 15;
+      const labelW = 60;
       ctx.save();
       ctx.font = '11px ' + CFG.fontMono;
-      const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + padX * 2;
-      const h = lines.length * lineH + padY * 2;
-      let x = this.mouse.x + 14;
-      let y = this.mouse.y + 14;
-      if (x + w > this.width - 4) x = this.mouse.x - w - 14;
-      if (y + h > this.height - 4) y = this.mouse.y - h - 14;
 
-      ctx.fillStyle = '#0a0a0a';
+      const valueWidths = pairs.map((p) => p.value ? ctx.measureText(p.value).width : 0);
+      const titleWidth = ctx.measureText(pairs[0].label).width;
+      const contentW = Math.max(titleWidth, ...valueWidths.map((w) => w + labelW));
+      const w = contentW + padX * 2 + 8;
+      const h = pairs.length * lineH + padY * 2;
+
+      let x = this.mouse.x + 16;
+      let y = this.mouse.y + 16;
+      if (x + w > this.width - 4) x = this.mouse.x - w - 16;
+      if (y + h > this.height - 4) y = this.mouse.y - h - 16;
+
+      // Background
+      ctx.fillStyle = 'rgba(6,6,6,0.95)';
       ctx.strokeStyle = CFG.nvidiaGreenDim;
       ctx.lineWidth = 1;
-      this._roundRect(x, y, w, h, 6);
+      this._roundRect(x, y, w, h, 8);
       ctx.fill();
       ctx.stroke();
 
-      ctx.textAlign = 'left';
+      // Lines
       ctx.textBaseline = 'top';
-      lines.forEach((line, i) => {
-        ctx.fillStyle = i === 0 ? CFG.textPrimary :
-                        i === lines.length - 1 ? CFG.nvidiaGreen : CFG.textSecondary;
-        ctx.fillText(line, x + padX, y + padY + i * lineH);
+      pairs.forEach((p, i) => {
+        const ly = y + padY + i * lineH;
+        if (p.highlight) {
+          // Title line — full width, brighter
+          ctx.textAlign = 'left';
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px ' + CFG.fontMono;
+          ctx.fillText(p.label, x + padX, ly);
+          ctx.font = '11px ' + CFG.fontMono;
+        } else {
+          // Label
+          ctx.textAlign = 'left';
+          ctx.fillStyle = CFG.textMuted;
+          ctx.fillText(p.label, x + padX, ly);
+          // Value
+          ctx.fillStyle = p.green ? CFG.nvidiaGreen : CFG.textSecondary;
+          ctx.fillText(p.value, x + padX + labelW, ly);
+        }
       });
       ctx.restore();
     }
