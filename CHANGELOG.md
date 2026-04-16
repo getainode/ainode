@@ -12,6 +12,45 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.3] — 2026-04-15
+
+### Added
+
+**Training — Phase 1: Artifact retrieval & robustness**
+- `GET /api/training/jobs/{id}/output` — list all artifact files after training completes (name, size, download URL)
+- `GET /api/training/jobs/{id}/output/{filename}` — stream download any artifact file; path traversal blocked
+- HF token propagation — `NodeConfig.hf_token` (set via `ainode config --hf-token`) automatically flows to every training job; runners inject `HUGGING_FACE_HUB_TOKEN` + `HF_TOKEN` enabling gated models in training without per-job config
+- DDP validation — `torchrun` launch now fails fast with an actionable message if `MASTER_ADDR` is unset, instead of a cryptic NCCL timeout
+- OOM error detection — `RuntimeError: CUDA out of memory` is caught and re-emitted as `AINODE_ERROR:CUDA_OOM` with suggestions (lower batch_size, enable gradient checkpointing, switch to QLoRA)
+- `TrainingConfig.hf_token` field
+
+**Training — Phase 2: Merge & resume**
+- `POST /api/training/jobs/{id}/merge` — merge a completed LoRA/QLoRA adapter into the base model using `PEFT.merge_and_unload()`; runs async, returns a `merge_job_id` to poll
+- `POST /api/training/jobs/{id}/resume` — resume training from the latest (or specified) checkpoint; discovers `checkpoint-N/` dirs in the output folder and creates a new job wired to `resume_from_checkpoint`
+- `TrainingConfig._resume_from_checkpoint` field
+
+**Training — Phase 3: Custom templates**
+- `POST /api/training/templates` — save a custom training template; persisted to `~/.ainode/training/custom_templates.json`
+- `GET /api/training/templates` — now returns built-in templates + persisted custom templates
+
+**Training — Phase 4: Evaluation loop**
+- `TrainingConfig.eval_split` (default 0.1) — hold out a fraction of the dataset for validation; set to 0 to disable
+- `TrainingConfig.eval_steps` — run eval every N steps (default: once per epoch)
+- `eval_loss` + `eval_samples_per_second` included in `AINODE_PROGRESS` events when eval is active
+- `load_best_model_at_end=True` when eval is enabled — saves the checkpoint with lowest eval_loss
+
+**Training — Phase 5: W&B integration**
+- `TrainingConfig.wandb_project` — set a W&B project name to enable Weights & Biases logging; injects `WANDB_PROJECT` + `WANDB_NAME` env vars automatically
+
+**Public docs**
+- `docs.argentos.ai/ainode/training` — new guide covering full training workflow, config reference, gated model setup, DDP, all API endpoints, and troubleshooting
+
+### Fixed
+- Training datasets now correctly split into train/eval — `dataset.train_test_split()` with fixed seed 42
+- `MASTER_PORT` defaults to 29500 if unset when `MASTER_ADDR` is configured
+
+---
+
 ## [0.4.2] — 2026-04-15
 
 ### Added

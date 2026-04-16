@@ -213,7 +213,13 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 | Multi-node auto-discovery (UDP broadcast) | ✅ |
 | Distributed tensor-parallel inference across nodes | ✅ (4-node verified — 487 GB aggregated VRAM) |
 | Cluster topology UI (members, VRAM aggregate, instance badges) | ✅ |
-| Browser-based fine-tuning (LoRA / QLoRA / DDP templates) | ✅ all three methods wired — real-GPU validation ongoing |
+| Browser-based fine-tuning (LoRA / QLoRA / Full + DDP) | ✅ |
+| Training artifact retrieval + download via API | ✅ |
+| LoRA adapter merge into base model | ✅ |
+| Checkpoint resume | ✅ |
+| Evaluation loop (configurable train/eval split) | ✅ |
+| W&B logging integration | ✅ |
+| Custom training template persistence | ✅ |
 | Prometheus metrics endpoint (`/metrics`) | ✅ |
 | `ainode role master\|worker\|solo` CLI | ✅ |
 | Worker nodes start instantly — no model required | ✅ |
@@ -524,9 +530,11 @@ scrape_configs:
 - [x] Automatic model sharding across nodes (TP=2 verified)
 - [x] NFS-shared model storage
 - [x] Unified container image + systemd install
-- [x] Browser-driven fine-tuning runner (LoRA / QLoRA / Full + DDP) — real-GPU run ongoing
+- [x] Browser-driven fine-tuning (LoRA / QLoRA / Full + DDP)
+- [x] Training artifact retrieval, LoRA merge, checkpoint resume
+- [x] Evaluation loop + W&B integration
 - [x] Prometheus metrics endpoint (`/metrics`)
-- [ ] 4-node TP on dedicated switch
+- [ ] 4-node TP=4 sharded inference (cluster hardware ready, launch under test)
 - [ ] Model marketplace (quantized variants, custom registries)
 - [ ] Mobile-friendly UI
 
