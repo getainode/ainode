@@ -50,6 +50,12 @@
       this.mouse = { x: -1, y: -1 };
       this.onNodeSelect = null;
 
+      // Loading / fade-in state
+      this._prevNodeIds = new Set();   // tracks which nodes were present last frame
+      this._nodeAlpha = {};            // per-node fade-in alpha (0 → 1)
+      this._masterTransition = 0;      // 0 = fully loading, 1 = fully real
+      this._engineReady = false;       // set true when engine comes online
+
       this._bind();
       this._resize();
       this._loop = this._loop.bind(this);
@@ -57,7 +63,7 @@
       window.addEventListener('resize', () => this._resize());
     }
 
-    update(nodesArray) {
+    update(nodesArray, engineReady) {
       const incoming = (nodesArray || []).map((data) => ({
         data,
         id: data.node_id,
@@ -76,6 +82,21 @@
         incoming[0].role = 'master';
       }
       incoming.forEach((n) => { if (!n.role) n.role = 'worker'; });
+
+      // Track which nodes are new (get fade-in alpha starting at 0)
+      incoming.forEach((n) => {
+        if (!this._prevNodeIds.has(n.id)) {
+          this._nodeAlpha[n.id] = n.role === 'master' ? 1 : 0; // master starts visible
+        }
+      });
+      this._prevNodeIds = new Set(incoming.map((n) => n.id));
+
+      // Engine-ready transition: loading circle → real master node
+      const wasReady = this._engineReady;
+      this._engineReady = !!engineReady;
+      if (!wasReady && this._engineReady) {
+        this._masterTransition = 0; // start cross-fade
+      }
 
       this.nodes = incoming;
       this.master = this.nodes[0] || null;
@@ -158,24 +179,54 @@
 
     _render() {
       const ctx = this.ctx;
+      const dt = 0.016; // approx frame delta for transitions
+
       ctx.clearRect(0, 0, this.width, this.height);
       this._drawGrid();
 
       if (!this.master) {
-        this._drawEmpty();
+        // No nodes at all — show the loading animation
+        this._drawLoading();
         return;
       }
 
-      // Pulsing rings around master (always)
-      this._drawMasterRings();
+      // Advance master transition (loading → real): takes ~0.8s
+      if (this._engineReady && this._masterTransition < 1) {
+        this._masterTransition = Math.min(1, this._masterTransition + dt / 0.8);
+      } else if (!this._engineReady && this.master) {
+        // Engine not ready — stay in loading state
+        this._masterTransition = Math.max(0, this._masterTransition - dt / 0.5);
+      }
 
-      // Connection lines from each worker to master
+      // Advance per-worker fade-in
       this.nodes.forEach((n) => {
-        if (n.role === 'worker') this._drawConnection(n, this.master);
+        if (n.role === 'worker') {
+          if (this._nodeAlpha[n.id] === undefined) this._nodeAlpha[n.id] = 0;
+          this._nodeAlpha[n.id] = Math.min(1, (this._nodeAlpha[n.id] || 0) + dt / 1.2);
+        }
       });
 
-      // Nodes (planets)
-      this.nodes.forEach((n, i) => this._drawNode(n, i === this.hoverIdx));
+      // Master rings
+      this._drawMasterRings();
+
+      // Loading ghost (fades OUT as engine comes online)
+      if (this._masterTransition < 1) {
+        this._drawLoadingGhost(1 - this._masterTransition);
+      }
+
+      // Connection lines (fade in with their workers)
+      this.nodes.forEach((n) => {
+        if (n.role === 'worker') {
+          const a = this._nodeAlpha[n.id] || 0;
+          if (a > 0) this._drawConnection(n, this.master, a);
+        }
+      });
+
+      // Nodes (master cross-fades from ghost; workers fade in)
+      this.nodes.forEach((n, i) => {
+        const alpha = n.role === 'master' ? this._masterTransition : (this._nodeAlpha[n.id] || 0);
+        if (alpha > 0.01) this._drawNode(n, i === this.hoverIdx, alpha);
+      });
 
       if (this.hoverIdx >= 0) this._drawTooltip(this.nodes[this.hoverIdx]);
       if (this.nodes.length === 1) this._drawWaitingLabel();
@@ -197,11 +248,126 @@
     }
 
     _drawEmpty() {
+      this._drawLoading();
+    }
+
+    _drawLoading() {
+      // Shown when no nodes have been discovered yet.
+      // Renders a pulsating master-sized circle in the center that says
+      // "Loading..." — exactly like the real master node but ghosted/breathing.
       const ctx = this.ctx;
-      ctx.fillStyle = CFG.textMuted;
-      ctx.font = '14px ' + CFG.fontSans;
+      const cx = this.width / 2;
+      const cy = this.height / 2;
+      const r = CFG.masterRadius;
+      const t = this.time;
+
+      ctx.save();
+
+      // Expanding ghost rings (same as master rings but dimmer)
+      for (let i = 0; i < 4; i++) {
+        const phase = (t * 0.6 + i * 0.55) % 2.0;
+        const frac = phase / 2.0;
+        const ringR = r + 10 + frac * 90;
+        const alpha = (1 - frac) * 0.22 - i * 0.03;
+        if (alpha <= 0) continue;
+        ctx.strokeStyle = this._rgba(CFG.nvidiaGreenDim, alpha);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Breathing scale
+      const breathe = 1 + Math.sin(t * 1.8) * 0.05;
+      ctx.translate(cx, cy);
+      ctx.scale(breathe, breathe);
+
+      // Halo
+      const haloR = r + 14;
+      const halo = ctx.createRadialGradient(0, 0, r * 0.7, 0, 0, haloR);
+      halo.addColorStop(0, this._rgba(CFG.nvidiaGreenDim, 0.18));
+      halo.addColorStop(1, this._rgba(CFG.nvidiaGreenDim, 0));
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(0, 0, haloR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Circle fill
+      const fill = ctx.createRadialGradient(0, -r * 0.3, 2, 0, 0, r);
+      fill.addColorStop(0, '#111');
+      fill.addColorStop(1, '#080808');
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Dashed border — indicates "pending"
+      const borderAlpha = 0.35 + Math.sin(t * 2.5) * 0.2;
+      ctx.strokeStyle = this._rgba(CFG.nvidiaGreenDim, borderAlpha);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // "Loading..." text with animated dots
+      const dots = '.'.repeat(1 + Math.floor(t * 2) % 3);
+      ctx.fillStyle = this._rgba(CFG.textSecondary, 0.7 + Math.sin(t * 2) * 0.2);
+      ctx.font = 'bold 11px ' + CFG.fontSans;
       ctx.textAlign = 'center';
-      ctx.fillText('Waiting for cluster nodes...', this.width / 2, this.height / 2);
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Loading' + dots, 0, -5);
+
+      // Spinning arc inside to show activity
+      const arcStart = t * 2.4;
+      const arcLen = Math.PI * 0.7 + Math.sin(t * 1.2) * 0.3;
+      ctx.strokeStyle = this._rgba(CFG.nvidiaGreen, 0.4);
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.55, arcStart, arcStart + arcLen);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    _drawLoadingGhost(alpha) {
+      // Ghost version of the loading circle that fades out as the real node fades in.
+      if (alpha <= 0) return;
+      const ctx = this.ctx;
+      const cx = this.master ? this.master.x : this.width / 2;
+      const cy = this.master ? this.master.y : this.height / 2;
+      const r = CFG.masterRadius;
+      const t = this.time;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(cx, cy);
+
+      const fill = ctx.createRadialGradient(0, -r * 0.3, 2, 0, 0, r);
+      fill.addColorStop(0, '#111');
+      fill.addColorStop(1, '#080808');
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = this._rgba(CFG.nvidiaGreenDim, 0.45);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const dots = '.'.repeat(1 + Math.floor(t * 2) % 3);
+      ctx.fillStyle = this._rgba(CFG.textSecondary, 0.6);
+      ctx.font = 'bold 11px ' + CFG.fontSans;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Loading' + dots, 0, -5);
+
+      ctx.restore();
     }
 
     _drawMasterRings() {
@@ -240,7 +406,8 @@
       ctx.restore();
     }
 
-    _drawConnection(worker, master) {
+    _drawConnection(worker, master, alpha) {
+      if (alpha !== undefined && alpha < 0.01) return;
       const ctx = this.ctx;
       const wOnline = (worker.data.status || 'online') === 'online';
       const dx = master.x - worker.x;
@@ -253,6 +420,7 @@
       const ey = master.y - uy * CFG.masterRadius;
 
       ctx.save();
+      if (alpha !== undefined) ctx.globalAlpha = alpha;
 
       if (!wOnline) {
         ctx.strokeStyle = this._rgba(CFG.textMuted, 0.4);
@@ -303,7 +471,7 @@
       ctx.restore();
     }
 
-    _drawNode(n, isHovered) {
+    _drawNode(n, isHovered, alpha) {
       const ctx = this.ctx;
       const isMaster = n.role === 'master';
       const r = isMaster ? CFG.masterRadius : CFG.workerRadius;
@@ -317,6 +485,7 @@
       const scale = 1 + Math.sin(this.time * 2 + n.pulse) * pulseAmp + (isHovered ? 0.06 : 0);
 
       ctx.save();
+      if (alpha !== undefined && alpha < 1) ctx.globalAlpha = alpha;
       ctx.translate(n.x, n.y);
       ctx.scale(scale, scale);
 

@@ -595,7 +595,9 @@ const AINode = {
           return n;
         });
       }
-      this.state.topology.update(topoNodes);
+      // Pass engine_ready so the topology can drive the loading → real transition
+      var engineReady = !!(s && s.engine_ready);
+      this.state.topology.update(topoNodes, engineReady);
     }
   },
 
