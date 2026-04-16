@@ -1344,6 +1344,7 @@ const AINode = {
         }
         var rows = models.map(function (m) {
           var isLoaded = loaded.includes(m.hf_repo);
+          var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.hf_repo]);
           var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
           var paramsStr = m.params_b ? m.params_b + 'B params' : '';
           var fits = gpuMem > 0 && m.size_gb > 0 && gpuMem >= (m.min_memory_gb || m.size_gb);
@@ -1355,14 +1356,16 @@ const AINode = {
           var capBadges = self.renderCapabilityBadges(m);
           var statusBadge = isLoaded ?
             '<span class="model-badge loaded">Loaded</span>' :
+            isOnDisk ?
+            '<span class="model-badge loaded">Downloaded</span>' :
             '<span class="model-badge available">Available</span>';
           var ageStr = m.created_at ? self.relativeTime(m.created_at) : '';
           var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' ⬇' : '';
           var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
           var metaParts = [paramsStr, sizeStr, ageStr, downloadsStr, likesStr].filter(Boolean);
           var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
-          var downloadBtn = !isLoaded ?
-            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>' : '';
+          var downloadBtn = isOnDisk ? '' :
+            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>';
           return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
             '<div class="download-card-main">' +
             '<div class="download-card-info">' +
@@ -1696,6 +1699,12 @@ const AINode = {
         self.state.activeDownloads[hfRepo].status === 'downloading') {
       self.toast('Already downloading ' + hfRepo, 'info');
       self.navigate('downloads');
+      return;
+    }
+
+    // Guard: already on disk — offer to launch instead of re-downloading
+    if (self.state.downloadedModels && self.state.downloadedModels[hfRepo]) {
+      self.toast(hfRepo + ' is already downloaded. Use Launch to load it.', 'info');
       return;
     }
 
@@ -2201,6 +2210,7 @@ const AINode = {
         }
         var rows = models.map(function (m) {
           var isLoaded = loaded.includes(m.hf_repo);
+          var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.hf_repo]);
           var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
           var fits = gpuMem > 0 && m.size_gb > 0 && gpuMem >= m.size_gb;
           var fitBadge = (gpuMem > 0 && m.size_gb > 0) ? (fits ?
@@ -2209,13 +2219,15 @@ const AINode = {
           var catalogBadge = m.in_catalog ? '<span class="fit-badge rec">In Catalog</span>' : '';
           var statusBadge = isLoaded ?
             '<span class="model-badge loaded">Loaded</span>' :
+            isOnDisk ?
+            '<span class="model-badge loaded">Downloaded</span>' :
             '<span class="model-badge available">Available</span>';
           var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' downloads' : '';
           var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
           var statsLine = [downloadsStr, likesStr].filter(Boolean).join(' · ');
           var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
-          var downloadBtn = !isLoaded ?
-            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>' : '';
+          var downloadBtn = isOnDisk ? '' :
+            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>';
           return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
             '<div class="download-card-main">' +
             '<div class="download-card-info">' +
