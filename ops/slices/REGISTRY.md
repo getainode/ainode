@@ -4,7 +4,7 @@
 
 | Slice | Owner | Branch | Status | Linear |
 |-------|-------|--------|--------|--------|
-| training-artifacts | Threadmaster | codex/training-artifacts | IN PROGRESS | — |
+| training-artifacts | Threadmaster | codex/training-artifacts | MERGED TO MAIN | — |
 
 ## Completed Slices
 
