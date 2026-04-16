@@ -12,6 +12,13 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.6] — 2026-04-16
+
+### Fixed
+- **Download button hidden for already-downloaded models** — all catalog views (trending, openrouter, latest, HF search, main catalog) now check disk presence via `/api/models/downloaded`. Badge shows "Downloaded" instead of "Available". Re-downloading is blocked with a toast directing users to Launch instead. Fixes [#35](https://github.com/getainode/ainode/issues/35).
+
+---
+
 ## [0.4.5] — 2026-04-16
 
 ### Fixed
