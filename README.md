@@ -67,9 +67,9 @@ curl -fsSL https://ainode.dev/install | bash
 
 ## Screenshots
 
-### Cluster view — 2 nodes, 244 GB aggregated VRAM, distributed inference
+### Cluster view — 4 nodes, 487 GB aggregated VRAM
 
-![Cluster view](docs/images/cluster-view.png)
+![Cluster view](docs/images/cluster-4node.gif)
 
 The "MASTER" node (head) runs the API and orchestrates. The smaller
 orbiting node (member) has its GPU reserved for a Ray worker that the
