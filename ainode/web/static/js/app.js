@@ -348,6 +348,9 @@ const AINode = {
     this.renderInstances();
     this.populateLaunchModels();
     // Keep the distributed/solo hint in sync with the latest cluster state.
+    if (typeof this._renderNodeDots === 'function') {
+      try { this._renderNodeDots(); } catch (_) {}
+    }
     if (typeof this._launchHintUpdater === 'function') {
       try { this._launchHintUpdater(); } catch (_) {}
     }
@@ -745,10 +748,36 @@ const AINode = {
       });
     }
 
-    // Node selector dots
+    // Node selector dots — populated dynamically based on cluster size
     var nodeSelector = document.getElementById('node-selector');
     var launchHint = document.getElementById('launch-hint');
     var self = this;
+
+    this._renderNodeDots = function () {
+      if (!nodeSelector) return;
+      var clusterSize = Math.max(1, (self.state.nodes || []).length);
+      var currentActive = nodeSelector.querySelector('.node-dot.active');
+      var currentVal = currentActive ? parseInt(currentActive.dataset.value) || 1 : 1;
+      // Only re-render if count changed
+      var dotCount = nodeSelector.querySelectorAll('.node-dot').length;
+      if (dotCount === clusterSize) return;
+      var html = '';
+      for (var i = 1; i <= clusterSize; i++) {
+        html += '<button class="node-dot' + (i === Math.min(currentVal, clusterSize) ? ' active' : '') + '" data-value="' + i + '">' + i + '</button>';
+      }
+      nodeSelector.innerHTML = html;
+      // Re-bind click handlers
+      nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
+        dot.addEventListener('click', function () {
+          nodeSelector.querySelectorAll('.node-dot').forEach(function (d) { d.classList.remove('active'); });
+          dot.classList.add('active');
+          updateLaunchHint();
+        });
+      });
+      updateLaunchHint();
+    };
+    this._renderNodeDots();
+
     function updateLaunchHint() {
       if (!launchHint) return;
       var activeDot = nodeSelector && nodeSelector.querySelector('.node-dot.active');
@@ -772,15 +801,7 @@ const AINode = {
         launchHint.className = 'launch-hint' + (enough ? '' : ' warn');
       }
     }
-    if (nodeSelector) {
-      nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
-        dot.addEventListener('click', function () {
-          nodeSelector.querySelectorAll('.node-dot').forEach(function (d) { d.classList.remove('active'); });
-          dot.classList.add('active');
-          updateLaunchHint();
-        });
-      });
-    }
+    // (dot click handlers bound inside _renderNodeDots)
     // Update hint when strategy pill changes too
     document.querySelectorAll('#sharding-pills .pill').forEach(function (pill) {
       pill.addEventListener('click', updateLaunchHint);
@@ -802,16 +823,39 @@ const AINode = {
     var self = this;
     var s = this.state.status;
     var loaded = (s && s.models_loaded) || [];
+    var onDisk = this.state.downloadedModels || {};
 
-    this.fetchJSON('/api/models').then(function (data) {
+    // Fetch both catalog and downloaded list, merge them
+    Promise.all([
+      this.fetchJSON('/api/models'),
+      this.fetchJSON('/api/models/downloaded'),
+    ]).then(function (results) {
+      var data = results[0];
+      var dlData = results[1];
       if (!data) return;
+
+      // Build set of repos known to be on disk
+      var diskSet = Object.assign({}, onDisk);
+      ((dlData && dlData.models) || []).forEach(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (repo) diskSet[repo] = true;
+      });
+
       var all = data.models || [];
-      // Only show models that are downloaded (or currently loaded).
+      // Only show models that are on disk or currently loaded.
       var ready = all.filter(function (m) {
-        if (m.downloaded) return true;
-        if (loaded.indexOf(m.hf_repo) !== -1) return true;
-        if (loaded.indexOf(m.id) !== -1) return true;
+        var repo = m.hf_repo || m.id;
+        if (m.downloaded || diskSet[repo]) return true;
+        if (loaded.indexOf(repo) !== -1) return true;
         return false;
+      });
+
+      // Also add disk models not in catalog
+      ((dlData && dlData.models) || []).forEach(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (!ready.some(function (r) { return (r.hf_repo || r.id) === repo; })) {
+          ready.push(m);
+        }
       });
 
       var cv = select.value;
@@ -926,7 +970,8 @@ const AINode = {
         }
       });
       stage.addEventListener('dragleave', function (e) {
-        if (e.target === stage) stage.classList.remove('drag-over');
+        // Remove overlay when leaving the stage OR any child boundary
+        if (!stage.contains(e.relatedTarget)) stage.classList.remove('drag-over');
       });
       stage.addEventListener('drop', function (e) {
         e.preventDefault();
@@ -936,6 +981,14 @@ const AINode = {
         });
         if (files.length > 0) self.attachImages(files);
         else self.toast('Only image files are supported', 'warning');
+      });
+      // Escape key dismisses the drop overlay
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') stage.classList.remove('drag-over');
+      });
+      // Click outside the drop zone also dismisses it
+      stage.addEventListener('click', function () {
+        stage.classList.remove('drag-over');
       });
     }
 
