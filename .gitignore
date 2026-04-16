@@ -39,5 +39,8 @@ models/
 *.safetensors
 *.gguf
 
+# Ops (internal runbooks, session logs — not for public repo)
+ops/
+
 # Node (for web UI)
 node_modules/
