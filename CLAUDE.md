@@ -8,7 +8,7 @@ AINode — Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning
 - **Marketing site repo:** https://github.com/getainode/ainode.dev
 - **Live site:** https://ainode.dev
 - **Powered by:** argentos.ai
-- **Public docs:** https://docs.argentos.ai (repo: /Users/sem/code/mintlify-docs)
+- **Public docs:** https://docs.ainode.dev (repo: /tmp/ainode-docs → github.com/getainode/ainode-docs)
 - **License:** Apache 2.0
 
 ## Tech Stack
