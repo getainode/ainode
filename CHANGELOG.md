@@ -12,6 +12,20 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.7] — 2026-04-16
+
+### Fixed
+- **Image drop overlay stuck** — dragging a file across the chat window showed a "DROP IMAGES TO ATTACH" overlay that couldn't be dismissed. Now dismisses on Escape key, clicking outside, or dragging away from the window.
+- **Master node stuck on "starting..." forever** — when the master had no model configured, the topology showed a permanent "starting..." overlay. Now correctly shows "online" when the web server is up with no engine to wait for.
+- **Minimum Nodes selector capped at 3** — was hardcoded in the HTML. Now dynamically populated from the actual discovered cluster size. With 4 nodes online, shows 1-2-3-4.
+- **Launch Instance model dropdown incomplete** — only showed models loaded in vLLM. Now merges the catalog with `/api/models/downloaded` so all disk-present models appear, even if not currently running.
+- **Download button shown for already-downloaded models** — live catalog tabs (Trending, Most Used, Latest, HF Search) didn't check disk presence. Fixed across all views. Badge shows "Downloaded" instead of "Available". Re-downloading blocked with a toast. (Fixes [#35](https://github.com/getainode/ainode/issues/35))
+
+### Infrastructure note
+AINode supports NFS-shared model storage across a cluster. Download a model once to a central NVMe-over-TCP volume (e.g. a NAS, MikroTik ROSA, or TrueNAS), export it via NFS, and mount it on every node. Set `models_dir` in each node's `~/.ainode/config.json` to the shared mount path — all nodes serve from the same weights with zero duplicate downloads. See the [Cluster Setup docs](https://docs.ainode.dev/cluster-setup) for details.
+
+---
+
 ## [0.4.6] — 2026-04-16
 
 ### Fixed
