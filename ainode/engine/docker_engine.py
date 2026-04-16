@@ -294,7 +294,16 @@ class DockerEngine:
         if self.config.max_model_len:
             cmd.extend(["--max-model-len", str(self.config.max_model_len)])
         if self.config.quantization:
-            cmd.extend(["--quantization", self.config.quantization])
+            quant = self.config.quantization
+        elif self.config.model and "awq" in self.config.model.lower():
+            # Model name contains AWQ — explicitly pin to awq (not awq_marlin).
+            # vLLM auto-upgrades AWQ → awq_marlin which requires Marlin CUDA
+            # kernels not compiled for GB10 (sm_12.1) in the eugr base image.
+            quant = "awq"
+        else:
+            quant = None
+        if quant:
+            cmd.extend(["--quantization", quant])
         if self.config.models_dir:
             cmd.extend(["--download-dir", self.config.models_dir])
         if gpu and gpu.unified_memory:
