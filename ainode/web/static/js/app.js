@@ -592,7 +592,7 @@ const AINode = {
         gpu_name: s.gpu?.name || 'GPU',
         gpu_memory_gb: s.gpu?.memory_gb || 0,
         model: s.model || 'none',
-        status: s.engine_ready ? 'online' : 'starting',
+        status: s.engine_ready ? 'online' : (s.model ? 'starting' : 'online'),
       }];
 
       // Annotate with sharding info
@@ -609,8 +609,9 @@ const AINode = {
           return n;
         });
       }
-      // Pass engine_ready so the topology can drive the loading → real transition
-      var engineReady = !!(s && s.engine_ready);
+      // Pass engine_ready so the topology can drive the loading → real transition.
+      // If no model is configured, the server is ready (no engine to wait for).
+      var engineReady = !!(s && (s.engine_ready || !s.model));
       this.state.topology.update(topoNodes, engineReady);
     }
   },
