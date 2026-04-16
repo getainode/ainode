@@ -5,6 +5,7 @@
 | Slice | Owner | Branch | Status | Linear |
 |-------|-------|--------|--------|--------|
 | training-artifacts | Threadmaster | codex/training-artifacts | MERGED TO MAIN | — |
+| v0.4.4-release | Threadmaster | main | MERGED TO MAIN | — |
 
 ## Completed Slices
 
