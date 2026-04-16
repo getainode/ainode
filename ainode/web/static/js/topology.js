@@ -209,11 +209,6 @@
       // Master rings
       this._drawMasterRings();
 
-      // Loading ghost (fades OUT as engine comes online)
-      if (this._masterTransition < 1) {
-        this._drawLoadingGhost(1 - this._masterTransition);
-      }
-
       // Connection lines (fade in with their workers)
       this.nodes.forEach((n) => {
         if (n.role === 'worker') {
@@ -222,11 +217,16 @@
         }
       });
 
-      // Nodes (master cross-fades from ghost; workers fade in)
+      // Nodes — master always visible once discovered; workers fade in
       this.nodes.forEach((n, i) => {
-        const alpha = n.role === 'master' ? this._masterTransition : (this._nodeAlpha[n.id] || 0);
+        const alpha = n.role === 'master' ? 1 : (this._nodeAlpha[n.id] || 0);
         if (alpha > 0.01) this._drawNode(n, i === this.hoverIdx, alpha);
       });
+
+      // Loading overlay on master while engine isn't ready (fades out)
+      if (this._masterTransition < 1 && this.master) {
+        this._drawMasterLoadingOverlay(1 - this._masterTransition);
+      }
 
       if (this.hoverIdx >= 0) this._drawTooltip(this.nodes[this.hoverIdx]);
       if (this.nodes.length === 1) this._drawWaitingLabel();
@@ -332,40 +332,49 @@
     }
 
     _drawLoadingGhost(alpha) {
-      // Ghost version of the loading circle that fades out as the real node fades in.
-      if (alpha <= 0) return;
+      // Legacy — not used, kept for safety
+    }
+
+    _drawMasterLoadingOverlay(alpha) {
+      // Shown on top of the real master node while engine is starting up.
+      // Keeps the node name/GPU visible but adds a spinning arc + dim veil.
+      if (alpha <= 0 || !this.master) return;
       const ctx = this.ctx;
-      const cx = this.master ? this.master.x : this.width / 2;
-      const cy = this.master ? this.master.y : this.height / 2;
+      const m = this.master;
       const r = CFG.masterRadius;
       const t = this.time;
 
       ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.translate(cx, cy);
+      ctx.globalAlpha = alpha * 0.75;
+      ctx.translate(m.x, m.y);
 
-      const fill = ctx.createRadialGradient(0, -r * 0.3, 2, 0, 0, r);
-      fill.addColorStop(0, '#111');
-      fill.addColorStop(1, '#080808');
-      ctx.fillStyle = fill;
+      // Dim veil over the node interior
+      const veil = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+      veil.addColorStop(0, 'rgba(0,0,0,0.55)');
+      veil.addColorStop(1, 'rgba(0,0,0,0.2)');
+      ctx.fillStyle = veil;
       ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.arc(0, 0, r - 3, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.strokeStyle = this._rgba(CFG.nvidiaGreenDim, 0.45);
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 5]);
+      // Spinning arc inside the circle
+      const arcStart = t * 2.8;
+      const arcLen = Math.PI * 0.65 + Math.sin(t * 1.4) * 0.25;
+      ctx.strokeStyle = this._rgba(CFG.nvidiaGreen, 0.7);
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.arc(0, 0, r * 0.52, arcStart, arcStart + arcLen);
       ctx.stroke();
-      ctx.setLineDash([]);
 
+      // Small "starting up" label — doesn't replace the node name
       const dots = '.'.repeat(1 + Math.floor(t * 2) % 3);
-      ctx.fillStyle = this._rgba(CFG.textSecondary, 0.6);
-      ctx.font = 'bold 11px ' + CFG.fontSans;
+      ctx.globalAlpha = alpha * 0.85;
+      ctx.fillStyle = this._rgba(CFG.textSecondary, 0.9);
+      ctx.font = '9px ' + CFG.fontMono;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('Loading' + dots, 0, -5);
+      ctx.fillText('starting' + dots, 0, 18);
 
       ctx.restore();
     }
