@@ -57,6 +57,36 @@ def main() -> None:
         if resolved.exists():
             config["dataset_path"] = str(resolved)
 
+    # Inject HF token if provided in config — needed for gated repos (Llama etc.)
+    hf_token = config.get("hf_token") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
+    if hf_token:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        os.environ["HF_TOKEN"] = hf_token
+        _log("HF token set — gated model access enabled")
+
+    # DDP env var validation: fail fast with an actionable message instead of a
+    # cryptic NCCL or socket timeout buried in torchrun output.
+    world_size_str = os.environ.get("WORLD_SIZE", "1")
+    try:
+        world_size = int(world_size_str)
+    except ValueError:
+        world_size = 1
+
+    if world_size > 1:
+        master_addr = os.environ.get("MASTER_ADDR", "")
+        master_port = os.environ.get("MASTER_PORT", "")
+        if not master_addr:
+            print(
+                "ERROR: MASTER_ADDR is not set. Multi-node DDP requires MASTER_ADDR "
+                "to be the IP of the head node (e.g. MASTER_ADDR=10.0.0.1). "
+                "Set it before launching torchrun.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not master_port:
+            os.environ["MASTER_PORT"] = "29500"
+            _log("MASTER_PORT not set — defaulting to 29500")
+
     try:
         import torch
         from transformers import (
@@ -77,6 +107,10 @@ def main() -> None:
 
     base_model = config["base_model"]
     dataset_path = config["dataset_path"]
+    resume_from_checkpoint = config.get("_resume_from_checkpoint")  # set by resume endpoint
+    eval_split = float(config.get("eval_split", 0.1))
+    eval_steps = int(config.get("eval_steps", 0))
+    wandb_project = config.get("wandb_project") or None
     output_dir = config.get("output_dir", "./output")
     method = config.get("method", "lora")
     num_epochs = config.get("num_epochs", 3)
@@ -234,6 +268,15 @@ def main() -> None:
     dataset = dataset.map(tokenize_fn, batched=True, remove_columns=dataset.column_names)
     dataset = dataset.map(lambda x: {"labels": x["input_ids"]})
 
+    # Split into train / eval if requested
+    eval_dataset = None
+    train_dataset = dataset
+    if eval_split > 0 and len(dataset) > 10:
+        split = dataset.train_test_split(test_size=min(eval_split, 0.2), seed=42)
+        train_dataset = split["train"]
+        eval_dataset = split["test"]
+        _log(f"Dataset split: {len(train_dataset)} train / {len(eval_dataset)} eval samples")
+
     # ------------------------------------------------------------------
     # Trainer
     # ------------------------------------------------------------------
@@ -255,6 +298,13 @@ def main() -> None:
                     "progress": round(progress, 1),
                     "step": state.global_step,
                 }
+                # Include eval metrics if present
+                if "eval_loss" in logs:
+                    payload["eval_loss"] = round(logs["eval_loss"], 4)
+                if "eval_runtime" in logs:
+                    payload["eval_samples_per_second"] = round(
+                        logs.get("eval_samples_per_second", 0), 2
+                    )
                 print(f"AINODE_PROGRESS:{json.dumps(payload)}", flush=True)
 
     training_args = TrainingArguments(
@@ -266,7 +316,7 @@ def main() -> None:
         logging_steps=10,
         save_strategy="epoch",
         save_total_limit=2,
-        report_to="none",
+        report_to=["wandb"] if wandb_project else ["none"],
         gradient_accumulation_steps=gradient_accumulation_steps,
         warmup_steps=warmup_steps,
         warmup_ratio=0.03 if warmup_steps == 0 else 0.0,
@@ -275,17 +325,64 @@ def main() -> None:
         optim=("paged_adamw_8bit" if method == "qlora" else "adamw_torch"),
         gradient_checkpointing=use_gradient_checkpointing,
         ddp_find_unused_parameters=False if world_size > 1 else None,
+        # Evaluation
+        eval_strategy="steps" if (eval_dataset and eval_steps > 0) else ("epoch" if eval_dataset else "no"),
+        eval_steps=eval_steps if eval_steps > 0 else None,
+        per_device_eval_batch_size=max(1, batch_size // 2),
+        load_best_model_at_end=bool(eval_dataset),
+        metric_for_best_model="eval_loss" if eval_dataset else None,
+        greater_is_better=False if eval_dataset else None,
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         callbacks=[ProgressCallback(num_epochs)],
     )
 
+    # Configure W&B if requested
+    if wandb_project:
+        os.environ["WANDB_PROJECT"] = wandb_project
+        if config.get("run_name"):
+            os.environ["WANDB_NAME"] = config["run_name"]
+        _log(f"W&B logging enabled → project: {wandb_project}")
+
     _log("Starting training...")
-    trainer.train()
+    try:
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint or None)
+    except RuntimeError as exc:
+        err_str = str(exc)
+        # Provide actionable messages for the most common GPU errors
+        if "out of memory" in err_str.lower() or "cuda out of memory" in err_str.lower():
+            print(
+                f"AINODE_ERROR:CUDA_OOM — GPU ran out of memory. "
+                f"Try: lower batch_size (currently {batch_size}), "
+                f"enable gradient_checkpointing, or use QLoRA instead of LoRA/full. "
+                f"Original error: {err_str}",
+                file=sys.stderr, flush=True,
+            )
+        elif "cuda" in err_str.lower() or "nccl" in err_str.lower():
+            print(
+                f"AINODE_ERROR:CUDA_ERROR — GPU/NCCL error during training. "
+                f"Check GPU health with nvidia-smi. "
+                f"Original error: {err_str}",
+                file=sys.stderr, flush=True,
+            )
+        elif "address already in use" in err_str.lower():
+            print(
+                f"AINODE_ERROR:DDP_PORT_CONFLICT — Port {os.environ.get('MASTER_PORT', '29500')} "
+                f"is already in use. Another training job may be running. "
+                f"Original error: {err_str}",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            print(f"AINODE_ERROR:TRAINING_FAILED — {err_str}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        _log("Training interrupted by user.")
+        sys.exit(130)
 
     # Only rank-0 writes artifacts.
     if _is_main_process():

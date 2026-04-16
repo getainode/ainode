@@ -1,6 +1,7 @@
 """Tests for ainode.training — config validation, job lifecycle, manager queue, API routes."""
 
 import asyncio
+from pathlib import Path
 import json
 import pytest
 import pytest_asyncio
@@ -655,3 +656,98 @@ class TestTrainingAPI:
         await training_client.delete(f"/api/training/jobs/{job_id}")
         resp = await training_client.delete(f"/api/training/jobs/{job_id}")
         assert resp.status == 409
+
+
+class TestArtifactEndpoints:
+    """Tests for /api/training/jobs/{job_id}/output endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_output_not_found_for_unknown_job(self, training_client):
+        resp = await training_client.get("/api/training/jobs/nonexistent/output")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_output_empty_before_completion(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}/output")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["files"] == []
+        assert data["job_id"] == job_id
+
+    @pytest.mark.asyncio
+    async def test_output_lists_files_when_dir_exists(self, training_client, tmp_path):
+        """If output_dir exists and has files, they appear in the listing."""
+        from ainode.training.engine import JOBS_DIR
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+
+        # Simulate completed artifacts
+        resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
+        output_dir_str = (await resp2.json())["config"]["output_dir"]
+        output_dir = Path(output_dir_str)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "adapter_model.safetensors").write_bytes(b"x" * 1024)
+        (output_dir / "config.json").write_text('{"model_type": "qwen2"}')
+
+        resp3 = await training_client.get(f"/api/training/jobs/{job_id}/output")
+        assert resp3.status == 200
+        data = await resp3.json()
+        names = [f["name"] for f in data["files"]]
+        assert "adapter_model.safetensors" in names
+        assert "config.json" in names
+        assert data["total_files"] == 2
+
+    @pytest.mark.asyncio
+    async def test_download_artifact_path_traversal_blocked(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp2 = await training_client.get(
+            f"/api/training/jobs/{job_id}/output/../../etc/passwd"
+        )
+        # Should 404 (path traversal stripped by router) or 400
+        assert resp2.status in (400, 404)
+
+
+class TestHFTokenPropagation:
+    """Tests for HF token flow from NodeConfig → training job."""
+
+    @pytest.mark.asyncio
+    async def test_hf_token_injected_from_node_config(self, training_client):
+        """When config has hf_token, it propagates to the submitted job config."""
+        # Inject a fake token into the app config
+        training_client.app["config"] = type("C", (), {"hf_token": "hf_test123"})()
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert resp.status == 201
+        data = await resp.json()
+        # Token should be in config (not exposed directly in status but stored)
+        job_id = data["job_id"]
+        resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
+        job_data = await resp2.json()
+        assert job_data["config"]["hf_token"] == "hf_test123"
+
+    @pytest.mark.asyncio
+    async def test_request_token_takes_precedence(self, training_client):
+        """Explicit token in request body wins over NodeConfig token."""
+        training_client.app["config"] = type("C", (), {"hf_token": "hf_config_token"})()
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "hf_token": "hf_explicit"},
+        )
+        assert resp.status == 201
+        job_id = (await resp.json())["job_id"]
+        resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
+        assert (await resp2.json())["config"]["hf_token"] == "hf_explicit"
