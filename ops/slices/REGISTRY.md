@@ -4,46 +4,49 @@
 
 | Slice | Owner | Branch | Status | Linear |
 |-------|-------|--------|--------|--------|
-| engine-vllm | Threadmaster | codex/engine-vllm | MERGED TO DEV | — |
-| api-proxy | Agent (pane 1) | codex/api-proxy | IN PROGRESS | — |
-| cli-polish | Agent (pane 2) | codex/cli-polish | IN PROGRESS | — |
-| discovery-cluster | Agent (pane 3) | codex/discovery-cluster | IN PROGRESS | — |
-
-### docker-engine — scope
-Full scripted Docker-based vLLM for GB10 nodes. Runbook: `ops/runbooks/docker-engine-deploy.md`.
-- `ainode/engine/docker_engine.py` (new) — same interface as VLLMEngine, drives `docker compose`
-- `scripts/install.sh` — writes compose file, .env, systemd user unit, auto-enables
-- `ainode/cli/main.py` — cmd_start picks engine by `config.engine_strategy`
-- `ainode/core/config.py` — add `engine_strategy: "docker" | "pip"` field
-- systemd user unit at `~/.config/systemd/user/ainode.service`, linger enabled
-- Acceptance: one-liner install on Spark 2 brings it to cluster with zero manual steps
+| training-artifacts | Threadmaster | codex/training-artifacts | IN PROGRESS | — |
 
 ## Completed Slices
 
 | Slice | Owner | Merged | Date |
 |-------|-------|--------|------|
 | initial-scaffold | Threadmaster | main | 2026-04-12 |
-| docker-engine | Claude (Opus 4.6) | dev | 2026-04-14 |
+| docker-engine | Claude (Opus 4.6) | main | 2026-04-14 |
+| engine-vllm | Threadmaster | main | 2026-04-14 |
+| api-proxy | Threadmaster | main | 2026-04-14 |
+| cli-polish | Threadmaster | main | 2026-04-14 |
+| discovery-cluster | Threadmaster | main | 2026-04-14 |
+| cluster-member-mode | Threadmaster | main | 2026-04-14 |
+| docker-image-distribution | Threadmaster | main | 2026-04-15 |
+| v0.4.0-release | Threadmaster | main | 2026-04-15 |
+| v0.4.1-release | Threadmaster | main | 2026-04-15 |
+| v0.4.2-release | Threadmaster | main | 2026-04-15 |
+
+### training-artifacts — scope (active)
+Close training module gaps: artifact retrieval, LoRA merge, checkpoint resume,
+HF token propagation, OOM error handling, DDP validation, eval loop, W&B support,
+custom template persistence.
+
+**Files changed:**
+- `ainode/training/api_routes.py` — 6 new endpoints
+- `ainode/training/engine.py` — new config fields (hf_token, eval_split, eval_steps, wandb_project)
+- `ainode/training/_run_training.py` — HF token, DDP validation, OOM handling, eval loop, W&B, checkpoint resume
+- `tests/test_training.py` — 10 new test cases (artifacts, HF token propagation)
+- `docs/mintlify-docs/ainode/training.mdx` — new public doc page
+
+**Acceptance criteria:**
+- `pytest tests/test_training.py` — all pass ✅
+- Training job output accessible via API ✅
+- HF token flows from NodeConfig → job config ✅
+- OOM error produces actionable message ✅
+- eval_split creates validation split ✅
 
 ## Available Slices (Priority Order)
 
-### P0 — MVP (must ship for v0.1)
-- `engine-vllm` — vLLM engine: health checks, readiness wait, log streaming, graceful shutdown
-- `api-proxy` — API proxy: sits in front of vLLM, adds /status, /nodes, model catalog
-- `web-ui` — Embedded chat UI: simple HTML/JS, served by ainode, no external deps
+### P1 — Training smoke tests
+- `training-smoke-gpu` — Run all 4 training methods on real GB10 hardware and verify outputs
+- `training-benchmarks-ui` — Replace benchmark tab stub with real NCCL/RDMA/storage benchmarks
 
-### P1 — Cluster + Polish
-- `cli-polish` — Rich terminal output, progress bars, spinners, colored status
-- `discovery-cluster` — Multi-node: form cluster from discovered nodes, route requests, shard models
-- `onboarding-web` — Browser-based onboarding instead of terminal prompts
-
-### P2 — Differentiators
-- `training-ui` — Fine-tuning from browser: dataset upload, config, launch, monitor
-- `training-engine` — Backend: vLLM/PyTorch training pipeline, LoRA, progress streaming
-- `model-manager` — Download, delete, organize models from UI
-- `metrics` — Prometheus endpoint for GPU, memory, request stats
-
-### P3 — Production
-- `installer-test` — Test install script on real DGX Spark hardware
-- `systemd-service` — Auto-start on boot, service management
-- `auth` — Optional API key auth, user accounts
+### P2 — Polish
+- `model-manager-enhancements` — Model tagging, sorting by disk size, bulk delete
+- `auth-api-keys` — Per-user API keys for multi-tenant deployments

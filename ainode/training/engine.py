@@ -62,6 +62,11 @@ class TrainingConfig:
     distributed: bool = False
     num_nodes: int = 1
     template_id: Optional[str] = None  # training template used
+    hf_token: Optional[str] = None                  # Hugging Face token for gated models
+    _resume_from_checkpoint: Optional[str] = None  # internal: checkpoint path for resume
+    eval_split: float = 0.1          # fraction of dataset to hold out for evaluation (0 = no eval)
+    eval_steps: int = 0              # evaluate every N steps (0 = once per epoch)
+    wandb_project: Optional[str] = None  # if set, enable W&B logging to this project
 
     def validate(self) -> list[str]:
         """Return a list of validation errors (empty means valid)."""
