@@ -49,6 +49,7 @@ const AINode = {
     this.bindChat();
     this.bindLaunchForm();
     this.initTopology();
+    this.initClusterUpdateBtn();
     this.startPolling();
     this.renderConversationList();
     // Restore any in-flight downloads from before page refresh
@@ -384,8 +385,7 @@ const AINode = {
   initClusterUpdateBtn() {
     var self = this;
     var btn = document.getElementById('cluster-update-all-btn');
-    if (!btn || btn._bound) return;
-    btn._bound = true;
+    if (!btn) return;
     btn.addEventListener('click', function () {
       var nodeCount = (self.state.nodes || []).length || 1;
       if (!confirm('Update all ' + nodeCount + ' node(s) to the latest AINode image?\n\nEach node will docker pull + restart. The master updates last.')) return;
@@ -462,7 +462,19 @@ const AINode = {
     var info = this.state.versionInfo;
     var self = this;
 
-    // Remove existing badge
+    // Show/hide the cluster "Update all" button based on update availability
+    var clusterBtn = document.getElementById('cluster-update-all-btn');
+    if (clusterBtn) {
+      if (info && info.update_available) {
+        clusterBtn.style.display = '';
+        clusterBtn.title = 'Update all nodes to v' + info.latest;
+        clusterBtn.textContent = '⬆ Update all  v' + info.latest;
+      } else {
+        clusterBtn.style.display = 'none';
+      }
+    }
+
+    // Remove existing top-bar badge
     var existing = document.getElementById('update-badge');
     if (existing) existing.remove();
 
@@ -551,7 +563,6 @@ const AINode = {
     if (nodesEl) nodesEl.textContent = r.total_nodes + (r.total_nodes === 1 ? ' node' : ' nodes');
     if (vramEl) vramEl.textContent = Math.round(r.total_vram_gb) + ' GB VRAM';
     if (gpusEl) gpusEl.textContent = r.total_gpus + (r.total_gpus === 1 ? ' GPU' : ' GPUs');
-    this.initClusterUpdateBtn();
 
     // Also surface on the Server view top bar (if the element exists).
     var srvEl = document.getElementById('server-cluster-summary');
