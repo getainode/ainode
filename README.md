@@ -230,37 +230,21 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 
 ---
 
-## Relation to eugr/spark-vllm-docker
+## Relation to the Community
 
-AINode started as a polished frontend and training layer built on top of
-the excellent [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
-project.
+AINode builds on excellent open-source work in the DGX Spark ecosystem.
+In particular, our base image inherits the patched NCCL from
+**[eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)**
+(`dgxspark-3node-ring` branch), which we've found to be the most reliable
+variant for handling GB10 unified-memory topologies and fabric setups.
 
-We use the same battle-tested, GB10-patched vLLM + NCCL foundation
-(including recipes and patches from eugr's `dgxspark-3node-ring` and
-`4x-spark-cluster` work). This gives us reliable tensor/pipeline
-parallelism and fabric performance on DGX Spark setups — exactly what the
-community has come to trust.
+eugr's project remains the go-to for raw, high-performance vLLM clustering
+on Spark hardware. AINode layers a modern browser UI, one-command
+deployment, in-browser chat + OpenAI API, and distributed fine-tuning on
+top of that strong foundation.
 
-**What AINode adds:**
-
-- Single unified container with one-command install (`curl | bash`)
-- Automatic node discovery via UDP (no manual SSH or Ray head/worker
-  setup for basic clusters)
-- Beautiful live cluster UI with glowing node rings and VRAM usage
-- In-browser chat interface + full OpenAI-compatible API
-- Browser-based distributed fine-tuning (LoRA, QLoRA, full fine-tuning)
-  with dataset upload, evaluation, and live monitoring
-- Simplified launch panel for tensor/pipeline sharding and solo mode
-
-If you just need raw high-performance vLLM inference on Sparks,
-[eugr's repo](https://github.com/eugr/spark-vllm-docker) remains an
-outstanding choice. If you want a complete local AI platform (chat +
-API + training + monitoring) with minimal friction, that's what AINode
-is designed for.
-
-Huge thanks to eugr and all contributors to `spark-vllm-docker` — this
-project wouldn't exist without that foundation.
+Huge thanks to eugr and the contributors making multi-node Spark setups
+practical.
 
 ---
 
