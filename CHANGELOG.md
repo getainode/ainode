@@ -12,6 +12,14 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.5] — 2026-04-16
+
+### Fixed
+- **Master node shows real identity while engine loads** — previously the master showed a plain "Loading." placeholder even when the node was already discovered, hiding the node name and GPU. Now the real node (name, GB10, crown) is always visible once discovered; a dim veil + spinning arc + "starting..." text overlays it while the engine warms up, fading out when ready.
+- **"Update all" button hidden when cluster is current** — the button now only appears in the CLUSTER pill when `GET /api/version/check` confirms a newer version is available on GHCR. Shows the target version: `⬆ Update all  v0.4.6`. Hides immediately after a successful update.
+
+---
+
 ## [0.4.4] — 2026-04-16
 
 ### Fixed
