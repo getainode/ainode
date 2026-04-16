@@ -12,6 +12,19 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.4] — 2026-04-16
+
+### Fixed
+- **AWQ models crash on GB10 (sm_12.1)** — vLLM auto-upgrades AWQ → `awq_marlin`, but the Marlin CUDA kernels aren't compiled for sm_12.1 in the eugr base image. Engine now pins `--quantization awq` whenever the model name contains `awq`, preventing the upgrade. Fixes [#34](https://github.com/getainode/ainode/issues/34) reported by Chennu@riai360.
+
+### Added
+- **Cluster-wide update from the master UI** — `⬆ Update all` button in the CLUSTER pill. Master SSHes into each worker in parallel, runs `docker pull + systemctl restart`, updates itself last. Per-node progress panel shows pending → updating → done/failed status live.
+- **`POST /api/cluster/update-all`** — trigger cluster-wide update via REST.
+- **`GET /api/cluster/update-status`** — poll per-node update progress.
+- **Topology loading animation** — before the engine is ready, the cluster view shows a pulsating dashed circle at center with a breathing `Loading...` label and a spinning arc. When the engine comes online, it cross-fades into the real master node over 0.8 seconds. Worker nodes fade in individually (~1.2s each) as they are discovered — not all at once.
+
+---
+
 ## [0.4.3] — 2026-04-15
 
 ### Added

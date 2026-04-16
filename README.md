@@ -224,6 +224,9 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 | `ainode role master\|worker\|solo` CLI | ✅ |
 | Worker nodes start instantly — no model required | ✅ |
 | Web portal available immediately on start | ✅ |
+| Cluster-wide update from master UI (`⬆ Update all` button) | ✅ |
+| Topology loading animation + per-node fade-in | ✅ |
+| AWQ models on GB10 (sm_12.1) — `awq_marlin` kernel fix | ✅ |
 
 ---
 
