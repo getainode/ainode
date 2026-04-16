@@ -105,6 +105,8 @@ def create_app(
     app.router.add_get("/api/cluster/resources", handle_cluster_resources)
     app.router.add_post("/api/cluster/role", handle_cluster_set_role)
     app.router.add_post("/api/cluster/id", handle_cluster_set_id)
+    app.router.add_post("/api/cluster/update-all", handle_cluster_update_all)
+    app.router.add_get("/api/cluster/update-status", handle_cluster_update_status)
     app.router.add_get("/api/config", handle_get_config)
     app.router.add_post("/api/engine/set-model", handle_set_model)
     app.router.add_get("/api/version/check", handle_version_check)
@@ -680,6 +682,134 @@ def _rebuild_announcement(app: web.Application) -> None:
     if announcement is not None:
         announcement.cluster_id = getattr(config, "cluster_id", "default")
         announcement.role = getattr(config, "cluster_role", "auto")
+
+
+# In-memory store for cluster update job state
+_cluster_update_state: dict = {}
+
+
+async def handle_cluster_update_all(request: web.Request) -> web.Response:
+    """POST /api/cluster/update-all — pull latest image and restart ainode on all cluster nodes.
+
+    Runs updates in parallel across all discovered nodes via SSH.
+    The master also updates itself last (so it can coordinate the others first).
+    Poll GET /api/cluster/update-status for live per-node progress.
+    """
+    import asyncio
+    import subprocess as _sp
+    cluster: "ClusterState" = request.app["cluster_state"]
+    config: NodeConfig = request.app["config"]
+
+    nodes = cluster.members()
+    # Include the master itself
+    all_nodes = [{"node_id": config.node_id, "node_name": config.node_id, "host": "localhost", "is_self": True}]
+    for n in nodes:
+        if n.node_id != config.node_id:
+            peer_ip = getattr(n, "peer_ip", None) or n.host
+            all_nodes.append({"node_id": n.node_id, "node_name": getattr(n, "node_name", n.node_id), "host": peer_ip, "is_self": False})
+
+    if len(all_nodes) == 0:
+        return web.json_response({"error": "No nodes in cluster"}, status=400)
+
+    update_id = f"update-{int(asyncio.get_event_loop().time())}"
+    _cluster_update_state[update_id] = {
+        "id": update_id,
+        "status": "running",
+        "nodes": {n["node_id"]: {"node_name": n["node_name"], "status": "pending", "log": ""} for n in all_nodes},
+        "started_at": asyncio.get_event_loop().time(),
+    }
+
+    ssh_user = getattr(config, "ssh_user", "sem") or "sem"
+    image = "ghcr.io/getainode/ainode:latest"
+
+    async def _update_node(node: dict) -> None:
+        nid = node["node_id"]
+        state = _cluster_update_state[update_id]["nodes"][nid]
+        state["status"] = "updating"
+
+        if node["is_self"]:
+            # Update self: pull then restart service
+            try:
+                loop = asyncio.get_event_loop()
+                pull = await loop.run_in_executor(
+                    None, lambda: _sp.run(
+                        ["docker", "pull", image],
+                        capture_output=True, text=True, timeout=600
+                    )
+                )
+                if pull.returncode != 0:
+                    state["status"] = "failed"
+                    state["log"] = pull.stderr[:500]
+                    return
+                restart = await loop.run_in_executor(
+                    None, lambda: _sp.run(
+                        ["systemctl", "restart", "ainode"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                )
+                state["status"] = "done" if restart.returncode == 0 else "failed"
+                state["log"] = restart.stderr[:200] if restart.returncode != 0 else "Updated and restarted"
+            except Exception as exc:
+                state["status"] = "failed"
+                state["log"] = str(exc)[:200]
+        else:
+            # Update remote node via SSH
+            host = node["host"]
+            cmd = (
+                f"docker pull {image} && "
+                f"sudo systemctl restart ainode && "
+                f"echo UPDATE_OK"
+            )
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, lambda: _sp.run(
+                        ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                         f"{ssh_user}@{host}", cmd],
+                        capture_output=True, text=True, timeout=700
+                    )
+                )
+                if result.returncode == 0 and "UPDATE_OK" in result.stdout:
+                    state["status"] = "done"
+                    state["log"] = "Updated and restarted"
+                else:
+                    state["status"] = "failed"
+                    state["log"] = (result.stderr or result.stdout)[:300]
+            except Exception as exc:
+                state["status"] = "failed"
+                state["log"] = str(exc)[:200]
+
+    async def _run_all():
+        # Update workers in parallel, then self last
+        workers = [n for n in all_nodes if not n["is_self"]]
+        self_node = next((n for n in all_nodes if n["is_self"]), None)
+
+        await asyncio.gather(*[_update_node(n) for n in workers])
+
+        if self_node:
+            await _update_node(self_node)
+
+        _cluster_update_state[update_id]["status"] = "complete"
+
+    asyncio.get_event_loop().create_task(_run_all())
+
+    return web.json_response({
+        "update_id": update_id,
+        "nodes": list(_cluster_update_state[update_id]["nodes"].keys()),
+        "message": f"Updating {len(all_nodes)} node(s). Poll /api/cluster/update-status?id={update_id} for progress.",
+    }, status=202)
+
+
+async def handle_cluster_update_status(request: web.Request) -> web.Response:
+    """GET /api/cluster/update-status?id=... — poll update progress."""
+    update_id = request.query.get("id", "")
+    if not update_id or update_id not in _cluster_update_state:
+        # Return most recent if no ID given
+        if _cluster_update_state:
+            update_id = max(_cluster_update_state.keys())
+        else:
+            return web.json_response({"error": "No update in progress"}, status=404)
+    return web.json_response(_cluster_update_state[update_id])
 
 
 async def handle_cluster_set_role(request: web.Request) -> web.Response:

@@ -381,6 +381,83 @@ const AINode = {
       .catch(function () {});
   },
 
+  initClusterUpdateBtn() {
+    var self = this;
+    var btn = document.getElementById('cluster-update-all-btn');
+    if (!btn || btn._bound) return;
+    btn._bound = true;
+    btn.addEventListener('click', function () {
+      var nodeCount = (self.state.nodes || []).length || 1;
+      if (!confirm('Update all ' + nodeCount + ' node(s) to the latest AINode image?\n\nEach node will docker pull + restart. The master updates last.')) return;
+      self.runClusterUpdate();
+    });
+  },
+
+  runClusterUpdate() {
+    var self = this;
+    var btn = document.getElementById('cluster-update-all-btn');
+    var panel = document.getElementById('cluster-update-panel');
+    if (btn) { btn.disabled = true; btn.textContent = 'Updating...'; }
+    if (panel) { panel.style.display = ''; panel.innerHTML = '<div class="cluster-update-row"><span class="cu-spinner">⟳</span> Starting update...</div>'; }
+
+    fetch('/api/cluster/update-all', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) {
+          self.toast('Update failed: ' + data.error, 'error');
+          if (btn) { btn.disabled = false; btn.textContent = '⬆ Update all'; }
+          return;
+        }
+        var updateId = data.update_id;
+        self._pollClusterUpdate(updateId);
+      })
+      .catch(function () {
+        self.toast('Update request failed', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '⬆ Update all'; }
+      });
+  },
+
+  _pollClusterUpdate(updateId) {
+    var self = this;
+    var panel = document.getElementById('cluster-update-panel');
+    var btn = document.getElementById('cluster-update-all-btn');
+
+    fetch('/api/cluster/update-status?id=' + updateId)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!panel) return;
+
+        // Render per-node status
+        var rows = Object.entries(data.nodes || {}).map(function (entry) {
+          var nid = entry[0], n = entry[1];
+          var icon = n.status === 'done' ? '✅' :
+                     n.status === 'failed' ? '❌' :
+                     n.status === 'updating' ? '<span class="cu-spinner">⟳</span>' : '⏳';
+          return '<div class="cluster-update-row">' + icon + ' <b>' + self.esc(n.node_name || nid) + '</b> — ' + self.esc(n.status) +
+                 (n.log ? ' <span class="cu-log">' + self.esc(n.log.slice(0, 80)) + '</span>' : '') + '</div>';
+        }).join('');
+
+        panel.innerHTML = rows;
+
+        if (data.status === 'complete') {
+          var allOk = Object.values(data.nodes).every(function (n) { return n.status === 'done'; });
+          if (btn) { btn.disabled = false; btn.textContent = '⬆ Update all'; }
+          self.toast(allOk ? 'All nodes updated ✅' : 'Update complete — some nodes failed', allOk ? 'success' : 'error');
+          // Clear panel after 10s
+          setTimeout(function () {
+            if (panel) panel.style.display = 'none';
+            self.checkVersion(); // refresh version badge
+          }, 10000);
+        } else {
+          // Still running — poll again in 3s
+          setTimeout(function () { self._pollClusterUpdate(updateId); }, 3000);
+        }
+      })
+      .catch(function () {
+        setTimeout(function () { self._pollClusterUpdate(updateId); }, 5000);
+      });
+  },
+
   renderVersionBadge() {
     var info = this.state.versionInfo;
     var self = this;
@@ -474,6 +551,7 @@ const AINode = {
     if (nodesEl) nodesEl.textContent = r.total_nodes + (r.total_nodes === 1 ? ' node' : ' nodes');
     if (vramEl) vramEl.textContent = Math.round(r.total_vram_gb) + ' GB VRAM';
     if (gpusEl) gpusEl.textContent = r.total_gpus + (r.total_gpus === 1 ? ' GPU' : ' GPUs');
+    this.initClusterUpdateBtn();
 
     // Also surface on the Server view top bar (if the element exists).
     var srvEl = document.getElementById('server-cluster-summary');
