@@ -689,24 +689,31 @@ _cluster_update_state: dict = {}
 
 
 async def handle_cluster_update_all(request: web.Request) -> web.Response:
-    """POST /api/cluster/update-all — pull latest image and restart ainode on all cluster nodes.
+    """POST /api/cluster/update-all — pull latest image and restart on all nodes.
 
-    Runs updates in parallel across all discovered nodes via SSH.
-    The master also updates itself last (so it can coordinate the others first).
+    Workers are updated via HTTP (POST /api/engine/update on each worker's
+    API port) — no SSH required. The master updates itself last.
     Poll GET /api/cluster/update-status for live per-node progress.
     """
     import asyncio
     import subprocess as _sp
     cluster: "ClusterState" = request.app["cluster_state"]
     config: NodeConfig = request.app["config"]
+    session: aiohttp.ClientSession = request.app["client_session"]
 
     nodes = cluster.members()
-    # Include the master itself
-    all_nodes = [{"node_id": config.node_id, "node_name": config.node_id, "host": "localhost", "is_self": True}]
+    all_nodes = [{"node_id": config.node_id, "node_name": config.node_id, "host": "localhost", "port": config.web_port or 3000, "is_self": True}]
     for n in nodes:
         if n.node_id != config.node_id:
             peer_ip = getattr(n, "peer_ip", None) or n.host
-            all_nodes.append({"node_id": n.node_id, "node_name": getattr(n, "node_name", n.node_id), "host": peer_ip, "is_self": False})
+            port = getattr(n, "web_port", 3000) or 3000
+            all_nodes.append({
+                "node_id": n.node_id,
+                "node_name": getattr(n, "node_name", n.node_id),
+                "host": peer_ip,
+                "port": port,
+                "is_self": False,
+            })
 
     if len(all_nodes) == 0:
         return web.json_response({"error": "No nodes in cluster"}, status=400)
@@ -719,7 +726,6 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
         "started_at": asyncio.get_event_loop().time(),
     }
 
-    ssh_user = getattr(config, "ssh_user", "sem") or "sem"
     image = "ghcr.io/getainode/ainode:latest"
 
     async def _update_node(node: dict) -> None:
@@ -728,7 +734,7 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
         state["status"] = "updating"
 
         if node["is_self"]:
-            # Update self: pull then restart service
+            # Update self: docker pull + systemctl restart
             try:
                 loop = asyncio.get_event_loop()
                 pull = await loop.run_in_executor(
@@ -753,34 +759,26 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
                 state["status"] = "failed"
                 state["log"] = str(exc)[:200]
         else:
-            # Update remote node via SSH
-            host = node["host"]
-            cmd = (
-                f"docker pull {image} && "
-                f"sudo systemctl restart ainode && "
-                f"echo UPDATE_OK"
-            )
+            # Update remote worker via HTTP — no SSH needed.
+            # Each worker runs the same AINode container with /api/engine/update.
+            url = f"http://{node['host']}:{node['port']}/api/engine/update"
             try:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None, lambda: _sp.run(
-                        ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                         f"{ssh_user}@{host}", cmd],
-                        capture_output=True, text=True, timeout=700
-                    )
-                )
-                if result.returncode == 0 and "UPDATE_OK" in result.stdout:
-                    state["status"] = "done"
-                    state["log"] = "Updated and restarted"
-                else:
-                    state["status"] = "failed"
-                    state["log"] = (result.stderr or result.stdout)[:300]
+                async with session.post(url, timeout=aiohttp.ClientTimeout(total=700)) as resp:
+                    data = await resp.json()
+                    if resp.status < 300:
+                        state["status"] = "done"
+                        state["log"] = data.get("message", "Updated and restarting")
+                    else:
+                        state["status"] = "failed"
+                        state["log"] = data.get("error", f"HTTP {resp.status}")[:300]
+            except asyncio.TimeoutError:
+                state["status"] = "failed"
+                state["log"] = "Timeout — worker may still be pulling the image"
             except Exception as exc:
                 state["status"] = "failed"
                 state["log"] = str(exc)[:200]
 
     async def _run_all():
-        # Update workers in parallel, then self last
         workers = [n for n in all_nodes if not n["is_self"]]
         self_node = next((n for n in all_nodes if n["is_self"]), None)
 
@@ -796,7 +794,7 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
     return web.json_response({
         "update_id": update_id,
         "nodes": list(_cluster_update_state[update_id]["nodes"].keys()),
-        "message": f"Updating {len(all_nodes)} node(s). Poll /api/cluster/update-status?id={update_id} for progress.",
+        "message": f"Updating {len(all_nodes)} node(s) via HTTP. Poll /api/cluster/update-status?id={update_id} for progress.",
     }, status=202)
 
 
