@@ -170,6 +170,31 @@ class DockerEngine:
         self._log_thread.start()
         return self.process.poll() is None
 
+    def launch_distributed(self, sharding_config=None) -> bool:
+        """Launch distributed inference — compatibility shim for the /api/models/load path.
+
+        Accepts an optional sharding_config (from VLLMEngine's interface) but
+        delegates to start_distributed() which reads peer_ips and TP size from
+        self.config. If the config isn't already in head mode, we flip it.
+        """
+        if sharding_config is not None:
+            # Apply sharding config fields to our config
+            if hasattr(sharding_config, "model") and sharding_config.model:
+                self.config.model = sharding_config.model
+            if hasattr(sharding_config, "peer_ips") and sharding_config.peer_ips:
+                self.config.peer_ips = sharding_config.peer_ips
+            if hasattr(sharding_config, "strategy"):
+                pass  # TP vs PP handled by eugr launcher via env vars
+
+        if self.config.distributed_mode != "head":
+            self.config.distributed_mode = "head"
+            try:
+                self.config.save()
+            except Exception:
+                pass
+
+        return self.start_distributed()
+
     def stop(self) -> None:
         """Graceful shutdown. For distributed, also invokes eugr's ``stop``."""
         if self.process and self.process.poll() is None:
