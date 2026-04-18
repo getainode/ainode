@@ -62,6 +62,16 @@ DOCKER_RUN_CMD = (
     " -v {ainode_home}:/root/.ainode"
     " -v /var/run/docker.sock:/var/run/docker.sock"
     " -v {home}/.ssh:/root/.ssh:ro"
+    # Shared cluster storage — required by DockerEngine._publish_nccl_init_script
+    # to stage the per-node NCCL init shim. ``--mount type=bind`` (vs ``-v``) is
+    # intentional: it fails loudly at container start if /mnt/shared-models does
+    # not exist, surfacing the operator-facing setup requirement immediately
+    # rather than silently degrading to partial fix. Operators who do not yet
+    # have an NFS mount should ``sudo mkdir -p /mnt/shared-models`` before
+    # upgrading. See CHANGELOG v0.4.9 entry.
+    # TODO(v0.4.10): once the shim is baked into ainode-base, this mount is no
+    # longer required; make it conditional on shared-storage being present.
+    " --mount type=bind,source=/mnt/shared-models,target=/mnt/shared-models,bind-propagation=rshared"
     " {image}"
 )
 
