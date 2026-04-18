@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ainode"
-version = "0.4.8"
+version = "0.4.9"
 description = "Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning in your browser."
 readme = "README.md"
 license = {text = "Apache-2.0"}

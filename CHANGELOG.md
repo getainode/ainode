@@ -12,6 +12,29 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.9] — 2026-04-18
+
+### Fixed
+- **4-node distributed inference: `NCCL_IB_HCA` now auto-detected per-node** — four bugs in the NCCL environment generator prevented TP=4 ring formation on any cluster with heterogeneous HCA naming (MOFED `mlx5_*` on some nodes, stock Ubuntu `rocep*`/`roceP*` on others), or with vestigial direct-connect ports on dual-homed nodes:
+  1. `_detect_ib_hca()` filtered `ibdev2netdev` output by the `mlx5_` prefix and silently returned empty on non-MOFED nodes, triggering a hardcoded `mlx5_0` fallback that pointed at a direct-connect port. Now accepts both naming schemes.
+  2. `_detect_ib_hca()` did not filter by port `(Up)` state. Down ports could poison the output. Fixed to match eugr's autodiscover contract.
+  3. Detection ran on the head only and broadcast one value cluster-wide. New startup shim (`scripts/nccl-env-init.sh`) runs inside each vllm_node container via `docker run --entrypoint` and exports the correct node-local `NCCL_IB_HCA`.
+  4. `_write_eugr_env()` conflated `IB_IF` (HCA device name in eugr's model) with `cluster_interface` (netdev). Fixed so eugr's `launch-cluster.sh` receives a real HCA list for `NCCL_IB_HCA`.
+- **Direct-connect HCAs now excluded from NCCL ring automatically** — detection now filters HCAs to those whose netdev IP is on the cluster subnet (derived from `cluster_interface`). On Sparks 1 & 2 in our reference cluster, this keeps `mlx5_1` / `mlx5_3` (switch-facing) and drops `mlx5_0` (10.0.0.x direct-connect), eliminating one source of TP=4 hangs.
+
+### Changed
+- **ainode systemd unit now mounts `/mnt/shared-models`** via `docker --mount type=bind`. Required by the new per-node NCCL shim publish path. Uses `--mount` (not `-v`) so the service **fails loudly** if the path is missing rather than silently degrading to partial fix.
+
+### Upgrade notes
+- **Create `/mnt/shared-models` on every node before upgrading** — `sudo mkdir -p /mnt/shared-models`. NFS mount recommended for clusters (so the master's `docker run -v` mount on each peer resolves to shared model files and the NCCL init shim). On the master, bind-mount or NFS-export the path from your model storage location.
+- The v0.4.9 fix is fully effective only when every node has `/mnt/shared-models` populated. Without it, the service fails to start until the path exists. Create the dir, or downgrade if you're not ready.
+
+### Known limitations
+- The per-node NCCL shim is distributed via `/mnt/shared-models`, not baked into the `ainode-base` image. Clusters without shared storage get a startup failure by design. `TODO(v0.4.10)` — move the shim into `ainode-base` so the mount becomes optional and `ainode-base` containers have the shim natively.
+- Performance numbers for TP=2 on direct-connect 10.0.0.0/24 (advertised in v0.4.0's README as "NET/IB RoCE @ 200 Gb/s") have not been re-measured on the switched fabric post-fix. v0.4.9 smoke test captures live `NCCL_DEBUG=INFO`, `ib_write_bw`, and pre/post TP=2 throughput to `ops/runbooks/2026-04-18-v0.4.9-verification.md`. If results differ from v0.4.0's claim, a README footnote will acknowledge the earlier measurement was on direct-connect and may have been partially socket-fallback.
+
+---
+
 ## [0.4.8] — 2026-04-17
 
 ### Fixed
