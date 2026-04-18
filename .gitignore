@@ -39,8 +39,18 @@ models/
 *.safetensors
 *.gguf
 
-# Ops (internal runbooks, session logs — not for public repo)
-ops/
+# Ops (internal runbooks, session logs — not for public repo).
+# Named-convention whitelist: files matching *-verification.md under
+# ops/runbooks/ are explicitly public — they're the audit trail for
+# release verification and belong in git. Everything else stays private.
+# Note: git cannot re-include files whose parent directory is excluded,
+# so we exclude ops/* (contents) rather than ops/ (dir) and re-include
+# the runbooks dir, then exclude its contents, then re-include the
+# naming-convention whitelist.
+ops/*
+!ops/runbooks/
+ops/runbooks/*
+!ops/runbooks/*-verification.md
 
 # Node (for web UI)
 node_modules/
