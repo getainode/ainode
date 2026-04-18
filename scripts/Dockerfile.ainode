@@ -63,7 +63,14 @@ RUN apt-get update \
 COPY scripts/_eugr /opt/spark-vllm-docker
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# Per-node NCCL init shim — bind-mounted into each vllm_node container at
+# distributed launch and used as ``--entrypoint``. See scripts/nccl-env-init.sh
+# and ainode/engine/docker_engine.py (_publish_nccl_init_script).
+# TODO(v0.4.10): also COPY into ainode-base so vllm_node containers have this
+# natively without needing the /mnt/shared-models mount.
+COPY scripts/nccl-env-init.sh /usr/local/bin/nccl-env-init.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/nccl-env-init.sh \
     && chmod +x /opt/spark-vllm-docker/launch-cluster.sh \
     && chmod +x /opt/spark-vllm-docker/autodiscover.sh \
     && chmod +x /opt/spark-vllm-docker/hf-download.sh 2>/dev/null \
