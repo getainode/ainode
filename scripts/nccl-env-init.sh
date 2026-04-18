@@ -27,6 +27,12 @@
 # in Dockerfile.ainode so the shim is available without requiring
 # /mnt/shared-models to be mounted. Once done, this NFS-publish path
 # becomes optional instead of required.
+#
+# TODO(v0.4.10): eugr's autodiscover.sh has the same ibdev2netdev
+# dependency this shim originally did. If AINode's sysfs detection
+# ever returns empty, the launcher's fallback to autodiscover fails
+# the same way (ibdev2netdev not in container). Upstream a /sys-based
+# autodiscover to eugr, or wrap it.
 
 set -euo pipefail
 
@@ -58,13 +64,42 @@ except Exception:
 PY
 }
 
+# Detect HCAs via /sys/class/infiniband — kernel-provided, always present
+# inside the eugr base image. Prior implementation used ``ibdev2netdev``,
+# but that tool ships in MOFED / infiniband-diags on the host, not in the
+# container where this shim actually runs.
 declare -a KEEP=()
-if command -v ibdev2netdev >/dev/null 2>&1; then
-    while IFS= read -r line; do
-        [[ "$line" == *"(Up)" ]] || continue
-        hca=$(echo "$line" | grep -oE "(mlx5_[0-9]+|rocep[A-Za-z0-9_]+|roceP[A-Za-z0-9_]+)" | head -1)
-        netdev=$(echo "$line" | sed -E 's|.*==>[[:space:]]+([^[:space:]]+).*|\1|')
-        [[ -z "$hca" || -z "$netdev" ]] && continue
+if [[ -d /sys/class/infiniband ]]; then
+    for hca_dir in /sys/class/infiniband/*/; do
+        [[ -d "$hca_dir" ]] || continue
+        hca=$(basename "$hca_dir")
+        # Accept only the two naming schemes we expect — the kernel may
+        # expose unrelated virtual devices under this path on some hosts.
+        [[ "$hca" =~ ^(mlx5_[0-9]+|rocep[A-Za-z0-9_]+|roceP[A-Za-z0-9_]+)$ ]] || continue
+
+        # Port state — parse leading integer from the file and match
+        # against the ib_port_state enum (include/rdma/ib_verbs.h):
+        #   0 = NOP, 1 = DOWN, 2 = INIT, 3 = ARMED,
+        #   4 = ACTIVE (normal up),
+        #   5 = ACTIVE_DEFER (also functional for traffic).
+        # Accept {4, 5}. Leading-integer parse is stable across kernels
+        # where the textual label (e.g. "4: ACTIVE") may vary.
+        state_file="$hca_dir/ports/1/state"
+        [[ -r "$state_file" ]] || continue
+        state=$(cat "$state_file" 2>/dev/null | tr -d '[:space:]')
+        state_num="${state%%[!0-9]*}"
+        case "$state_num" in
+            4|5) ;;
+            *)   continue ;;
+        esac
+
+        # Netdev via /sys/class/infiniband/<hca>/device/net/<netdev>.
+        # Empty when no Ethernet overlay (pure-IB ports); skip those.
+        netdev_dir="$hca_dir/device/net"
+        [[ -d "$netdev_dir" ]] || continue
+        # shellcheck disable=SC2012
+        netdev=$(ls "$netdev_dir" 2>/dev/null | head -1)
+        [[ -z "$netdev" ]] && continue
 
         if [[ -n "$SUBNET" ]]; then
             cidr=$(ip -o -4 addr show dev "$netdev" 2>/dev/null | awk '{print $4}' | head -1)
@@ -74,9 +109,9 @@ if command -v ibdev2netdev >/dev/null 2>&1; then
         fi
 
         KEEP+=("$hca")
-    done < <(ibdev2netdev 2>/dev/null)
+    done
 else
-    log "ibdev2netdev not present; NCCL will auto-detect"
+    log "/sys/class/infiniband not present; NCCL will auto-detect"
 fi
 
 if [[ ${#KEEP[@]} -gt 0 ]]; then

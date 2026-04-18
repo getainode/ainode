@@ -444,13 +444,23 @@ class DockerEngine:
     def _detect_ib_hca(subnet_cidr: Optional[str] = None) -> Optional[str]:
         """Return a comma-joined list of Up, on-subnet HCAs, or None.
 
-        Bug 1 fix: accept both MOFED naming (``mlx5_*``) and stock Ubuntu
-        rdma-core naming (``rocep*``, ``roceP*``). Prior code filtered by
-        ``startswith("mlx5_")`` and silently returned empty on any node
-        without MOFED, triggering the removed ``"mlx5_0"`` hardcoded fallback.
+        Reads ``/sys/class/infiniband/`` directly. Prior implementation
+        shelled out to ``ibdev2netdev``, but that tool ships in MOFED /
+        infiniband-diags on the host and is NOT in our containers (neither
+        the eugr base nor the ainode layer). sysfs is kernel-provided and
+        always available.
 
-        Bug 2 fix: only include ports in ``(Up)`` state. Matches eugr's
-        ``ibdev2netdev | awk '/\\(Up\\)/ ...'`` contract.
+        Accepts any HCA name the kernel exposes. Udev rules set the name:
+        MOFED gives ``mlx5_*``, stock Ubuntu rdma-core gives ``rocep*`` /
+        ``roceP*``. Regex limits to those patterns so the detector doesn't
+        pick up unrelated entries (virtual HCAs, etc.).
+
+        Port state is parsed as the leading integer and matched against the
+        ``ib_port_state`` kernel enum (``include/rdma/ib_verbs.h``):
+        0 = NOP, 1 = DOWN, 2 = INIT, 3 = ARMED, 4 = ACTIVE, 5 = ACTIVE_DEFER.
+        Accept {4, 5}, reject everything else. Leading-integer parse is
+        format-stable where substring matching on the textual label is not
+        (kernels emit ``"4: ACTIVE"``, ``"4\\n"``, ``"4 : ACTIVE"``, etc.).
 
         Subnet filter: if ``subnet_cidr`` is given, exclude HCAs whose
         netdev does not have an IP inside that subnet. On nodes 1 & 2 in
@@ -459,23 +469,18 @@ class DockerEngine:
 
         Returns None if no HCA passes the filters — caller should leave
         ``NCCL_IB_HCA`` unset rather than fall back to a guess.
+
+        TODO(v0.4.10): eugr's ``autodiscover.sh`` also depends on
+        ``ibdev2netdev``. When this function returns None, the launcher
+        writes ``IB_IF=`` (empty) → eugr runs its own autodiscover →
+        fails with the same "ibdev2netdev not found" error. Upstream a
+        /sys-based autodiscover to eugr, or wrap it.
         """
-        if shutil.which("ibdev2netdev") is None:
-            return None
-        try:
-            out = subprocess.run(
-                ["ibdev2netdev"], capture_output=True, text=True, timeout=5,
-            )
-            if out.returncode != 0:
-                return None
-        except Exception:
+        ib_base = Path("/sys/class/infiniband")
+        if not ib_base.is_dir():
             return None
 
-        # Accepts old format ("mlx5_0 port 1 ==> enp1s0f0np0 (Up)") and
-        # MOFED-verbose format ("0000:01:00.0 mlx5_0 (MT4129 ...) ==> ... (Up)").
-        line_re = re.compile(
-            r"(mlx5_\d+|rocep\w+|roceP\w+)\b.*?==>\s*(\S+)\s*\(Up\)"
-        )
+        name_re = re.compile(r"^(mlx5_\d+|rocep\w+|roceP\w+)$")
 
         subnet_obj = None
         if subnet_cidr:
@@ -484,12 +489,45 @@ class DockerEngine:
             except Exception:
                 subnet_obj = None
 
+        try:
+            hca_dirs = sorted(ib_base.iterdir())
+        except Exception:
+            return None
+
         devs: List[str] = []
-        for line in out.stdout.splitlines():
-            m = line_re.search(line)
-            if not m:
+        for hca_dir in hca_dirs:
+            hca = hca_dir.name
+            if not name_re.match(hca):
                 continue
-            hca, netdev = m.group(1), m.group(2)
+
+            # Port state — parse leading integer and match against the
+            # ib_port_state enum (include/rdma/ib_verbs.h):
+            #   0 = NOP, 1 = DOWN, 2 = INIT, 3 = ARMED,
+            #   4 = ACTIVE (normal up),
+            #   5 = ACTIVE_DEFER (also functional for traffic).
+            # Accept {4, 5}, reject everything else. File content on recent
+            # kernels is "4: ACTIVE\n" but can be "4\n" or "4 : ACTIVE" on
+            # others — leading-integer parse is format-stable where a
+            # substring match on the textual label is not.
+            try:
+                state_text = (hca_dir / "ports" / "1" / "state").read_text().strip()
+            except Exception:
+                continue
+            state_match = re.match(r"(\d+)", state_text)
+            if not state_match or int(state_match.group(1)) not in (4, 5):
+                continue
+
+            # Netdev via /sys/class/infiniband/<hca>/device/net/<netdev>.
+            # iterdir() returns empty if no netdev is associated (e.g.
+            # a pure-IB port with no Ethernet overlay); skip those.
+            try:
+                netdev_dir = hca_dir / "device" / "net"
+                netdevs = list(netdev_dir.iterdir())
+            except Exception:
+                continue
+            if not netdevs:
+                continue
+            netdev = netdevs[0].name
 
             if subnet_obj is not None:
                 try:
