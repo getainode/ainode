@@ -12,6 +12,14 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.8] — 2026-04-17
+
+### Fixed
+- **"Launch Instance" silently failed in distributed mode** — `DockerEngine` was missing a `launch_distributed()` method that `/api/models/load` expects. The UI Launch button kicked off an 8-way inference request that quietly returned without starting anything. Added a compatibility shim that accepts a sharding config, writes it through to `NodeConfig`, and delegates to the existing `start_distributed()` path.
+- **Cluster-wide "Update all" no longer requires SSH** — previously the master SSHed into each worker to run `docker pull && systemctl restart`, which broke whenever a peer's `~/.ssh` was owned by root or the keys weren't pushed. Updates now use each worker's HTTP API (`POST /api/engine/update`). The master updates itself last. SSH remains required only for distributed inference bootstrap via eugr's launcher.
+
+---
+
 ## [0.4.7] — 2026-04-16
 
 ### Fixed
