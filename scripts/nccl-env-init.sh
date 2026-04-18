@@ -50,6 +50,32 @@ log() {
 
 SUBNET="${AINODE_CLUSTER_SUBNET:-}"
 
+# Get the primary IPv4 address of a netdev by name. Uses python3 with
+# SIOCGIFADDR (ioctl 0x8915; see include/uapi/linux/sockios.h) rather
+# than the ``ip`` command from iproute2 — ``ip`` is NOT present in the
+# eugr vllm-node base image. A prior version of this shim called
+# ``ip -o -4 addr show dev $netdev | awk | head``, which died with
+# rc=127 under ``set -o pipefail; set -e`` whenever SUBNET was set,
+# because the ``ip`` binary wasn't found and the pipe inherited 127.
+# python3 is always present in the base image; socket / fcntl / struct
+# are stdlib; SIOCGIFADDR is a kernel ABI.
+netdev_ipv4() {
+    local ifname="$1"
+    python3 - "$ifname" <<'PY' 2>/dev/null
+import socket, fcntl, struct, sys
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    packed = fcntl.ioctl(
+        s.fileno(),
+        0x8915,  # SIOCGIFADDR (include/uapi/linux/sockios.h)
+        struct.pack('256s', sys.argv[1].encode()[:15]),
+    )
+    print(socket.inet_ntoa(packed[20:24]))
+except OSError:
+    pass  # interface has no IPv4 address — emit nothing
+PY
+}
+
 ip_in_subnet() {
     local ip="$1"
     [[ -z "$SUBNET" ]] && return 0
@@ -102,10 +128,9 @@ if [[ -d /sys/class/infiniband ]]; then
         [[ -z "$netdev" ]] && continue
 
         if [[ -n "$SUBNET" ]]; then
-            cidr=$(ip -o -4 addr show dev "$netdev" 2>/dev/null | awk '{print $4}' | head -1)
-            [[ -z "$cidr" ]] && continue
-            ip_only="${cidr%/*}"
-            ip_in_subnet "$ip_only" || continue
+            netdev_ip=$(netdev_ipv4 "$netdev")
+            [[ -z "$netdev_ip" ]] && continue
+            ip_in_subnet "$netdev_ip" || continue
         fi
 
         KEEP+=("$hca")
@@ -129,5 +154,11 @@ fi
 # Entrypoint mode: preserve whatever CMD was passed (e.g. ``sleep infinity``).
 # Export-only mode: caller handles the rest.
 if [[ "$EXPORT_ONLY" == "false" ]]; then
-    exec "$@"
+    # Defensive ``exec --``: terminates bash builtin option parsing so
+    # args that start with ``-`` are forwarded as positional args to the
+    # exec'd command rather than interpreted as flags to ``exec``. Not
+    # the cause of any observed failure (docker inspect confirms Cmd
+    # starts with the CMD binary) — but the right long-term pattern for
+    # an entrypoint shim that forwards arbitrary arguments.
+    exec -- "$@"
 fi
