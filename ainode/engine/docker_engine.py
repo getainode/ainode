@@ -18,9 +18,11 @@ can dispatch polymorphically via a factory.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -40,6 +42,36 @@ logger = logging.getLogger(__name__)
 # Path to eugr's launcher inside the unified image. See scripts/Dockerfile.ainode.
 EUGR_LAUNCHER = Path("/opt/spark-vllm-docker/launch-cluster.sh")
 EUGR_ENV_FILE = Path("/opt/spark-vllm-docker/.env")
+
+# Per-node NCCL init shim. Baked into the ainode image via Dockerfile COPY;
+# AINode copies it onto shared storage at launch so every peer's vllm_node
+# container can mount it via ``-v`` and run it via ``--entrypoint``. The shim
+# detects each node's local HCAs (mlx5_* or rocep*/roceP*), filters by Up
+# state and cluster subnet, and exports NCCL_IB_HCA before exec-ing CMD.
+#
+# TODO(v0.4.10): bake the shim into ainode-base so every vllm_node has it at
+# /usr/local/bin/nccl-env-init.sh without needing NFS distribution. Then the
+# NCCL_INIT_SHARED_* paths and ``_publish_nccl_init_script`` become optional.
+NCCL_INIT_IMAGE_PATH = Path("/usr/local/bin/nccl-env-init.sh")
+NCCL_INIT_SHARED_DIR = Path("/mnt/shared-models/.ainode")
+NCCL_INIT_SHARED_PATH = NCCL_INIT_SHARED_DIR / "nccl-env-init.sh"
+# In-container path used by ``--entrypoint`` AND by the head's exec-script source hook.
+NCCL_INIT_CONTAINER_PATH = "/mnt/shared-models/.ainode/nccl-env-init.sh"
+
+# Per-node NCCL init shim. Baked into the ainode image via Dockerfile COPY;
+# AINode copies it onto shared storage at launch so every peer's vllm_node
+# container can mount it via ``-v`` and run it via ``--entrypoint``. The shim
+# detects each node's local HCAs (mlx5_* or rocep*/roceP*), filters by Up
+# state and cluster subnet, and exports NCCL_IB_HCA before exec-ing CMD.
+#
+# TODO(v0.4.10): bake the shim into ainode-base so every vllm_node has it at
+# /usr/local/bin/nccl-env-init.sh without needing NFS distribution. Then the
+# NCCL_INIT_SHARED_* paths and ``_publish_nccl_init_script`` become optional.
+NCCL_INIT_IMAGE_PATH = Path("/usr/local/bin/nccl-env-init.sh")
+NCCL_INIT_SHARED_DIR = Path("/mnt/shared-models/.ainode")
+NCCL_INIT_SHARED_PATH = NCCL_INIT_SHARED_DIR / "nccl-env-init.sh"
+# In-container path used by ``--entrypoint`` AND by the head's exec-script source hook.
+NCCL_INIT_CONTAINER_PATH = "/mnt/shared-models/.ainode/nccl-env-init.sh"
 
 
 class DockerEngineError(RuntimeError):
@@ -140,11 +172,26 @@ class DockerEngine:
         self._write_eugr_env()
         launch_script = self._write_distributed_launch_script()
 
+        # Bug 3 fix: publish per-node shim to shared storage so every peer's
+        # vllm_node can mount + exec it as --entrypoint. Returns None if the
+        # shim/shared-storage isn't available; falls back cleanly to head-only
+        # detection (bugs 1/2/4 still fixed).
+        shim_container_path = self._publish_nccl_init_script()
+
         cmd = [str(EUGR_LAUNCHER), "--launch-script", str(launch_script)]
         extra_docker_args = [
             "-v",
             f"{self.config.models_dir or '/root/.ainode/models'}:/models",
         ]
+        if shim_container_path is not None:
+            # Mount the shared dir read-only and replace the vllm_node
+            # container's default entrypoint with the shim. The shim detects
+            # local HCAs, exports NCCL_IB_HCA, and execs the original CMD
+            # (typically ``sleep infinity`` from eugr's launcher).
+            extra_docker_args.extend([
+                "-v", "/mnt/shared-models:/mnt/shared-models:ro",
+                "--entrypoint", shim_container_path,
+            ])
         env = self._build_env()
         env["VLLM_SPARK_EXTRA_DOCKER_ARGS"] = " ".join(extra_docker_args)
 
@@ -351,10 +398,15 @@ class DockerEngine:
             env["GLOO_SOCKET_IFNAME"] = iface
             env["UCX_NET_DEVICES"] = iface
 
-        # Prefer RDMA over socket for cross-node; NCCL will fall back if
-        # the device isn't actually RDMA-capable.
-        ib_hca = self._detect_ib_hca() or "mlx5_0"
-        env.setdefault("NCCL_IB_HCA", ib_hca)
+        # Bugs 1/2/4 fix: accept both MOFED (mlx5_*) and stock rdma-core
+        # (rocep*/roceP*) naming, filter by (Up) state, filter by cluster
+        # subnet so direct-connect HCAs on dual-homed nodes are excluded.
+        # If detection returns nothing, leave NCCL_IB_HCA unset — better for
+        # NCCL to auto-detect locally than to pin to a hardcoded name that
+        # may not exist on this host (the removed "mlx5_0" fallback).
+        ib_hca = self._detect_ib_hca(subnet_cidr=self._cluster_subnet())
+        if ib_hca:
+            env.setdefault("NCCL_IB_HCA", ib_hca)
         env.setdefault("NCCL_IB_DISABLE", "0")
         env.setdefault("NCCL_P2P_DISABLE", "0")
         env.setdefault("NCCL_NET_GDR_LEVEL", "5")
@@ -362,25 +414,101 @@ class DockerEngine:
 
         return env
 
+    def _cluster_subnet(self) -> Optional[str]:
+        """Return the CIDR of the ``cluster_interface`` netdev (e.g. '192.168.0.0/24').
+
+        Needed to filter out vestigial direct-connect HCAs (10.0.0.x on
+        dual-homed Sparks 1 & 2 in our reference cluster) vs the switched
+        fabric HCAs (192.168.0.x). Without this, ``_detect_ib_hca`` would
+        return direct-connect devices that don't exist on all cluster nodes,
+        hanging NCCL ring init.
+        """
+        iface = self.config.cluster_interface
+        if not iface:
+            return None
+        try:
+            out = subprocess.run(
+                ["ip", "-o", "-4", "addr", "show", "dev", iface],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode != 0:
+                return None
+            m = re.search(r"inet\s+(\S+)", out.stdout)
+            if not m:
+                return None
+            return str(ipaddress.ip_network(m.group(1), strict=False))
+        except Exception:
+            return None
+
     @staticmethod
-    def _detect_ib_hca() -> Optional[str]:
-        """Return a comma-joined mlx5_* list from ``ibdev2netdev`` or None."""
+    def _detect_ib_hca(subnet_cidr: Optional[str] = None) -> Optional[str]:
+        """Return a comma-joined list of Up, on-subnet HCAs, or None.
+
+        Bug 1 fix: accept both MOFED naming (``mlx5_*``) and stock Ubuntu
+        rdma-core naming (``rocep*``, ``roceP*``). Prior code filtered by
+        ``startswith("mlx5_")`` and silently returned empty on any node
+        without MOFED, triggering the removed ``"mlx5_0"`` hardcoded fallback.
+
+        Bug 2 fix: only include ports in ``(Up)`` state. Matches eugr's
+        ``ibdev2netdev | awk '/\\(Up\\)/ ...'`` contract.
+
+        Subnet filter: if ``subnet_cidr`` is given, exclude HCAs whose
+        netdev does not have an IP inside that subnet. On nodes 1 & 2 in
+        our reference cluster, this filters out the vestigial direct-
+        connect fabric (10.0.0.x) so it never enters the NCCL ring.
+
+        Returns None if no HCA passes the filters — caller should leave
+        ``NCCL_IB_HCA`` unset rather than fall back to a guess.
+        """
         if shutil.which("ibdev2netdev") is None:
             return None
         try:
             out = subprocess.run(
-                ["ibdev2netdev"], capture_output=True, text=True, timeout=5
+                ["ibdev2netdev"], capture_output=True, text=True, timeout=5,
             )
             if out.returncode != 0:
                 return None
-            devs = [
-                line.split()[0]
-                for line in out.stdout.splitlines()
-                if line.strip().startswith("mlx5_")
-            ]
-            return ",".join(devs) or None
         except Exception:
             return None
+
+        # Accepts old format ("mlx5_0 port 1 ==> enp1s0f0np0 (Up)") and
+        # MOFED-verbose format ("0000:01:00.0 mlx5_0 (MT4129 ...) ==> ... (Up)").
+        line_re = re.compile(
+            r"(mlx5_\d+|rocep\w+|roceP\w+)\b.*?==>\s*(\S+)\s*\(Up\)"
+        )
+
+        subnet_obj = None
+        if subnet_cidr:
+            try:
+                subnet_obj = ipaddress.ip_network(subnet_cidr, strict=False)
+            except Exception:
+                subnet_obj = None
+
+        devs: List[str] = []
+        for line in out.stdout.splitlines():
+            m = line_re.search(line)
+            if not m:
+                continue
+            hca, netdev = m.group(1), m.group(2)
+
+            if subnet_obj is not None:
+                try:
+                    ip_out = subprocess.run(
+                        ["ip", "-o", "-4", "addr", "show", "dev", netdev],
+                        capture_output=True, text=True, timeout=3,
+                    )
+                    addr_m = re.search(r"inet\s+(\S+)", ip_out.stdout)
+                    if not addr_m:
+                        continue
+                    netdev_ip = ipaddress.ip_interface(addr_m.group(1)).ip
+                    if netdev_ip not in subnet_obj:
+                        continue
+                except Exception:
+                    continue  # can't verify subnet → exclude, don't guess
+
+            devs.append(hca)
+
+        return ",".join(devs) or None
 
     # ------------------------------------------------------------------
     # Distributed (eugr) wiring
@@ -390,29 +518,79 @@ class DockerEngine:
         """Total TP = local GPUs × (1 + number of peers). One GPU per GB10 node."""
         return 1 + len(self.config.peer_ips)
 
+    def _publish_nccl_init_script(self) -> Optional[str]:
+        """Publish the per-node shim to shared storage so every peer sees it.
+
+        Bug 3 fix: per-node NCCL detection can't be broadcast from a single
+        ``.env`` (eugr's launcher propagates one cluster-wide value), so we
+        mount the shim into each peer's vllm_node via ``--entrypoint``. The
+        shim itself is baked into the ainode image by Dockerfile COPY; here
+        we stage it on the shared NFS path that every peer's ``docker run
+        -v`` can bind-mount from.
+
+        Returns the in-container path to pass to ``--entrypoint``, or None
+        if publishing failed (shim missing from image, or shared storage
+        unavailable). On None, ``start_distributed`` falls back to head-only
+        detection — bugs 1, 2, 4 still fixed; bug 3 degrades to partial.
+
+        TODO(v0.4.10): bake the shim into ainode-base so every vllm_node
+        has it at ``/usr/local/bin/nccl-env-init.sh`` without NFS. Then this
+        publish step and the ``/mnt/shared-models`` dependency go away.
+        """
+        if not NCCL_INIT_IMAGE_PATH.exists():
+            logger.warning(
+                "NCCL init shim %s missing from image; per-node NCCL env "
+                "disabled (bugs 1/2/4 still fixed).",
+                NCCL_INIT_IMAGE_PATH,
+            )
+            return None
+        try:
+            NCCL_INIT_SHARED_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy(NCCL_INIT_IMAGE_PATH, NCCL_INIT_SHARED_PATH)
+            NCCL_INIT_SHARED_PATH.chmod(0o755)
+            logger.info("Published NCCL shim to %s", NCCL_INIT_SHARED_PATH)
+            return NCCL_INIT_CONTAINER_PATH
+        except Exception as exc:
+            logger.warning(
+                "Could not publish NCCL shim to %s: %s. Falling back to "
+                "head-only detection (bugs 1/2/4 still fixed).",
+                NCCL_INIT_SHARED_PATH, exc,
+            )
+            return None
+
     def _write_eugr_env(self) -> None:
         """Populate ``/opt/spark-vllm-docker/.env`` for the launcher."""
         iface = self.config.cluster_interface
         head_ip = _local_ip_for_interface(iface)
         cluster_nodes = ",".join([head_ip] + self.config.peer_ips)
+        subnet = self._cluster_subnet()
 
-        ib_hca = self._detect_ib_hca() or "mlx5_0"
+        # Bug 4 fix: IB_IF carries the HCA device list (eugr maps it to
+        # NCCL_IB_HCA at launch-cluster.sh:810). Prior code wrote the netdev
+        # name here — ``IB_IF=enP2p1s0f1np1`` — which produced a garbage
+        # ``NCCL_IB_HCA=enP2p1s0f1np1`` (a netdev is not an HCA device).
+        ib_hca = self._detect_ib_hca(subnet_cidr=subnet) or ""
 
         lines = [
             f"CLUSTER_NODES={cluster_nodes}",
             f"ETH_IF={iface}",
-            f"IB_IF={iface}",
+            f"IB_IF={ib_hca}",
             "MASTER_PORT=29501",
             f"SSH_USER={self.config.ssh_user}",
             # CONTAINER_* vars are injected into every per-node container.
             "CONTAINER_NCCL_DEBUG=INFO",
             "CONTAINER_NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH",
             f"CONTAINER_NCCL_SOCKET_IFNAME={iface}",
-            f"CONTAINER_NCCL_IB_HCA={ib_hca}",
+            # Bug 3 fix: CONTAINER_NCCL_IB_HCA deliberately omitted. Each
+            # vllm_node's per-node shim (mounted via --entrypoint) exports
+            # its own node-local NCCL_IB_HCA at startup. A cluster-wide
+            # value would be wrong for heterogeneous HCA naming.
             "CONTAINER_NCCL_IB_DISABLE=0",
             "CONTAINER_NCCL_IGNORE_CPU_AFFINITY=1",
             "CONTAINER_NCCL_NET_GDR_LEVEL=5",
             f"CONTAINER_UCX_NET_DEVICES={iface}",
+            # Consumed by the per-node shim to filter HCAs by subnet.
+            f"CONTAINER_AINODE_CLUSTER_SUBNET={subnet or ''}",
         ]
         EUGR_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
         EUGR_ENV_FILE.write_text("\n".join(lines) + "\n")
@@ -435,8 +613,22 @@ class DockerEngine:
         # matters far more for the user than first-token latency. If the
         # graphs capture fails on a particular model, we can re-add eager
         # per-invocation via config.
+
+        # Bug 3 belt-and-suspenders: ``docker exec`` on the head does not
+        # inherit PID-1 runtime env from ``--entrypoint``. Source the shim
+        # in --export-only mode so NCCL_IB_HCA lands in THIS shell before
+        # vllm starts, and thereby in every child (driver + Ray workers).
+        # ``|| true`` and the presence check keep this safe if the shim
+        # wasn't staged (operator without shared storage).
+        env_init_hook = (
+            f"if [ -x {NCCL_INIT_CONTAINER_PATH} ]; then\n"
+            f'    eval "$({NCCL_INIT_CONTAINER_PATH} --export-only 2>/dev/null || true)"\n'
+            f"fi\n"
+        )
+
         script = f"""#!/bin/bash
 # Auto-generated by ainode DockerEngine.start_distributed. Do not edit.
+{env_init_hook}
 vllm serve {self.config.model} \\
     --host 0.0.0.0 --port {self.config.api_port} \\
     --distributed-executor-backend ray \\
