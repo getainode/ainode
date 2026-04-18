@@ -56,6 +56,17 @@ log "Checking prerequisites"
 command -v docker >/dev/null 2>&1 || die "docker not found. Install: https://docs.docker.com/engine/install/"
 docker info >/dev/null 2>&1 || die "docker daemon not reachable — run 'sudo systemctl start docker' or add \$USER to the 'docker' group"
 
+# /mnt/shared-models is required by the v0.4.9 systemd unit (--mount type=bind
+# fails loudly if the source doesn't exist). Surface the setup requirement
+# here instead of waiting for first-start to fail with a cryptic docker error.
+# For clusters: make this an NFS mount from the master's model storage. For
+# single-node: a directory is enough. See CHANGELOG v0.4.9 for context.
+# TODO(v0.4.10): once the NCCL init shim is baked into ainode-base, this
+# path becomes optional and the precheck can be dropped.
+if [ ! -d /mnt/shared-models ]; then
+    die "AINode v0.4.9+ requires /mnt/shared-models to exist for the per-node NCCL init shim.\n  Create it before re-running this installer:\n    sudo mkdir -p /mnt/shared-models\n  For clusters, mount shared model storage there (NFS from master recommended)."
+fi
+
 # GPU check (nvidia-container-toolkit). AINode targets NVIDIA GB10; skip if
 # missing, let the container fail fast with a clear error.
 if ! docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
@@ -161,6 +172,7 @@ EXEC_START="/usr/bin/docker run --rm --name ainode \
  -v ${AINODE_HOME}:/root/.ainode \
  -v /var/run/docker.sock:/var/run/docker.sock \
  -v ${HOME}/.ssh:/host-ssh:ro \
+ --mount type=bind,source=/mnt/shared-models,target=/mnt/shared-models,bind-propagation=rshared \
  -e AINODE_HOME=/root/.ainode \
  -e NVIDIA_VISIBLE_DEVICES=all \
  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
