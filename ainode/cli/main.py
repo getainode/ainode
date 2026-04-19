@@ -204,8 +204,8 @@ def cmd_start(args):
         return
 
     if in_container or config.engine_strategy == "docker":
-        from ainode.engine.docker_engine import build_engine
-        engine = build_engine(config)
+        from ainode.engine.backends import get_backend
+        engine = get_backend(config)
     else:
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)
@@ -319,8 +319,8 @@ def cmd_status(args):
 
     # Engine health check — dispatch by engine_strategy for parity with cmd_start.
     if config.engine_strategy == "docker":
-        from ainode.engine.docker_engine import DockerEngine
-        engine = DockerEngine(config)
+        from ainode.engine.backends import get_backend
+        engine = get_backend(config)
     else:
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)

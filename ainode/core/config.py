@@ -30,6 +30,10 @@ class NodeConfig:
 
     # Engine
     engine_strategy: str = "pip"  # "pip" | "docker"
+    # Which Docker-engine backend to use when engine_strategy == "docker".
+    #   "eugr"   — eugr/spark-vllm-docker (v0.4.x default)
+    #   "nvidia" — NVIDIA's nvcr.io/nvidia/vllm (v0.5.0+, opt-in)
+    engine_backend: str = "eugr"
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     models_dir: str = str(MODELS_DIR)
     max_model_len: Optional[int] = None

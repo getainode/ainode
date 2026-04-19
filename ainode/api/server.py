@@ -58,8 +58,11 @@ def create_app(
     ----------
     config : NodeConfig
         Node configuration (defaults created if None).
-    engine : VLLMEngine | None
-        Optional engine instance for health/status queries.
+    engine : EngineBackend | VLLMEngine | None
+        Optional engine instance for health/status queries. May be any of
+        the concrete backends in :mod:`ainode.engine.backends` (eugr,
+        nvidia) or the legacy :class:`ainode.engine.vllm_engine.VLLMEngine`
+        pip-venv engine.
     """
     if config is None:
         config = NodeConfig()

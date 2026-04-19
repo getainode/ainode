@@ -1,10 +1,16 @@
-"""Tests for ainode.engine.docker_engine.DockerEngine (v0.4.0 container-native).
+"""Tests for ainode.engine.backends.eugr.EugrBackend (v0.4.0 container-native).
 
 The v0.3.x DockerEngine drove ``docker compose`` from the host. v0.4.0 runs
 *inside* the AINode unified image and either spawns ``vllm serve`` directly
 (solo) or shells out to eugr's ``launch-cluster.sh`` (head). These tests
 mock ``subprocess`` so they run anywhere — no docker, no GPU, no eugr image
 required.
+
+Phase 3 of nvidia-vllm-engine: the class was renamed ``DockerEngine`` →
+``EugrBackend`` and moved to ``ainode.engine.backends.eugr``. The back-compat
+shim at ``ainode.engine.docker_engine`` re-exports both names, but these
+tests patch module-level symbols (``subprocess``, ``detect_gpu``, ``shutil``,
+``LOGS_DIR``) so they must target the real module.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ainode.core.config import NodeConfig
-from ainode.engine import docker_engine as de
+from ainode.engine.backends import eugr as de
 
 
 def _cfg(**overrides) -> NodeConfig:
@@ -35,7 +41,8 @@ def _cfg(**overrides) -> NodeConfig:
 
 
 def test_build_engine_returns_docker_engine():
-    assert isinstance(de.build_engine(_cfg()), de.DockerEngine)
+    from ainode.engine.backends import get_backend
+    assert isinstance(get_backend(_cfg()), de.DockerEngine)
 
 
 def test_start_rejects_unknown_mode():
@@ -65,7 +72,7 @@ def test_start_distributed_requires_launcher():
 
 def test_build_solo_cmd_minimum():
     cfg = _cfg(model="Qwen/Qwen2.5-1.5B-Instruct")
-    with patch("ainode.engine.docker_engine.detect_gpu", return_value=None):
+    with patch("ainode.engine.backends.eugr.detect_gpu", return_value=None):
         cmd = de.DockerEngine(cfg)._build_solo_cmd()
     assert cmd[:3] == ["vllm", "serve", "Qwen/Qwen2.5-1.5B-Instruct"]
     assert "--host" in cmd and "0.0.0.0" in cmd
@@ -74,7 +81,7 @@ def test_build_solo_cmd_minimum():
 
 def test_build_solo_cmd_adds_bfloat16_for_unified_memory():
     gpu = MagicMock(unified_memory=True)
-    with patch("ainode.engine.docker_engine.detect_gpu", return_value=gpu):
+    with patch("ainode.engine.backends.eugr.detect_gpu", return_value=gpu):
         cmd = de.DockerEngine(_cfg())._build_solo_cmd()
     assert "--dtype" in cmd
     assert cmd[cmd.index("--dtype") + 1] == "bfloat16"
@@ -82,7 +89,7 @@ def test_build_solo_cmd_adds_bfloat16_for_unified_memory():
 
 def test_build_solo_cmd_respects_quantization_and_max_len():
     cfg = _cfg(quantization="awq", max_model_len=4096, trust_remote_code=True)
-    with patch("ainode.engine.docker_engine.detect_gpu", return_value=None):
+    with patch("ainode.engine.backends.eugr.detect_gpu", return_value=None):
         cmd = de.DockerEngine(cfg)._build_solo_cmd()
     assert "--quantization" in cmd and "awq" in cmd
     assert "--max-model-len" in cmd and "4096" in cmd
@@ -91,7 +98,7 @@ def test_build_solo_cmd_respects_quantization_and_max_len():
 
 def test_build_env_sets_nccl_interface_from_config():
     cfg = _cfg(cluster_interface="enp1s0f0np0")
-    with patch("ainode.engine.docker_engine.shutil.which", return_value=None):
+    with patch("ainode.engine.backends.eugr.shutil.which", return_value=None):
         env = de.DockerEngine(cfg)._build_env()
     assert env["NCCL_SOCKET_IFNAME"] == "enp1s0f0np0"
     assert env["GLOO_SOCKET_IFNAME"] == "enp1s0f0np0"
@@ -99,7 +106,7 @@ def test_build_env_sets_nccl_interface_from_config():
 
 
 def test_build_env_defaults_nccl_ib_disable_zero():
-    with patch("ainode.engine.docker_engine.shutil.which", return_value=None):
+    with patch("ainode.engine.backends.eugr.shutil.which", return_value=None):
         env = de.DockerEngine(_cfg())._build_env()
     assert env["NCCL_IB_DISABLE"] == "0"
 
@@ -111,9 +118,9 @@ def test_tp_size_one_plus_peers():
 
 def test_start_solo_launches_subprocess():
     engine = de.DockerEngine(_cfg())
-    with patch("ainode.engine.docker_engine.subprocess.Popen") as popen, \
-         patch("ainode.engine.docker_engine.detect_gpu", return_value=None), \
-         patch("ainode.engine.docker_engine.shutil.which", return_value=None):
+    with patch("ainode.engine.backends.eugr.subprocess.Popen") as popen, \
+         patch("ainode.engine.backends.eugr.detect_gpu", return_value=None), \
+         patch("ainode.engine.backends.eugr.shutil.which", return_value=None):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         popen.return_value = mock_proc
@@ -138,7 +145,7 @@ def test_api_url_uses_config_port():
 
 
 def test_log_path_switches_by_mode(tmp_path):
-    with patch("ainode.engine.docker_engine.LOGS_DIR", tmp_path):
+    with patch("ainode.engine.backends.eugr.LOGS_DIR", tmp_path):
         solo = de.DockerEngine(_cfg(distributed_mode="solo"))
         head = de.DockerEngine(_cfg(distributed_mode="head", peer_ips=["x"]))
         assert solo.log_path.name == "vllm.log"
