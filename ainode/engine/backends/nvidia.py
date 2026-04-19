@@ -445,7 +445,14 @@ class NvidiaBackend(EngineBackend):
             "NCCL_IB_GID_INDEX": NCCL_IB_GID_INDEX,
             "NCCL_IB_SUBNET_AWARE_ROUTING": "1",
             "NCCL_IB_DISABLE": "0",
-            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            # NVIDIA's nvcr.io/nvidia/vllm:26.02-py3 does NOT ship hf_transfer.
+            # If AINode's own container has HF_HUB_ENABLE_HF_TRANSFER=1 (our
+            # install-UX default), that env var would inherit into the vllm
+            # container via docker exec and crash vllm at first weight
+            # download. Explicitly set to "0" so the NVIDIA image uses the
+            # standard HF downloader. If NVIDIA bakes hf_transfer into a
+            # future image, flip this to "1".
+            "HF_HUB_ENABLE_HF_TRANSFER": "0",
             "HF_TOKEN": self.config.hf_token or "",
         }
         if hca:
