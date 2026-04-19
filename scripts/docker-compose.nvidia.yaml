@@ -1,0 +1,78 @@
+# docker-compose example — AINode orchestrator + NVIDIA vLLM engine.
+#
+# Single-node development stack. Starts the slim AINode orchestrator and
+# the NVIDIA official vLLM engine side-by-side so you can iterate on the
+# web UI / API without the full systemd install.
+#
+# Usage:
+#     docker compose -f scripts/docker-compose.nvidia.yaml up
+#     open http://localhost:3000
+#
+# Prerequisites:
+#   - Docker 20.10+ with NVIDIA container runtime
+#   - One NVIDIA GPU visible to Docker (nvidia-smi works inside `docker run --gpus all`)
+#   - `docker login nvcr.io` completed (engine image pull)
+#   - HF_TOKEN exported in env or ~/.cache/huggingface/token present
+#
+# This file is for dev ergonomics only. Production installs use the
+# systemd unit rendered by scripts/install.sh.
+
+services:
+  ainode:
+    image: ghcr.io/getainode/ainode:latest
+    container_name: ainode
+    # host networking keeps discovery (UDP 5679) + API (3000/8000) identical
+    # to the production unit; bridge networking loses the UDP broadcasts.
+    network_mode: host
+    ipc: host
+    shm_size: 64g
+    volumes:
+      - ${HOME}/.ainode:/root/.ainode
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/.ssh:/host-ssh:ro
+      - /mnt/shared-models:/mnt/shared-models:rshared
+    environment:
+      - AINODE_HOME=/root/.ainode
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - HF_TOKEN=${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # NVIDIA vLLM engine — spawned by AINode at model-load time in production.
+  # Defined here for dev convenience so you can `docker compose exec vllm ...`
+  # to poke at the container directly. In prod AINode spawns it via
+  # scripts/run_cluster.sh with dynamic env injection.
+  vllm:
+    image: nvcr.io/nvidia/vllm:26.02-py3
+    container_name: vllm
+    profiles: ["manual-engine"]   # disabled by default — started on demand
+    network_mode: host
+    ipc: host
+    shm_size: 64g
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      - /mnt/shared-models:/mnt/shared-models:rshared
+    environment:
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - HF_TOKEN=${HF_TOKEN:-}
+      - VLLM_HOST_IP=127.0.0.1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Placeholder command — replace with an actual `vllm serve ...` for ad-hoc
+    # testing, or leave commented out and let AINode spawn the container.
+    # command: >
+    #   vllm serve nvidia/Llama-3.3-70B-Instruct-NVFP4
+    #     --tensor-parallel-size 2
+    #     --max-model-len 4096

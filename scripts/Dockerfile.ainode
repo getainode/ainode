@@ -1,85 +1,111 @@
 # syntax=docker/dockerfile:1.6
 #
-# AINode unified image — eugr/spark-vllm-docker base + AINode web/API/CLI.
+# AINode orchestrator image — slim Python container.
 #
-# Build via scripts/build-base-image.sh first (produces the `ainode-base`
-# layer), then:
+# Design (slice nvidia-vllm-engine, D5):
+#   AINode's OWN container is a lean Python-only orchestrator. It does NOT
+#   embed CUDA, vLLM, or NCCL. The inference engine runs in a SEPARATE
+#   container (`nvcr.io/nvidia/vllm:26.02-py3` for the NVIDIA backend;
+#   `ghcr.io/getainode/ainode-base` for the eugr backend — built via
+#   scripts/build-base-image.sh + the legacy Dockerfile path).
+#
+# Build:
 #   docker build -f scripts/Dockerfile.ainode -t ainode:dev .
 #
-# Published at ghcr.io/getainode/ainode:<version> and argentos/ainode:<version>
-# once green (see .github/workflows/publish-image.yml).
+# Target image size: ~500-800 MB (python:3.12-slim is ~120 MB, + docker-cli
+# + iproute2 + Python deps).
+#
+# Published at ghcr.io/getainode/ainode:<version> (mirrored to argentos/ainode).
 
-ARG BASE_IMAGE=ghcr.io/getainode/ainode-base:c026c92
-FROM ${BASE_IMAGE} AS ainode
+FROM python:3.12-slim AS ainode
 
 LABEL org.opencontainers.image.source="https://github.com/getainode/ainode"
-LABEL org.opencontainers.image.description="AINode — local AI platform for NVIDIA GB10 (DGX Spark, ASUS GX10). UI + inference engine, one container per node."
+LABEL org.opencontainers.image.description="AINode — local AI platform orchestrator (slim Python container; spawns NVIDIA vLLM engine in a separate container)."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ENV AINODE_HOME=/root/.ainode \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # eugr's base already has PATH pointing at /usr/local/bin; keep it intact.
-    AINODE_IN_CONTAINER=1
+    AINODE_IN_CONTAINER=1 \
+    # All HF downloads from the orchestrator default to the Rust parallel
+    # downloader. See ops/slices/nvidia-vllm-engine/runbooks/04-install-ux-spec.md § 5.1.
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PATH=/usr/local/bin:/usr/bin:/bin
 
-# Install AINode from local source. Copy only what's needed for pip install so
-# the layer invalidates cleanly when code changes.
+# -- System deps -----------------------------------------------------------
+# docker-cli: AINode spawns the engine container on the local node via
+#             /var/run/docker.sock (mounted read-write by the host unit)
+#             and over SSH to peers.
+# openssh-client + sshpass: distributed launch SSHes to peers to run
+#             run_cluster.sh --worker. sshpass handles the first-time
+#             bootstrap before passwordless keys are distributed.
+# iproute2: `ip` + `ss` for preflight/doctor (fabric IP detection, port
+#             probes). iputils-ping: MTU + reachability probes.
+# curl, jq, ca-certificates, gnupg: preflight/doctor HTTP checks, token
+#             validation against registries, apt key trust for docker-ce.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         ca-certificates \
+         curl \
+         gnupg \
+         iproute2 \
+         iputils-ping \
+         jq \
+         openssh-client \
+         sshpass \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+         > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         docker-ce-cli \
+         docker-compose-plugin \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# -- Python deps -----------------------------------------------------------
+# Project + its runtime deps from pyproject.toml (aiohttp, pynvml, psutil,
+# rich, huggingface_hub). Plus:
+#   paramiko   — SSH library used by the future cluster-join flow.
+#   hf_transfer — Rust parallel downloader for HuggingFace models
+#                (2–5× faster than the Python default on fat pipes).
+# Install hf_transfer + paramiko BEFORE the project so they land in a
+# lower, cache-friendly layer.
+RUN pip install --no-cache-dir \
+      hf_transfer \
+      paramiko
+
+# Copy only the minimal set needed for `pip install .` so code edits
+# invalidate the smallest layer possible.
 COPY pyproject.toml README.md /src/
 COPY ainode /src/ainode
 RUN pip install --no-cache-dir /src \
-    && rm -rf /src
+    && rm -rf /src /root/.cache/pip
 
-# sshpass is convenient for the distributed launcher to non-interactively
-# orchestrate peers during first-time bootstrap; after passwordless SSH is
-# configured, it is unused. openssh-client ensures `ssh` is present for the
-# launch-cluster.sh invocation.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-         openssh-client \
-         sshpass \
-         iproute2 \
-         iputils-ping \
-         curl \
-         ca-certificates \
-         gnupg \
-    # docker CLI only (no daemon); eugr's launcher shells out to `docker run`
-    # on the local node (via the mounted /var/run/docker.sock) and over SSH
-    # to peers. Matches the host daemon version family.
-    && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
-         > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
-    && rm -rf /var/lib/apt/lists/*
+# -- Bundled scripts -------------------------------------------------------
+# run_cluster.sh is NVIDIA/vLLM upstream's canonical Ray-in-Docker launcher.
+# NvidiaBackend execs /opt/ainode/run_cluster.sh on the head and SSHes it to
+# peers. Shipped in-container for offline/reproducible installs (see D3).
+# Provenance: scripts/RUN_CLUSTER_SH.md.
+COPY scripts/run_cluster.sh /opt/ainode/run_cluster.sh
+RUN chmod 0755 /opt/ainode/run_cluster.sh
 
-# Ship a copy of eugr's launcher into a stable path. The base image builds
-# from their Dockerfile but doesn't necessarily keep the repo; copy it in
-# from the build context to guarantee /opt/spark-vllm-docker is present.
-# scripts/build-base-image.sh places a checkout at scripts/_eugr before this
-# stage runs.
-COPY scripts/_eugr /opt/spark-vllm-docker
-
+# Host-key-rehoming + ssh_config-injection entrypoint. Required so the
+# container can `ssh <peer-ip>` as the host user after the host mounts
+# ~/.ssh at /host-ssh:ro. Same behavior as v0.4.x.
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-# Per-node NCCL init shim — bind-mounted into each vllm_node container at
-# distributed launch and used as ``--entrypoint``. See scripts/nccl-env-init.sh
-# and ainode/engine/docker_engine.py (_publish_nccl_init_script).
-# TODO(v0.4.10): also COPY into ainode-base so vllm_node containers have this
-# natively without needing the /mnt/shared-models mount.
-COPY scripts/nccl-env-init.sh /usr/local/bin/nccl-env-init.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && chmod +x /usr/local/bin/nccl-env-init.sh \
-    && chmod +x /opt/spark-vllm-docker/launch-cluster.sh \
-    && chmod +x /opt/spark-vllm-docker/autodiscover.sh \
-    && chmod +x /opt/spark-vllm-docker/hf-download.sh 2>/dev/null \
-    || true
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-# Default ports: 3000 web UI, 8000 OpenAI-compatible API, 5679/udp discovery.
+# -- Ports + volumes -------------------------------------------------------
+# 3000 = web UI, 8000 = OpenAI-compatible API, 5679/udp = discovery.
 EXPOSE 3000 8000 5679/udp
 
-# Persist config/models/logs via bind mount at runtime.
+# Persist config / models metadata / logs on the host via bind mount.
 VOLUME ["/root/.ainode"]
 
+# ENTRYPOINT keeps docker-entrypoint.sh so SSH-key rehoming + peer ssh_config
+# injection continue to work; the script execs `ainode start --in-container`.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

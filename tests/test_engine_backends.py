@@ -23,12 +23,20 @@ class TestEngineBackendFactory:
         backend = get_backend(config)
         assert isinstance(backend, EugrBackend)
 
-    def test_nvidia_stub(self):
+    def test_nvidia_backend_instance(self):
+        """Phase 4: NvidiaBackend is a real implementation, not a stub.
+
+        Pre-Phase-4 this asserted ``NotImplementedError`` on ``start()``.
+        The full lifecycle is now exercised in ``test_nvidia_backend.py``;
+        here we only verify the factory wires it up.
+        """
         config = NodeConfig(engine_backend="nvidia")
         backend = get_backend(config)
         assert isinstance(backend, NvidiaBackend)
-        # Stub should raise on start
-        with pytest.raises(NotImplementedError):
+        # Unknown distributed_mode is the only remaining way ``start`` can
+        # raise synchronously — useful as a smoke test for the dispatch.
+        config.distributed_mode = "bogus"
+        with pytest.raises(Exception):
             backend.start()
 
     def test_invalid_backend_raises(self):

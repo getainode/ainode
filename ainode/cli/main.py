@@ -724,6 +724,23 @@ def main():
     auth_sub.add_parser("new-key", help="Generate a new API key")
     auth_parser.set_defaults(func=cmd_auth)
 
+    # doctor — health report. Stub for v0.4.x; full impl in v0.5.0.
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Run a cluster/node health report (stub — v0.5.0 for full report)",
+    )
+    doctor_parser.add_argument("--peer", help="Run doctor against a remote peer over SSH (v0.5.0)")
+    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable output (v0.5.0)")
+    doctor_parser.add_argument("--fix", action="store_true", help="Offer per-item auto-fix prompts (v0.5.0)")
+
+    def _cmd_doctor(a):
+        # Lazy import — the module is dependency-free today but a future
+        # full impl will pull in ainode.cluster.hca_discovery etc.
+        from ainode.cli.doctor import cmd_doctor
+        return cmd_doctor(a)
+
+    doctor_parser.set_defaults(func=_cmd_doctor)
+
     args = parser.parse_args()
 
     if args.command is None:
