@@ -22,10 +22,12 @@ from ainode.engine.backends import (
     get_backend,
 )
 from ainode.engine.backends.nvidia import (
+    HEAD_CONTAINER_NAME,
     NVIDIA_VLLM_IMAGE,
     RAY_CONTAINER_NAME_PREFIX,
     RUN_CLUSTER_SCRIPT_FALLBACK,
     RUN_CLUSTER_SCRIPT_SOURCE,
+    WORKER_CONTAINER_NAME_PREFIX,
     NvidiaBackendError,
 )
 
@@ -349,46 +351,60 @@ class TestStartDistributed:
         with pytest.raises(NvidiaBackendError, match="peer_ips is empty"):
             backend.start_distributed()
 
-    def test_raises_when_run_cluster_script_missing(self, monkeypatch):
-        config = _make_config(distributed_mode="head", peer_ips=["10.100.0.13"])
+    def test_raises_when_head_container_does_not_become_ready(self):
+        """If ``docker inspect`` never reports Running=true, we must raise.
+
+        Option α replaced the old ``run_cluster.sh`` blocking subprocess
+        with a ``docker run -d`` + poll-readiness flow. The bad path is
+        now "head container never reports Running" — we surface it as an
+        NvidiaBackendError instead of hanging.
+        """
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13"],
+        )
         backend = NvidiaBackend(config)
-        # Point both candidate paths at something guaranteed missing.
-        monkeypatch.setattr(
-            "ainode.engine.backends.nvidia.RUN_CLUSTER_SCRIPT_SOURCE",
-            Path("/no/such/opt/ainode/run_cluster.sh"),
-        )
-        monkeypatch.setattr(
-            "ainode.engine.backends.nvidia.RUN_CLUSTER_SCRIPT_FALLBACK",
-            Path("/no/such/tmp/run_cluster.sh"),
-        )
-        with pytest.raises(NvidiaBackendError, match="run_cluster.sh missing"):
-            backend.start_distributed()
+        with mock.patch.object(
+            backend, "_launch_head_container", return_value="fake_container_id"
+        ), mock.patch.object(
+            backend, "_wait_for_head_container_ready", return_value=False
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.detect_fabric_ip",
+            return_value="10.100.0.11",
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="",
+        ):
+            with pytest.raises(NvidiaBackendError, match="did not enter Running"):
+                backend.start_distributed()
 
-    def test_distributed_launches_head_ssh_workers_and_vllm_exec(
-        self, tmp_path, monkeypatch
-    ):
-        # Vendor a stub run_cluster.sh so _locate_run_cluster_script finds it.
-        script = tmp_path / "run_cluster.sh"
-        script.write_text("#!/bin/bash\nexit 0\n")
-        monkeypatch.setattr(
-            "ainode.engine.backends.nvidia.RUN_CLUSTER_SCRIPT_SOURCE", script
-        )
+    def test_distributed_launches_head_ssh_workers_and_vllm_exec(self):
+        """Orchestration test — ``start_distributed`` calls the three helpers
+        in order (head launch → ssh workers → docker exec vllm) with the
+        right arguments, and produces a TP=N ``vllm serve`` command where
+        N = 1 + len(peers).
 
+        We mock the helpers rather than the raw subprocess layer so the
+        test isn't brittle to internals of ``docker run`` / ``docker
+        inspect`` polling.
+        """
         config = _make_config(
             distributed_mode="head",
             peer_ips=["10.100.0.13", "10.100.0.15"],
         )
         backend = NvidiaBackend(config)
 
-        run_calls: List[List[str]] = []
+        ssh_launch_calls: List[dict] = []
 
-        def fake_run(cmd, **kwargs):
-            run_calls.append(cmd)
-            return _FakeCompleted(returncode=0)
+        def fake_ssh_launch(peer_ip, head_ip):
+            ssh_launch_calls.append({"peer_ip": peer_ip, "head_ip": head_ip})
 
-        with mock.patch(
-            "ainode.engine.backends.nvidia.subprocess.run",
-            side_effect=fake_run,
+        with mock.patch.object(
+            backend, "_launch_head_container", return_value="ctr_abc"
+        ) as launch_head, mock.patch.object(
+            backend, "_wait_for_head_container_ready", return_value=True
+        ) as wait_ready, mock.patch.object(
+            backend, "_ssh_launch_worker", side_effect=fake_ssh_launch
         ), mock.patch(
             "ainode.engine.backends.nvidia.subprocess.Popen",
             return_value=_FakePopen(),
@@ -403,41 +419,321 @@ class TestStartDistributed:
 
         assert result is True
 
-        # 1 head run_cluster.sh invocation + 2 peer SSH invocations = 3 run calls.
-        assert len(run_calls) == 3
+        # Head launched once, readiness polled once.
+        launch_head.assert_called_once()
+        wait_ready.assert_called_once()
+        _, kwargs = launch_head.call_args
+        assert kwargs["fabric_ip"] == "10.100.0.11"
 
-        # Head call: first command is bash <script>, --head, image, head_ip present.
-        head_call = run_calls[0]
-        assert head_call[0] == "bash"
-        assert head_call[1] == str(script)
-        assert NVIDIA_VLLM_IMAGE in head_call
-        assert "10.100.0.11" in head_call
-        assert "--head" in head_call
+        # SSH launches: exactly one per peer, each carrying the head IP.
+        assert {c["peer_ip"] for c in ssh_launch_calls} == set(config.peer_ips)
+        assert all(c["head_ip"] == "10.100.0.11" for c in ssh_launch_calls)
 
-        # Peer SSH calls: ssh user@peer ... --worker ...
-        peer_calls = run_calls[1:]
-        peer_ips_seen = set()
-        for call in peer_calls:
-            assert call[0] == "ssh"
-            # The last element is the remote command string
-            remote = call[-1]
-            assert "--worker" in remote
-            assert NVIDIA_VLLM_IMAGE in remote
-            # SSH target is user@ip
-            target = next(a for a in call if a.startswith(f"{config.ssh_user}@"))
-            peer_ips_seen.add(target.split("@")[1])
-        assert peer_ips_seen == set(config.peer_ips)
-
-        # docker exec call for vllm serve — TP=3 (1 head + 2 peers)
+        # docker exec call for vllm serve — TP=3 (1 head + 2 peers).
         popen.assert_called_once()
         exec_argv = popen.call_args.args[0]
         assert exec_argv[0] == "docker"
         assert exec_argv[1] == "exec"
-        # Wrapped in bash -lc, so scan the whole command string
         joined = " ".join(exec_argv)
         assert "vllm" in joined and "serve" in joined
         assert "--tensor-parallel-size 3" in joined
         assert "--distributed-executor-backend ray" in joined
+
+    def test_start_distributed_returns_within_reasonable_time(self):
+        """Regression test for Bug 2: ``start_distributed`` must not block
+        the main thread for 120+ seconds. With helpers mocked to succeed
+        immediately, the call should return in well under a second."""
+        import time
+
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13"],
+        )
+        backend = NvidiaBackend(config)
+        with mock.patch.object(
+            backend, "_launch_head_container", return_value="ctr_abc"
+        ), mock.patch.object(
+            backend, "_wait_for_head_container_ready", return_value=True
+        ), mock.patch.object(
+            backend, "_ssh_launch_worker", return_value=None
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.Popen",
+            return_value=_FakePopen(),
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.detect_fabric_ip",
+            return_value="10.100.0.11",
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="",
+        ):
+            t0 = time.time()
+            result = backend.start_distributed()
+            elapsed = time.time() - t0
+
+        assert result is True
+        # Generous: real path will be dominated by docker run +
+        # docker inspect poll. Mocked path should be nearly instant.
+        assert elapsed < 5.0, (
+            f"start_distributed took {elapsed:.2f}s with all helpers mocked; "
+            "something is re-introducing a blocking call."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Option α helper methods — _launch_head_container, _wait_for_head_container_ready,
+# _ssh_launch_worker
+# ---------------------------------------------------------------------------
+
+
+class TestLaunchHeadContainer:
+    def test_issues_docker_run_d_with_ray_head_command(self):
+        """`docker run -d` must go out with --name HEAD_CONTAINER_NAME and
+        the ray head start command embedded as the container argv."""
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13"],
+        )
+        backend = NvidiaBackend(config)
+
+        run_calls: List[List[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            # First call will be docker stop, second docker rm (cleanup of
+            # any stale container) — return ok. Third is docker run -d.
+            return _FakeCompleted(returncode=0, stdout="ctr_abc\n")
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            side_effect=fake_run,
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.detect_fabric_ip",
+            return_value="10.100.0.11",
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="mlx5_1",
+        ):
+            container_id = backend._launch_head_container(
+                fabric_ip="10.100.0.11",
+                hf_cache_dir="/tmp/hf",
+            )
+
+        assert container_id == "ctr_abc"
+
+        # Last call is the docker run -d; earlier are the pre-cleanup
+        # stop+rm (best-effort).
+        run_cmd = run_calls[-1]
+        assert run_cmd[0] == "docker"
+        assert run_cmd[1] == "run"
+        assert "-d" in run_cmd
+        assert "--name" in run_cmd
+        assert run_cmd[run_cmd.index("--name") + 1] == HEAD_CONTAINER_NAME
+        assert "--network" in run_cmd
+        assert run_cmd[run_cmd.index("--network") + 1] == "host"
+        assert "--gpus" in run_cmd
+        assert "--entrypoint" in run_cmd
+        assert NVIDIA_VLLM_IMAGE in run_cmd
+
+        # Last two tokens carry the shell-wrapped ray start command.
+        # Structure: [..., NVIDIA_VLLM_IMAGE, "-c", "ray start ..."]
+        assert run_cmd[-2] == "-c"
+        ray_cmd = run_cmd[-1]
+        assert ray_cmd.startswith("ray start --block --head")
+        assert "--port=6379" in ray_cmd
+
+    def test_raises_on_docker_failure(self):
+        """Non-zero returncode from docker must raise NvidiaBackendError
+        with the stderr so operators can see what broke."""
+        config = _make_config(distributed_mode="head", peer_ips=["10.0.0.2"])
+        backend = NvidiaBackend(config)
+
+        call_n = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            # Let the pre-cleanup succeed so we isolate the failure on
+            # the actual docker run -d call.
+            call_n["n"] += 1
+            if call_n["n"] <= 2:
+                return _FakeCompleted(returncode=0)
+            return _FakeCompleted(
+                returncode=125,
+                stderr="docker: Error response from daemon: Conflict.",
+            )
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            side_effect=fake_run,
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="",
+        ):
+            with pytest.raises(NvidiaBackendError, match="docker run -d"):
+                backend._launch_head_container(
+                    fabric_ip="10.0.0.1",
+                    hf_cache_dir="/tmp/hf",
+                )
+
+    def test_returns_fast(self):
+        """`_launch_head_container` must finish well under its safety timeout —
+        it is just a `docker run -d`, which returns as soon as the
+        container is created. Regression guard for Bug 2."""
+        import time
+
+        config = _make_config(distributed_mode="head", peer_ips=["10.0.0.2"])
+        backend = NvidiaBackend(config)
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            return_value=_FakeCompleted(returncode=0, stdout="ctr_abc\n"),
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="",
+        ):
+            t0 = time.time()
+            backend._launch_head_container(
+                fabric_ip="10.0.0.1",
+                hf_cache_dir="/tmp/hf",
+            )
+            elapsed = time.time() - t0
+
+        assert elapsed < 2.0
+
+
+class TestWaitForHeadContainerReady:
+    def test_returns_true_when_container_running(self):
+        config = _make_config(distributed_mode="head", peer_ips=["10.0.0.2"])
+        backend = NvidiaBackend(config)
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            return_value=_FakeCompleted(returncode=0, stdout="true\n"),
+        ):
+            ok = backend._wait_for_head_container_ready(
+                HEAD_CONTAINER_NAME, timeout=5
+            )
+
+        assert ok is True
+
+    def test_returns_false_on_timeout(self):
+        config = _make_config(distributed_mode="head", peer_ips=["10.0.0.2"])
+        backend = NvidiaBackend(config)
+
+        # Return "false" every time — so the poll loop times out.
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            return_value=_FakeCompleted(returncode=0, stdout="false\n"),
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.time.sleep",
+            return_value=None,
+        ):
+            ok = backend._wait_for_head_container_ready(
+                HEAD_CONTAINER_NAME, timeout=2
+            )
+
+        assert ok is False
+
+    def test_tolerates_inspect_errors_and_retries(self):
+        """`docker inspect` errors early (container not yet visible) must
+        not abort the poll — only the final timeout should."""
+        config = _make_config(distributed_mode="head", peer_ips=["10.0.0.2"])
+        backend = NvidiaBackend(config)
+
+        call_n = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            call_n["n"] += 1
+            if call_n["n"] <= 2:
+                return _FakeCompleted(
+                    returncode=1,
+                    stderr="No such object: ainode-vllm-head",
+                )
+            return _FakeCompleted(returncode=0, stdout="true\n")
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            side_effect=fake_run,
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.time.sleep",
+            return_value=None,
+        ):
+            ok = backend._wait_for_head_container_ready(
+                HEAD_CONTAINER_NAME, timeout=10
+            )
+
+        assert ok is True
+        assert call_n["n"] >= 3
+
+
+class TestSshLaunchWorker:
+    def test_ssh_issues_docker_run_d_on_peer(self):
+        """The remote command sent over SSH must include a `docker run -d`
+        with the worker's stable name and a `ray start --address=HEAD:6379`
+        — not `bash run_cluster.sh --worker` (that was the Bug 2 path)."""
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13"],
+        )
+        backend = NvidiaBackend(config)
+
+        ssh_cmds: List[List[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            ssh_cmds.append(cmd)
+            return _FakeCompleted(returncode=0)
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            side_effect=fake_run,
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="",
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.detect_fabric_ip",
+            return_value="10.100.0.11",
+        ):
+            backend._ssh_launch_worker(
+                peer_ip="10.100.0.13",
+                head_ip="10.100.0.11",
+            )
+
+        assert len(ssh_cmds) == 1
+        ssh = ssh_cmds[0]
+        assert ssh[0] == "ssh"
+        assert f"{config.ssh_user}@10.100.0.13" in ssh
+
+        remote = ssh[-1]
+        # Must not shell out to run_cluster.sh anymore.
+        assert "run_cluster.sh" not in remote
+        # Must be a docker run -d with the deterministic worker name.
+        assert "docker run" in remote
+        assert "-d" in remote
+        assert f"{WORKER_CONTAINER_NAME_PREFIX}-10-100-0-13" in remote
+        # And a ray worker connect string pointing at the head.
+        assert "ray start" in remote
+        assert "--address=10.100.0.11:6379" in remote
+
+    def test_raises_on_ssh_failure(self):
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13"],
+        )
+        backend = NvidiaBackend(config)
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            return_value=_FakeCompleted(
+                returncode=255,
+                stderr="Permission denied (publickey).",
+            ),
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
+            return_value="",
+        ):
+            with pytest.raises(NvidiaBackendError, match="ssh docker run"):
+                backend._ssh_launch_worker(
+                    peer_ip="10.100.0.13",
+                    head_ip="10.100.0.11",
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -454,13 +750,7 @@ class _FakeShardingConfig:
 class TestLaunchDistributedShim:
     """Mirrors EugrBackend.launch_distributed. Called by /api/models/load."""
 
-    def test_applies_sharding_config_and_flips_to_head(self, tmp_path, monkeypatch):
-        script = tmp_path / "run_cluster.sh"
-        script.write_text("#!/bin/bash\nexit 0\n")
-        monkeypatch.setattr(
-            "ainode.engine.backends.nvidia.RUN_CLUSTER_SCRIPT_SOURCE", script
-        )
-
+    def test_applies_sharding_config_and_flips_to_head(self):
         config = _make_config(distributed_mode="solo", peer_ips=[])
         backend = NvidiaBackend(config)
 
@@ -469,9 +759,12 @@ class TestLaunchDistributedShim:
             peer_ips=["10.100.0.13"],
         )
 
-        with mock.patch.object(config, "save"), mock.patch(
-            "ainode.engine.backends.nvidia.subprocess.run",
-            return_value=_FakeCompleted(returncode=0),
+        with mock.patch.object(config, "save"), mock.patch.object(
+            backend, "_launch_head_container", return_value="ctr_abc"
+        ), mock.patch.object(
+            backend, "_wait_for_head_container_ready", return_value=True
+        ), mock.patch.object(
+            backend, "_ssh_launch_worker", return_value=None
         ), mock.patch(
             "ainode.engine.backends.nvidia.subprocess.Popen",
             return_value=_FakePopen(),
@@ -530,13 +823,64 @@ class TestStop:
         ):
             backend.stop()
 
-        # One local docker stop + 2 ssh docker-stop calls = 3 total.
+        # Locally we stop+rm the head container (2 docker calls). We SSH
+        # to each peer once to do both stop+rm inside a single remote
+        # shell (2 ssh calls for 2 peers).
         ssh_calls = [c for c in run_calls if c[0] == "ssh"]
         docker_stop_calls = [
             c for c in run_calls if c[0] == "docker" and c[1] == "stop"
         ]
+        docker_rm_calls = [
+            c for c in run_calls if c[0] == "docker" and c[1] == "rm"
+        ]
         assert len(ssh_calls) == 2
         assert len(docker_stop_calls) == 1
+        assert len(docker_rm_calls) == 1
+
+        # The local docker stop must target HEAD_CONTAINER_NAME — if we
+        # ever drift from the Option α naming, stop() will leak
+        # containers, so pin the invariant here.
+        assert HEAD_CONTAINER_NAME in docker_stop_calls[0]
+        # And each ssh must target one of our peers with a remote command
+        # that references the deterministic per-peer worker container.
+        for call in ssh_calls:
+            remote = call[-1]
+            assert WORKER_CONTAINER_NAME_PREFIX in remote
+            assert "docker stop" in remote and "docker rm" in remote
+
+    def test_stop_tolerates_unreachable_peer(self):
+        """An SSH failure to one peer must not prevent teardown of the head
+        container or of the other (reachable) peer."""
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13", "10.100.0.15"],
+        )
+        backend = NvidiaBackend(config)
+
+        calls: List[List[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            # First ssh call explodes; everything else succeeds.
+            if cmd[0] == "ssh" and "10.100.0.13" in cmd:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+            return _FakeCompleted(returncode=0)
+
+        with mock.patch(
+            "ainode.engine.backends.nvidia.subprocess.run",
+            side_effect=fake_run,
+        ):
+            # Must not raise.
+            backend.stop()
+
+        # Both SSH attempts were still made, and so were the local docker
+        # stop + rm — ordering shouldn't short-circuit on peer failure.
+        ssh_calls = [c for c in calls if c[0] == "ssh"]
+        assert len(ssh_calls) == 2
+        assert any(
+            c[0] == "docker" and c[1] == "stop" and HEAD_CONTAINER_NAME in c
+            for c in calls
+        )
 
 
 # ---------------------------------------------------------------------------

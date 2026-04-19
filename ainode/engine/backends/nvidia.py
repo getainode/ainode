@@ -55,16 +55,31 @@ logger = logging.getLogger(__name__)
 
 NVIDIA_VLLM_IMAGE = "nvcr.io/nvidia/vllm:26.02-py3"
 
-# Agent B vendors ``scripts/run_cluster.sh`` into the AINode install at
-# ``/opt/ainode/run_cluster.sh``. For dev environments where that install
-# isn't present, fall back to ``/tmp/run_cluster.sh`` so operators can
-# ``wget`` the script into /tmp and test without a full install.
+# Agent B originally vendored ``scripts/run_cluster.sh`` into the AINode
+# install at ``/opt/ainode/run_cluster.sh``. Phase 5 Bug 2 fix (Option α)
+# removed run_cluster.sh from the hot path entirely — NvidiaBackend now
+# drives ``docker run -d`` directly in Python. The constants are retained
+# for back-compat: the vendored script still ships for manual debugging
+# and eugr parity, and operators can still ``wget`` it into /tmp.
 RUN_CLUSTER_SCRIPT_SOURCE = Path("/opt/ainode/run_cluster.sh")
 RUN_CLUSTER_SCRIPT_FALLBACK = Path("/tmp/run_cluster.sh")
 
-# run_cluster.sh names its container ``node-<N>`` where N is a small index.
-# We use a stable prefix so ``stop()`` can find the container to kill.
+# Historical prefix used by run_cluster.sh-era containers. Retained for
+# callers that import it (it's still in ``__all__``), but no longer used
+# in the Option α launch path — see ``HEAD_CONTAINER_NAME`` /
+# ``WORKER_CONTAINER_NAME_PREFIX`` below.
 RAY_CONTAINER_NAME_PREFIX = "ainode-vllm-node"
+
+# Option α — stable container names for head + workers. Stable so
+# ``stop()`` (and operator ``docker stop``) can always find them, and
+# collision-free across peers because worker names embed the peer IP.
+HEAD_CONTAINER_NAME = "ainode-vllm-head"
+WORKER_CONTAINER_NAME_PREFIX = "ainode-vllm-worker"
+
+# How long to wait for the head Ray container to report Running after
+# ``docker run -d`` returns. ``ray start --block`` binds :6379 in a few
+# seconds on a pre-pulled image; 60s is generous.
+HEAD_CONTAINER_READY_TIMEOUT = 60
 
 # NCCL tuning from Phase 1 floor verification — see
 # ops/slices/nvidia-vllm-engine/runbooks/01-nccl-floor-verification.md.
@@ -148,21 +163,38 @@ class NvidiaBackend(EngineBackend):
     def start_distributed(self) -> bool:
         """Launch a distributed TP/PP cluster across ``config.peer_ips``.
 
-        Steps (mirrors runbook 02 § Steps 4-7):
+        Phase 5 Bug 2 fix (Option α) — the prior implementation invoked
+        the vendored ``scripts/run_cluster.sh`` via a blocking
+        ``subprocess.run(..., timeout=120)``. That script does a
+        *foreground* ``docker run`` ending in ``ray start --block`` and
+        therefore never exits on its own, so the 120 s timeout always
+        fired and AINode's main thread was stuck long enough that
+        ``run_server()`` never bound port 3000. Option α replaces the
+        script with an inline ``docker run -d`` in Python, giving us
+        immediate return + a stable container handle for teardown.
 
-        1. Validate we're ``distributed_mode == "head"`` with peers configured
-           and ``run_cluster.sh`` is vendored.
-        2. Run ``run_cluster.sh --head`` locally via ``Popen``. This does
-           ``docker run -d`` of the NVIDIA image with ``ray start --head``
-           as its PID-1. Env vars built via :meth:`_build_nccl_env`.
-        3. SSH to each peer and run ``run_cluster.sh --worker`` with the
-           same image + env, pointing it at our head fabric IP.
+        Steps:
+
+        1. Validate we're ``distributed_mode == "head"`` with peers
+           configured.
+        2. Start the head Ray container via ``docker run -d`` (see
+           :meth:`_launch_head_container`). Poll ``docker inspect`` until
+           ``.State.Running`` is true (see
+           :meth:`_wait_for_head_container_ready`).
+        3. SSH to each peer and run ``docker run -d`` there too, pointing
+           the workers at the head fabric IP.
         4. ``docker exec`` into the local head container to invoke
            ``vllm serve --tensor-parallel-size N`` with N = 1 + len(peers).
 
-        The ``Popen`` handle we keep is for the ``vllm serve`` exec (step 4);
-        the Ray containers on head + peers are managed by docker itself and
-        cleaned up in :meth:`stop`.
+        The ``Popen`` handle we keep is for the ``vllm serve`` exec
+        (step 4); the Ray containers on head + peers are managed by
+        docker itself and cleaned up in :meth:`stop`.
+
+        Assumes the NVIDIA vLLM image is pre-pulled on every node (our
+        deploy pipeline does ``docker load`` from NFS before enabling
+        the systemd unit). We deliberately do NOT pass ``--pull=always``
+        — first-run pulls can be multi-GB and would blow the 30 s
+        ``docker run -d`` timeout.
         """
         if self.config.distributed_mode != "head":
             raise NvidiaBackendError(
@@ -174,14 +206,6 @@ class NvidiaBackend(EngineBackend):
                 "peer_ips is empty; cannot launch distributed cluster without peers."
             )
 
-        script = self._locate_run_cluster_script()
-        if script is None:
-            raise NvidiaBackendError(
-                f"run_cluster.sh missing at both {RUN_CLUSTER_SCRIPT_SOURCE} and "
-                f"{RUN_CLUSTER_SCRIPT_FALLBACK}. Agent B's vendoring step "
-                "must land before NvidiaBackend distributed mode can run."
-            )
-
         fabric_ip = self._head_fabric_ip()
         if fabric_ip is None:
             raise NvidiaBackendError(
@@ -191,31 +215,28 @@ class NvidiaBackend(EngineBackend):
 
         hf_cache = self._head_hf_cache()
 
-        # Step 2 — head Ray container.
-        head_cmd = self._build_run_cluster_cmd(
-            script=script,
-            role="head",
-            head_ip=fabric_ip,
-            hf_cache_dir=hf_cache,
+        # Step 2 — head Ray container. Non-blocking: ``docker run -d``
+        # returns as soon as the container is created.
+        self._launch_head_container(
             fabric_ip=fabric_ip,
+            hf_cache_dir=hf_cache,
         )
-        logger.info("Launching head Ray container: %s", " ".join(head_cmd))
-        head_result = subprocess.run(
-            head_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if head_result.returncode != 0:
+
+        # Step 2b — wait for Ray head to actually be up before we SSH
+        # workers at it (otherwise they race to connect to an unbound
+        # :6379 and error out).
+        if not self._wait_for_head_container_ready(
+            HEAD_CONTAINER_NAME, timeout=HEAD_CONTAINER_READY_TIMEOUT
+        ):
             raise NvidiaBackendError(
-                "run_cluster.sh --head failed "
-                f"(rc={head_result.returncode}): {head_result.stderr.strip()}"
+                f"Head container {HEAD_CONTAINER_NAME!r} did not enter "
+                f"Running state within {HEAD_CONTAINER_READY_TIMEOUT}s. "
+                "Check ``docker logs`` on the head for Ray startup errors."
             )
 
-        # Step 3 — peer Ray workers over SSH.
+        # Step 3 — peer Ray workers over SSH (``ssh <peer> docker run -d``).
         for peer_ip in self.config.peer_ips:
             self._ssh_launch_worker(
-                script_path=script,
                 peer_ip=peer_ip,
                 head_ip=fabric_ip,
             )
@@ -271,7 +292,14 @@ class NvidiaBackend(EngineBackend):
         return self.start_distributed()
 
     def stop(self) -> None:
-        """Stop the vllm serve process + fan out to peers to kill their Ray containers."""
+        """Stop the vllm serve process + fan out to peers to kill their Ray containers.
+
+        Teardown is best-effort for every remote call — an unreachable
+        peer should not block shutdown of the head. The local head
+        container is removed as well as stopped, so the next
+        ``start_distributed`` can re-create the named container without
+        a conflict.
+        """
         if self._process and self._process.poll() is None:
             self._process.send_signal(signal.SIGTERM)
             try:
@@ -284,11 +312,15 @@ class NvidiaBackend(EngineBackend):
                     pass
             self._process = None
 
-        # Tear down local Ray / vllm container by name. Best-effort.
-        container = self._solo_container_name() if self.config.distributed_mode == "solo" else self._head_container_name()
-        self._docker_stop_best_effort(container)
+        # Tear down local container by name. Best-effort.
+        container = (
+            self._solo_container_name()
+            if self.config.distributed_mode == "solo"
+            else self._head_container_name()
+        )
+        self._docker_stop_and_rm_best_effort(container)
 
-        # For distributed: SSH to each peer and stop their worker container.
+        # For distributed: SSH to each peer and stop+rm their worker container.
         if self.config.distributed_mode == "head":
             for peer_ip in self.config.peer_ips:
                 self._ssh_stop_peer_container(peer_ip)
@@ -444,10 +476,24 @@ class NvidiaBackend(EngineBackend):
         return f"{RAY_CONTAINER_NAME_PREFIX}-solo"
 
     def _head_container_name(self) -> str:
-        # run_cluster.sh names the container ``node-0`` on the head by
-        # default. We publish that name via our own launcher wrapper so
-        # ``docker exec`` / ``docker stop`` are deterministic.
-        return f"{RAY_CONTAINER_NAME_PREFIX}-head"
+        """Stable name for the head Ray container.
+
+        Under Option α we launch the head ourselves via ``docker run -d
+        --name``, so this is simply the constant ``HEAD_CONTAINER_NAME``.
+        """
+        return HEAD_CONTAINER_NAME
+
+    def _worker_container_name(self, peer_ip: str) -> str:
+        """Stable name for a peer's worker container.
+
+        Must be collision-free across peers so ``docker inspect`` / ``docker
+        stop`` address the right container. We embed the peer IP (with
+        dots replaced by dashes, since ``.`` is valid in docker names but
+        confusing to read) so the name round-trips from config to running
+        container deterministically.
+        """
+        safe_ip = peer_ip.replace(".", "-").replace(":", "-")
+        return f"{WORKER_CONTAINER_NAME_PREFIX}-{safe_ip}"
 
     def _build_solo_docker_cmd(self, container_name: str) -> List[str]:
         """Single-container solo mode — ``docker run ... vllm serve ...``.
@@ -483,6 +529,159 @@ class NvidiaBackend(EngineBackend):
         cmd.extend([NVIDIA_VLLM_IMAGE, "vllm", "serve", self.config.model])
         cmd.extend(self._build_vllm_serve_args(tp_size=1))
         return cmd
+
+    def _build_ray_docker_cmd(
+        self,
+        *,
+        container_name: str,
+        role: str,
+        head_ip: str,
+        node_ip: str,
+        hf_cache_dir: str,
+    ) -> List[str]:
+        """Build the ``docker run -d ... ray start --block`` command.
+
+        Used by both head and worker launches under Option α. The
+        container is detached (``-d``), so the returned command finishes
+        fast and we keep the handle via ``--name``.
+
+        ``role`` must be ``"head"`` or ``"worker"``. On head, Ray binds
+        :6379; on worker, Ray connects to ``<head_ip>:6379``. ``node_ip``
+        is what each Ray process registers as its own address in the
+        cluster — for head this equals ``head_ip``, for worker it's the
+        peer's fabric IP.
+
+        Note: we deliberately do NOT pass ``--rm`` so operators can
+        ``docker logs <name>`` after a crash. ``stop()`` removes the
+        container explicitly.
+        """
+        if role not in {"head", "worker"}:
+            raise ValueError(f"role must be 'head' or 'worker', got {role!r}")
+
+        nccl_env = self._build_nccl_env(
+            is_head=(role == "head"),
+            head_fabric_ip=head_ip,
+        )
+
+        if role == "head":
+            ray_cmd = (
+                f"ray start --block --head "
+                f"--node-ip-address={shlex.quote(node_ip)} --port=6379"
+            )
+        else:
+            ray_cmd = (
+                f"ray start --block "
+                f"--address={shlex.quote(head_ip)}:6379 "
+                f"--node-ip-address={shlex.quote(node_ip)}"
+            )
+
+        cmd: List[str] = [
+            "docker", "run", "-d",
+            "--name", container_name,
+            "--network", "host",
+            "--gpus", "all",
+            "--shm-size", "10.24g",
+            "--entrypoint", "/bin/bash",
+            "-v", f"{hf_cache_dir}:/root/.cache/huggingface",
+        ]
+        for key, value in nccl_env.items():
+            cmd.extend(["-e", f"{key}={value}"])
+        cmd.extend([NVIDIA_VLLM_IMAGE, "-c", ray_cmd])
+        return cmd
+
+    def _launch_head_container(
+        self,
+        fabric_ip: str,
+        hf_cache_dir: str,
+    ) -> str:
+        """Launch the head Ray container via ``docker run -d``.
+
+        Returns the container ID (stdout of ``docker run -d``) on
+        success. Raises :class:`NvidiaBackendError` if docker reports a
+        non-zero exit — most commonly because a previous container of
+        the same name already exists (we try to ``stop/rm`` it first to
+        make this idempotent).
+
+        The 30 s timeout is a safety net, not a normal-path bound:
+        ``docker run -d`` returns as soon as the container is created,
+        which should take well under a second on a pre-pulled image.
+        If we hit the timeout, something is catastrophically wrong with
+        the local docker daemon and raising is the right call.
+        """
+        # Idempotency: if a stale container from a previous run is
+        # hanging around, remove it before trying to ``--name`` ours.
+        self._docker_stop_and_rm_best_effort(HEAD_CONTAINER_NAME)
+
+        cmd = self._build_ray_docker_cmd(
+            container_name=HEAD_CONTAINER_NAME,
+            role="head",
+            head_ip=fabric_ip,
+            node_ip=fabric_ip,
+            hf_cache_dir=hf_cache_dir,
+        )
+        env = self._build_env_for_subprocess()
+
+        logger.info("Launching head Ray container: %s", " ".join(cmd))
+        try:
+            result = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise NvidiaBackendError(
+                f"docker run -d for head container {HEAD_CONTAINER_NAME!r} "
+                f"timed out after {exc.timeout}s; the local docker daemon "
+                "may be unresponsive."
+            ) from exc
+
+        if result.returncode != 0:
+            raise NvidiaBackendError(
+                f"docker run -d for head container {HEAD_CONTAINER_NAME!r} "
+                f"failed (rc={result.returncode}): {result.stderr.strip()}"
+            )
+        return result.stdout.strip()
+
+    def _wait_for_head_container_ready(
+        self,
+        container_name: str,
+        timeout: int = HEAD_CONTAINER_READY_TIMEOUT,
+    ) -> bool:
+        """Poll ``docker inspect`` until the container is Running, or time out.
+
+        Returns True once ``.State.Running == true``, False on timeout.
+        We only check ``Running`` and not ``Health.Status`` — the
+        NVIDIA vLLM image does not ship a HEALTHCHECK instruction, so
+        ``Health`` is absent from ``docker inspect`` output. ``ray start``
+        binds :6379 within a couple of seconds on a pre-pulled image, so
+        Running-true is a reliable-enough proxy for "head is up".
+        """
+        deadline = time.time() + timeout
+        inspect_fmt = "{{.State.Running}}"
+        last_err: Optional[str] = None
+        while time.time() < deadline:
+            try:
+                result = subprocess.run(
+                    ["docker", "inspect", "-f", inspect_fmt, container_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                last_err = "docker inspect timed out"
+                time.sleep(1)
+                continue
+            if result.returncode == 0 and result.stdout.strip() == "true":
+                return True
+            last_err = result.stderr.strip() or result.stdout.strip()
+            time.sleep(1)
+        logger.warning(
+            "Head container %s not ready within %ds: %s",
+            container_name, timeout, last_err,
+        )
+        return False
 
     def _build_vllm_serve_args(self, tp_size: int) -> List[str]:
         """Assemble the positional ``vllm serve`` args after ``<model>``."""
@@ -558,36 +757,48 @@ class NvidiaBackend(EngineBackend):
 
     def _ssh_launch_worker(
         self,
-        script_path: Path,
         peer_ip: str,
         head_ip: str,
     ) -> None:
-        """SSH to ``peer_ip`` and run ``run_cluster.sh --worker`` there.
+        """SSH to ``peer_ip`` and launch its Ray worker container.
 
-        Assumes the script has been propagated to the peer at the same
-        path (``/opt/ainode/run_cluster.sh``) via Agent B's install, and
-        that ``ssh_user`` has passwordless SSH access to the peer.
+        Phase 5 Bug 2 fix: previously this invoked
+        ``bash run_cluster.sh --worker ...`` on the peer, inheriting the
+        same foreground/trap-EXIT problem that caused the head to hang.
+        Option α replaces it with a direct ``docker run -d`` over SSH
+        using the same builder as the head, so the SSH call returns
+        fast and leaves a detached container on the peer.
+
+        Assumes passwordless SSH from this node as ``ssh_user`` to the
+        peer, and that the NVIDIA vLLM image is pre-pulled on the peer
+        (the deploy pipeline distributes it via ``docker load`` from NFS).
         """
-        nccl_env = self._build_nccl_env(is_head=False, head_fabric_ip=head_ip)
-        env_args: List[str] = []
-        for key, value in nccl_env.items():
-            env_args.extend(["-e", f"{key}={value}"])
+        # Reasonable per-peer HF cache path. Workers can't always write
+        # to NFS (runbook 02 § Observations / gotcha 2), so default to a
+        # home-directory path. ``mkdir -p`` runs inside the remote shell.
+        peer_hf_cache = "/root/ainode-nvidia-cache"
 
-        # Reasonable per-peer HF cache path. Workers can't always write to
-        # NFS (runbook 02 § Observations / gotcha 2), so default to a
-        # home-directory path.
-        peer_hf_cache = "~/ainode-nvidia-cache"
+        worker_name = self._worker_container_name(peer_ip)
 
-        remote_cmd_parts: List[str] = [
-            "mkdir", "-p", peer_hf_cache, "&&",
-            "bash", str(script_path),
-            NVIDIA_VLLM_IMAGE,
-            head_ip,
-            "--worker",
-            peer_hf_cache,
-            *env_args,
-        ]
-        remote_cmd = " ".join(shlex.quote(p) for p in remote_cmd_parts)
+        docker_cmd = self._build_ray_docker_cmd(
+            container_name=worker_name,
+            role="worker",
+            head_ip=head_ip,
+            # The peer registers as its own IP, which is the IP we SSH to.
+            # (We SSH over the fabric, so peer_ip here is the fabric IP.)
+            node_ip=peer_ip,
+            hf_cache_dir=peer_hf_cache,
+        )
+
+        # Remote shell command: clean up any stale worker container from
+        # a prior run (stable name means we can always find it), make
+        # the cache dir, then docker run -d. Chained with && so a failed
+        # cleanup still lets docker run surface its own error.
+        docker_cmd_str = " ".join(shlex.quote(p) for p in docker_cmd)
+        remote_cmd = (
+            f"docker rm -f {shlex.quote(worker_name)} >/dev/null 2>&1 || true; "
+            f"mkdir -p {shlex.quote(peer_hf_cache)} && {docker_cmd_str}"
+        )
 
         ssh_target = f"{self.config.ssh_user}@{peer_ip}"
         ssh_cmd = [
@@ -599,25 +810,40 @@ class NvidiaBackend(EngineBackend):
             remote_cmd,
         ]
         logger.info("SSH-launching worker on %s", peer_ip)
-        result = subprocess.run(
-            ssh_cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+        try:
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise NvidiaBackendError(
+                f"ssh docker run -d for worker on {peer_ip} timed out "
+                f"after {exc.timeout}s."
+            ) from exc
         if result.returncode != 0:
             raise NvidiaBackendError(
-                f"run_cluster.sh --worker on {peer_ip} failed "
+                f"ssh docker run -d for worker on {peer_ip} failed "
                 f"(rc={result.returncode}): {result.stderr.strip()}"
             )
 
     def _ssh_stop_peer_container(self, peer_ip: str) -> None:
-        """Best-effort ``docker stop`` on a peer's worker container."""
+        """Best-effort ``docker stop && docker rm`` on a peer's worker container.
+
+        Uses the deterministic container name (see
+        :meth:`_worker_container_name`) so stop is targeted and can't
+        accidentally clobber unrelated containers on the peer. Remote
+        errors are swallowed — an unreachable peer should not block
+        shutdown of the head.
+        """
+        worker_name = self._worker_container_name(peer_ip)
         ssh_target = f"{self.config.ssh_user}@{peer_ip}"
-        # Stop any container whose name starts with our prefix.
+        # ``|| true`` so a missing container (peer never started) doesn't
+        # fail the ssh. ``-f`` on rm covers still-running containers.
         remote = (
-            "docker ps -q --filter "
-            f"'name={RAY_CONTAINER_NAME_PREFIX}' | xargs -r docker stop"
+            f"docker stop {shlex.quote(worker_name)} >/dev/null 2>&1 || true; "
+            f"docker rm -f {shlex.quote(worker_name)} >/dev/null 2>&1 || true"
         )
         ssh_cmd = [
             "ssh",
@@ -634,16 +860,31 @@ class NvidiaBackend(EngineBackend):
         except Exception:  # pragma: no cover - best-effort teardown
             logger.exception("ssh docker stop on %s failed", peer_ip)
 
+    def _docker_stop_and_rm_best_effort(self, container_name: str) -> None:
+        """Stop and remove a local container, swallowing all errors.
+
+        Used both at teardown (``stop()``) and before launching a fresh
+        head/solo container so the ``--name`` flag doesn't collide with
+        a lingering stopped container from a previous run.
+        """
+        for args in (
+            ["docker", "stop", container_name],
+            ["docker", "rm", "-f", container_name],
+        ):
+            try:
+                subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except Exception:  # pragma: no cover - best-effort teardown
+                logger.exception("%s failed", " ".join(args))
+
+    # Back-compat alias — older tests (and any outside caller) might
+    # import the historical name. Kept so imports don't break.
     def _docker_stop_best_effort(self, container_name: str) -> None:
-        try:
-            subprocess.run(
-                ["docker", "stop", container_name],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except Exception:  # pragma: no cover - best-effort teardown
-            logger.exception("docker stop %s failed", container_name)
+        self._docker_stop_and_rm_best_effort(container_name)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -697,10 +938,13 @@ class NvidiaBackend(EngineBackend):
 
 
 __all__ = [
+    "HEAD_CONTAINER_NAME",
+    "HEAD_CONTAINER_READY_TIMEOUT",
     "NVIDIA_VLLM_IMAGE",
     "NvidiaBackend",
     "NvidiaBackendError",
     "RUN_CLUSTER_SCRIPT_FALLBACK",
     "RUN_CLUSTER_SCRIPT_SOURCE",
     "RAY_CONTAINER_NAME_PREFIX",
+    "WORKER_CONTAINER_NAME_PREFIX",
 ]
