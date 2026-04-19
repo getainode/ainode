@@ -775,8 +775,9 @@ class NvidiaBackend(EngineBackend):
         """
         # Reasonable per-peer HF cache path. Workers can't always write
         # to NFS (runbook 02 § Observations / gotcha 2), so default to a
-        # home-directory path. ``mkdir -p`` runs inside the remote shell.
-        peer_hf_cache = "/root/ainode-nvidia-cache"
+        # home-directory path under the ssh_user's home. We can't use /root
+        # because we SSH in as the non-root ssh_user on the peer.
+        peer_hf_cache = f"/home/{self.config.ssh_user}/ainode-nvidia-cache"
 
         worker_name = self._worker_container_name(peer_ip)
 
