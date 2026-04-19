@@ -406,6 +406,7 @@ class NvidiaBackend(EngineBackend):
         self,
         is_head: bool = True,
         head_fabric_ip: Optional[str] = None,
+        peer_fabric_ip: Optional[str] = None,
     ) -> Dict[str, str]:
         """Build the NCCL/Ray env vars for the NVIDIA container.
 
@@ -427,10 +428,21 @@ class NvidiaBackend(EngineBackend):
         * ``HF_HUB_ENABLE_HF_TRANSFER=1`` — always on, per install-UX spec.
         """
         iface = self.config.cluster_interface or ""
-        fabric_ip = detect_fabric_ip(iface) or "127.0.0.1"
+        local_fabric_ip = detect_fabric_ip(iface) or "127.0.0.1"
         hca = build_nccl_ib_hca_whitelist()
 
-        master_addr = fabric_ip if is_head else (head_fabric_ip or fabric_ip)
+        # For the head, VLLM_HOST_IP is this node's fabric IP. For a worker,
+        # it must be THE WORKER's fabric IP (we pass `peer_fabric_ip` when
+        # assembling the SSH-to-worker docker command from the head). If
+        # not set, fall back to local detection — but that would only be
+        # correct when the method runs on the worker itself, which is not
+        # how `_ssh_launch_worker` invokes it today. Phase 5 Bug 5 fix.
+        if is_head:
+            fabric_ip = local_fabric_ip
+        else:
+            fabric_ip = peer_fabric_ip or local_fabric_ip
+
+        master_addr = head_fabric_ip if not is_head else local_fabric_ip
 
         env: Dict[str, str] = {
             "VLLM_HOST_IP": fabric_ip,
@@ -565,9 +577,14 @@ class NvidiaBackend(EngineBackend):
         if role not in {"head", "worker"}:
             raise ValueError(f"role must be 'head' or 'worker', got {role!r}")
 
+        # When building the env for a peer (role == "worker"), pass the
+        # peer's fabric IP explicitly so VLLM_HOST_IP is UNIQUE per node.
+        # node_ip here is the peer's own fabric IP (set by the caller in
+        # _ssh_launch_worker).
         nccl_env = self._build_nccl_env(
             is_head=(role == "head"),
             head_fabric_ip=head_ip,
+            peer_fabric_ip=(node_ip if role != "head" else None),
         )
 
         if role == "head":

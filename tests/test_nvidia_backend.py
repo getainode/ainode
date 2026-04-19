@@ -156,7 +156,9 @@ class TestBuildNcclEnv:
         assert env["NCCL_IB_GID_INDEX"] == "3"
         assert env["NCCL_IB_SUBNET_AWARE_ROUTING"] == "1"
         assert env["NCCL_IB_DISABLE"] == "0"
-        assert env["HF_HUB_ENABLE_HF_TRANSFER"] == "1"
+        # P5 Bug 4: explicit "0" so env doesn't leak from AINode container
+        # into nvcr.io/nvidia/vllm (which doesn't ship hf_transfer).
+        assert env["HF_HUB_ENABLE_HF_TRANSFER"] == "0"
         # MASTER_PORT is a constant at the module level; ensure it matches
         assert env["MASTER_PORT"] == "29501"
 
@@ -301,7 +303,9 @@ class TestStartSolo:
         ]
         assert any(p.startswith("VLLM_HOST_IP=") for p in env_pairs)
         assert any(p.startswith("NCCL_IB_GID_INDEX=3") for p in env_pairs)
-        assert any(p.startswith("HF_HUB_ENABLE_HF_TRANSFER=1") for p in env_pairs)
+        # P5 Bug 4: HF_HUB_ENABLE_HF_TRANSFER is explicitly "0" for the
+        # nvcr.io vllm container (hf_transfer isn't installed there).
+        assert any(p.startswith("HF_HUB_ENABLE_HF_TRANSFER=0") for p in env_pairs)
 
     def test_start_solo_skips_when_already_running(self):
         config = _make_config(distributed_mode="solo")
