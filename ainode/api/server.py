@@ -94,7 +94,12 @@ def create_app(
     app["broadcast_listener"] = None
     app["secrets_manager"] = SecretsManager()
     app["embedding_manager"] = EmbeddingManager()
-    app["ray_autostart_state"] = RayAutostartState()
+    # Ray autostart is only meaningful for the legacy eugr backend. The NVIDIA
+    # backend manages its own Ray lifecycle via run_cluster.sh at model-load time;
+    # running `ray start` here fights with that (session-name mismatch on peer
+    # nodes, port conflicts on port 6379). Disable the autostart loop in that case.
+    _engine_backend_for_ray = (getattr(config, "engine_backend", None) or "eugr").lower()
+    app["ray_autostart_state"] = RayAutostartState(enabled=(_engine_backend_for_ray == "eugr"))
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -261,13 +266,14 @@ async def _on_startup(app: web.Application) -> None:
                 return None
             return f"{name}:6379"
 
-        app["_ray_autostart_task"] = asyncio.get_event_loop().create_task(
-            _ray_autostart_loop(
-                cluster_state=cluster,
-                get_master_address=_get_master_address,
-                state=app["ray_autostart_state"],
+        if app["ray_autostart_state"].enabled:
+            app["_ray_autostart_task"] = asyncio.get_event_loop().create_task(
+                _ray_autostart_loop(
+                    cluster_state=cluster,
+                    get_master_address=_get_master_address,
+                    state=app["ray_autostart_state"],
+                )
             )
-        )
 
 
 async def _cluster_sync_loop(app: web.Application) -> None:
