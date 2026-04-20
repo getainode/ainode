@@ -23,6 +23,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app["download_jobs"] = {}
 
     app.router.add_post("/api/models/load", handle_model_load)
+    app.router.add_post("/api/models/unload", handle_model_unload)
     app.router.add_get("/api/models", handle_list_models)
     app.router.add_post("/api/models/refresh", handle_refresh_catalog)
     app.router.add_get("/api/models/recommended", handle_recommended)
@@ -147,6 +148,52 @@ async def handle_model_load(request: web.Request) -> web.Response:
         "model": model,
         "distributed": sharding_config is not None,
         "plan": plan_dict,
+    })
+
+
+async def handle_model_unload(request: web.Request) -> web.Response:
+    """POST /api/models/unload -- stop the current model (solo or distributed).
+
+    The dashboard DELETE button hits this endpoint. Calls engine.stop(), which
+    for EugrBackend tears down eugr's launch-cluster.sh, and for NvidiaBackend
+    stops the head container + fan-outs `docker stop` to peer workers over SSH.
+
+    For distributed (head) mode, flips config back to "solo" so a subsequent
+    launch defaults sanely.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    engine = request.app.get("engine")
+    config = request.app["config"]
+    stopped = False
+    errors = []
+
+    if engine is not None:
+        try:
+            if engine.is_running():
+                engine.stop()
+                stopped = True
+        except Exception as exc:
+            errors.append(f"engine.stop(): {exc}")
+
+    try:
+        config.model = None
+        if getattr(config, "distributed_mode", "") == "head":
+            config.distributed_mode = "solo"
+        try:
+            config.save()
+        except Exception as exc:
+            errors.append(f"config.save: {exc}")
+    except Exception as exc:
+        errors.append(f"config clear: {exc}")
+
+    return web.json_response({
+        "stopped": stopped,
+        "model": body.get("model"),
+        "errors": errors,
     })
 
 
