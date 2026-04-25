@@ -71,12 +71,13 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     When min_nodes > 1, this endpoint flips the local engine into head mode:
     it discovers member nodes from the cluster state, takes their peer IPs
     from UDP recvfrom, writes them into config, stops the current (solo)
-    engine, and starts the distributed engine which shells out to eugr's
-    launch-cluster.sh. When min_nodes == 1, it falls through to the
-    existing single-node load path (/api/models/load).
+    engine, and starts the distributed engine via the configured backend
+    (eugr's launch-cluster.sh, or NvidiaBackend's run_cluster path).
+    When min_nodes == 1, it falls through to the existing single-node load
+    path (/api/models/load).
     """
     from ainode.core.config import NodeConfig
-    from ainode.engine.docker_engine import DockerEngine
+    from ainode.engine.backends import get_backend
 
     global _active_sharding
 
@@ -160,7 +161,7 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     except Exception:
         logger.exception("Engine.stop() failed during distributed hot-swap")
 
-    new_engine = DockerEngine(config)
+    new_engine = get_backend(config)
     try:
         started = new_engine.start_distributed()
     except Exception as exc:
