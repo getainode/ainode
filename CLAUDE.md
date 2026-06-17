@@ -1,5 +1,7 @@
 # CLAUDE.md — AINode Product
 
+> **DOX:** Before editing, walk this repo's `AGENTS.md` chain (root → target folder) and obey the nearest one as the local edit contract. This file holds **Claude-specific** config only and must not restate the `AGENTS.md` edit rules or the Vault's state/"why". Boundary: Obsidian Vault → `Systems/Claude Code Harness/DOX — Ownership Charter & Pilot`.
+
 ## Project Overview
 
 AINode — Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning in your browser. One command to start, automatic clustering.
@@ -89,6 +91,32 @@ launcher handles SSH to peers, Ray head/worker formation, and NCCL.
 - NVIDIA DGX Spark (GB10, 128 GB unified memory)
 - ASUS/Dell/HP GB10 variants
 - Any Linux system with NVIDIA GPU + CUDA
+
+## Performance Design Point (GB10 / DGX Spark)
+
+GB10 decode is **memory-bandwidth bound** (273 GB/s LPDDR5x per node), not
+compute bound. Single-stream decode reads the active weights once per token,
+so the ceiling is `bandwidth ÷ bytes-read-per-token`. Implications that should
+shape engine defaults and user expectations:
+
+- **Dense models are bandwidth-limited.** Dense 70B (NVFP4 ~35 GB) caps near
+  ~7-8 t/s single-stream on one node; dense 405B is ~1 t/s. Multi-node tensor
+  parallelism does **not** improve single-stream latency — it adds 2
+  all-reduces/layer over the fabric, and the comms tax eats the per-node
+  bandwidth gain. A model that fits on one node should run TP=1.
+- **MoE is the design point for distributed serving.** A Mixture-of-Experts
+  model (e.g. Qwen3.5-397B-**A17B**) needs the cluster's pooled memory for its
+  total params but only reads its *active* params per token, so decode stays
+  fast (~16-17 t/s single-stream observed at TP=4 on a 4-node RoCE cluster).
+  MoE decouples capacity from decode cost — the right match for this hardware.
+- **The cluster pays off on:** frontier MoE that can't fit one node, batched
+  multi-user throughput, and fine-tuning/training. Not single-stream chat.
+
+**Proven distributed vLLM flags** for frontier MoE on this hardware (the engine
+should emit these automatically — users never hand-edit vLLM commands):
+`--tensor-parallel-size <N>`, `--kv-cache-dtype fp8` (required for long context),
+`--enforce-eager` (Blackwell/ARM stability), `--gpu-memory-utilization 0.85`,
+RoCE/RDMA NCCL env per-node (see `scripts/nccl-env-init.sh`).
 
 ## Brand
 
