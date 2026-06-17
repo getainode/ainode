@@ -179,6 +179,37 @@ class TestManagerList:
         assert downloaded[0]["hf_repo"] == "some-org/custom-model"
         assert downloaded[0]["downloaded"] is True
 
+    def test_hf_cache_nested_model_is_discovered(self, manager: ModelManager):
+        """Models cached at models_dir/hf-cache/hub/ (out-of-band HF_HOME) surface
+        in both list_available() and list_downloaded()."""
+        slug = "models--nvidia--Qwen3-235B-A22B-NVFP4"
+        nested = manager.models_dir / "hf-cache" / "hub" / slug
+        nested.mkdir(parents=True)
+        (nested / "config.json").write_text('{"test": true}')
+
+        avail = {m["id"]: m for m in manager.list_available()}
+        assert slug in avail
+        assert avail[slug]["downloaded"] is True
+        assert avail[slug]["hf_repo"] == "nvidia/Qwen3-235B-A22B-NVFP4"
+
+        dl = manager.list_downloaded()
+        assert any(d["hf_repo"] == "nvidia/Qwen3-235B-A22B-NVFP4" for d in dl)
+
+    def test_hf_cache_nested_dedupes_against_standard_path(self, manager: ModelManager):
+        """Same model in both hub/ and hf-cache/hub/ is counted once (no regression
+        to the standard-path scan)."""
+        slug = "models--nvidia--Qwen3-235B-A22B-NVFP4"
+        for sub in (manager.models_dir / "hub", manager.models_dir / "hf-cache" / "hub"):
+            d = sub / slug
+            d.mkdir(parents=True)
+            (d / "config.json").write_text('{"test": true}')
+
+        avail_ids = [m["id"] for m in manager.list_available()]
+        assert avail_ids.count(slug) == 1
+
+        dl = manager.list_downloaded()
+        assert sum(1 for d in dl if d["hf_repo"] == "nvidia/Qwen3-235B-A22B-NVFP4") == 1
+
 
 class TestManagerInfo:
     def test_get_model_info_exists(self, manager: ModelManager):

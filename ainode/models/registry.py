@@ -666,7 +666,11 @@ class ModelManager:
         # Merge in downloaded-but-not-in-catalog entries. HF's cache layout is
         # models_dir/hub/models--<org>--<name>/ — skip control dirs like
         # .locks, xet, blobs, snapshots and anything not prefixed `models--`.
-        scan_roots = [self.models_dir, self.models_dir / "hub"]
+        scan_roots = [
+            self.models_dir,
+            self.models_dir / "hub",
+            self.models_dir / "hf-cache" / "hub",  # out-of-band HF_HOME=models/hf-cache downloads
+        ]
         seen_slugs: set[str] = set()
         for root in scan_roots:
             if not root.exists():
@@ -757,12 +761,13 @@ class ModelManager:
                 # Direct download: org--name
                 _add(child, name.replace("--", "/", 1))
 
-        # Also scan hub/ subdirectory (HF nested cache layout)
-        hub = self.models_dir / "hub"
-        if hub.is_dir():
-            for child in sorted(hub.iterdir()):
-                if child.is_dir() and child.name.startswith("models--"):
-                    _add(child, child.name[len("models--"):].replace("--", "/", 1))
+        # Also scan nested HF cache layouts: models_dir/hub and the out-of-band
+        # models_dir/hf-cache/hub (HF_HOME=models/hf-cache downloads land here).
+        for hub in (self.models_dir / "hub", self.models_dir / "hf-cache" / "hub"):
+            if hub.is_dir():
+                for child in sorted(hub.iterdir()):
+                    if child.is_dir() and child.name.startswith("models--"):
+                        _add(child, child.name[len("models--"):].replace("--", "/", 1))
 
         return downloaded
 
