@@ -466,6 +466,18 @@ class NvidiaBackend(EngineBackend):
             # future image, flip this to "1".
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
             "HF_TOKEN": self.config.hf_token or "",
+            # FlashInfer ships a prebuilt attention kernel that emits an
+            # "illegal instruction" on GB10 (sm120) — a wrong-arch binary —
+            # which kills EngineCore on the first real prefill. Pin Triton
+            # (JIT-compiled for the live arch) instead. Set on the driver;
+            # vLLM forwards VLLM_* into the Ray workers' runtime_env, so the
+            # peers honor it too (verified TP=4 on the 4-node GB10 cluster).
+            # ponytail: env-overridable, so a future image that fixes the
+            # FlashInfer sm120 kernel needs no code change — just set
+            # VLLM_ATTENTION_BACKEND (or FLASHINFER) in the systemd unit env.
+            "VLLM_ATTENTION_BACKEND": os.environ.get(
+                "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
+            ),
         }
         if hca:
             env["NCCL_IB_HCA"] = hca
@@ -713,6 +725,11 @@ class NvidiaBackend(EngineBackend):
             "--host", "0.0.0.0",
             "--port", str(self.config.api_port),
             "--gpu-memory-utilization", str(self.config.gpu_memory_utilization),
+            # Blackwell/ARM stability — the documented invariant (CLAUDE.md +
+            # engine/AGENTS.md). This product targets GB10, where CUDA-graph
+            # capture is the throughput lever to revisit *after* the
+            # TRITON_ATTN path is proven under load — not a silent default-off.
+            "--enforce-eager",
         ]
         if tp_size > 1:
             args.extend(["--tensor-parallel-size", str(tp_size)])

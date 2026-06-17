@@ -10,6 +10,7 @@ Parent: `../../AGENTS.md` · State / "why" / history: Obsidian Vault → `Titani
 
 ## vLLM flag invariants (GB10 / Blackwell ARM)
 
+- **Pin `VLLM_ATTENTION_BACKEND=TRITON_ATTN`.** FlashInfer (vLLM's auto-pick on Blackwell) ships a prebuilt attention kernel that emits an `illegal instruction` on GB10 (sm120) and kills EngineCore on the **first prefill** (`BatchPrefillWithPagedKVCache`). The engine loads + reports READY, then suicides on the first real request — `/v1/models` 200 is NOT proof of a working engine. `FLASH_ATTN` is unavailable (no `flash_attn` in the image); Triton JIT-compiles to the live arch. NvidiaBackend sets this in `_build_nccl_env`; vLLM forwards `VLLM_*` to Ray workers. Env-overridable for a future image that fixes FlashInfer.
 - **Keep `--enforce-eager`.** It's the Blackwell/ARM stability flag. Removing it (to capture CUDA graphs) is a deliberate, revertible perf experiment — never a silent default.
 - **Never add `--enable-expert-parallel`** — it hangs on this MoE/hardware.
 - **`--gpu-memory-utilization` target `0.85`** (config default is `0.9`).

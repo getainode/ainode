@@ -10,6 +10,17 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 _Next release — changes accumulate here until tagged._
 
+### Fixed
+- **GB10 (sm120) frontier-MoE inference no longer crashes on the first request** — `NvidiaBackend` now pins `VLLM_ATTENTION_BACKEND=TRITON_ATTN`. vLLM auto-selects FlashInfer on Blackwell, whose *prebuilt* prefill kernel (`BatchPrefillWithPagedKVCache`) emits an `illegal instruction` on GB10/sm120 and kills EngineCore on the first real prefill (the engine loads, reports READY, then suicides — vLLM SIGTERMs its own Ray workers). Triton JIT-compiles to the live arch and serves correctly. `FLASH_ATTN` is not an option (no `flash_attn` in the serving image). The value is read from `os.environ` with a `TRITON_ATTN` default, so a future image that fixes the FlashInfer sm120 kernel needs only a unit-env change, not a code change. Set on the driver; vLLM forwards `VLLM_*` to the Ray workers, so all nodes honor it. Verified live: `nvidia/Qwen3-235B-A22B-NVFP4` at TP=4 across 4× GB10 survived a 3,516-token prefill. (`ainode/engine/backends/nvidia.py`)
+- **`models/hf-cache/hub/` now scanned for downloaded models** — `registry.py` `list_available` + `list_downloaded` previously walked only `models/` and `models/hub/`, so HF-transfer downloads (e.g. the 235B) were invisible in the launch dropdown despite being on disk. +2 tests.
+
+### Changed
+- **`NvidiaBackend` now passes `--enforce-eager`** — the documented Blackwell/ARM stability flag (this product targets GB10). CUDA-graph capture is a deliberate throughput experiment to revisit once the `TRITON_ATTN` path is proven under load, not a silent default-off.
+- **Adopted the DOX `AGENTS.md` edit-contract convention** — root `AGENTS.md` + a child at `ainode/engine/AGENTS.md` (distributed-launch + GB10 vLLM-flag invariants), plus a chain-walk pointer atop `CLAUDE.md`. References only; no duplication.
+
+### Known limitations
+- The `VLLM_ATTENTION_BACKEND` / `--enforce-eager` fixes ship in the **next image build (0.4.10)**. A running `0.4.9` is unchanged — until rebuilt, bring frontier MoE up via the manual serve command (or a volume-mount hotfix of `nvidia.py`) documented in `ops/runbooks/2026-06-17-235b-moe-tp4-working-state.md`.
+
 ---
 
 ## [0.4.9] — 2026-04-18
