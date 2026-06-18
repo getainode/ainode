@@ -466,15 +466,15 @@ class NvidiaBackend(EngineBackend):
             # future image, flip this to "1".
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
             "HF_TOKEN": self.config.hf_token or "",
-            # FlashInfer ships a prebuilt attention kernel that emits an
-            # "illegal instruction" on GB10 (sm120) — a wrong-arch binary —
-            # which kills EngineCore on the first real prefill. Pin Triton
-            # (JIT-compiled for the live arch) instead. Set on the driver;
-            # vLLM forwards VLLM_* into the Ray workers' runtime_env, so the
-            # peers honor it too (verified TP=4 on the 4-node GB10 cluster).
-            # ponytail: env-overridable, so a future image that fixes the
-            # FlashInfer sm120 kernel needs no code change — just set
-            # VLLM_ATTENTION_BACKEND (or FLASHINFER) in the systemd unit env.
+            # Attention backend. NOTE (verified 2026-06-17): this
+            # scitrera/vLLM 0.17.1 build does NOT honor "TRITON_ATTN" — every
+            # rank still logs "Using FLASHINFER attention", so this pin is
+            # currently a NO-OP. The actual GB10/sm120 crash fix is
+            # --enforce-eager (see _build_vllm_serve_args); FlashInfer's
+            # prefill kernel is fine in eager, it only crashes under CUDA-graph
+            # capture. Pin retained as an env-overridable hedge: if a future
+            # build honors it, the correct value is likely "TRITON_ATTN_VLLM_V1"
+            # — set VLLM_ATTENTION_BACKEND in the systemd unit to override.
             "VLLM_ATTENTION_BACKEND": os.environ.get(
                 "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
             ),
@@ -725,10 +725,14 @@ class NvidiaBackend(EngineBackend):
             "--host", "0.0.0.0",
             "--port", str(self.config.api_port),
             "--gpu-memory-utilization", str(self.config.gpu_memory_utilization),
-            # Blackwell/ARM stability — the documented invariant (CLAUDE.md +
-            # engine/AGENTS.md). This product targets GB10, where CUDA-graph
-            # capture is the throughput lever to revisit *after* the
-            # TRITON_ATTN path is proven under load — not a silent default-off.
+            # THE GB10/sm120 fix (verified 2026-06-17). FlashInfer's prefill
+            # kernel (BatchPrefillWithPagedKVCache) illegal-instructions under
+            # CUDA-graph capture on GB10 (sm120) and kills EngineCore on the
+            # first real prefill — the engine loads, reports READY, then
+            # suicides (vLLM SIGTERMs its own Ray workers). --enforce-eager
+            # disables graph capture and the same kernel runs clean (235B TP=4
+            # survived a 3,513-token prefill). Re-enabling graphs for
+            # throughput needs a working non-FlashInfer backend first.
             "--enforce-eager",
         ]
         if tp_size > 1:
