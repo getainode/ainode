@@ -649,6 +649,14 @@ const AINode = {
     var self = this;
     var s = this.state.status;
     var live = !!(s && s.engine_ready);
+    var phase = (s && s.load_phase) || 'idle';
+    // Coarse phase → [label, percent] for the launching card (3c).
+    var PHASE_INFO = {
+      idle: ['starting', 8], starting: ['starting', 12],
+      loading_weights: ['loading weights', 40],
+      distributed_init: ['connecting nodes', 62],
+      profiling: ['profiling', 84], ready: ['ready', 100],
+    };
     var instances = [];
 
     // Distributed instance (authoritative from /api/cluster/resources) —
@@ -704,6 +712,19 @@ const AINode = {
       }
     }
 
+    // Launching card (3c): a model is configured and the engine is spinning up
+    // but hasn't registered as an instance yet — show its load phase so the
+    // multi-minute launch doesn't read as "nothing running".
+    if (instances.length === 0 && s && s.model && !live) {
+      instances.push({
+        model: s.model,
+        strategy: 'launching',
+        nodes: [s.node_id || 'local'],
+        status: 'STARTING',
+        badge: 'LAUNCHING',
+      });
+    }
+
     if (instances.length === 0) {
       container.innerHTML = '<div class="instances-empty">No running instances</div>';
       return;
@@ -719,7 +740,14 @@ const AINode = {
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
         '<div class="instance-footer">' +
-        '<span class="instance-status ' + (inst.status === 'READY' ? 'ready' : 'starting') + '">' + self.esc(inst.status) + '</span>' +
+        (inst.status === 'READY'
+          ? '<span class="instance-status ready">READY</span>'
+          : (function () {
+              var pi = PHASE_INFO[phase] || ['starting', 10];
+              return '<span class="instance-status starting">' + self.esc(pi[0].toUpperCase()) + ' · ' + pi[1] + '%</span>' +
+                '<span style="display:inline-block;width:90px;height:5px;background:#1f2a1f;border-radius:3px;margin:0 8px;vertical-align:middle;overflow:hidden">' +
+                '<span style="display:block;height:100%;width:' + pi[1] + '%;background:#76c043;transition:width .4s"></span></span>';
+            })()) +
         '<button class="instance-delete" data-model="' + self.esc(inst.model) + '">DELETE</button>' +
         '</div>' +
         '</div>';

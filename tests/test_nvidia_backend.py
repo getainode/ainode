@@ -918,11 +918,19 @@ class TestIsRunningAndHealth:
         ):
             result = backend.health_check()
         assert set(result.keys()) == {
-            "process_alive", "api_responding", "models_loaded"
+            "process_alive", "api_responding", "models_loaded", "load_phase"
         }
         assert result["process_alive"] is False
         assert result["api_responding"] is False
         assert result["models_loaded"] == []
+        assert result["load_phase"] == "idle"
+
+    def test_load_phase_monotonic(self):
+        backend = NvidiaBackend(_make_config())
+        assert backend.load_phase == "idle"
+        backend._advance_load_phase("profiling")
+        backend._advance_load_phase("loading_weights")  # earlier — must not regress
+        assert backend.load_phase == "profiling"
 
     def test_api_url_matches_config_port(self):
         config = _make_config(api_port=8765)

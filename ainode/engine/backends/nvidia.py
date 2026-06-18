@@ -104,6 +104,9 @@ class NvidiaBackend(EngineBackend):
         self.on_ready = on_ready
         self._process: Optional[subprocess.Popen] = None
         self._ready = False
+        # Coarse load-phase for the UI launching card (3c). Advances
+        # monotonically as _stream_logs sees the engine's startup markers.
+        self._load_phase = "idle"
         self._log_thread: Optional[threading.Thread] = None
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file: Path = LOGS_DIR / "nvidia-vllm.log"
@@ -326,6 +329,7 @@ class NvidiaBackend(EngineBackend):
                 self._ssh_stop_peer_container(peer_ip)
 
         self._ready = False
+        self._load_phase = "idle"
 
     def wait_ready(self, timeout: float = 600.0) -> bool:
         """Poll ``/v1/models`` on the API port until 2xx or timeout."""
@@ -358,6 +362,7 @@ class NvidiaBackend(EngineBackend):
             "process_alive": self.is_running(),
             "api_responding": False,
             "models_loaded": [],
+            "load_phase": self._load_phase,
         }
         try:
             url = f"http://127.0.0.1:{self.config.api_port}/v1/models"
@@ -376,6 +381,11 @@ class NvidiaBackend(EngineBackend):
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def load_phase(self) -> str:
+        """Coarse engine load phase for the UI launching card (3c)."""
+        return self._load_phase
 
     @property
     def api_url(self) -> str:
@@ -963,19 +973,48 @@ class NvidiaBackend(EngineBackend):
                 return candidate
         return None
 
+    # Ordered load phases (3c). Each engine startup log line is matched against
+    # these markers; the phase only advances (monotonic by rank) so a coarse
+    # progress card can show load → distributed-init → profiling → ready, and a
+    # stall is visible as the phase that stops advancing.
+    _LOAD_PHASE_ORDER = ["idle", "starting", "loading_weights", "distributed_init", "profiling", "ready"]
+    _LOAD_PHASE_MARKERS = [
+        ("loading_weights", ("loading model weights", "loading weights", "loading safetensors")),
+        ("distributed_init", ("nccl info", "init_process_group", "rayworkerwrapper", "ray worker")),
+        ("profiling", ("memory profiling", "available kv cache", "gpu kv cache", "warming up", "autotuning")),
+    ]
+
+    def _advance_load_phase(self, phase: str) -> None:
+        """Set _load_phase to `phase` only if it's later than the current one."""
+        order = self._LOAD_PHASE_ORDER
+        try:
+            if order.index(phase) > order.index(self._load_phase):
+                self._load_phase = phase
+        except ValueError:
+            pass
+
     def _stream_logs(self, process: subprocess.Popen, target: Path) -> None:
-        """Tee subprocess stdout to ``target``, watch for readiness lines."""
+        """Tee subprocess stdout to ``target``, watch for readiness + load phase."""
         if not process.stdout:
             return
+        # A fresh log stream means a fresh launch — start the phase clock over.
+        self._load_phase = "starting"
         with open(target, "a") as sink:
             for line in process.stdout:
                 sink.write(line)
                 sink.flush()
+                if not self._ready:
+                    low = line.lower()
+                    for phase, markers in self._LOAD_PHASE_MARKERS:
+                        if any(m in low for m in markers):
+                            self._advance_load_phase(phase)
+                            break
                 if not self._ready and (
                     "Uvicorn running on" in line
                     or "Application startup complete" in line
                 ):
                     self._ready = True
+                    self._load_phase = "ready"
                     if self.on_ready:
                         try:
                             self.on_ready()

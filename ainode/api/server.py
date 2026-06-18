@@ -448,6 +448,9 @@ async def handle_status(request: web.Request) -> web.Response:
         "model": config.model,
         "gpu": gpu_info,
         "engine_ready": engine_ready,
+        # Coarse engine load phase for the UI launching card (3c):
+        # idle | starting | loading_weights | distributed_init | profiling | ready
+        "load_phase": (getattr(engine, "load_phase", "idle") if engine is not None else "idle"),
         "uptime": round(time.time() - start_time, 1),
         "version": __version__,
         "powered_by": "argentos.ai",
