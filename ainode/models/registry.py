@@ -123,6 +123,72 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 }
 
 
+# ---- Curated cluster models (always discoverable) --------------------------
+#
+# The live HF sweep (top-downloads) misses the frontier/NVFP4 models this GB10
+# cluster actually runs — so they were undiscoverable in the catalog and only
+# appeared once already on disk. These curated entries are ALWAYS merged into
+# the catalog (see ModelManager.get_catalog) so an operator can find + download
+# them. NVFP4 is native on Blackwell; these run distributed (TP=N) across nodes.
+
+CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
+    "qwen3-235b-a22b-nvfp4": ModelInfo(
+        id="qwen3-235b-a22b-nvfp4",
+        name="Qwen3-235B-A22B (NVFP4)",
+        hf_repo="nvidia/Qwen3-235B-A22B-NVFP4",
+        size_gb=250.0,
+        description="Frontier MoE (A22B active). Runs distributed TP=4 on the cluster. NVFP4 for GB10.",
+        quantization="NVFP4", min_memory_gb=275, family="qwen", params_b=235.0,
+        context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
+    ),
+    "qwen3.5-397b-a17b-nvfp4": ModelInfo(
+        id="qwen3.5-397b-a17b-nvfp4",
+        name="Qwen3.5-397B-A17B (NVFP4)",
+        hf_repo="nvidia/Qwen3.5-397B-A17B-NVFP4",
+        size_gb=468.0,
+        description="Frontier MoE (A17B active) — the cluster's design point. Distributed TP=4. NVFP4.",
+        quantization="NVFP4", min_memory_gb=500, family="qwen", params_b=397.0,
+        context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
+    ),
+    "llama-3.1-405b-nvfp4": ModelInfo(
+        id="llama-3.1-405b-nvfp4",
+        name="Llama 3.1 405B Instruct (NVFP4)",
+        hf_repo="nvidia/Llama-3.1-405B-Instruct-NVFP4",
+        size_gb=437.0,
+        description="Dense 405B, NVFP4. Needs the cluster's pooled memory (TP=4).",
+        quantization="NVFP4", min_memory_gb=470, family="llama", params_b=405.0,
+        context_length=131072, license="Llama 3.1", format="nvfp4",
+    ),
+    "llama-3.1-405b-awq": ModelInfo(
+        id="llama-3.1-405b-awq",
+        name="Llama 3.1 405B Instruct (AWQ-INT4)",
+        hf_repo="hugging-quants/Meta-Llama-3.1-405B-Instruct-AWQ-INT4",
+        size_gb=408.0,
+        description="Dense 405B, AWQ-INT4. Distributed TP=4.",
+        quantization="AWQ", min_memory_gb=440, family="llama", params_b=405.0,
+        context_length=131072, license="Llama 3.1", format="awq",
+    ),
+    "llama-3.3-70b-nvfp4": ModelInfo(
+        id="llama-3.3-70b-nvfp4",
+        name="Llama 3.3 70B Instruct (NVFP4)",
+        hf_repo="nvidia/Llama-3.3-70B-Instruct-NVFP4",
+        size_gb=80.0,
+        description="Dense 70B, NVFP4. Fits TP=2; bandwidth-bound single-stream on GB10.",
+        quantization="NVFP4", min_memory_gb=88, family="llama", params_b=70.0,
+        context_length=131072, license="Llama 3.3", recommended=True, format="nvfp4",
+    ),
+    "glm-5.1": ModelInfo(
+        id="glm-5.1",
+        name="GLM-5.1",
+        hf_repo="zai-org/GLM-5.1",
+        size_gb=874.0,
+        description="Large GLM. Needs the full cluster's pooled memory (TP=4).",
+        quantization=None, min_memory_gb=900, family="glm", params_b=0.0,
+        context_length=131072, license="GLM",
+    ),
+}
+
+
 # Backward-compat alias — external code may still import MODEL_CATALOG.
 MODEL_CATALOG: dict[str, ModelInfo] = FALLBACK_CATALOG
 
@@ -625,7 +691,15 @@ class ModelManager:
             models = self._aggregator.fetch(force_refresh=refresh)
             if not models:
                 models = list(FALLBACK_CATALOG.values())
-            self._catalog_cache = {m.id: m for m in models}
+            merged = {m.id: m for m in models}
+            # Always merge the curated cluster models — the live HF sweep misses
+            # them, so without this they're undiscoverable until already on disk.
+            # Skip any whose hf_repo a live entry already covers (don't clobber).
+            existing_repos = {m.hf_repo.lower() for m in merged.values()}
+            for cid, info in CURATED_CLUSTER_MODELS.items():
+                if cid not in merged and info.hf_repo.lower() not in existing_repos:
+                    merged[cid] = info
+            self._catalog_cache = merged
         return list(self._catalog_cache.values())
 
     def get_catalog_map(self, refresh: bool = False) -> dict[str, ModelInfo]:
@@ -856,15 +930,33 @@ class ModelManager:
     def _model_dir_info(self, info: ModelInfo) -> Path:
         return self.models_dir / self._repo_to_dirname(info.hf_repo)
 
+    def _find_model_dir(self, info: ModelInfo) -> Optional[Path]:
+        """Return the on-disk dir for a model across every layout we support.
+
+        A model can live as: direct ``org--name`` (our downloader), flat HF
+        ``models--org--name``, HF cache ``hub/models--org--name``, or out-of-band
+        ``hf-cache/hub/models--org--name`` (HF_HOME downloads). Catalog entries
+        (incl. the curated cluster models) must detect all of them — otherwise an
+        on-disk model reads as "not downloaded". Mirrors the list_available scan.
+        """
+        hf_slug = "models--" + info.hf_repo.replace("/", "--")
+        candidates = [
+            self.models_dir / self._repo_to_dirname(info.hf_repo),  # org--name
+            self.models_dir / hf_slug,
+            self.models_dir / "hub" / hf_slug,
+            self.models_dir / "hf-cache" / "hub" / hf_slug,
+        ]
+        for d in candidates:
+            if d.exists() and any(d.iterdir()):
+                return d
+        return None
+
     def _is_downloaded_info(self, info: ModelInfo) -> bool:
-        d = self._model_dir_info(info)
-        return d.exists() and any(d.iterdir())
+        return self._find_model_dir(info) is not None
 
     def _local_size_gb_info(self, info: ModelInfo) -> Optional[float]:
-        d = self._model_dir_info(info)
-        if not d.exists():
-            return None
-        return self._dir_size_gb(d)
+        d = self._find_model_dir(info)
+        return self._dir_size_gb(d) if d else None
 
     @staticmethod
     def _dir_size_gb(path: Path) -> float:
