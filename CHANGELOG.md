@@ -12,6 +12,21 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.11] — 2026-06-17
+
+### Fixed (dashboard now reports the truth — Phase 1+2)
+- **Phantom READY eliminated** — `/api/status` `engine_ready` is now a live `/v1/models` probe each call (latched `engine.ready` no longer trusted); the instances panel + master node card derive status from it (READY vs STARTING) instead of a hardcoded `READY`.
+- **Per-node VRAM no longer stuck at 0%** — `metrics/collector.py` falls back to `psutil` for GB10 unified memory (nvidia-smi reports N/A), and the UI merges live GPU metrics into the (local) node so the memory ring shows real %. *(Per-peer VRAM still pending a metrics fan-out — Phase 3.)*
+- **Cluster graphic shows distributed membership** — participating nodes are stamped with the model + `TP=N` from the authoritative `/api/cluster/resources` `distributed_instance` (the old path keyed off `active_sharding`, which is `null` while serving, so workers showed nothing).
+- **Ray status no longer falsely "not installed"** — `/api/sharding/status` derives Ray health from the head engine when a distributed instance is serving (the orchestrator container has no `ray` binary to probe).
+- **DELETE works on a dead/phantom instance** — `unload` force-clears (`stopped: true`) when the engine is unreachable instead of blocking on a `SIGTERM` that can't confirm.
+
+### Changed
+- **AUTO sharding now defaults to Tensor parallel** (was Pipeline) — matches the distributed launch path and this hardware. Launch UI defaults the Sharding pill to **Tensor** and relabels the node selector "Tensor Parallel Size (nodes)".
+- **Launch dropdown marks model state** — loaded (●) / on-disk (○) so you can tell what's downloaded.
+
+---
+
 ## [0.4.10] — 2026-06-17
 
 ### Fixed
