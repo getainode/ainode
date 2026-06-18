@@ -51,6 +51,14 @@ class NodeAnnouncement:
     # "DISTRIBUTED across N nodes" and know which topology members are busy.
     distributed_instance_id: Optional[str] = None
     distributed_peers: List[str] = field(default_factory=list)
+    # Live GPU telemetry (metrics fan-out): stamped fresh on every broadcast
+    # tick so the head can render real per-peer VRAM/util on the cluster
+    # graphic. Defaults keep older nodes backward-compatible — from_json drops
+    # unknown keys, so a peer running an older build just reports zeros.
+    gpu_memory_used_mb: float = 0.0
+    gpu_memory_total_mb: float = 0.0
+    gpu_utilization: float = 0.0
+    gpu_temp: float = 0.0
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -98,10 +106,15 @@ class BroadcastSender:
         announcement: NodeAnnouncement,
         discovery_port: int = 5678,
         broadcast_interval: float = 5.0,
+        metrics_provider: Optional[Callable[[], dict]] = None,
     ):
         self.announcement = announcement
         self.discovery_port = discovery_port
         self.broadcast_interval = broadcast_interval
+        # Optional zero-arg callable returning a get_gpu_metrics()-shaped dict;
+        # its values are stamped onto the announcement each tick so peers
+        # broadcast live VRAM/util/temp.
+        self.metrics_provider = metrics_provider
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -136,6 +149,18 @@ class BroadcastSender:
             while self._running:
                 try:
                     self.announcement.timestamp = time.time()
+                    # Refresh live GPU telemetry so each broadcast carries the
+                    # node's current VRAM/util (the head renders it per-peer).
+                    if self.metrics_provider is not None:
+                        try:
+                            m = self.metrics_provider() or {}
+                            if not m.get("error"):
+                                self.announcement.gpu_memory_used_mb = float(m.get("memory_used_mb", 0) or 0)
+                                self.announcement.gpu_memory_total_mb = float(m.get("memory_total_mb", 0) or 0)
+                                self.announcement.gpu_utilization = float(m.get("utilization_percent", 0) or 0)
+                                self.announcement.gpu_temp = float(m.get("temperature_c", 0) or 0)
+                        except Exception:
+                            pass
                     data = self.announcement.to_json().encode()
                     sock.sendto(data, ("<broadcast>", self.discovery_port))
                 except Exception:

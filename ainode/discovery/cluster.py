@@ -33,6 +33,11 @@ class ClusterNode:
     distributed_instance_id: Optional[str] = None
     distributed_peers: list = field(default_factory=list)
     peer_ip: Optional[str] = None  # captured from UDP recvfrom on the head
+    # Live GPU telemetry carried in the broadcast (metrics fan-out).
+    gpu_memory_used_mb: float = 0.0
+    gpu_memory_total_mb: float = 0.0
+    gpu_utilization: float = 0.0
+    gpu_temp: float = 0.0
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -55,6 +60,10 @@ class ClusterNode:
             distributed_instance_id=getattr(a, "distributed_instance_id", None),
             distributed_peers=list(getattr(a, "distributed_peers", []) or []),
             peer_ip=getattr(discovered, "peer_ip", None),
+            gpu_memory_used_mb=getattr(a, "gpu_memory_used_mb", 0.0),
+            gpu_memory_total_mb=getattr(a, "gpu_memory_total_mb", 0.0),
+            gpu_utilization=getattr(a, "gpu_utilization", 0.0),
+            gpu_temp=getattr(a, "gpu_temp", 0.0),
         )
 
     @classmethod
@@ -76,6 +85,10 @@ class ClusterNode:
             distributed_mode=getattr(announcement, "distributed_mode", "solo"),
             distributed_instance_id=getattr(announcement, "distributed_instance_id", None),
             distributed_peers=list(getattr(announcement, "distributed_peers", []) or []),
+            gpu_memory_used_mb=getattr(announcement, "gpu_memory_used_mb", 0.0),
+            gpu_memory_total_mb=getattr(announcement, "gpu_memory_total_mb", 0.0),
+            gpu_utilization=getattr(announcement, "gpu_utilization", 0.0),
+            gpu_temp=getattr(announcement, "gpu_temp", 0.0),
         )
 
 

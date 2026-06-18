@@ -10,6 +10,9 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 _Next release — changes accumulate here until tagged._
 
+### Added (Phase 3, in progress)
+- **Per-peer GPU telemetry fan-out** — every node now stamps live VRAM/util/temp onto its 5s discovery broadcast (`NodeAnnouncement` gains `gpu_memory_used_mb`/`gpu_memory_total_mb`/`gpu_utilization`/`gpu_temp`, default-valued so older nodes stay compatible). `BroadcastSender` refreshes them each tick from the node's `MetricsCollector`; `ClusterNode` carries them; `/api/nodes` exposes `gpu_memory_used_pct`/`gpu_utilization`/`gpu_temp` per node (local node read fresh from its own collector). The cluster graphic now shows real VRAM on **all** nodes, not just the head — closing the Phase-1 worker-VRAM gap.
+
 ---
 
 ## [0.4.11] — 2026-06-17

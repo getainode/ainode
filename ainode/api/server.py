@@ -218,9 +218,13 @@ async def _on_startup(app: web.Application) -> None:
 
     if config.cluster_enabled:
         # Start broadcast sender
+        _collector = app.get("metrics_collector")
         sender = BroadcastSender(
             announcement=announcement,
             discovery_port=config.discovery_port,
+            # Stamp live GPU telemetry onto every broadcast so the head can
+            # render real per-peer VRAM/util (metrics fan-out).
+            metrics_provider=(_collector.get_gpu_metrics if _collector else None),
         )
         await sender.start()
         app["broadcast_sender"] = sender
@@ -461,6 +465,8 @@ async def handle_nodes(request: web.Request) -> web.Response:
     cluster: ClusterState = request.app["cluster_state"]
 
     cluster_nodes = cluster.get_nodes(include_offline=False)
+    collector = request.app.get("metrics_collector")
+    local_id = config.node_id
     if cluster_nodes:
         nodes_list = []
         for n in cluster_nodes:
@@ -471,6 +477,26 @@ async def handle_nodes(request: web.Request) -> web.Response:
             ready = status_str in ("online", "serving") or (
                 dmode == "member" and status_str in ("online", "member-ready")
             )
+            # Live GPU telemetry: peers come from their broadcast; the local
+            # node's ClusterNode is built once at startup, so read it fresh
+            # from our own collector here. (metrics fan-out)
+            used_mb = float(getattr(n, "gpu_memory_used_mb", 0.0) or 0.0)
+            total_mb = float(getattr(n, "gpu_memory_total_mb", 0.0) or 0.0)
+            util = float(getattr(n, "gpu_utilization", 0.0) or 0.0)
+            temp = float(getattr(n, "gpu_temp", 0.0) or 0.0)
+            if n.node_id == local_id and collector is not None:
+                try:
+                    m = collector.get_gpu_metrics() or {}
+                    if not m.get("error"):
+                        used_mb = float(m.get("memory_used_mb", used_mb) or used_mb)
+                        total_mb = float(m.get("memory_total_mb", total_mb) or total_mb)
+                        util = float(m.get("utilization_percent", util) or util)
+                        temp = float(m.get("temperature_c", temp) or temp)
+                except Exception:
+                    pass
+            if not total_mb and n.gpu_memory_gb:
+                total_mb = n.gpu_memory_gb * 1024
+            used_pct = round(used_mb / total_mb * 100) if total_mb else 0
             nodes_list.append({
                 "node_id": n.node_id,
                 "node_name": n.node_name,
@@ -481,6 +507,9 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "gpu_name": n.gpu_name,
                 "gpu_memory_gb": n.gpu_memory_gb,
                 "unified_memory": n.unified_memory,
+                "gpu_memory_used_pct": used_pct,
+                "gpu_utilization": round(util),
+                "gpu_temp": round(temp),
                 "status": status_str,
                 "engine_ready": ready,
                 "distributed_mode": dmode,
