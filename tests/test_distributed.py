@@ -252,7 +252,8 @@ class TestShardedLaunch:
         )
         assert config.is_distributed is True
         assert config.world_size == 2
-        assert config.pipeline_parallel_size == 2
+        assert config.tensor_parallel_size == 2
+        assert config.pipeline_parallel_size == 1
 
     def test_launch_single_node_path(self):
         """With no workers, sharding plan stays on one node."""

@@ -598,18 +598,38 @@ const AINode = {
         engine_ready: s.engine_ready,
       }];
 
-      // Annotate with sharding info
-      var shardInfo = this.state.shardingStatus && this.state.shardingStatus.active_sharding;
-      if (shardInfo && shardInfo.shard_map) {
+      // MEMBERSHIP — stamp model + TP=N onto participating nodes from the
+      // authoritative distributed_instance (cluster/resources). Keep any
+      // distinct per-node model; never overwrite it. Solo mode (di null) no-op.
+      var di = this.state.clusterResources && this.state.clusterResources.distributed_instance;
+      if (di && di.model) {
+        var memberIps = di.peer_ips || [];
         topoNodes = topoNodes.map(function (n) {
-          var shard = shardInfo.shard_map[n.node_id];
-          if (shard) {
-            n.shard_role = shard.role;
-            n.shard_layers = shard.layers;
-            n.shard_memory_gb = shard.estimated_memory_gb;
-            n.sharded_model = shardInfo.model;
+          var participates =
+            n.node_id === di.head_node_id ||
+            (di.instance_id && n.instance_id === di.instance_id) ||
+            n.distributed_mode === 'head' ||
+            n.distributed_mode === 'member' ||
+            memberIps.indexOf(n.node_id) !== -1;
+          if (participates) {
+            n.model = n.model || di.model;
+            n.tp_size = di.tensor_parallel_size;
           }
           return n;
+        });
+      }
+
+      // VRAM — merge this node's live GPU metrics so the ring shows real %.
+      // Only mutates the local node; remote nodes keep their static totals.
+      var gm = this.state.metrics && this.state.metrics.gpu;
+      if (gm && !gm.error && gm.memory_total_mb > 0) {
+        var localId = s.node_id;
+        topoNodes.forEach(function (n) {
+          if (n.node_id === localId || topoNodes.length === 1) {
+            n.gpu_memory_used_pct = Math.round((gm.memory_used_mb / gm.memory_total_mb) * 100);
+            n.gpu_utilization = gm.utilization_percent;
+            n.gpu_temp = gm.temperature_c;
+          }
         });
       }
       // Pass engine_ready so the topology can drive the loading → real transition.
@@ -628,6 +648,7 @@ const AINode = {
     if (!container) return;
     var self = this;
     var s = this.state.status;
+    var live = !!(s && s.engine_ready);
     var instances = [];
 
     // Distributed instance (authoritative from /api/cluster/resources) —
@@ -643,7 +664,7 @@ const AINode = {
         strategy: 'distributed',
         tp_size: di.tensor_parallel_size,
         nodes: [di.head_node_id].concat(di.peer_ips || []),
-        status: 'READY',
+        status: live ? 'READY' : 'STARTING',
         badge: 'DISTRIBUTED · TP=' + di.tensor_parallel_size,
       });
     }
@@ -656,7 +677,7 @@ const AINode = {
           model: modelName,
           strategy: 'single',
           nodes: [s.node_id || 'local'],
-          status: 'READY',
+          status: live ? 'READY' : 'STARTING',
           badge: 'SINGLE',
         });
       });
@@ -674,7 +695,7 @@ const AINode = {
           model: sh.model,
           strategy: sh.strategy || 'pipeline',
           nodes: shardNodes,
-          status: 'READY',
+          status: live ? 'READY' : 'STARTING',
           badge: (sh.strategy || 'pipeline').toUpperCase(),
         });
       } else {
@@ -698,7 +719,7 @@ const AINode = {
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
         '<div class="instance-footer">' +
-        '<span class="instance-status ready">READY</span>' +
+        '<span class="instance-status ' + (inst.status === 'READY' ? 'ready' : 'starting') + '">' + self.esc(inst.status) + '</span>' +
         '<button class="instance-delete" data-model="' + self.esc(inst.model) + '">DELETE</button>' +
         '</div>' +
         '</div>';
@@ -787,7 +808,7 @@ const AINode = {
       var activeDot = nodeSelector && nodeSelector.querySelector('.node-dot.active');
       var n = activeDot ? parseInt(activeDot.dataset.value) || 1 : 1;
       var strategyPill = document.querySelector('#sharding-pills .pill.active');
-      var strat = strategyPill ? strategyPill.dataset.value : 'pipeline';
+      var strat = strategyPill ? strategyPill.dataset.value : 'tensor';
       if (n <= 1) {
         launchHint.textContent = 'Solo mode — runs on this node only.';
         launchHint.className = 'launch-hint';
@@ -872,7 +893,10 @@ const AINode = {
           var repo = m.hf_repo || m.id;
           var label = m.name || repo;
           var sizeNote = m.size_gb ? ' (' + Math.round(m.size_gb) + ' GB)' : '';
-          return '<option value="' + self.esc(repo) + '">' + self.esc(label) + sizeNote + '</option>';
+          var isLoaded = ((self.state.status && self.state.status.models_loaded) || []).indexOf(repo) !== -1;
+          var onDiskNow = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[repo]) || !!diskSet[repo];
+          var glyph = isLoaded ? '● ' : (onDiskNow ? '○ ' : '');
+          return '<option value="' + self.esc(repo) + '">' + glyph + self.esc(label) + sizeNote + '</option>';
         }).join('');
       if (cv) select.value = cv;
     });
@@ -884,7 +908,7 @@ const AINode = {
     if (!model) { this.toast('Select a model first', 'error'); return; }
 
     var pillGroup = document.getElementById('sharding-pills');
-    var strategy = 'pipeline';
+    var strategy = 'tensor';
     if (pillGroup) {
       var activePill = pillGroup.querySelector('.pill.active');
       if (activePill) strategy = activePill.dataset.value;

@@ -602,6 +602,12 @@
         ctx.fillStyle = CFG.nvidiaGreen;
         ctx.font = '9px ' + CFG.fontMono;
         ctx.fillText(this._shortText(model, 28), n.x, labelY + 14);
+        const tp = n.data.tp_size;
+        if (tp) {
+          ctx.fillStyle = CFG.textSecondary;
+          ctx.font = '8px ' + CFG.fontMono;
+          ctx.fillText('TP=' + tp, n.x, labelY + 26);
+        }
       }
 
       ctx.fillStyle = CFG.textMuted;

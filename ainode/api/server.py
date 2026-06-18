@@ -412,17 +412,10 @@ async def handle_status(request: web.Request) -> web.Response:
     engine_ready = False
     models_loaded: list[str] = []
 
-    # First try our managed engine
-    if engine is not None:
-        engine_ready = getattr(engine, "ready", False)
-        try:
-            hc = engine.health_check()
-            models_loaded = hc.get("models_loaded", [])
-        except Exception:
-            pass
-
-    # Fallback: probe vLLM directly (handles Docker-managed vLLM)
-    if not models_loaded and session is not None:
+    # Live-probe wins: a vLLM that answers /v1/models with >=1 model right now
+    # is the single source of liveness. The latched engine.ready is no longer
+    # trusted for status (wait_ready still uses it internally).
+    if session is not None:
         try:
             vllm_url = f"http://localhost:{config.api_port}/v1/models"
             async with session.get(vllm_url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
@@ -431,7 +424,15 @@ async def handle_status(request: web.Request) -> web.Response:
                     models_loaded = [m.get("id", "") for m in data.get("data", [])]
                     engine_ready = len(models_loaded) > 0
         except Exception:
-            pass
+            engine_ready = False
+    elif engine is not None:
+        # No HTTP session — fall back to the managed engine's health check.
+        try:
+            hc = engine.health_check()
+            models_loaded = hc.get("models_loaded", [])
+            engine_ready = bool(hc.get("api_responding")) and len(models_loaded) > 0
+        except Exception:
+            engine_ready = False
 
     cluster: ClusterState = request.app["cluster_state"]
     master = cluster.get_master()

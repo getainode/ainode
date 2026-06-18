@@ -127,9 +127,9 @@ class TestPlanSharding:
         config = self.planner.plan_sharding("meta-llama/Llama-3.1-70B-Instruct", cluster)
 
         assert config.is_distributed is True
-        assert config.pipeline_parallel_size == 2
-        assert config.tensor_parallel_size == 1
-        assert config.strategy == ShardingStrategy.PIPELINE_PARALLEL
+        assert config.tensor_parallel_size == 2
+        assert config.pipeline_parallel_size == 1
+        assert config.strategy == ShardingStrategy.TENSOR_PARALLEL
         assert len(config.shard_map) == 2
         roles = set()
         for s in config.shard_map.values():
@@ -147,15 +147,15 @@ class TestPlanSharding:
         config = self.planner.plan_sharding("meta-llama/Llama-3.1-405B-Instruct", cluster)
 
         assert config.is_distributed is True
-        assert config.pipeline_parallel_size >= 2
+        assert config.tensor_parallel_size >= 2
         assert len(config.shard_map) >= 2
 
-    def test_auto_strategy_selects_pipeline(self):
+    def test_auto_strategy_selects_tensor(self):
         cluster = _make_cluster(_make_node("a", 128.0), _make_node("b", 128.0))
         config = self.planner.plan_sharding(
             "meta-llama/Llama-3.1-70B-Instruct", cluster, ShardingStrategy.AUTO
         )
-        assert config.strategy == ShardingStrategy.PIPELINE_PARALLEL
+        assert config.strategy == ShardingStrategy.TENSOR_PARALLEL
 
     def test_explicit_tensor_parallel(self):
         cluster = _make_cluster(_make_node("a", 128.0), _make_node("b", 128.0))

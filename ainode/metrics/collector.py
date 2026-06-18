@@ -84,15 +84,26 @@ class MetricsCollector:
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
             util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
             temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+
+            # Unified memory (DGX Spark / GB10) has no nvml memory info — fall
+            # back to psutil so memory fields are always populated.
+            try:
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                memory_used_mb = round(mem.used / (1024 * 1024))
+                memory_total_mb = round(mem.total / (1024 * 1024))
+            except Exception:
+                import psutil
+                vm = psutil.virtual_memory()
+                memory_used_mb = round(vm.used / (1024 * 1024))
+                memory_total_mb = round(vm.total / (1024 * 1024))
 
             pynvml.nvmlShutdown()
 
             return {
                 "utilization_percent": util.gpu,
-                "memory_used_mb": round(mem.used / (1024 * 1024)),
-                "memory_total_mb": round(mem.total / (1024 * 1024)),
+                "memory_used_mb": memory_used_mb,
+                "memory_total_mb": memory_total_mb,
                 "temperature_c": temp,
             }
         except Exception as exc:

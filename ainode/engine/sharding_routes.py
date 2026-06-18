@@ -185,20 +185,43 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
 
 async def handle_sharding_status(request: web.Request) -> web.Response:
     """GET /api/sharding/status — current sharding state and Ray cluster health."""
-    ray_status = get_ray_status()
     engine = request.app.get("engine")
 
     engine_running = False
     engine_ready = False
     if engine is not None:
-        engine_running = engine.is_running()
+        try:
+            engine_running = engine.is_running()
+        except Exception:
+            engine_running = False
         engine_ready = getattr(engine, "ready", False)
+
+    # When a distributed head engine is up, derive ray health from the engine
+    # itself — the orchestrator container has no ray binary to probe.
+    engine_config = getattr(engine, "config", None) if engine is not None else None
+    distributed_mode = getattr(engine_config, "distributed_mode", "solo")
+    peer_ips = getattr(engine_config, "peer_ips", None) or []
+
+    if distributed_mode == "head" and peer_ips and engine_running:
+        probe = get_ray_status()
+        ray = {
+            "running": True,
+            "is_head": True,
+            "num_nodes": 1 + len(peer_ips),
+            "total_cpus": getattr(probe, "total_cpus", 0) or 0,
+            "total_gpus": getattr(probe, "total_gpus", 0) or 0,
+            "error": None,
+            "source": "engine",
+        }
+    else:
+        ray = get_ray_status().to_dict()
+        ray["source"] = "ray_probe"
 
     result = {
         "active_sharding": _active_sharding.to_dict() if _active_sharding else None,
         "engine_running": engine_running,
         "engine_ready": engine_ready,
-        "ray": ray_status.to_dict(),
+        "ray": ray,
     }
 
     return web.json_response(result)

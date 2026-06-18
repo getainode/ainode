@@ -160,6 +160,10 @@ async def handle_model_unload(request: web.Request) -> web.Response:
 
     For distributed (head) mode, flips config back to "solo" so a subsequent
     launch defaults sanely.
+
+    `stopped` means "the instance is no longer serving after this call" — a
+    dead/phantom/no-engine instance force-clears to stopped:true rather than
+    requiring a live SIGTERM. `errors` still carries best-effort teardown detail.
     """
     try:
         body = await request.json()
@@ -175,9 +179,18 @@ async def handle_model_unload(request: web.Request) -> web.Response:
         try:
             if engine.is_running():
                 engine.stop()
-                stopped = True
+            # Both a live stop and an already-dead engine mean not-serving.
+            stopped = True
         except Exception as exc:
             errors.append(f"engine.stop(): {exc}")
+            stopped = True
+        # Always force the latch down so a phantom doesn't re-advertise.
+        try:
+            engine._ready = False
+        except Exception:
+            pass
+    else:
+        stopped = True
 
     try:
         config.model = None
