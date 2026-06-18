@@ -10,7 +10,15 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 _Next release — changes accumulate here until tagged._
 
-### Added (Phase 3, in progress)
+---
+
+## [0.4.13] — 2026-06-18
+
+### Added (Phase 3 — model lifecycle, in-app)
+- **Curated cluster models in the catalog (3b)** — the frontier/NVFP4 models this GB10 cluster runs (235B/397B/405B-NVFP4, 70B, GLM) are now always merged into the catalog (`CURATED_CLUSTER_MODELS`), so they're discoverable + downloadable instead of only appearing once on disk. `_find_model_dir` now resolves downloaded-state across all on-disk layouts (`org--name`, `hub/`, `hf-cache/hub/`), so a catalog model present anywhere reads as downloaded.
+- **Live load-phase card during spin-up (3c)** — `NvidiaBackend` tracks a coarse load phase (`starting→loading_weights→distributed_init→profiling→ready`) from engine log markers, exposed via `health_check` + `/api/status` `load_phase`. The instances panel shows a LAUNCHING card with the phase + a progress bar through the multi-minute launch; a stall is visible as the phase that stops advancing.
+
+### Added (Phase 3 — telemetry fan-out, shipped in the 0.4.12 lab build)
 - **Per-peer GPU telemetry fan-out** — every node now stamps live VRAM/util/temp onto its 5s discovery broadcast (`NodeAnnouncement` gains `gpu_memory_used_mb`/`gpu_memory_total_mb`/`gpu_utilization`/`gpu_temp`, default-valued so older nodes stay compatible). `BroadcastSender` refreshes them each tick from the node's `MetricsCollector`; `ClusterNode` carries them; `/api/nodes` exposes `gpu_memory_used_pct`/`gpu_utilization`/`gpu_temp` per node (local node read fresh from its own collector). The cluster graphic now shows real VRAM on **all** nodes, not just the head — closing the Phase-1 worker-VRAM gap.
 
 ---
