@@ -838,6 +838,10 @@ class NvidiaBackend(EngineBackend):
         # because we SSH in as the non-root ssh_user on the peer.
         peer_hf_cache = f"/home/{self.config.ssh_user}/ainode-nvidia-cache"
 
+        # Phase 3a: ensure the peer actually has the model weights before its
+        # worker starts — distribute from the head over the fabric if missing.
+        self._ensure_peer_has_model(peer_ip, peer_hf_cache)
+
         worker_name = self._worker_container_name(peer_ip)
 
         docker_cmd = self._build_ray_docker_cmd(
@@ -887,6 +891,50 @@ class NvidiaBackend(EngineBackend):
                 f"ssh docker run -d for worker on {peer_ip} failed "
                 f"(rc={result.returncode}): {result.stderr.strip()}"
             )
+
+    def _ensure_peer_has_model(self, peer_ip: str, peer_hf_cache: str) -> None:
+        """Distribute the model weights to a peer over the fabric if it's missing.
+
+        The launch only succeeds if every node can read the model from its local
+        HF cache. Rather than require manual pre-placement, the head streams the
+        weights to any selected peer that lacks them. Uses tar-over-ssh (the image
+        ships tar + ssh, not rsync) on the cluster fabric (``peer_ip``).
+        Best-effort no-op when the peer already has it, or the head doesn't.
+        """
+        model = self.config.model or ""
+        if not model:
+            return
+        model_dir = "models--" + model.replace("/", "--")
+        head_hub = str(Path(self._head_hf_cache()) / "hub")
+        if not (Path(head_hub) / model_dir).is_dir():
+            return  # head doesn't have it either — engine will report clearly
+        peer_hub = peer_hf_cache.rstrip("/") + "/hub"
+        target = f"{peer_hub}/{model_dir}"
+        ssh_target = f"{self.config.ssh_user}@{peer_ip}"
+        ssh_opts = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+
+        check = subprocess.run(
+            ["ssh", *ssh_opts, ssh_target, f"test -d {shlex.quote(target)} && echo present || echo missing"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if "present" in (check.stdout or ""):
+            return  # peer already has the weights
+
+        logger.info("Distributing %s to %s over the fabric (not cached)...", model_dir, peer_ip)
+        self._load_phase = "distributing"
+        # tar the model dir on the head, pipe through ssh, untar on the peer.
+        cmd = (
+            f"tar -C {shlex.quote(head_hub)} -cf - {shlex.quote(model_dir)} | "
+            f"ssh {' '.join(ssh_opts)} {shlex.quote(ssh_target)} "
+            f"'mkdir -p {shlex.quote(peer_hub)} && tar -C {shlex.quote(peer_hub)} -xf -'"
+        )
+        result = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=3600)
+        if result.returncode != 0:
+            raise NvidiaBackendError(
+                f"Failed to distribute {model_dir} to {peer_ip} "
+                f"(rc={result.returncode}): {result.stderr.strip()[:300]}"
+            )
+        logger.info("Distributed %s to %s", model_dir, peer_ip)
 
     def _ssh_stop_peer_container(self, peer_ip: str) -> None:
         """Best-effort ``docker stop && docker rm`` on a peer's worker container.
@@ -981,7 +1029,7 @@ class NvidiaBackend(EngineBackend):
     # these markers; the phase only advances (monotonic by rank) so a coarse
     # progress card can show load → distributed-init → profiling → ready, and a
     # stall is visible as the phase that stops advancing.
-    _LOAD_PHASE_ORDER = ["idle", "starting", "loading_weights", "distributed_init", "profiling", "ready"]
+    _LOAD_PHASE_ORDER = ["idle", "starting", "distributing", "loading_weights", "distributed_init", "profiling", "ready"]
     _LOAD_PHASE_MARKERS = [
         ("loading_weights", ("loading model weights", "loading weights", "loading safetensors")),
         ("distributed_init", ("nccl info", "init_process_group", "rayworkerwrapper", "ray worker")),

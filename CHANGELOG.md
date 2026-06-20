@@ -12,6 +12,17 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.20] — 2026-06-20
+
+### Added
+- **Phase 3a — auto-distribute weights at launch.** A distributed launch now ensures
+  each selected peer has the model in its cache; if missing, the head streams the
+  weights over the fabric (tar-over-ssh; the image has no rsync) before starting that
+  peer's worker. No more manual pre-placement — pick any nodes and launch. Reports a
+  `distributing` load phase. Skips peers that already have it.
+
+---
+
 ## [0.4.19] — 2026-06-20
 
 ### Fixed

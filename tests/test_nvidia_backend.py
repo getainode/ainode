@@ -968,3 +968,58 @@ def test_nvidia_vllm_image_env_and_default(monkeypatch):
 
     monkeypatch.delenv("NVIDIA_VLLM_IMAGE", raising=False)
     importlib.reload(nv)  # restore default for other tests
+
+
+def _fake_proc(returncode=0, stdout="", stderr=""):
+    import types
+    return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def test_ensure_peer_has_model_distributes_when_missing(tmp_path, monkeypatch):
+    """Phase 3a: a peer missing the model gets it tar-streamed over the fabric."""
+    import ainode.engine.backends.nvidia as nv
+    cfg = _make_config(model="nvidia/Llama-3.3-70B-Instruct-NVFP4", ssh_user="sem",
+                       hf_cache_dir=str(tmp_path))
+    (tmp_path / "hub" / "models--nvidia--Llama-3.3-70B-Instruct-NVFP4").mkdir(parents=True)
+    b = nv.NvidiaBackend(cfg)
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        if args[0] == "ssh":
+            return _fake_proc(stdout="missing\n")   # peer lacks it
+        return _fake_proc()                          # the bash tar pipe
+
+    monkeypatch.setattr(nv.subprocess, "run", fake_run)
+    b._ensure_peer_has_model("10.100.0.13", "/home/sem/ainode-nvidia-cache")
+
+    tar = [c for c in calls if c[0] == "bash"]
+    assert tar, "expected a tar-over-ssh distribute command"
+    cmd = tar[0][2]
+    assert "models--nvidia--Llama-3.3-70B-Instruct-NVFP4" in cmd
+    assert "sem@10.100.0.13" in cmd
+    assert "tar -C" in cmd and "| ssh" in cmd
+    assert b.load_phase == "distributing"
+
+
+def test_ensure_peer_has_model_skips_when_present(tmp_path, monkeypatch):
+    import ainode.engine.backends.nvidia as nv
+    cfg = _make_config(model="nvidia/Llama-3.3-70B-Instruct-NVFP4", ssh_user="sem",
+                       hf_cache_dir=str(tmp_path))
+    (tmp_path / "hub" / "models--nvidia--Llama-3.3-70B-Instruct-NVFP4").mkdir(parents=True)
+    b = nv.NvidiaBackend(cfg)
+    calls = []
+    monkeypatch.setattr(nv.subprocess, "run",
+                        lambda args, **kw: (calls.append(args) or _fake_proc(stdout="present\n")))
+    b._ensure_peer_has_model("10.100.0.13", "/home/sem/ainode-nvidia-cache")
+    assert not any(c[0] == "bash" for c in calls)   # no transfer when present
+
+
+def test_ensure_peer_has_model_noop_when_head_lacks_it(tmp_path, monkeypatch):
+    import ainode.engine.backends.nvidia as nv
+    cfg = _make_config(model="nvidia/Some-Model", ssh_user="sem", hf_cache_dir=str(tmp_path))
+    b = nv.NvidiaBackend(cfg)
+    calls = []
+    monkeypatch.setattr(nv.subprocess, "run", lambda args, **kw: (calls.append(args) or _fake_proc()))
+    b._ensure_peer_has_model("10.100.0.13", "/home/sem/ainode-nvidia-cache")
+    assert calls == []   # head has no weights → nothing to do, no ssh
