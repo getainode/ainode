@@ -720,6 +720,7 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         nodes_payload.append({
             "node_id": n.node_id,
             "hostname": n.node_name,
+            "fabric_ip": getattr(n, "fabric_ip", "") or "",
             "vram_gb": round(float(n.gpu_memory_gb or 0), 1),
             "gpus": 1,
             "gpu_name": n.gpu_name,

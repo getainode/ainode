@@ -12,6 +12,19 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.17] — 2026-06-20
+
+### Fixed
+- **Node-picker pills no longer wrap.** `.node-dot` was a fixed 40px circle (sized for the
+  old single-digit count picker); node-name labels like "Spark-4" wrapped to two lines. Now an
+  auto-width pill (`nowrap`), so "Spark-1 ★" / "Spark-4" render on one line.
+
+### Added
+- **`fabric_ip` in `/api/nodes`** — each node's cluster-fabric IP is exposed for UI/debugging
+  (the launch already resolves it server-side; this just surfaces it).
+
+---
+
 ## [0.4.16] — 2026-06-20
 
 ### Added

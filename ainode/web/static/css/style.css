@@ -1782,9 +1782,11 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
 }
 
 .node-dot {
-  width: 40px;
+  min-width: 40px;
   height: 40px;
-  border-radius: 50%;
+  border-radius: 18px;
+  padding: 0 12px;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   justify-content: center;
