@@ -12,6 +12,24 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.14] — 2026-06-20
+
+### Added
+- **Node selection for distributed launch.** The launch panel is now a per-node
+  picker (head pinned ★, others toggle) instead of a count selector; the launch
+  POSTs explicit `node_ids`, so you choose *which* nodes span a model (head +
+  selected peers), not just how many.
+- **Single stable endpoint, visible loading.** `:3000` returns a clear
+  `503 {load_phase}` during a model swap instead of proxying into a hang.
+
+### Fixed
+- **BUG D — distributed launch now uses FABRIC IPs.** Nodes broadcast their
+  fabric IP (`NodeAnnouncement.fabric_ip`); the head resolves participating peers
+  to fabric IPs and refuses to launch on a node with no known fabric IP. The old
+  path used the mgmt-LAN UDP source IP, landing a Ray worker on a non-GPU address.
+
+---
+
 ## [0.4.13] — 2026-06-18
 
 ### Added (Phase 3 — model lifecycle, in-app)
