@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -922,13 +923,25 @@ class NvidiaBackend(EngineBackend):
 
         logger.info("Distributing %s to %s over the fabric (not cached)...", model_dir, peer_ip)
         self._load_phase = "distributing"
-        # tar the model dir on the head, pipe through ssh, untar on the peer.
-        cmd = (
-            f"tar -C {shlex.quote(head_hub)} -cf - {shlex.quote(model_dir)} | "
-            f"ssh {' '.join(ssh_opts)} {shlex.quote(ssh_target)} "
-            f"'mkdir -p {shlex.quote(peer_hub)} && tar -C {shlex.quote(peer_hub)} -xf -'"
-        )
-        result = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=3600)
+        ssh_e = "ssh " + " ".join(ssh_opts)
+        if shutil.which("rsync"):
+            # Preferred: rsync is resumable (--partial) and incremental, so a
+            # re-launch after a dropped transfer doesn't re-send the whole model.
+            subprocess.run(["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(peer_hub)}"],
+                           capture_output=True, text=True, timeout=30)
+            result = subprocess.run(
+                ["rsync", "-a", "--partial", "-e", ssh_e,
+                 f"{head_hub}/{model_dir}/", f"{ssh_target}:{peer_hub}/{model_dir}/"],
+                capture_output=True, text=True, timeout=7200,
+            )
+        else:
+            # Fallback for images without rsync: tar-over-ssh (not resumable).
+            tar = (
+                f"tar -C {shlex.quote(head_hub)} -cf - {shlex.quote(model_dir)} | "
+                f"{ssh_e} {shlex.quote(ssh_target)} "
+                f"'mkdir -p {shlex.quote(peer_hub)} && tar -C {shlex.quote(peer_hub)} -xf -'"
+            )
+            result = subprocess.run(["bash", "-lc", tar], capture_output=True, text=True, timeout=7200)
         if result.returncode != 0:
             raise NvidiaBackendError(
                 f"Failed to distribute {model_dir} to {peer_ip} "

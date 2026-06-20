@@ -12,6 +12,15 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.21] — 2026-06-20
+
+### Changed
+- **Weight distribution prefers rsync** (resumable + incremental) over tar-over-ssh; the
+  image now ships rsync. A dropped transfer no longer re-sends the whole model on relaunch.
+  Falls back to tar if rsync is absent.
+
+---
+
 ## [0.4.20] — 2026-06-20
 
 ### Added

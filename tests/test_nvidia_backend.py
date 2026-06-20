@@ -975,31 +975,49 @@ def _fake_proc(returncode=0, stdout="", stderr=""):
     return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-def test_ensure_peer_has_model_distributes_when_missing(tmp_path, monkeypatch):
-    """Phase 3a: a peer missing the model gets it tar-streamed over the fabric."""
+def _missing_setup(tmp_path):
     import ainode.engine.backends.nvidia as nv
     cfg = _make_config(model="nvidia/Llama-3.3-70B-Instruct-NVFP4", ssh_user="sem",
                        hf_cache_dir=str(tmp_path))
     (tmp_path / "hub" / "models--nvidia--Llama-3.3-70B-Instruct-NVFP4").mkdir(parents=True)
-    b = nv.NvidiaBackend(cfg)
-    calls = []
+    return nv, nv.NvidiaBackend(cfg)
 
-    def fake_run(args, **kw):
+
+def _record_run(calls):
+    def run(args, **kw):
         calls.append(args)
-        if args[0] == "ssh":
-            return _fake_proc(stdout="missing\n")   # peer lacks it
-        return _fake_proc()                          # the bash tar pipe
+        return _fake_proc(stdout="missing\n" if args and args[0] == "ssh" else "")
+    return run
 
-    monkeypatch.setattr(nv.subprocess, "run", fake_run)
+
+def test_ensure_peer_has_model_uses_rsync_when_available(tmp_path, monkeypatch):
+    """Phase 3a: prefer rsync (resumable) for the over-fabric transfer."""
+    nv, b = _missing_setup(tmp_path)
+    monkeypatch.setattr(nv.shutil, "which", lambda name: "/usr/bin/rsync")
+    calls = []
+    monkeypatch.setattr(nv.subprocess, "run", _record_run(calls))
     b._ensure_peer_has_model("10.100.0.13", "/home/sem/ainode-nvidia-cache")
+    rsync = [c for c in calls if c and c[0] == "rsync"]
+    assert rsync, "expected an rsync command"
+    assert rsync[0][-2].endswith("models--nvidia--Llama-3.3-70B-Instruct-NVFP4/")
+    assert rsync[0][-1] == ("sem@10.100.0.13:/home/sem/ainode-nvidia-cache/hub/"
+                            "models--nvidia--Llama-3.3-70B-Instruct-NVFP4/")
+    assert not any(c[0] == "bash" for c in calls)   # rsync, not tar fallback
+    assert b.load_phase == "distributing"
 
-    tar = [c for c in calls if c[0] == "bash"]
-    assert tar, "expected a tar-over-ssh distribute command"
+
+def test_ensure_peer_has_model_falls_back_to_tar(tmp_path, monkeypatch):
+    """No rsync in the image → tar-over-ssh still works."""
+    nv, b = _missing_setup(tmp_path)
+    monkeypatch.setattr(nv.shutil, "which", lambda name: None)
+    calls = []
+    monkeypatch.setattr(nv.subprocess, "run", _record_run(calls))
+    b._ensure_peer_has_model("10.100.0.13", "/home/sem/ainode-nvidia-cache")
+    tar = [c for c in calls if c and c[0] == "bash"]
+    assert tar, "expected a tar-over-ssh fallback"
     cmd = tar[0][2]
     assert "models--nvidia--Llama-3.3-70B-Instruct-NVFP4" in cmd
-    assert "sem@10.100.0.13" in cmd
-    assert "tar -C" in cmd and "| ssh" in cmd
-    assert b.load_phase == "distributing"
+    assert "sem@10.100.0.13" in cmd and "tar -C" in cmd and "| ssh" in cmd
 
 
 def test_ensure_peer_has_model_skips_when_present(tmp_path, monkeypatch):
