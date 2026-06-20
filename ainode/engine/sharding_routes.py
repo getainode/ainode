@@ -95,6 +95,18 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         min_nodes = 1
 
+    # Explicit node selection (preferred): the exact nodes to span, head = this
+    # node + the rest as peers. `tp_size` is the legacy count form. Either sets
+    # the effective node count so the min_nodes<=1 solo path still triggers.
+    node_ids = body.get("node_ids") or None
+    if node_ids:
+        min_nodes = len(node_ids)
+    elif body.get("tp_size"):
+        try:
+            min_nodes = int(body.get("tp_size"))
+        except (TypeError, ValueError):
+            pass
+
     strategy_str = body.get("strategy", "tensor_parallel")
     # We accept but don't gate on strategy here — vLLM picks TP vs PP via
     # CLI args in the launch script; for now any min_nodes > 1 triggers TP.
@@ -116,31 +128,57 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         shim = _ReqShim(request, {"model": model})
         return await handle_model_load(shim)
 
-    # Distributed path. Find discovered member nodes on our cluster_interface
-    # subnet and use their peer IPs as authoritative addresses.
+    # Distributed path. Resolve the participating peers to their FABRIC IPs
+    # (BUG D: never the mgmt-LAN UDP peer_ip, which lands a Ray worker on a
+    # non-GPU address). Two selection modes:
+    #   node_ids  — explicit set chosen in the UI; head = this node, peers = rest
+    #   min_nodes — legacy count: take the first (N-1) discovered members
     members = [
         n for n in cluster.members()
         if getattr(n, "distributed_mode", "solo") == "member"
         and (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "member-ready", "serving")
     ]
-    peer_ips = [n.peer_ip for n in members if getattr(n, "peer_ip", None)]
-    if len(peer_ips) < (min_nodes - 1):
+    fabric_of = lambda n: (getattr(n, "fabric_ip", "") or "").strip()
+    members_dump = [
+        {"node_id": n.node_id, "node_name": n.node_name, "fabric_ip": fabric_of(n),
+         "status": n.status.value if hasattr(n.status, "value") else str(n.status)}
+        for n in members
+    ]
+
+    if node_ids:
+        # Head is always this node; peers are the other selected nodes.
+        wanted = [nid for nid in node_ids if nid != config.node_id]
+        by_id = {n.node_id: n for n in members}
+        missing = [nid for nid in wanted if nid not in by_id]
+        if missing:
+            return web.json_response({
+                "error": f"Selected node(s) not available as members: {missing}",
+                "discovered_members": members_dump,
+            }, status=422)
+        chosen = [by_id[nid] for nid in wanted]
+    else:
+        want_peers = max(0, min_nodes - 1)
+        if len(members) < want_peers:
+            return web.json_response({
+                "error": (
+                    f"Requested {want_peers + 1} node(s) but only {len(members) + 1} "
+                    f"available (1 head + {len(members)} member(s))."
+                ),
+                "discovered_members": members_dump,
+            }, status=422)
+        chosen = members[:want_peers]
+
+    # Refuse to launch on a peer with no known fabric IP — that's exactly the
+    # BUG-D failure mode (would fall back to a mgmt address).
+    no_fabric = [n.node_id for n in chosen if not fabric_of(n)]
+    if no_fabric:
         return web.json_response({
-            "error": (
-                f"Requested min_nodes={min_nodes} but only {len(peer_ips)+1} "
-                f"node(s) available (1 head + {len(peer_ips)} member(s) with "
-                f"known peer IPs). Ensure member nodes are running and "
-                f"broadcasting on the cluster_interface subnet."
-            ),
-            "discovered_members": [
-                {"node_id": n.node_id, "node_name": n.node_name,
-                 "peer_ip": getattr(n, "peer_ip", None),
-                 "status": n.status.value if hasattr(n.status, "value") else str(n.status)}
-                for n in members
-            ],
+            "error": f"No fabric IP known for node(s) {no_fabric}; cannot launch over the fabric.",
+            "hint": "Those nodes must broadcast a fabric_ip (cluster_interface configured).",
+            "discovered_members": members_dump,
         }, status=422)
 
-    chosen_peers = peer_ips[: min_nodes - 1]
+    chosen_peers = [fabric_of(n) for n in chosen]
 
     # Flip local config to head mode and persist.
     config.model = model

@@ -59,6 +59,10 @@ class NodeAnnouncement:
     gpu_memory_total_mb: float = 0.0
     gpu_utilization: float = 0.0
     gpu_temp: float = 0.0
+    # This node's IP on the cluster fabric (cluster_interface). The head uses
+    # this to launch distributed peers over the fabric — NOT the mgmt-LAN UDP
+    # source IP (peer_ip), which lands a Ray worker on a non-GPU address (BUG D).
+    fabric_ip: str = ""
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

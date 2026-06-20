@@ -38,6 +38,7 @@ class ClusterNode:
     gpu_memory_total_mb: float = 0.0
     gpu_utilization: float = 0.0
     gpu_temp: float = 0.0
+    fabric_ip: str = ""  # this node's cluster-fabric IP (BUG D: launch over fabric, not mgmt)
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -64,6 +65,7 @@ class ClusterNode:
             gpu_memory_total_mb=getattr(a, "gpu_memory_total_mb", 0.0),
             gpu_utilization=getattr(a, "gpu_utilization", 0.0),
             gpu_temp=getattr(a, "gpu_temp", 0.0),
+            fabric_ip=getattr(a, "fabric_ip", "") or "",
         )
 
     @classmethod
@@ -89,6 +91,7 @@ class ClusterNode:
             gpu_memory_total_mb=getattr(announcement, "gpu_memory_total_mb", 0.0),
             gpu_utilization=getattr(announcement, "gpu_utilization", 0.0),
             gpu_temp=getattr(announcement, "gpu_temp", 0.0),
+            fabric_ip=getattr(announcement, "fabric_ip", "") or "",
         )
 
 

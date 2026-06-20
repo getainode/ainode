@@ -164,6 +164,15 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     gpu_memory_gb = round(gpu.memory_total_mb / 1024, 1) if gpu else 0.0
     unified_memory = gpu.unified_memory if gpu else False
 
+    # This node's fabric IP, so a head can launch us over the cluster fabric
+    # (BUG D fix — not the mgmt-LAN UDP source address).
+    fabric_ip = ""
+    try:
+        from ainode.cluster.hca_discovery import detect_fabric_ip
+        fabric_ip = detect_fabric_ip(getattr(config, "cluster_interface", "") or "") or ""
+    except Exception:
+        pass
+
     engine_ready = False
     if engine is not None:
         engine_ready = getattr(engine, "ready", False)
@@ -206,6 +215,7 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         distributed_mode=distributed_mode,
         distributed_instance_id=distributed_instance_id,
         distributed_peers=distributed_peers,
+        fabric_ip=fabric_ip,
     )
 
 
