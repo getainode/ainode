@@ -156,12 +156,12 @@
             <button class="pill active" data-value="tensor">Tensor</button>
             <button class="pill" data-value="pipeline">Pipeline</button>
           </div>
-          <label class="form-label">Tensor Parallel Size (nodes)</label>
+          <label class="form-label">Nodes (★ = head; click to add)</label>
           <div class="node-selector" id="node-selector">
-            <!-- Populated dynamically based on discovered cluster size -->
+            <!-- One toggle per discovered node; populated dynamically -->
           </div>
           <div class="launch-hint" id="launch-hint">
-            Solo mode — runs on this node only.
+            Solo — runs on this node only (TP=1).
           </div>
           <button class="btn-nvidia btn-full" id="launch-btn">LAUNCH</button>
         </div>

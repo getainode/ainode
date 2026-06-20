@@ -806,24 +806,31 @@ const AINode = {
     var launchHint = document.getElementById('launch-hint');
     var self = this;
 
+    // One toggle per real node. The head (this node) is pinned-selected; the
+    // others default OFF (so a fresh launch is solo TP=1 — the common case).
+    // Click a node to add it; TP size = number of selected nodes. The launch
+    // POSTs the selected node_ids (resolved to fabric IPs server-side).
     this._renderNodeDots = function () {
       if (!nodeSelector) return;
-      var clusterSize = Math.max(1, (self.state.nodes || []).length);
-      var currentActive = nodeSelector.querySelector('.node-dot.active');
-      var currentVal = currentActive ? parseInt(currentActive.dataset.value) || 1 : 1;
-      // Only re-render if count changed
-      var dotCount = nodeSelector.querySelectorAll('.node-dot').length;
-      if (dotCount === clusterSize) return;
-      var html = '';
-      for (var i = 1; i <= clusterSize; i++) {
-        html += '<button class="node-dot' + (i === Math.min(currentVal, clusterSize) ? ' active' : '') + '" data-value="' + i + '">' + i + '</button>';
-      }
-      nodeSelector.innerHTML = html;
-      // Re-bind click handlers
+      var headId = self.state.status && self.state.status.node_id;
+      var nodes = (self.state.nodes || []).slice();
+      if (!nodes.length && headId) nodes = [{ node_id: headId, node_name: 'this node' }];
+      var key = nodes.map(function (n) { return n.node_id; }).join(',');
+      if (nodeSelector.dataset.nodekey === key) return; // node set unchanged
+      nodeSelector.dataset.nodekey = key;
+      nodeSelector.innerHTML = nodes.map(function (n) {
+        var isHead = headId && n.node_id === headId;
+        var label = (n.node_name || n.node_id || '').replace(/-DGX|-GX10/i, '');
+        return '<button class="node-dot' + (isHead ? ' active head' : '') + '"'
+          + ' data-node-id="' + self.esc(n.node_id) + '"'
+          + (isHead ? ' data-head="1"' : '')
+          + ' title="' + self.esc(n.node_name || n.node_id) + (isHead ? ' (head — always included)' : '') + '">'
+          + self.esc(label) + (isHead ? ' ★' : '') + '</button>';
+      }).join('');
       nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
         dot.addEventListener('click', function () {
-          nodeSelector.querySelectorAll('.node-dot').forEach(function (d) { d.classList.remove('active'); });
-          dot.classList.add('active');
+          if (dot.dataset.head) return; // head can't be deselected
+          dot.classList.toggle('active');
           updateLaunchHint();
         });
       });
@@ -833,25 +840,16 @@ const AINode = {
 
     function updateLaunchHint() {
       if (!launchHint) return;
-      var activeDot = nodeSelector && nodeSelector.querySelector('.node-dot.active');
-      var n = activeDot ? parseInt(activeDot.dataset.value) || 1 : 1;
+      var active = nodeSelector ? nodeSelector.querySelectorAll('.node-dot.active') : [];
+      var n = active.length || 1;
       var strategyPill = document.querySelector('#sharding-pills .pill.active');
       var strat = strategyPill ? strategyPill.dataset.value : 'tensor';
+      launchHint.className = 'launch-hint';
       if (n <= 1) {
-        launchHint.textContent = 'Solo mode — runs on this node only.';
-        launchHint.className = 'launch-hint';
+        launchHint.textContent = 'Solo — runs on this node only (TP=1).';
       } else {
-        // Count available member peers for honesty.
-        var cr = self.state.clusterResources;
-        var members = 0;
-        if (cr && cr.nodes) {
-          members = cr.nodes.filter(function (x) { return x.distributed_mode === 'member'; }).length;
-        }
-        var enough = members >= (n - 1);
-        launchHint.textContent = 'Distributed ' + strat.toUpperCase() + ' · ' + n + ' nodes'
-          + (enough ? ' — will place ' + (n - 1) + ' Ray worker(s) on discovered member node(s).'
-                    : ' — need ' + (n - 1) + ' member peer(s), ' + members + ' discovered.');
-        launchHint.className = 'launch-hint' + (enough ? '' : ' warn');
+        var names = Array.prototype.map.call(active, function (d) { return d.textContent.replace(' ★', '').trim(); }).join(' + ');
+        launchHint.textContent = strat.toUpperCase() + ' · TP=' + n + ' across ' + names + '.';
       }
     }
     // (dot click handlers bound inside _renderNodeDots)
@@ -943,10 +941,11 @@ const AINode = {
     }
 
     var nodeSelector = document.getElementById('node-selector');
-    var minNodes = 1;
+    var nodeIds = [];
     if (nodeSelector) {
-      var activeDot = nodeSelector.querySelector('.node-dot.active');
-      if (activeDot) minNodes = parseInt(activeDot.dataset.value) || 1;
+      nodeSelector.querySelectorAll('.node-dot.active').forEach(function (d) {
+        if (d.dataset.nodeId) nodeIds.push(d.dataset.nodeId);
+      });
     }
 
     var launchBtn = document.getElementById('launch-btn');
@@ -954,12 +953,12 @@ const AINode = {
 
     try {
       var endpoint, body;
-      if (minNodes > 1) {
-        // Sharded launch
+      if (nodeIds.length > 1) {
+        // Distributed launch on the chosen nodes (head = this node + the rest).
         endpoint = '/api/sharding/launch';
-        body = { model: model, strategy: strategy, min_nodes: minNodes };
+        body = { model: model, strategy: strategy, node_ids: nodeIds };
       } else {
-        // Single node launch
+        // Single node launch.
         endpoint = '/api/models/load';
         body = { model: model };
       }
