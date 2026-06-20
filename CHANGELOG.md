@@ -12,6 +12,16 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.19] — 2026-06-20
+
+### Fixed
+- **Server MODEL INFO "Size on disk" now shows the real size** (completes B2). The
+  server view loads a raw `/api/models` catalog into `_serverState` and reads
+  `local_size_gb`/`size_gb` — the loaded-model object had no size and
+  `this.state.catalog` was never populated in this view (and remapped the field).
+
+---
+
 ## [0.4.18] — 2026-06-20
 
 ### Fixed

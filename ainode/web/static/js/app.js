@@ -4839,6 +4839,13 @@ const AINode = {
     if (!this._serverState.endpoints) {
       this._serverState.endpoints = await this.fetchJSON('/api/server/endpoints');
     }
+    // Raw catalog (size_gb / local_size_gb / architecture) for MODEL INFO — the
+    // loaded-model object lacks size, and this.state.catalog (live-catalog view)
+    // isn't loaded here and remaps the fields.
+    if (!this._serverState.modelsCatalog) {
+      var _md = await this.fetchJSON('/api/models');
+      this._serverState.modelsCatalog = (_md && _md.models) || [];
+    }
 
     var s = status || { status: 'stopped', reachable_at: [], loaded_models: [] };
     var primaryUrl = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '—';
@@ -5367,11 +5374,12 @@ const AINode = {
     // Pull derivable fields from the catalog (size/arch/quant) — the served
     // model object lacks them. Real arch (e.g. LlamaForCausalLM) needs the
     // per-model config.json (owned follow-up); family is a truthful stand-in.
-    var _cat = (this.state.catalog || []).find(function (c) { return (c.hf_repo || c.id) === model.id; }) || {};
+    var _cat = (this._serverState.modelsCatalog || []).find(function (c) { return (c.hf_repo || c.id) === model.id; }) || {};
     var arch = model.architecture || _cat.architecture || _cat.family || AINode._modelFamily(model.id) || '—';
     var fileName = (model.id || '').split('/').pop();
+    var _catSize = _cat.local_size_gb || _cat.size_gb;
     var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes)
-      : (_cat.size_gb ? Math.round(_cat.size_gb) + ' GB' : '—');
+      : (_catSize ? Math.round(_catSize) + ' GB' : '—');
 
     var html = '';
     html += '<div class="panel-section">';
