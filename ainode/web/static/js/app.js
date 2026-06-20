@@ -4841,9 +4841,7 @@ const AINode = {
     }
 
     var s = status || { status: 'stopped', reachable_at: [], loaded_models: [] };
-    var primaryUrl = (s.reachable_at && s.reachable_at.length > 1)
-      ? s.reachable_at[1]
-      : (s.reachable_at && s.reachable_at[0]) || '—';
+    var primaryUrl = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '—';
 
     var html = '';
 
@@ -5365,10 +5363,15 @@ const AINode = {
       return;
     }
     var self = this;
-    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || '—';
-    var arch = (model.id || '').split('/')[0] || 'unknown';
+    var primary = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '—';
+    // Pull derivable fields from the catalog (size/arch/quant) — the served
+    // model object lacks them. Real arch (e.g. LlamaForCausalLM) needs the
+    // per-model config.json (owned follow-up); family is a truthful stand-in.
+    var _cat = (this.state.catalog || []).find(function (c) { return (c.hf_repo || c.id) === model.id; }) || {};
+    var arch = model.architecture || _cat.architecture || _cat.family || AINode._modelFamily(model.id) || '—';
     var fileName = (model.id || '').split('/').pop();
-    var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes) : '—';
+    var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes)
+      : (_cat.size_gb ? Math.round(_cat.size_gb) + ' GB' : '—');
 
     var html = '';
     html += '<div class="panel-section">';
@@ -5415,6 +5418,23 @@ const AINode = {
     });
   },
 
+  _modelQuant(id) {
+    var m = (id || '').toUpperCase().match(/NVFP4|MXFP4|AWQ|GPTQ|FP8|INT4|INT8/);
+    return m ? m[0] : '';
+  },
+
+  _modelFamily(id) {
+    var n = (id || '').split('/').pop().toLowerCase();
+    if (n.indexOf('llama') >= 0) return 'Llama';
+    if (n.indexOf('qwen') >= 0) return 'Qwen';
+    if (n.indexOf('glm') >= 0) return 'GLM';
+    if (n.indexOf('mixtral') >= 0 || n.indexOf('mistral') >= 0) return 'Mistral';
+    if (n.indexOf('deepseek') >= 0) return 'DeepSeek';
+    if (n.indexOf('phi') >= 0) return 'Phi';
+    if (n.indexOf('gemma') >= 0) return 'Gemma';
+    return '';
+  },
+
   _renderServerInfoTab(tab, model, arch, fileName, sizeStr) {
     if (tab === 'load') {
       return '<div class="server-info-section">' +
@@ -5438,7 +5458,7 @@ const AINode = {
       '<div class="server-info-row"><span class="label">Model</span><span class="mono val">' + AINode.esc(model.id) + '</span></div>' +
       '<div class="server-info-row"><span class="label">File</span><span class="mono val">' + AINode.esc(fileName) + '</span></div>' +
       '<div class="server-info-row"><span class="label">Format</span><span class="val">' + AINode.esc(model.format || 'SafeTensors') + '</span></div>' +
-      '<div class="server-info-row"><span class="label">Quantization</span><span class="val">' + AINode.esc(model.quantization || 'none') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Quantization</span><span class="val">' + AINode.esc(model.quantization || AINode._modelQuant(model.id) || 'none') + '</span></div>' +
       '<div class="server-info-row"><span class="label">Arch</span><span class="val">' + AINode.esc(arch) + '</span></div>' +
       '<div class="server-info-row"><span class="label">Capabilities</span><span class="val">' + (caps || '—') + '</span></div>' +
       '<div class="server-info-row"><span class="label">Domain</span><span class="val">' + AINode.esc(model.type || 'llm') + '</span></div>' +

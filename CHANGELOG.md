@@ -12,6 +12,20 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.18] — 2026-06-20
+
+### Fixed
+- **Server view "Reachable at" no longer renders blank** — falls back through
+  `reachable_at[1] → [0] → "—"` (was blank when the preferred entry was empty).
+- **Server MODEL INFO shows real values** — Quantization (e.g. NVFP4) and Arch
+  (family) and Size on disk are now derived from the catalog/model-id instead of
+  showing `none` / the org name / `—`. (Real arch like `LlamaForCausalLM` needs the
+  per-model config.json — tracked as a follow-up.)
+- **`fabric_ip` now live in `/api/nodes`** (carried in this roll; was added to
+  `/api/cluster/resources` in 0.4.17).
+
+---
+
 ## [0.4.17] — 2026-06-20
 
 ### Fixed
