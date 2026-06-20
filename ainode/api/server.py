@@ -554,6 +554,18 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     collector: MetricsCollector = request.app["metrics_collector"]
     vllm_url = f"http://localhost:{config.api_port}{request.path}"
 
+    # Single stable endpoint, visible loading: during a model swap/load the
+    # engine isn't ready and vLLM's port may be down — return a clear 503 with
+    # the current load phase instead of proxying into a hang.
+    engine = request.app.get("engine")
+    if engine is not None and not getattr(engine, "ready", False):
+        phase = getattr(engine, "load_phase", "starting")
+        return web.json_response(
+            {"error": {"type": "loading", "message": f"AINode is loading a model (phase: {phase})",
+                       "load_phase": phase, "model": config.model}},
+            status=503, headers={"Retry-After": "10"},
+        )
+
     # Extract model name for metrics
     model = config.model or "unknown"
     body_bytes = None

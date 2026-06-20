@@ -111,3 +111,31 @@ def test_unknown_node_id_is_rejected():
         [_member("m1", "10.100.0.13")],
     )
     assert resp.status == 422
+
+
+def test_proxy_returns_503_loading_during_swap():
+    """While the engine is mid-swap (not ready), :3000 returns a clear loading
+    state with the phase — not a hang/opaque proxy error."""
+    import json as _json
+    from ainode.api.server import proxy_to_vllm
+
+    class _Engine:
+        ready = False
+        load_phase = "loading_weights"
+
+    config = NodeConfig(node_id="head")
+    config.model = "nvidia/Llama-3.3-70B-Instruct-NVFP4"
+    app = {"config": config, "client_session": None, "metrics_collector": None, "engine": _Engine()}
+
+    class _Req:
+        method = "GET"
+        path = "/v1/models"
+        headers = {}
+        def __init__(self):
+            self.app = app
+
+    resp = asyncio.run(proxy_to_vllm(_Req()))
+    assert resp.status == 503
+    data = _json.loads(resp.body.decode())
+    assert data["error"]["load_phase"] == "loading_weights"
+    assert resp.headers.get("Retry-After") == "10"
