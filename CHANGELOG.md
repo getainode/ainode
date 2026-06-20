@@ -12,6 +12,19 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.16] — 2026-06-20
+
+### Added
+- **Proven-config catalog.** Curated models carry `proven_tp` + `verified`; the launch
+  dropdown marks verified models with ✓ and picking a model pre-selects its proven node
+  count in the picker (70B → 2, 235B → 4).
+
+### Changed
+- **`NVIDIA_VLLM_IMAGE` is env-resolved** with the proven GB10 default
+  (`scitrera/dgx-spark-vllm:0.17.0-t5`); no deployment hand-seds the source anymore.
+
+---
+
 ## [0.4.15] — 2026-06-20
 
 ### Fixed
