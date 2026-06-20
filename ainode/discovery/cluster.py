@@ -39,6 +39,7 @@ class ClusterNode:
     gpu_utilization: float = 0.0
     gpu_temp: float = 0.0
     fabric_ip: str = ""  # this node's cluster-fabric IP (BUG D: launch over fabric, not mgmt)
+    instances: list = field(default_factory=list)  # Phase 2: distributed instances this node heads
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -66,6 +67,7 @@ class ClusterNode:
             gpu_utilization=getattr(a, "gpu_utilization", 0.0),
             gpu_temp=getattr(a, "gpu_temp", 0.0),
             fabric_ip=getattr(a, "fabric_ip", "") or "",
+            instances=list(getattr(a, "instances", []) or []),
         )
 
     @classmethod
@@ -92,6 +94,7 @@ class ClusterNode:
             gpu_utilization=getattr(announcement, "gpu_utilization", 0.0),
             gpu_temp=getattr(announcement, "gpu_temp", 0.0),
             fabric_ip=getattr(announcement, "fabric_ip", "") or "",
+            instances=list(getattr(announcement, "instances", []) or []),
         )
 
 

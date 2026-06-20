@@ -63,6 +63,11 @@ class NodeAnnouncement:
     # this to launch distributed peers over the fabric — NOT the mgmt-LAN UDP
     # source IP (peer_ip), which lands a Ray worker on a non-GPU address (BUG D).
     fabric_ip: str = ""
+    # Phase 2: distributed instances this node HEADS, as wire dicts
+    # (InstanceRecord.to_dict()). Empty for non-heads / solo. Same info as the
+    # legacy distributed_instance_id/distributed_peers, but a list so a head can
+    # run more than one. from_json drops unknown keys → older peers stay OK.
+    instances: List[dict] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

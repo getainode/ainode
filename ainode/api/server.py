@@ -157,6 +157,30 @@ def create_app(
     return app
 
 
+def _head_instances(config) -> list:
+    """Phase 2: the instances list this node HEADS, as wire dicts.
+
+    Today there's at most one (derived from config), so this returns a 0- or
+    1-element list. When the engine layer owns multiple instances (P2-2) it will
+    return all of them. Mirrors the legacy distributed_instance_id/peers.
+    """
+    from ainode.discovery.instance import InstanceRecord
+
+    peer_ips = list(getattr(config, "peer_ips", []) or [])
+    if not peer_ips:
+        return []
+    iid = f"{config.node_id or 'head'}:{config.model}"
+    return [InstanceRecord(
+        instance_id=iid,
+        model=config.model or "",
+        head_node_id=config.node_id or "unknown",
+        peer_ips=peer_ips,
+        api_port=config.api_port,
+        tensor_parallel_size=1 + len(peer_ips),
+        status="serving",
+    ).to_dict()]
+
+
 def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     """Create a NodeAnnouncement from current node state."""
     gpu: Optional[GPUInfo] = detect_gpu()
@@ -216,6 +240,7 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         distributed_instance_id=distributed_instance_id,
         distributed_peers=distributed_peers,
         fabric_ip=fabric_ip,
+        instances=(_head_instances(config) if (distributed_mode == "head" and engine_ready) else []),
     )
 
 
@@ -331,6 +356,9 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                 elif dmode != "head":
                     updates["distributed_instance_id"] = None
                     updates["distributed_peers"] = []
+                updates["instances"] = (
+                    _head_instances(config) if (dmode == "head" and engine_ready) else []
+                )
                 if sender:
                     sender.update_announcement(**updates)
                     # Keep the app-level announcement in sync so /api/status sees fresh values
@@ -684,37 +712,54 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
     total_vram = sum(float(n.gpu_memory_gb or 0) for n in ready)
     total_gpus = len(ready)  # one GPU per node today; future: per-node GPU count
 
-    # Surface the distributed instance (if any) — the head broadcasts it;
-    # everybody else can tell from cluster state.
-    distributed_instance = None
+    # Phase 2: the LIST of distributed instances across all nodes — each head
+    # advertises the instances it heads. Resolve each instance's peer FABRIC IPs
+    # (BUG D) back to member node ids/names. `distributed_instance` (singular)
+    # stays = the first one, for one release of back-compat.
+    by_fabric = {
+        (getattr(m, "fabric_ip", "") or ""): m
+        for m in cluster.members() if getattr(m, "fabric_ip", "")
+    }
+
+    def _resolve_instance(head, inst):
+        iid = inst.get("instance_id", "") or ""
+        peers = list(inst.get("peer_ips", []) or [])
+        peer_node_ids, member_names = [], [head.node_name]
+        for ip in peers:
+            m = by_fabric.get(ip)
+            peer_node_ids.append(m.node_id if m else ip)
+            member_names.append(m.node_name if m else ip)
+        # model can be stale ("") if the head started idle; it's authoritative in
+        # instance_id ("<node_id>:<model>").
+        model = inst.get("model") or (iid.split(":", 1)[1] if ":" in iid else "") or head.model
+        return {
+            "instance_id": iid,
+            "head_node_id": head.node_id,
+            "head_node_name": head.node_name,
+            "peer_ips": peers,
+            "peer_node_ids": peer_node_ids,
+            "member_names": member_names,
+            "tensor_parallel_size": inst.get("tensor_parallel_size") or (1 + len(peers)),
+            "model": model,
+            "status": inst.get("status", "serving"),
+        }
+
+    distributed_instances = []
     for n in ready:
-        iid = getattr(n, "distributed_instance_id", None)
-        if iid:
-            peers = list(getattr(n, "distributed_peers", []) or [])
-            # peers are FABRIC IPs (BUG D) — resolve them back to member nodes so
-            # the UI can render real membership (it keys on node_id, not IP).
-            by_fabric = {
-                (getattr(m, "fabric_ip", "") or ""): m
-                for m in cluster.members() if getattr(m, "fabric_ip", "")
-            }
-            peer_node_ids, member_names = [], [n.node_name]
-            for ip in peers:
-                m = by_fabric.get(ip)
-                peer_node_ids.append(m.node_id if m else ip)
-                member_names.append(m.node_name if m else ip)
-            distributed_instance = {
-                "instance_id": iid,
-                "head_node_id": n.node_id,
-                "head_node_name": n.node_name,
-                "peer_ips": peers,
-                "peer_node_ids": peer_node_ids,
-                "member_names": member_names,
-                "tensor_parallel_size": 1 + len(peers),
-                # n.model can be stale ("") if the head started idle then launched;
-                # the model is authoritative in instance_id ("<node_id>:<model>").
-                "model": (iid.split(":", 1)[1] if ":" in iid else n.model) or n.model,
-            }
-            break
+        node_instances = list(getattr(n, "instances", []) or [])
+        if not node_instances:
+            # Back-compat: an older node advertises only the singular fields.
+            iid = getattr(n, "distributed_instance_id", None)
+            if iid:
+                node_instances = [{
+                    "instance_id": iid,
+                    "model": (iid.split(":", 1)[1] if ":" in iid else getattr(n, "model", "")),
+                    "peer_ips": list(getattr(n, "distributed_peers", []) or []),
+                }]
+        for inst in node_instances:
+            distributed_instances.append(_resolve_instance(n, inst))
+
+    distributed_instance = distributed_instances[0] if distributed_instances else None
 
     nodes_payload = []
     for n in ready:
@@ -742,6 +787,7 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         "total_nodes": len(ready),
         "nodes": nodes_payload,
         "distributed_instance": distributed_instance,
+        "distributed_instances": distributed_instances,
         "ray": ray_state.to_dict(),
     })
 
