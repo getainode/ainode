@@ -1,11 +1,12 @@
-"""NvidiaBackend — drive vLLM via NVIDIA's official ``nvcr.io/nvidia/vllm`` image.
+"""NvidiaBackend — drive vLLM in a container image (``$NVIDIA_VLLM_IMAGE``,
+defaulting to the proven GB10/Spark build; see ``NVIDIA_VLLM_IMAGE`` below).
 
 Phase 4 implementation. Mirrors the public lifecycle surface of
 :class:`ainode.engine.backends.eugr.EugrBackend` so ``cmd_start`` /
 ``cmd_status`` / the dashboard can dispatch polymorphically. Internally,
 very different from eugr:
 
-* **Solo mode** — a single ``docker run nvcr.io/nvidia/vllm:26.02-py3 \\
+* **Solo mode** — a single ``docker run $NVIDIA_VLLM_IMAGE \\
   vllm serve ...`` on this host. No Ray, no run_cluster.sh. Environment
   is populated from :mod:`ainode.cluster.hca_discovery` so NCCL sees the
   correct HCA + fabric IP without manual tuning.
@@ -53,7 +54,11 @@ logger = logging.getLogger(__name__)
 # Module-level constants
 # -----------------------------------------------------------------------------
 
-NVIDIA_VLLM_IMAGE = "nvcr.io/nvidia/vllm:26.02-py3"
+# The vLLM container image to run. Defaults to the proven GB10/Spark build
+# (vLLM 0.17.1, serves MoE on sm120); override with $NVIDIA_VLLM_IMAGE (e.g.
+# nvcr.io/nvidia/vllm on non-Spark GPUs). Resolved here so a deployment never has
+# to sed-repoint this source — the nvcr→scitrera drift that once broke a node.
+NVIDIA_VLLM_IMAGE = os.environ.get("NVIDIA_VLLM_IMAGE") or "scitrera/dgx-spark-vllm:0.17.0-t5"
 
 # Agent B originally vendored ``scripts/run_cluster.sh`` into the AINode
 # install at ``/opt/ainode/run_cluster.sh``. Phase 5 Bug 2 fix (Option α)
@@ -133,7 +138,7 @@ class NvidiaBackend(EngineBackend):
         """Launch a single-node vLLM container on this host.
 
         No Ray, no run_cluster.sh. Direct ``docker run
-        nvcr.io/nvidia/vllm:26.02-py3 vllm serve <model> ...``.
+        $NVIDIA_VLLM_IMAGE vllm serve <model> ...``.
         """
         if self.is_running():
             return True
@@ -467,13 +472,12 @@ class NvidiaBackend(EngineBackend):
             "NCCL_IB_GID_INDEX": NCCL_IB_GID_INDEX,
             "NCCL_IB_SUBNET_AWARE_ROUTING": "1",
             "NCCL_IB_DISABLE": "0",
-            # NVIDIA's nvcr.io/nvidia/vllm:26.02-py3 does NOT ship hf_transfer.
-            # If AINode's own container has HF_HUB_ENABLE_HF_TRANSFER=1 (our
-            # install-UX default), that env var would inherit into the vllm
-            # container via docker exec and crash vllm at first weight
-            # download. Explicitly set to "0" so the NVIDIA image uses the
-            # standard HF downloader. If NVIDIA bakes hf_transfer into a
-            # future image, flip this to "1".
+            # The vLLM image does NOT ship hf_transfer. If AINode's own
+            # container has HF_HUB_ENABLE_HF_TRANSFER=1 (our install-UX
+            # default), that env var would inherit into the vllm container via
+            # docker exec and crash vllm at first weight download. Explicitly
+            # set to "0" so the image uses the standard HF downloader. If a
+            # future image bakes hf_transfer in, flip this to "1".
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
             "HF_TOKEN": self.config.hf_token or "",
             # Attention backend. NOTE (verified 2026-06-17): this

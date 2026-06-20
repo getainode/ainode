@@ -949,3 +949,22 @@ class TestIsRunningAndHealth:
         fake = _FakePopen()
         backend.process = fake
         assert backend.process is fake
+
+
+def test_nvidia_vllm_image_env_and_default(monkeypatch):
+    """The vLLM image resolves from $NVIDIA_VLLM_IMAGE, defaulting to the proven
+    GB10 build — so deployments never sed-repoint the source (the drift fix)."""
+    import importlib
+    import ainode.engine.backends.nvidia as nv
+
+    monkeypatch.delenv("NVIDIA_VLLM_IMAGE", raising=False)
+    importlib.reload(nv)
+    assert nv.NVIDIA_VLLM_IMAGE == "scitrera/dgx-spark-vllm:0.17.0-t5"
+    assert "nvcr.io" not in nv.NVIDIA_VLLM_IMAGE  # the drift default is gone
+
+    monkeypatch.setenv("NVIDIA_VLLM_IMAGE", "myreg/vllm:test")
+    importlib.reload(nv)
+    assert nv.NVIDIA_VLLM_IMAGE == "myreg/vllm:test"  # env override wins
+
+    monkeypatch.delenv("NVIDIA_VLLM_IMAGE", raising=False)
+    importlib.reload(nv)  # restore default for other tests
