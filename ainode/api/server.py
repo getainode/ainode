@@ -513,6 +513,7 @@ async def handle_nodes(request: web.Request) -> web.Response:
             nodes_list.append({
                 "node_id": n.node_id,
                 "node_name": n.node_name,
+                "fabric_ip": getattr(n, "fabric_ip", "") or "",
                 "host": "localhost",
                 "api_port": n.api_port,
                 "web_port": n.web_port,
