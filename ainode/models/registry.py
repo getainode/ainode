@@ -34,6 +34,10 @@ class ModelInfo:
     context_length: int = 0
     license: str = ""
     recommended: bool = False
+    # Cluster-proven config: proven_tp = node count to launch at; verified = we've
+    # actually served it on this hardware (drives the picker default + a ✓ badge).
+    proven_tp: int = 0
+    verified: bool = False
     created_at: str = ""
     downloads: int = 0
     likes: int = 0
@@ -139,6 +143,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=250.0,
         description="Frontier MoE (A22B active). Runs distributed TP=4 on the cluster. NVFP4 for GB10.",
         quantization="NVFP4", min_memory_gb=275, family="qwen", params_b=235.0,
+        proven_tp=4, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
     ),
     "qwen3.5-397b-a17b-nvfp4": ModelInfo(
@@ -148,6 +153,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=468.0,
         description="Frontier MoE (A17B active) — the cluster's design point. Distributed TP=4. NVFP4.",
         quantization="NVFP4", min_memory_gb=500, family="qwen", params_b=397.0,
+        proven_tp=4, verified=False,
         context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
     ),
     "llama-3.1-405b-nvfp4": ModelInfo(
@@ -157,6 +163,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=437.0,
         description="Dense 405B, NVFP4. Needs the cluster's pooled memory (TP=4).",
         quantization="NVFP4", min_memory_gb=470, family="llama", params_b=405.0,
+        proven_tp=4, verified=False,
         context_length=131072, license="Llama 3.1", format="nvfp4",
     ),
     "llama-3.1-405b-awq": ModelInfo(
@@ -166,6 +173,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=408.0,
         description="Dense 405B, AWQ-INT4. Distributed TP=4.",
         quantization="AWQ", min_memory_gb=440, family="llama", params_b=405.0,
+        proven_tp=4, verified=False,
         context_length=131072, license="Llama 3.1", format="awq",
     ),
     "llama-3.3-70b-nvfp4": ModelInfo(
@@ -175,6 +183,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=80.0,
         description="Dense 70B, NVFP4. Fits TP=2; bandwidth-bound single-stream on GB10.",
         quantization="NVFP4", min_memory_gb=88, family="llama", params_b=70.0,
+        proven_tp=2, verified=True,
         context_length=131072, license="Llama 3.3", recommended=True, format="nvfp4",
     ),
     "glm-5.1": ModelInfo(
@@ -184,6 +193,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=874.0,
         description="Large GLM. Needs the full cluster's pooled memory (TP=4).",
         quantization=None, min_memory_gb=900, family="glm", params_b=0.0,
+        proven_tp=4, verified=False,
         context_length=131072, license="GLM",
     ),
 }

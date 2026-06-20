@@ -102,6 +102,18 @@ class TestCatalog:
         assert "hf_repo" in d
         assert "size_gb" in d
 
+    def test_curated_models_carry_proven_config(self, manager):
+        cat = manager.get_catalog_map()
+        seventyb = cat["llama-3.3-70b-nvfp4"]
+        assert seventyb.proven_tp == 2 and seventyb.verified is True
+        big = cat["qwen3-235b-a22b-nvfp4"]
+        assert big.proven_tp == 4 and big.verified is True
+        # an unverified curated entry still carries a proven_tp default but verified=False
+        assert cat["qwen3.5-397b-a17b-nvfp4"].verified is False
+        # fields reach the dict the API serializes
+        d = seventyb.to_dict()
+        assert d["proven_tp"] == 2 and d["verified"] is True
+
 
 # ---------------------------------------------------------------------------
 # Aggregator tests (unit — mocked, no network)

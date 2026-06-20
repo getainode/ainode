@@ -838,6 +838,18 @@ const AINode = {
     };
     this._renderNodeDots();
 
+    // Pre-select head + (tp-1) peers — used when a model's proven TP is chosen.
+    this._selectNodes = function (tp) {
+      var sel = document.getElementById('node-selector'); if (!sel) return;
+      var peersWanted = Math.max(0, tp - 1), peerN = 0;
+      sel.querySelectorAll('.node-dot').forEach(function (d) {
+        if (d.dataset.head) { d.classList.add('active'); return; }
+        if (peerN < peersWanted) { d.classList.add('active'); peerN++; }
+        else { d.classList.remove('active'); }
+      });
+      updateLaunchHint();
+    };
+
     function updateLaunchHint() {
       if (!launchHint) return;
       var active = nodeSelector ? nodeSelector.querySelectorAll('.node-dot.active') : [];
@@ -922,9 +934,18 @@ const AINode = {
           var isLoaded = ((self.state.status && self.state.status.models_loaded) || []).indexOf(repo) !== -1;
           var onDiskNow = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[repo]) || !!diskSet[repo];
           var glyph = isLoaded ? '● ' : (onDiskNow ? '○ ' : '');
-          return '<option value="' + self.esc(repo) + '">' + glyph + self.esc(label) + sizeNote + '</option>';
+          var verifiedMark = m.verified ? ' ✓' : '';
+          var pt = m.proven_tp || 0;
+          return '<option value="' + self.esc(repo) + '" data-proven-tp="' + pt + '">'
+            + glyph + self.esc(label) + sizeNote + verifiedMark + '</option>';
         }).join('');
       if (cv) select.value = cv;
+      // Picking a model with a proven TP pre-selects that many nodes in the picker.
+      select.onchange = function () {
+        var opt = select.options[select.selectedIndex];
+        var tp = opt ? parseInt(opt.getAttribute('data-proven-tp') || '0', 10) : 0;
+        if (tp > 0 && self._selectNodes) self._selectNodes(tp);
+      };
     });
   },
 
