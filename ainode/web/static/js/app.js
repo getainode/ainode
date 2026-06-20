@@ -603,14 +603,14 @@ const AINode = {
       // distinct per-node model; never overwrite it. Solo mode (di null) no-op.
       var di = this.state.clusterResources && this.state.clusterResources.distributed_instance;
       if (di && di.model) {
-        var memberIps = di.peer_ips || [];
+        // Members are EXACTLY the head + this instance's peers (resolved to
+        // node_ids server-side). Don't mark every 'member'-mode node — that
+        // over-counts idle members not in this instance.
+        var memberIds = di.peer_node_ids || di.peer_ips || [];
         topoNodes = topoNodes.map(function (n) {
           var participates =
             n.node_id === di.head_node_id ||
-            (di.instance_id && n.instance_id === di.instance_id) ||
-            n.distributed_mode === 'head' ||
-            n.distributed_mode === 'member' ||
-            memberIps.indexOf(n.node_id) !== -1;
+            memberIds.indexOf(n.node_id) !== -1;
           if (participates) {
             n.model = n.model || di.model;
             n.tp_size = di.tensor_parallel_size;
@@ -671,7 +671,7 @@ const AINode = {
         model: di.model,
         strategy: 'distributed',
         tp_size: di.tensor_parallel_size,
-        nodes: [di.head_node_id].concat(di.peer_ips || []),
+        nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
         status: live ? 'READY' : 'STARTING',
         badge: 'DISTRIBUTED · TP=' + di.tensor_parallel_size,
       });

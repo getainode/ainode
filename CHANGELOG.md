@@ -12,6 +12,20 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.15] — 2026-06-20
+
+### Fixed
+- **Dashboard showed a distributed instance as `SINGLE`.** A running TP=N model
+  rendered as single-node because (1) `distributed_instance.model` came back empty
+  when the head had started idle then launched (stale announcement model) — the UI
+  gates its DISTRIBUTED card on that field; and (2) membership matched `peer_ips`
+  (now fabric IPs) against `node_id`. The cluster/resources builder now reads the
+  model from the instance_id and resolves fabric-IP peers back to member node_ids
+  (`peer_node_ids` / `member_names`); the UI keys on those and no longer over-counts
+  idle `member`-mode nodes. Verified in a live browser.
+
+---
+
 ## [0.4.14] — 2026-06-20
 
 ### Added

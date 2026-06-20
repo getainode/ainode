@@ -690,13 +690,28 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         iid = getattr(n, "distributed_instance_id", None)
         if iid:
             peers = list(getattr(n, "distributed_peers", []) or [])
+            # peers are FABRIC IPs (BUG D) — resolve them back to member nodes so
+            # the UI can render real membership (it keys on node_id, not IP).
+            by_fabric = {
+                (getattr(m, "fabric_ip", "") or ""): m
+                for m in cluster.members() if getattr(m, "fabric_ip", "")
+            }
+            peer_node_ids, member_names = [], [n.node_name]
+            for ip in peers:
+                m = by_fabric.get(ip)
+                peer_node_ids.append(m.node_id if m else ip)
+                member_names.append(m.node_name if m else ip)
             distributed_instance = {
                 "instance_id": iid,
                 "head_node_id": n.node_id,
                 "head_node_name": n.node_name,
                 "peer_ips": peers,
+                "peer_node_ids": peer_node_ids,
+                "member_names": member_names,
                 "tensor_parallel_size": 1 + len(peers),
-                "model": n.model,
+                # n.model can be stale ("") if the head started idle then launched;
+                # the model is authoritative in instance_id ("<node_id>:<model>").
+                "model": (iid.split(":", 1)[1] if ":" in iid else n.model) or n.model,
             }
             break
 

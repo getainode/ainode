@@ -139,3 +139,37 @@ def test_proxy_returns_503_loading_during_swap():
     data = _json.loads(resp.body.decode())
     assert data["error"]["load_phase"] == "loading_weights"
     assert resp.headers.get("Retry-After") == "10"
+
+
+def test_distributed_instance_resolves_peers_and_model():
+    """cluster/resources must report the running model (not stale "") and resolve
+    fabric-IP peers back to member nodes so the UI shows DISTRIBUTED, not SINGLE."""
+    import json as _json
+    from ainode.api.server import handle_cluster_resources
+    from ainode.engine.ray_autostart import RayAutostartState
+
+    head = ClusterNode(
+        node_id="headid", node_name="Spark-1-DGX", gpu_name="NVIDIA GB10",
+        gpu_memory_gb=128.0, unified_memory=True, model="",  # stale (idle-start)
+        status=NodeStatus.ONLINE, api_port=8000, web_port=3000, last_seen=0.0,
+        distributed_mode="head",
+        distributed_instance_id="headid:nvidia/Llama-3.3-70B-Instruct-NVFP4",
+        distributed_peers=["10.100.0.13"],  # FABRIC IP
+    )
+    member = _member("memberid", fabric_ip="10.100.0.13")
+    cluster = ClusterState()
+    cluster.add_node(head)
+    cluster.add_node(member)
+    app = {"cluster_state": cluster,
+           "ray_autostart_state": RayAutostartState(is_head=True, head_address="x:6379")}
+
+    class _Req:
+        def __init__(self):
+            self.app = app
+
+    resp = asyncio.run(handle_cluster_resources(_Req()))
+    di = _json.loads(resp.body.decode())["distributed_instance"]
+    assert di["model"] == "nvidia/Llama-3.3-70B-Instruct-NVFP4"  # from iid, not ""
+    assert "memberid" in di["peer_node_ids"]                      # fabric IP → node_id
+    assert di["tensor_parallel_size"] == 2
+    assert "Spark-1-DGX" in di["member_names"] and "host-memberid" in di["member_names"]
