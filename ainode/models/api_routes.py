@@ -80,38 +80,17 @@ async def handle_model_load(request: web.Request) -> web.Response:
     config = request.app.get("config")
     ray_state: Optional[RayAutostartState] = request.app.get("ray_autostart_state")
 
-    if engine is None:
-        # Create a lazy engine so launch is possible even when `ainode start`
-        # didn't pre-instantiate one — e.g. a node that booted in "member" mode
-        # (no local engine) and is now being given a solo model. Use get_backend
-        # so it honors engine_backend (nvidia) instead of the legacy host-venv
-        # VLLMEngine, which would "succeed" without ever launching a container.
-        try:
-            if config is None:
-                return web.json_response({"error": "Engine not initialized"}, status=503)
-            from ainode.engine.backends import get_backend
-            engine = get_backend(config)
-            request.app["engine"] = engine
-        except Exception as exc:
-            return web.json_response({"error": f"Engine unavailable: {exc}"}, status=503)
-
     # Per-load KV-cache knob: lets a caller cap vLLM's GPU reservation so small
-    # models don't hog a unified-memory node (and several can stack). Threads
-    # into the serve args via config.gpu_memory_utilization (nvidia.py).
-    gmu = body.get("gpu_memory_utilization")
-    if config is not None and gmu is not None:
+    # models don't hog a unified-memory node (and several can stack). Applied to
+    # the per-instance config snapshot below — NOT the shared app config, which
+    # would cross-wire a co-resident instance's reservation.
+    gmu = None
+    raw_gmu = body.get("gpu_memory_utilization")
+    if raw_gmu is not None:
         try:
-            config.gpu_memory_utilization = max(0.05, min(0.95, float(gmu)))
+            gmu = max(0.05, min(0.95, float(raw_gmu)))
         except (TypeError, ValueError):
-            pass
-
-    # Update the running config so downstream proxying to vLLM points at the new model
-    if config is not None and getattr(config, "model", None) != model:
-        config.model = model
-        try:
-            config.save()
-        except Exception:
-            pass
+            gmu = None
 
     # Decide: single-node or distributed?
     sharding_config = None
@@ -132,25 +111,6 @@ async def handle_model_load(request: web.Request) -> web.Response:
                     {"error": f"Sharding plan failed: {exc}"}, status=422
                 )
 
-    # Federation (F2): a solo load means this node self-serves. If it was left in
-    # "member" mode by a prior distributed run, it would otherwise sit idle waiting
-    # for a head — reset it to solo so the load actually serves.
-    if sharding_config is None and config is not None and \
-            getattr(config, "distributed_mode", "solo") != "solo":
-        config.distributed_mode = "solo"
-        config.peer_ips = []
-        try:
-            config.save()
-        except Exception:
-            pass
-
-    # If running, stop first so we can relaunch
-    try:
-        if engine.is_running():
-            engine.stop()
-    except Exception:
-        pass
-
     def _clear_model_claim():
         # routing-truth: a failed launch must stop this node advertising a model
         # it isn't serving, or it becomes a ghost the federated router 502s on.
@@ -161,30 +121,127 @@ async def handle_model_load(request: web.Request) -> web.Response:
             except Exception:
                 pass
 
-    # Launch path
-    success = False
-    plan_dict = None
-    try:
-        if sharding_config is not None:
+    # --- Distributed auto-shard path (Ray/TP) — singleton engine, unchanged ----
+    if sharding_config is not None:
+        if engine is None:
+            # Lazy-create via get_backend (honors engine_backend=nvidia, not the
+            # legacy host-venv VLLMEngine) for a node booted without an engine.
+            try:
+                if config is None:
+                    return web.json_response({"error": "Engine not initialized"}, status=503)
+                from ainode.engine.backends import get_backend
+                engine = get_backend(config)
+                request.app["engine"] = engine
+            except Exception as exc:
+                return web.json_response({"error": f"Engine unavailable: {exc}"}, status=503)
+        if config is not None and getattr(config, "model", None) != model:
+            config.model = model
+            try:
+                config.save()
+            except Exception:
+                pass
+        try:
+            if engine.is_running():
+                engine.stop()
+        except Exception:
+            pass
+        try:
             success = engine.launch_distributed(sharding_config)
-            plan_dict = sharding_config.to_dict()
-        else:
-            # Single-node fallback: tensor_parallel_size = local GPU count
-            # Current VLLMEngine.build_cmd already handles single-GPU; just start.
-            success = engine.start()
-    except Exception as exc:
-        _clear_model_claim()
-        return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
+        except Exception as exc:
+            _clear_model_claim()
+            return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
+        if not success:
+            _clear_model_claim()
+            return web.json_response({"error": "Failed to launch engine"}, status=500)
+        return web.json_response({
+            "status": "launching", "model": model,
+            "distributed": True, "plan": sharding_config.to_dict(),
+        })
 
+    # --- Solo path: APPEND an instance via the InstanceManager ------------------
+    # A solo load no longer REPLACES the running model. Each model gets its own
+    # container name + port + config snapshot, so several stack on one node. The
+    # 5s sync loop broadcasts manager.records() → /v1/models + routing see them.
+    if config is None:
+        return web.json_response({"error": "Engine not initialized"}, status=503)
+
+    from dataclasses import replace
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+    from ainode.engine.backends import get_backend
+
+    manager = request.app.get("instances")
+    if manager is None:
+        manager = InstanceManager(base_port=config.api_port)
+        request.app["instances"] = manager
+
+    # Re-loading a model already up replaces THAT instance (stop it first) — not
+    # the whole node. Other stacked instances are untouched.
+    existing = manager.by_model(model)
+    replaced_primary = existing is not None and request.app.get("engine") is existing.backend
+    if existing is not None:
+        try:
+            existing.backend.stop()
+        except Exception:
+            pass
+        manager.remove(existing.record.instance_id)
+
+    is_primary = manager.is_empty()
+    port = manager.allocate_port()
+    name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
+    instance_id = f"{config.node_id or 'head'}:{model}"
+
+    inst_config = replace(config, model=model, distributed_mode="solo",
+                          peer_ips=[], api_port=port)
+    if gmu is not None:
+        inst_config = replace(inst_config, gpu_memory_utilization=gmu)
+
+    backend = get_backend(inst_config, instance_id=name_token)
+    try:
+        success = backend.start()
+    except Exception as exc:
+        if is_primary:
+            _clear_model_claim()
+        return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
     if not success:
-        _clear_model_claim()
+        if is_primary:
+            _clear_model_claim()
         return web.json_response({"error": "Failed to launch engine"}, status=500)
+
+    manager.add(InstanceRecord(
+        instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
+        peer_ips=[], api_port=port, tensor_parallel_size=1, status="starting"), backend)
+
+    if is_primary:
+        # Back-compat: the proxy/status path reads app["config"] + app["engine"].
+        config.model = model
+        config.distributed_mode = "solo"
+        config.peer_ips = []
+        if gmu is not None:
+            config.gpu_memory_utilization = gmu
+        try:
+            config.save()
+        except Exception:
+            pass
+        request.app["engine"] = backend
+    elif replaced_primary:
+        # Reloaded the primary model while a stack exists: keep app["engine"]
+        # pointing at the live backend (not the stopped old one) so the
+        # status/proxy back-compat path doesn't dangle.
+        config.model = model
+        try:
+            config.save()
+        except Exception:
+            pass
+        request.app["engine"] = backend
 
     return web.json_response({
         "status": "launching",
         "model": model,
-        "distributed": sharding_config is not None,
-        "plan": plan_dict,
+        "instance_id": instance_id,
+        "api_port": port,
+        "stacked": not is_primary,
+        "distributed": False,
     })
 
 
@@ -211,6 +268,43 @@ async def handle_model_unload(request: web.Request) -> web.Response:
     config = request.app["config"]
     stopped = False
     errors = []
+
+    # Instance-aware unload: stop the ONE instance serving `model`, leaving any
+    # other stacked instances on this node serving. Falls through to the legacy
+    # singleton teardown when no manager/model match (back-compat).
+    manager = request.app.get("instances")
+    model = (body.get("model") or "").strip() if isinstance(body, dict) else ""
+    if manager is not None and model:
+        inst = manager.by_model(model)
+        if inst is not None:
+            try:
+                inst.backend.stop()
+            except Exception as exc:
+                errors.append(f"instance.stop(): {exc}")
+            manager.remove(inst.record.instance_id)
+            # If the primary went away, repoint app["engine"]/config to a survivor
+            # so the status/proxy back-compat path doesn't dangle on a dead backend.
+            if request.app.get("engine") is inst.backend:
+                survivors = manager.instances()
+                if survivors:
+                    keep = survivors[0]
+                    request.app["engine"] = keep.backend
+                    config.model = keep.record.model
+                else:
+                    request.app["engine"] = None
+                    config.model = None
+                    if getattr(config, "distributed_mode", "") == "head":
+                        config.distributed_mode = "solo"
+                try:
+                    config.save()
+                except Exception as exc:
+                    errors.append(f"config.save: {exc}")
+            return web.json_response({
+                "stopped": True, "model": model,
+                "instance_id": inst.record.instance_id,
+                "remaining": len(manager.instances()),
+                "errors": errors,
+            })
 
     if engine is not None:
         try:

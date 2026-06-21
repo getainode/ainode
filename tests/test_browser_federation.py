@@ -51,15 +51,23 @@ def test_gpu_mem_util_reaches_serve_args():
 
 
 def test_load_body_sets_gpu_mem_util(monkeypatch):
+    """A per-load gpu_memory_utilization caps THIS instance's vLLM reservation
+    (so several stack) and, for the primary, mirrors onto the shared config."""
+    made = {}
     class _Eng:
+        def __init__(self, cfg, instance_id=""):
+            self.config = cfg; self.instance_id = instance_id; made["cfg"] = cfg
         def is_running(self): return False
         def stop(self): pass
         def start(self): return True
+    monkeypatch.setattr(backends_mod, "get_backend",
+                        lambda cfg, instance_id="", on_ready=None: _Eng(cfg, instance_id))
     cfg = NodeConfig(node_id="n"); cfg.save = lambda: None
-    app = {"engine": _Eng(), "config": cfg, "cluster_state": ClusterState(),
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     asyncio.run(mr.handle_model_load(_Req(app, {"model": "m/x", "gpu_memory_utilization": 0.25})))
-    assert cfg.gpu_memory_utilization == 0.25
+    assert made["cfg"].gpu_memory_utilization == 0.25   # this instance's snapshot
+    assert cfg.gpu_memory_utilization == 0.25           # primary mirrors to shared config
 
 
 # --- 3. routing-truth: candidates + failover + clear-on-fail ----------------

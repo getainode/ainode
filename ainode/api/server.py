@@ -658,12 +658,20 @@ def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int
         host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
         if not host:
             continue
-        serves = (getattr(n, "model", "") == model) or any(
-            (inst.get("model") == model) for inst in (getattr(n, "instances", []) or []))
-        if not serves:
-            continue
-        port = local_port if is_local else n.api_port
-        (local if is_local else remote).append((host, port))
+        node_port = local_port if is_local else n.api_port
+        bucket = local if is_local else remote
+        seen = set()
+        # The node's primary/solo model is served on its main api_port.
+        if getattr(n, "model", "") == model and node_port not in seen:
+            bucket.append((host, node_port)); seen.add(node_port)
+        # Each stacked instance is served on its OWN port — a co-resident 2nd
+        # model on this node lives at :8001, not the node's main :8000.
+        for inst in (getattr(n, "instances", []) or []):
+            if inst.get("model") != model:
+                continue
+            iport = inst.get("api_port") or node_port
+            if iport not in seen:
+                bucket.append((host, iport)); seen.add(iport)
     return local + remote
 
 

@@ -125,8 +125,11 @@ def test_start_solo_launches_subprocess():
         mock_proc.poll.return_value = None
         popen.return_value = mock_proc
         assert engine.start_solo() is True
-        popen.assert_called_once()
-        invoked_cmd = popen.call_args[0][0]
+        # start_solo may also probe `ip addr` to resolve the cluster interface;
+        # assert the vLLM serve launch specifically rather than total call-count.
+        vllm_calls = [c for c in popen.call_args_list if c[0][0][:2] == ["vllm", "serve"]]
+        assert len(vllm_calls) == 1
+        invoked_cmd = vllm_calls[0][0][0]
         assert invoked_cmd[:2] == ["vllm", "serve"]
 
 

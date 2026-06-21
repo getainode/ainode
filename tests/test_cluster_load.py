@@ -106,55 +106,126 @@ def test_cluster_unload_remote_targets_unload_path(monkeypatch):
     assert posted["url"] == "http://10.100.0.15:3000/api/models/unload"
 
 
-def test_lazy_engine_uses_get_backend(monkeypatch):
-    """A node with no engine (booted in member mode) lazy-creates via get_backend,
-    not the legacy host-venv VLLMEngine (which would never launch a container)."""
+class _FakeBackend:
+    """A backend stand-in: records its config + start, no container."""
+    def __init__(self, cfg, instance_id=""):
+        self.config = cfg
+        self.instance_id = instance_id
+        self.started = False
+        self.stopped = False
+    def is_running(self):
+        return self.started and not self.stopped
+    def start(self):
+        self.started = True
+        return True
+    def stop(self):
+        self.stopped = True
+
+
+def _patch_backend(monkeypatch, sink=None):
+    """Patch get_backend everywhere handle_model_load imports it; capture builds."""
     import ainode.engine.backends as backends_mod
+    made = sink if sink is not None else {}
+    made.setdefault("backends", [])
+    def fake_get_backend(cfg, instance_id="", on_ready=None):
+        b = _FakeBackend(cfg, instance_id)
+        made["backends"].append(b)
+        return b
+    monkeypatch.setattr(backends_mod, "get_backend", fake_get_backend)
+    return made
+
+
+def test_lazy_engine_uses_get_backend(monkeypatch):
+    """A solo load builds the serving backend via get_backend (not the legacy
+    host-venv VLLMEngine, which would never launch a container) and starts it."""
     import ainode.models.api_routes as mr
 
-    made = {}
-
-    class _Eng:
-        def is_running(self):
-            return False
-        def stop(self):
-            pass
-        def start(self):
-            made["started"] = True
-            return True
-
-    def fake_get_backend(cfg, on_ready=None):
-        made["backend"] = True
-        return _Eng()
-
-    monkeypatch.setattr(backends_mod, "get_backend", fake_get_backend)
+    made = _patch_backend(monkeypatch)
     cfg = NodeConfig(node_id="spark3", api_port=8000)
     cfg.save = lambda: None
     app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Q"})))
-    assert made.get("backend") and made.get("started")
+    assert made["backends"] and made["backends"][0].started
+    # The primary is wired into app["engine"] for the back-compat proxy/status path.
+    assert app["engine"] is made["backends"][0]
 
 
 def test_solo_load_resets_member_mode(monkeypatch):
     """A solo load on a node stuck in 'member' mode resets it to solo so it serves."""
     import ainode.models.api_routes as mr
 
-    class _Eng:
-        def is_running(self):
-            return False
-        def stop(self):
-            pass
-        def start(self):
-            return True
-
+    _patch_backend(monkeypatch)
     cfg = NodeConfig(node_id="spark3", api_port=8000)
     cfg.distributed_mode = "member"
     cfg.peer_ips = ["10.100.0.11"]
     cfg.save = lambda: None
     # no cluster workers → sharding_config stays None → solo path
-    app = {"engine": _Eng(), "config": cfg, "cluster_state": ClusterState(),
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Q"})))
     assert cfg.distributed_mode == "solo"
     assert cfg.peer_ips == []
+
+
+def test_solo_load_appends_not_replaces(monkeypatch):
+    """A 2nd solo load on a busy node ADDS an instance (own port + container token),
+    leaving the first serving. Reloading the SAME model replaces only that one."""
+    import ainode.models.api_routes as mr
+    from ainode.discovery.instance import InstanceRecord  # noqa: F401 (sanity import)
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B"})))
+
+    mgr = app["instances"]
+    recs = {r.model: r for r in mgr.records()}
+    assert set(recs) == {"model-A", "model-B"}
+    # distinct ports: primary keeps 8000, the stacked one gets 8001
+    assert recs["model-A"].api_port == 8000
+    assert recs["model-B"].api_port == 8001
+    # both backends are alive (append did NOT stop the first)
+    assert all(b.started and not b.stopped for b in made["backends"])
+    # primary stays wired to app["engine"]; the 2nd is manager-only
+    assert app["engine"].config.model == "model-A"
+
+    # Reloading model-A replaces ONLY that instance (stops the old A backend).
+    n_before = len(made["backends"])
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
+    assert len(made["backends"]) == n_before + 1  # a fresh A backend
+    assert {r.model for r in mgr.records()} == {"model-A", "model-B"}
+    # B's port is now free's lowest → A reclaims 8000? No: B holds 8001, A re-gets 8000.
+    recs = {r.model: r for r in mgr.records()}
+    assert recs["model-A"].api_port == 8000
+    assert recs["model-B"].api_port == 8001
+
+
+def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
+    """Unloading one stacked model stops ONLY that instance; the co-resident one
+    keeps serving and stays in the manager."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B"})))
+    mgr = app["instances"]
+    b_backend = mgr.by_model("model-B").backend
+
+    resp = asyncio.run(mr.handle_model_unload(_Req(app, {"model": "model-B"})))
+    body = json.loads(resp.body)
+    assert body["stopped"] is True
+    assert body["remaining"] == 1
+    assert b_backend.stopped is True
+    # A survives, untouched
+    a = mgr.by_model("model-A")
+    assert a is not None and a.backend.stopped is False
+    assert mgr.by_model("model-B") is None
