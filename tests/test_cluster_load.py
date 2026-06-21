@@ -54,7 +54,7 @@ def test_cluster_load_remote_forwards_over_fabric(monkeypatch):
 
     class _Up:
         status = 200
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json; charset=utf-8"}  # charset must be stripped
         async def read(self):
             return b'{"status":"launching"}'
         async def __aenter__(self):
@@ -87,7 +87,7 @@ def test_cluster_unload_remote_targets_unload_path(monkeypatch):
 
     class _Up:
         status = 200
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json; charset=utf-8"}  # charset must be stripped
         async def read(self):
             return b"{}"
         async def __aenter__(self):

@@ -621,8 +621,10 @@ async def _cluster_dispatch(request: web.Request, path: str):
     try:
         async with session.post(url, json=fwd, timeout=aiohttp.ClientTimeout(total=60)) as up:
             data = await up.read()
-            return web.Response(status=up.status, body=data,
-                                content_type=up.headers.get("Content-Type", "application/json"))
+            # web.Response rejects a content_type carrying a charset; the node's
+            # json_response sends "application/json; charset=utf-8" — strip it.
+            ctype = up.headers.get("Content-Type", "application/json").split(";")[0].strip()
+            return web.Response(status=up.status, body=data, content_type=ctype)
     except aiohttp.ClientError as exc:
         return web.json_response(
             {"error": f"failed to reach node '{node_id}' at {url}: {exc}"}, status=502)
