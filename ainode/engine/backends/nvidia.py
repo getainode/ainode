@@ -151,6 +151,11 @@ class NvidiaBackend(EngineBackend):
             return True
 
         container_name = self._solo_container_name()
+        # Idempotent launch: a leftover container with this name (from a prior run
+        # that wasn't cleanly stopped) makes `docker run --name` fail with a
+        # Conflict. The head path already does this (see _launch_head_container);
+        # solo needs it too.
+        self._docker_stop_and_rm_best_effort(container_name)
         cmd = self._build_solo_docker_cmd(container_name)
         env = self._build_env_for_subprocess()
 

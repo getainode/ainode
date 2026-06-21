@@ -273,10 +273,12 @@ class TestStartSolo:
         ), mock.patch(
             "ainode.engine.backends.nvidia.build_nccl_ib_hca_whitelist",
             return_value="mlx5_1,mlx5_3",
-        ):
+        ), mock.patch.object(backend, "_docker_stop_and_rm_best_effort") as preclean:
             result = backend.start_solo()
 
         assert result is True
+        # idempotent launch: the solo container name is pre-cleaned before docker run
+        preclean.assert_called_once_with("ainode-vllm-node-solo")
         popen.assert_called_once()
         argv: List[str] = popen.call_args.args[0]
 
