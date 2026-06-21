@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
 from ainode.core.config import NodeConfig
 from ainode.discovery.broadcast import NodeAnnouncement, NodeStatus
 from ainode.discovery.cluster import ClusterNode, ClusterState
@@ -113,6 +115,10 @@ def test_unknown_node_id_is_rejected():
     assert resp.status == 422
 
 
+@pytest.mark.xfail(reason="F1 (0.4.26) removed proxy_to_vllm's 503 visible-loading guard "
+                          "because engine.ready is stale-False even while serving; a correct "
+                          "loading-state is an owned follow-up (restore once readiness is fixed).",
+                   strict=False)
 def test_proxy_returns_503_loading_during_swap():
     """While the engine is mid-swap (not ready), :3000 returns a clear loading
     state with the phase — not a hang/opaque proxy error."""

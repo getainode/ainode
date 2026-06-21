@@ -113,6 +113,8 @@ def create_app(
     app.router.add_get("/api/cluster/resources", handle_cluster_resources)
     app.router.add_post("/api/cluster/role", handle_cluster_set_role)
     app.router.add_post("/api/cluster/id", handle_cluster_set_id)
+    app.router.add_post("/api/cluster/load", handle_cluster_load)
+    app.router.add_post("/api/cluster/unload", handle_cluster_unload)
     app.router.add_post("/api/cluster/update-all", handle_cluster_update_all)
     app.router.add_get("/api/cluster/update-status", handle_cluster_update_status)
     app.router.add_get("/api/config", handle_get_config)
@@ -579,6 +581,62 @@ async def handle_nodes(request: web.Request) -> web.Response:
             "distributed_mode": dmode,
         }]
     return web.json_response({"nodes": nodes_list})
+
+async def _cluster_dispatch(request: web.Request, path: str):
+    """F2: forward a load/unload to a node's local /api/models endpoint.
+
+    node_id == this node → call the local handler directly (back-compat). Remote →
+    POST over the fabric to http://<fabric_ip>:<web_port><path>. Reuses each node's
+    existing /api/models/load|unload; the master never SSHes.
+    """
+    config: NodeConfig = request.app["config"]
+    cluster = request.app.get("cluster_state")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    node_id = (body.get("node_id") or "").strip()
+    if not node_id or node_id == config.node_id:
+        # Local: hand the body to the local model handler unchanged.
+        from ainode.models.api_routes import handle_model_load, handle_model_unload
+
+        class _Shim:
+            def __init__(self, orig, b):
+                self._o, self._b = orig, b
+            def __getattr__(self, k):
+                return getattr(self._o, k)
+            async def json(self):
+                return self._b
+        handler = handle_model_load if path.endswith("/load") else handle_model_unload
+        return await handler(_Shim(request, body))
+
+    node = cluster.get_node(node_id) if cluster is not None else None
+    host = (getattr(node, "fabric_ip", "") or "") if node else ""
+    if not host:
+        return web.json_response(
+            {"error": f"node '{node_id}' not found or has no fabric IP"}, status=404)
+    url = f"http://{host}:{node.web_port}{path}"
+    session: aiohttp.ClientSession = request.app["client_session"]
+    fwd = {k: v for k, v in body.items() if k != "node_id"}
+    try:
+        async with session.post(url, json=fwd, timeout=aiohttp.ClientTimeout(total=60)) as up:
+            data = await up.read()
+            return web.Response(status=up.status, body=data,
+                                content_type=up.headers.get("Content-Type", "application/json"))
+    except aiohttp.ClientError as exc:
+        return web.json_response(
+            {"error": f"failed to reach node '{node_id}' at {url}: {exc}"}, status=502)
+
+
+async def handle_cluster_load(request: web.Request) -> web.Response:
+    """POST /api/cluster/load {node_id, model} — load a model on any node (F2)."""
+    return await _cluster_dispatch(request, "/api/models/load")
+
+
+async def handle_cluster_unload(request: web.Request) -> web.Response:
+    """POST /api/cluster/unload {node_id, model} — unload on any node (F2)."""
+    return await _cluster_dispatch(request, "/api/models/unload")
+
 
 def _routing_table(cluster, local_node_id: str, local_port: int) -> dict:
     """model name → (host, port) for every model served across the fleet (F1).

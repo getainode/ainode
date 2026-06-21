@@ -119,6 +119,18 @@ async def handle_model_load(request: web.Request) -> web.Response:
                     {"error": f"Sharding plan failed: {exc}"}, status=422
                 )
 
+    # Federation (F2): a solo load means this node self-serves. If it was left in
+    # "member" mode by a prior distributed run, it would otherwise sit idle waiting
+    # for a head — reset it to solo so the load actually serves.
+    if sharding_config is None and config is not None and \
+            getattr(config, "distributed_mode", "solo") != "solo":
+        config.distributed_mode = "solo"
+        config.peer_ips = []
+        try:
+            config.save()
+        except Exception:
+            pass
+
     # If running, stop first so we can relaunch
     try:
         if engine.is_running():
