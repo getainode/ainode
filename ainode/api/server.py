@@ -654,22 +654,13 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     host, port = target
     vllm_url = f"http://{host}:{port}{request.path}"
 
-    # Visible-loading guard applies only when routing to the LOCAL engine — a
-    # remote node manages its own readiness.
-    if host == "localhost":
-        engine = request.app.get("engine")
-        if engine is not None and not getattr(engine, "ready", False):
-            phase = getattr(engine, "load_phase", "starting")
-            return web.json_response(
-                {"error": {"type": "loading", "message": f"AINode is loading a model (phase: {phase})",
-                           "load_phase": phase, "model": config.model}},
-                status=503, headers={"Retry-After": "10"},
-            )
-
-    # Build upstream request kwargs
+    # Build upstream request kwargs. Strip content-length: aiohttp recomputes it
+    # from `data`, and forwarding the original alongside makes the upstream wait
+    # for a body that never arrives (the proxy hangs). Strip host/transfer-encoding
+    # for the usual reverse-proxy reasons.
     kwargs: dict = {
         "headers": {k: v for k, v in request.headers.items()
-                    if k.lower() not in ("host", "transfer-encoding")},
+                    if k.lower() not in ("host", "transfer-encoding", "content-length")},
     }
     if body_bytes is not None:
         kwargs["data"] = body_bytes
