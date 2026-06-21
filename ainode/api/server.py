@@ -83,6 +83,23 @@ def create_app(
     app["config"] = config
     app["auth_config"] = auth_config
     app["engine"] = engine
+    # Seed the InstanceManager with the boot engine as the PRIMARY instance, so
+    # a later solo load APPENDS on the next port (8001…) instead of colliding
+    # with the boot container on the legacy name/port. The boot engine is owned
+    # by `ainode start` and binds `ainode-vllm-node-solo` + api_port; without
+    # this seed the manager would hand the same name/port to a 2nd backend and
+    # the two fight (repeated docker-name Conflict, neither serving).
+    if engine is not None and getattr(config, "model", None) \
+            and (getattr(config, "distributed_mode", "solo") or "solo") == "solo":
+        from ainode.discovery.instance import InstanceRecord
+        from ainode.engine.instance_manager import InstanceManager
+        _seed = InstanceManager(base_port=config.api_port)
+        _seed.add(InstanceRecord(
+            instance_id=f"{config.node_id or 'head'}:{config.model}",
+            model=config.model, head_node_id=config.node_id or "head",
+            peer_ips=[], api_port=config.api_port, tensor_parallel_size=1,
+            status="starting"), engine)
+        app["instances"] = _seed
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
     app["metrics_collector"] = collector

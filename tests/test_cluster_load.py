@@ -205,6 +205,36 @@ def test_solo_load_appends_not_replaces(monkeypatch):
     assert recs["model-B"].api_port == 8001
 
 
+def test_load_appends_when_boot_engine_already_seeded(monkeypatch):
+    """When the manager is pre-seeded with the boot engine (as run_server does),
+    a NEW-model load stacks on :8001 and never touches the boot's :8000 — the
+    boot stays primary (app["engine"]) and on its own port/container."""
+    import ainode.models.api_routes as mr
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.model = "boot-model"
+    cfg.save = lambda: None
+    boot = _FakeBackend(cfg, "")
+    boot.started = True  # boot engine already serving on :8000
+    mgr = InstanceManager(base_port=8000)
+    mgr.add(InstanceRecord(instance_id="spark1:boot-model", model="boot-model",
+                           head_node_id="spark1", peer_ips=[], api_port=8000,
+                           tensor_parallel_size=1, status="serving"), boot)
+    app = {"engine": boot, "instances": mgr, "config": cfg,
+           "cluster_state": ClusterState(), "ray_autostart_state": None}
+
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "new-model"})))
+
+    recs = {r.model: r.api_port for r in mgr.records()}
+    assert recs == {"boot-model": 8000, "new-model": 8001}  # appended on 8001
+    assert app["engine"] is boot          # boot stays primary, untouched
+    assert boot.stopped is False          # boot container never killed
+    assert cfg.model == "boot-model"      # shared config still the primary's
+
+
 def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
     """Unloading one stacked model stops ONLY that instance; the co-resident one
     keeps serving and stays in the manager."""
