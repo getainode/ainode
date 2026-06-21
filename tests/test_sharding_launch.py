@@ -38,8 +38,8 @@ class _FakeBackend:
     """Stand-in for NvidiaBackend — records launch, never touches docker."""
     last = {}
 
-    def __init__(self, config):
-        _FakeBackend.last = {"config": config, "launched": False}
+    def __init__(self, config, on_ready=None, instance_id=""):
+        _FakeBackend.last = {"config": config, "launched": False, "instance_id": instance_id}
 
     def is_running(self):
         return False

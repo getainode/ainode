@@ -356,9 +356,13 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                 elif dmode != "head":
                     updates["distributed_instance_id"] = None
                     updates["distributed_peers"] = []
-                updates["instances"] = (
-                    _head_instances(config) if (dmode == "head" and engine_ready) else []
-                )
+                manager = app.get("instances")
+                if manager is not None and not manager.is_empty():
+                    updates["instances"] = [r.to_dict() for r in manager.records()]
+                else:
+                    updates["instances"] = (
+                        _head_instances(config) if (dmode == "head" and engine_ready) else []
+                    )
                 if sender:
                     sender.update_announcement(**updates)
                     # Keep the app-level announcement in sync so /api/status sees fresh values

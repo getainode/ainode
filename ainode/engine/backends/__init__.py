@@ -7,17 +7,18 @@ from ainode.engine.backends.eugr import EugrBackend
 from ainode.engine.backends.nvidia import NvidiaBackend
 
 
-def get_backend(config, on_ready=None) -> EngineBackend:
+def get_backend(config, on_ready=None, instance_id="") -> EngineBackend:
     """Return the configured engine backend instance.
 
     Dispatches on ``config.engine_backend`` (new field). Defaults to ``"eugr"``
-    for backward compatibility with existing installs.
+    for backward compatibility with existing installs. ``instance_id`` (P2-2)
+    disambiguates per-instance container names for the nvidia backend.
     """
     backend = (getattr(config, "engine_backend", None) or "eugr").lower()
     if backend == "eugr":
         return EugrBackend(config, on_ready=on_ready)
     if backend == "nvidia":
-        return NvidiaBackend(config, on_ready=on_ready)
+        return NvidiaBackend(config, on_ready=on_ready, instance_id=instance_id)
     raise ValueError(
         f"Unknown engine_backend={backend!r}. Valid options: 'eugr', 'nvidia'."
     )

@@ -105,9 +105,15 @@ class NvidiaBackend(EngineBackend):
     fans out to peers over SSH to tear them down.
     """
 
-    def __init__(self, config: NodeConfig, on_ready: Optional[Callable] = None):
+    def __init__(self, config: NodeConfig, on_ready: Optional[Callable] = None,
+                 instance_id: str = ""):
         self.config = config
         self.on_ready = on_ready
+        # Container-name disambiguator for concurrent instances (P2-2). Empty for
+        # the primary instance → legacy unsuffixed names (back-compat); otherwise a
+        # short safe token (the handler uses the per-instance port) so two heads on
+        # the same node don't collide on `ainode-vllm-head`.
+        self.instance_id = instance_id
         self._process: Optional[subprocess.Popen] = None
         self._ready = False
         # Coarse load-phase for the UI launching card (3c). Advances
@@ -463,7 +469,7 @@ class NvidiaBackend(EngineBackend):
         env: Dict[str, str] = {
             "VLLM_HOST_IP": fabric_ip,
             "MASTER_ADDR": master_addr,
-            "MASTER_PORT": MASTER_PORT,
+            "MASTER_PORT": self._master_port(),
             "UCX_NET_DEVICES": iface,
             "NCCL_SOCKET_IFNAME": iface,
             "OMPI_MCA_btl_tcp_if_include": iface,
@@ -518,28 +524,45 @@ class NvidiaBackend(EngineBackend):
     # Docker command builders
     # ------------------------------------------------------------------
 
+    def _name_suffix(self) -> str:
+        """Per-instance container-name suffix (empty for the primary)."""
+        return f"-{self.instance_id}" if self.instance_id else ""
+
+    def _port_offset(self) -> int:
+        """0 for the primary (api_port 8000), 1+ for co-resident instances.
+
+        When two instances are headed by the SAME node, their Ray heads + torch
+        rendezvous can't share host ports under --network host, so each gets an
+        offset keyed off its (unique) api_port.
+        """
+        return max(0, int(self.config.api_port) - 8000)
+
+    def _ray_port(self) -> int:
+        return 6379 + self._port_offset()
+
+    def _master_port(self) -> str:
+        return str(int(MASTER_PORT) + self._port_offset())
+
     def _solo_container_name(self) -> str:
-        return f"{RAY_CONTAINER_NAME_PREFIX}-solo"
+        return f"{RAY_CONTAINER_NAME_PREFIX}-solo{self._name_suffix()}"
 
     def _head_container_name(self) -> str:
-        """Stable name for the head Ray container.
+        """Stable name for the head Ray container, unique per instance.
 
-        Under Option α we launch the head ourselves via ``docker run -d
-        --name``, so this is simply the constant ``HEAD_CONTAINER_NAME``.
+        Legacy single-instance name is ``HEAD_CONTAINER_NAME``; concurrent
+        instances append ``-<instance_id>`` so two heads on this node don't
+        collide (and the `docker rm -f` before launch only hits this instance).
         """
-        return HEAD_CONTAINER_NAME
+        return f"{HEAD_CONTAINER_NAME}{self._name_suffix()}"
 
     def _worker_container_name(self, peer_ip: str) -> str:
-        """Stable name for a peer's worker container.
+        """Stable, instance-unique name for a peer's worker container.
 
-        Must be collision-free across peers so ``docker inspect`` / ``docker
-        stop`` address the right container. We embed the peer IP (with
-        dots replaced by dashes, since ``.`` is valid in docker names but
-        confusing to read) so the name round-trips from config to running
-        container deterministically.
+        Embeds the peer IP (dots→dashes) AND the instance suffix, so two
+        instances that share a peer node don't collide on the worker name.
         """
         safe_ip = peer_ip.replace(".", "-").replace(":", "-")
-        return f"{WORKER_CONTAINER_NAME_PREFIX}-{safe_ip}"
+        return f"{WORKER_CONTAINER_NAME_PREFIX}-{safe_ip}{self._name_suffix()}"
 
     def _build_solo_docker_cmd(self, container_name: str) -> List[str]:
         """Single-container solo mode — ``docker run ... vllm serve ...``.
@@ -614,15 +637,16 @@ class NvidiaBackend(EngineBackend):
             peer_fabric_ip=(node_ip if role != "head" else None),
         )
 
+        ray_port = self._ray_port()
         if role == "head":
             ray_cmd = (
-                f"ray start --block --head "
-                f"--node-ip-address={shlex.quote(node_ip)} --port=6379"
+                f"ray start --block --head --include-dashboard=false "
+                f"--node-ip-address={shlex.quote(node_ip)} --port={ray_port}"
             )
         else:
             ray_cmd = (
-                f"ray start --block "
-                f"--address={shlex.quote(head_ip)}:6379 "
+                f"ray start --block --include-dashboard=false "
+                f"--address={shlex.quote(head_ip)}:{ray_port} "
                 f"--node-ip-address={shlex.quote(node_ip)}"
             )
 

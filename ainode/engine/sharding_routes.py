@@ -180,42 +180,67 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
 
     chosen_peers = [fabric_of(n) for n in chosen]
 
-    # Flip local config to head mode and persist.
-    config.model = model
-    config.distributed_mode = "head"
-    config.peer_ips = chosen_peers
-    try:
-        config.save()
-    except Exception:
-        logger.exception("Failed to persist config.json before distributed launch")
+    # P2-2: APPEND a new instance — do NOT tear down existing ones. Each instance
+    # gets its own port (8000, 8001, …), container-name token, and config SNAPSHOT
+    # (never the shared app["config"], which would cross-wire instances).
+    from dataclasses import replace
 
-    # Hot-swap the engine: stop the solo vLLM (if running) and build a
-    # fresh DockerEngine bound to the updated config for the distributed
-    # launch. We don't replace request.app["engine"] until success so the
-    # status endpoint keeps working during the switch.
-    try:
-        if engine is not None and engine.is_running():
-            engine.stop()
-    except Exception:
-        logger.exception("Engine.stop() failed during distributed hot-swap")
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
 
-    new_engine = get_backend(config)
+    manager = request.app.get("instances")
+    if manager is None:
+        manager = InstanceManager(base_port=config.api_port)
+        request.app["instances"] = manager
+
+    # Re-launching a model that's already up replaces THAT instance (stop it first).
+    existing = manager.by_model(model)
+    if existing is not None:
+        try:
+            existing.backend.stop()
+        except Exception:
+            logger.exception("stop() failed replacing instance for %s", model)
+        manager.remove(existing.record.instance_id)
+
+    is_primary = manager.is_empty()
+    port = manager.allocate_port()
+    name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
+    instance_id = f"{config.node_id or 'head'}:{model}"
+
+    inst_config = replace(config, model=model, distributed_mode="head",
+                          peer_ips=chosen_peers, api_port=port)
+    backend = get_backend(inst_config, instance_id=name_token)
     try:
-        started = new_engine.start_distributed()
+        started = backend.start_distributed()
     except Exception as exc:
         logger.exception("start_distributed raised")
         return web.json_response({"error": f"Distributed launch failed: {exc}"}, status=500)
-
     if not started:
         return web.json_response({"error": "Distributed launch returned False"}, status=500)
 
-    request.app["engine"] = new_engine
+    manager.add(InstanceRecord(
+        instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
+        peer_ips=chosen_peers, api_port=port,
+        tensor_parallel_size=1 + len(chosen_peers), status="starting"), backend)
+
+    if is_primary:
+        # Back-compat: the proxy/status path reads app["config"] + app["engine"].
+        config.model = model
+        config.distributed_mode = "head"
+        config.peer_ips = chosen_peers
+        try:
+            config.save()
+        except Exception:
+            logger.exception("Failed to persist config.json before distributed launch")
+        request.app["engine"] = backend
 
     return web.json_response({
         "status": "launching",
+        "instance_id": instance_id,
         "model": model,
         "distributed_mode": "head",
         "peer_ips": chosen_peers,
+        "api_port": port,
         "tensor_parallel_size": 1 + len(chosen_peers),
         "strategy": strategy_str,
     })

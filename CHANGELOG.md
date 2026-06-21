@@ -12,6 +12,19 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.22] — 2026-06-20
+
+### Added
+- **Concurrent multi-instance serving (P2-2).** A head node can now run several
+  distributed instances at once: an `InstanceManager` tracks them, each gets its own
+  api port (8000, 8001, …), Ray port (6379, 6380, …), MASTER_PORT, container names, and
+  config snapshot. `/api/sharding/launch` now **appends** an instance instead of tearing
+  down the running one; eject/unload stops a single instance by model. The announcement
+  advertises all instances a head runs. Route-by-model on :3000 is P2-3 (a 2nd instance
+  is reachable on its own port for now).
+
+---
+
 ## [0.4.21] — 2026-06-20
 
 ### Changed

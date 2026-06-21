@@ -334,6 +334,22 @@ async def handle_server_eject(request: web.Request) -> web.Response:
     model_id = request.match_info.get("model_id", "")
     engine = request.app.get("engine")
 
+    # P2-2: if this model is a running distributed instance, stop just that one
+    # and drop it from the manager (leaving any other instances untouched).
+    manager = request.app.get("instances")
+    if manager is not None:
+        inst = manager.by_model(model_id)
+        if inst is not None:
+            try:
+                inst.backend.stop()
+            except Exception:  # best-effort — still drop it from the registry
+                pass
+            manager.remove(inst.record.instance_id)
+            if request.app.get("engine") is inst.backend:
+                request.app["engine"] = None  # the primary went away
+            return web.json_response({"ok": True, "model_id": model_id,
+                                      "message": "Instance stopped"})
+
     # Delegate to embedding manager if this is a loaded embedding model
     embedding_manager = request.app.get("embedding_manager")
     if embedding_manager is not None and embedding_manager.is_loaded(model_id):
