@@ -108,7 +108,9 @@ async def test_cors_preflight(client):
 
 @pytest.mark.asyncio
 async def test_vllm_proxy_returns_502_when_down(client):
-    resp = await client.get("/v1/models")
+    # /v1/models is now the federated list endpoint (doesn't proxy); the proxy-
+    # when-down behavior lives on the completion routes, which still forward.
+    resp = await client.post("/v1/completions", json={"model": "test-model", "prompt": "hi"})
     assert resp.status == 502
     data = await resp.json()
     assert "error" in data

@@ -1,4 +1,33 @@
-# Phase 2 — Concurrent Multi-Instance Serving (Design)
+# Phase 2 — Multi-Model Serving (Design)
+
+> **Direction (2026-06-20): FEDERATION, not distribution.** The original plan below aimed
+> at running multiple *Ray-distributed* (TP≥2) instances at once. The P2-2 live smoke proved
+> that's **physically impossible** on this hardware: every instance is headed by the
+> dashboard node, which has **one GPU and one Ray raylet** — two `ray start --head` on it
+> collide (`LocalRayletDiedError`). And frontier giants (235B/405B) are too bandwidth-bound
+> to be usable anyway (~1 t/s).
+>
+> **The actual product = a federated fleet behind a master endpoint:**
+> - **Master node (spark-1)** hosts the single `:3000` endpoint, the UI, and a **router**.
+> - **Each Spark** is an *independent solo server* — loads its own model(s) (TP=1, stack
+>   several per node up to its 128 GB), advertises them via the cluster broadcast, serves on
+>   its own port.
+> - The master **routes `/v1/*` by model name** to whichever node serves it; `/v1/models`
+>   unions the fleet. Solo and an (optional) **TP=2 on the fast 1+2 fabric pair** are uniform
+>   to the router — just "model M → host:port".
+> - One TP=2 instance coexists fine with solo instances elsewhere; only *two* Ray clusters on
+>   a shared node collide.
+> - "Many models, one endpoint" (like OpenRouter/Together) = **catalog + router + on-demand
+>   load/evict + pin**, never all-resident. That's the F-series roadmap (F1 router → F2
+>   load-on-any-node → F3 fleet UI → F4 auto load/evict + pin).
+>
+> The control-plane built in P2-1/P2-2 (InstanceRecord, `instances` broadcast, InstanceManager,
+> per-instance ports) is the **substrate** for this — the federation routing table is built
+> from the `instances`/`model` a node advertises.
+
+---
+
+## Original plan (SUPERSEDED — kept for the chokepoint analysis)
 
 **Goal:** run **N models at once** on **disjoint node sets** (e.g. 70B on spark-1+2 *and*
 a different model on spark-3+4), route requests by model name behind the single `:3000`

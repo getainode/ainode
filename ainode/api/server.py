@@ -121,7 +121,7 @@ def create_app(
     app.router.add_post("/api/engine/update", handle_engine_update)
     app.router.add_patch("/api/config", handle_patch_config)
 
-    app.router.add_get("/v1/models", proxy_to_vllm)
+    app.router.add_get("/v1/models", handle_v1_models)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
 
@@ -580,34 +580,56 @@ async def handle_nodes(request: web.Request) -> web.Response:
         }]
     return web.json_response({"nodes": nodes_list})
 
+def _routing_table(cluster, local_node_id: str, local_port: int) -> dict:
+    """model name → (host, port) for every model served across the fleet (F1).
+
+    Built from cluster broadcast state: each node advertises its solo model and
+    any instances it heads. The local node routes to localhost; remote nodes to
+    their fabric IP (reachable from the master over the cluster fabric).
+    """
+    table: dict = {}
+    for n in cluster.members():
+        status = n.status.value if hasattr(n.status, "value") else str(n.status)
+        if status not in ("online", "serving", "member-ready"):
+            continue
+        is_local = n.node_id == local_node_id
+        host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
+        if not host:
+            continue
+        port = local_port if is_local else n.api_port
+        if getattr(n, "model", ""):
+            table.setdefault(n.model, (host, port))
+        for inst in (getattr(n, "instances", []) or []):
+            m = inst.get("model")
+            if m:
+                table.setdefault(m, (host, inst.get("api_port") or port))
+    return table
+
+
+async def handle_v1_models(request: web.Request) -> web.Response:
+    """Federated /v1/models — the UNION of models served across the fleet (F1)."""
+    config: NodeConfig = request.app["config"]
+    cluster = request.app.get("cluster_state")
+    table = _routing_table(cluster, config.node_id, config.api_port) if cluster is not None else {}
+    if not table and config.model:
+        table = {config.model: ("localhost", config.api_port)}
+    data = [{"id": m, "object": "model", "owned_by": "ainode"} for m in sorted(table)]
+    return web.json_response({"object": "list", "data": data})
+
+
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
-    """Forward the request to the local vLLM server and stream the response back."""
+    """Forward the request to the node serving the requested model (F1 federation)."""
     config: NodeConfig = request.app["config"]
     session: aiohttp.ClientSession = request.app["client_session"]
     collector: MetricsCollector = request.app["metrics_collector"]
-    vllm_url = f"http://localhost:{config.api_port}{request.path}"
-
-    # Single stable endpoint, visible loading: during a model swap/load the
-    # engine isn't ready and vLLM's port may be down — return a clear 503 with
-    # the current load phase instead of proxying into a hang.
-    engine = request.app.get("engine")
-    if engine is not None and not getattr(engine, "ready", False):
-        phase = getattr(engine, "load_phase", "starting")
-        return web.json_response(
-            {"error": {"type": "loading", "message": f"AINode is loading a model (phase: {phase})",
-                       "load_phase": phase, "model": config.model}},
-            status=503, headers={"Retry-After": "10"},
-        )
-
-    # Extract model name for metrics
+    # Extract the model name first — it drives BOTH routing and metrics.
     model = config.model or "unknown"
     body_bytes = None
     if request.method == "POST":
         body_bytes = await request.read()
         try:
             import json as _json
-            body_json = _json.loads(body_bytes)
-            model = body_json.get("model", model)
+            model = _json.loads(body_bytes).get("model", model)
         except Exception:
             pass
     # Tag the request so the server-view log middleware can capture the model
@@ -615,6 +637,34 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
         request["_log_model"] = model
     except Exception:
         pass
+
+    # Federated routing: send the request to whichever node serves this model
+    # (F1). The table is built from cluster broadcast state — no new infra.
+    cluster = request.app.get("cluster_state")
+    table = _routing_table(cluster, config.node_id, config.api_port) if cluster is not None else {}
+    target = table.get(model)
+    if target is None:
+        if model and model != "unknown" and table:
+            return web.json_response(
+                {"error": {"type": "model_not_found",
+                           "message": f"Model '{model}' is not loaded on any node",
+                           "code": "model_not_found"}},
+                status=404)
+        target = ("localhost", config.api_port)  # back-compat: no model / empty fleet → local
+    host, port = target
+    vllm_url = f"http://{host}:{port}{request.path}"
+
+    # Visible-loading guard applies only when routing to the LOCAL engine — a
+    # remote node manages its own readiness.
+    if host == "localhost":
+        engine = request.app.get("engine")
+        if engine is not None and not getattr(engine, "ready", False):
+            phase = getattr(engine, "load_phase", "starting")
+            return web.json_response(
+                {"error": {"type": "loading", "message": f"AINode is loading a model (phase: {phase})",
+                           "load_phase": phase, "model": config.model}},
+                status=503, headers={"Retry-After": "10"},
+            )
 
     # Build upstream request kwargs
     kwargs: dict = {
