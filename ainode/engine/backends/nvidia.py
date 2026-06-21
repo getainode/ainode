@@ -639,13 +639,16 @@ class NvidiaBackend(EngineBackend):
 
         ray_port = self._ray_port()
         if role == "head":
+            # --include-dashboard is HEAD-ONLY (the worker `ray start --address`
+            # PANICs on it). Disabling it avoids the 8265 dashboard-port collision
+            # only relevant if heads ever co-reside on a node.
             ray_cmd = (
                 f"ray start --block --head --include-dashboard=false "
                 f"--node-ip-address={shlex.quote(node_ip)} --port={ray_port}"
             )
         else:
             ray_cmd = (
-                f"ray start --block --include-dashboard=false "
+                f"ray start --block "
                 f"--address={shlex.quote(head_ip)}:{ray_port} "
                 f"--node-ip-address={shlex.quote(node_ip)}"
             )
