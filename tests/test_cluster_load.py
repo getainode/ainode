@@ -106,6 +106,36 @@ def test_cluster_unload_remote_targets_unload_path(monkeypatch):
     assert posted["url"] == "http://10.100.0.15:3000/api/models/unload"
 
 
+def test_lazy_engine_uses_get_backend(monkeypatch):
+    """A node with no engine (booted in member mode) lazy-creates via get_backend,
+    not the legacy host-venv VLLMEngine (which would never launch a container)."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+
+    made = {}
+
+    class _Eng:
+        def is_running(self):
+            return False
+        def stop(self):
+            pass
+        def start(self):
+            made["started"] = True
+            return True
+
+    def fake_get_backend(cfg, on_ready=None):
+        made["backend"] = True
+        return _Eng()
+
+    monkeypatch.setattr(backends_mod, "get_backend", fake_get_backend)
+    cfg = NodeConfig(node_id="spark3", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Q"})))
+    assert made.get("backend") and made.get("started")
+
+
 def test_solo_load_resets_member_mode(monkeypatch):
     """A solo load on a node stuck in 'member' mode resets it to solo so it serves."""
     import ainode.models.api_routes as mr

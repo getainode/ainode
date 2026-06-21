@@ -82,12 +82,15 @@ async def handle_model_load(request: web.Request) -> web.Response:
 
     if engine is None:
         # Create a lazy engine so launch is possible even when `ainode start`
-        # didn't pre-instantiate one (e.g. headless server boot).
+        # didn't pre-instantiate one — e.g. a node that booted in "member" mode
+        # (no local engine) and is now being given a solo model. Use get_backend
+        # so it honors engine_backend (nvidia) instead of the legacy host-venv
+        # VLLMEngine, which would "succeed" without ever launching a container.
         try:
-            from ainode.engine.vllm_engine import VLLMEngine
             if config is None:
                 return web.json_response({"error": "Engine not initialized"}, status=503)
-            engine = VLLMEngine(config)
+            from ainode.engine.backends import get_backend
+            engine = get_backend(config)
             request.app["engine"] = engine
         except Exception as exc:
             return web.json_response({"error": f"Engine unavailable: {exc}"}, status=503)
