@@ -142,3 +142,28 @@ class TestThreadSafety:
         stats = mc.get_request_stats()
         assert stats["total"] == 800
         assert stats["tokens_generated"] == 800
+
+
+# ---------------------------------------------------------------------------
+# GB10 unified-memory: nvml returns used=0 (doesn't raise) → psutil fallback
+# ---------------------------------------------------------------------------
+
+class TestGB10UnifiedMemory:
+    def _run(self, nvml_used, nvml_total, psutil_used):
+        mod = _mock_pynvml()
+        mod.nvmlDeviceGetMemoryInfo.return_value = MagicMock(used=nvml_used, total=nvml_total)
+        fake_vm = MagicMock(used=psutil_used, total=122 * 1024**3)
+        with patch.dict("sys.modules", {"pynvml": mod}), \
+             patch("psutil.virtual_memory", return_value=fake_vm):
+            return MetricsCollector().get_gpu_metrics()
+
+    def test_zero_nvml_used_falls_back_to_psutil(self):
+        # GB10: nvml succeeds but used=0 → must use psutil's real unified RAM
+        m = self._run(0, 0, 40 * 1024**3)
+        assert m["memory_used_mb"] == round(40 * 1024**3 / (1024 * 1024))
+        assert m["memory_total_mb"] == round(122 * 1024**3 / (1024 * 1024))
+
+    def test_real_nvml_used_is_kept(self):
+        # discrete GPU: nvml reports real used → keep it, don't fall back
+        m = self._run(8 * 1024**3, 24 * 1024**3, 5 * 1024**3)
+        assert m["memory_used_mb"] == round(8 * 1024**3 / (1024 * 1024))

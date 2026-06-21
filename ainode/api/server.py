@@ -746,6 +746,10 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     kwargs: dict = {
         "headers": {k: v for k, v in request.headers.items()
                     if k.lower() not in ("host", "transfer-encoding", "content-length")},
+        # Fast failover: a dead/ghost node must fail the CONNECT quickly so the
+        # loop moves on to the next candidate — but leave total uncapped so a live
+        # node's slow cold-start generation (35s+) can still stream to completion.
+        "timeout": aiohttp.ClientTimeout(total=None, sock_connect=5),
     }
     if body_bytes is not None:
         kwargs["data"] = body_bytes
@@ -778,8 +782,8 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                     status=upstream.status, body=body,
                     content_type=upstream.headers.get("Content-Type", "application/json").split(";")[0].strip(),
                 )
-        except aiohttp.ClientError as exc:
-            last_err = exc  # this target is unreachable (likely a ghost) — try the next
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_err = exc  # unreachable / connect-timeout (likely a ghost) — try the next
             continue
     # Every candidate failed.
     collector.record_request(model, (time.time() - start_time) * 1000, error=True)

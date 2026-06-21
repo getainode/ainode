@@ -86,13 +86,19 @@ class MetricsCollector:
             util = pynvml.nvmlDeviceGetUtilizationRates(handle)
             temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
 
-            # Unified memory (DGX Spark / GB10) has no nvml memory info — fall
-            # back to psutil so memory fields are always populated.
+            # Unified memory (DGX Spark / GB10): nvml does NOT raise here — it
+            # returns a struct with used=0 (same reason `nvidia-smi` prints N/A).
+            # So catch on a zero/garbage reading, not just on exception, and fall
+            # back to psutil (the unified RAM IS the GPU memory).
+            mem = None
             try:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            except Exception:
+                pass
+            if mem is not None and mem.used > 0 and mem.total > 0:
                 memory_used_mb = round(mem.used / (1024 * 1024))
                 memory_total_mb = round(mem.total / (1024 * 1024))
-            except Exception:
+            else:
                 import psutil
                 vm = psutil.virtual_memory()
                 memory_used_mb = round(vm.used / (1024 * 1024))
