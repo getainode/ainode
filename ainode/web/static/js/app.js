@@ -299,11 +299,15 @@ const AINode = {
       this.fetchJSON('/api/nodes'),
       this.fetchJSON('/api/sharding/status'),
       this.fetchJSON('/api/cluster/resources'),
+      this.fetchJSON('/v1/models'),   // federated fleet union (F1) — every node's model
     ]);
     this.state.status = results[0];
     this.state.nodes = results[1]?.nodes || [];
     this.state.shardingStatus = results[2];
     this.state.clusterResources = results[3];
+    // Fleet-wide loaded models: ids from the federated /v1/models union, so the
+    // chat dropdown + INSTANCES panel see models on ALL nodes, not just local.
+    this.state.fleetModels = ((results[4] && results[4].data) || []).map(function (m) { return m.id; });
 
     this.updateTopBar();
     this.updateClusterHero();
@@ -677,19 +681,24 @@ const AINode = {
       });
     }
 
-    // Collect from models_loaded (skip the one we already rendered distributed)
-    if (s && s.models_loaded) {
-      s.models_loaded.forEach(function (modelName) {
-        if (distModel && modelName === distModel) return;
-        instances.push({
-          model: modelName,
-          strategy: 'single',
-          nodes: [s.node_id || 'local'],
-          status: live ? 'READY' : 'STARTING',
-          badge: 'SINGLE',
-        });
+    // Fleet-wide: one card per node serving a solo model, across ALL nodes
+    // (not just local) — sourced from cluster /api/nodes so the panel matches
+    // the federated /v1/models the chat dropdown uses. Skip the distributed one.
+    var seen = {};
+    (this.state.nodes || []).forEach(function (n) {
+      var modelName = n.model;
+      if (!modelName || (distModel && modelName === distModel)) return;
+      var key = modelName + '@' + (n.node_id || n.hostname);
+      if (seen[key]) return;
+      seen[key] = true;
+      instances.push({
+        model: modelName,
+        strategy: 'single',
+        nodes: [n.hostname || n.node_id],
+        status: n.engine_ready ? 'READY' : 'STARTING',
+        badge: 'SINGLE',
       });
-    }
+    });
 
     // Collect from sharding status (legacy — keep for pipeline/tensor runs
     // that don't come through the cluster/resources distributed_instance)
@@ -1162,7 +1171,9 @@ const AINode = {
     if (!select) return;
     var s = this.state.status;
     if (!s) return;
-    var models = s.models_loaded || [];
+    // Prefer the fleet-wide union (every node's model) over local models_loaded.
+    var models = (this.state.fleetModels && this.state.fleetModels.length)
+      ? this.state.fleetModels : (s.models_loaded || []);
     var cv = select.value;
     if (models.length === 0) {
       select.innerHTML = '<option>No models loaded</option>';

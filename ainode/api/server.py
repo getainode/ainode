@@ -640,6 +640,33 @@ async def handle_cluster_unload(request: web.Request) -> web.Response:
     return await _cluster_dispatch(request, "/api/models/unload")
 
 
+def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int) -> list:
+    """All (host, port) currently serving `model` (routing-truth).
+
+    Returns a LIST so proxy_to_vllm can fail over when the first target is a
+    stale/ghost claim (a node that crashed but still advertises the model). A
+    crashed node is indistinguishable from a live one in cluster state, so
+    failover — not ordering — is what makes routing robust. Local node first
+    (cheapest hop), then remote peers.
+    """
+    local, remote = [], []
+    for n in (cluster.members() if cluster is not None else []):
+        status = n.status.value if hasattr(n.status, "value") else str(n.status)
+        if status not in ("online", "serving", "member-ready"):
+            continue
+        is_local = n.node_id == local_node_id
+        host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
+        if not host:
+            continue
+        serves = (getattr(n, "model", "") == model) or any(
+            (inst.get("model") == model) for inst in (getattr(n, "instances", []) or []))
+        if not serves:
+            continue
+        port = local_port if is_local else n.api_port
+        (local if is_local else remote).append((host, port))
+    return local + remote
+
+
 def _routing_table(cluster, local_node_id: str, local_port: int) -> dict:
     """model name → (host, port) for every model served across the fleet (F1).
 
@@ -698,21 +725,19 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     except Exception:
         pass
 
-    # Federated routing: send the request to whichever node serves this model
-    # (F1). The table is built from cluster broadcast state — no new infra.
+    # Federated routing with failover (F1 + routing-truth): try every node that
+    # serves this model (ready ones first), so a stale/ghost claim from a crashed
+    # node doesn't 502 a request another node can serve. Built from cluster state.
     cluster = request.app.get("cluster_state")
-    table = _routing_table(cluster, config.node_id, config.api_port) if cluster is not None else {}
-    target = table.get(model)
-    if target is None:
-        if model and model != "unknown" and table:
+    candidates = _routing_candidates(cluster, model, config.node_id, config.api_port)
+    if not candidates:
+        if model and model != "unknown" and cluster is not None and cluster.members():
             return web.json_response(
                 {"error": {"type": "model_not_found",
                            "message": f"Model '{model}' is not loaded on any node",
                            "code": "model_not_found"}},
                 status=404)
-        target = ("localhost", config.api_port)  # back-compat: no model / empty fleet → local
-    host, port = target
-    vllm_url = f"http://{host}:{port}{request.path}"
+        candidates = [("localhost", config.api_port)]  # back-compat: empty fleet → local
 
     # Build upstream request kwargs. Strip content-length: aiohttp recomputes it
     # from `data`, and forwarding the original alongside makes the upstream wait
@@ -726,43 +751,43 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
         kwargs["data"] = body_bytes
 
     start_time = time.time()
-    try:
-        async with session.request(request.method, vllm_url, **kwargs) as upstream:
-            # Detect SSE streaming
-            is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")
-
-            if is_sse:
-                resp = web.StreamResponse(
-                    status=upstream.status,
-                    headers={
-                        "Content-Type": "text/event-stream",
-                        "Cache-Control": "no-cache",
-                        "X-Accel-Buffering": "no",
-                    },
-                )
-                await resp.prepare(request)
-                async for chunk in upstream.content.iter_any():
-                    await resp.write(chunk)
-                await resp.write_eof()
-                latency_ms = (time.time() - start_time) * 1000
-                collector.record_request(model, latency_ms, error=False)
-                return resp
-            else:
+    last_err = None
+    for host, port in candidates:
+        vllm_url = f"http://{host}:{port}{request.path}"
+        try:
+            async with session.request(request.method, vllm_url, **kwargs) as upstream:
+                is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")
+                if is_sse:
+                    resp = web.StreamResponse(
+                        status=upstream.status,
+                        headers={
+                            "Content-Type": "text/event-stream",
+                            "Cache-Control": "no-cache",
+                            "X-Accel-Buffering": "no",
+                        },
+                    )
+                    await resp.prepare(request)
+                    async for chunk in upstream.content.iter_any():
+                        await resp.write(chunk)
+                    await resp.write_eof()
+                    collector.record_request(model, (time.time() - start_time) * 1000, error=False)
+                    return resp
                 body = await upstream.read()
-                latency_ms = (time.time() - start_time) * 1000
-                collector.record_request(model, latency_ms, error=False)
+                collector.record_request(model, (time.time() - start_time) * 1000, error=False)
                 return web.Response(
-                    status=upstream.status,
-                    body=body,
-                    content_type=upstream.headers.get("Content-Type", "application/json"),
+                    status=upstream.status, body=body,
+                    content_type=upstream.headers.get("Content-Type", "application/json").split(";")[0].strip(),
                 )
-    except aiohttp.ClientError:
-        latency_ms = (time.time() - start_time) * 1000
-        collector.record_request(model, latency_ms, error=True)
-        return web.json_response(
-            {"error": {"message": "vLLM engine not reachable", "type": "server_error"}},
-            status=502,
-        )
+        except aiohttp.ClientError as exc:
+            last_err = exc  # this target is unreachable (likely a ghost) — try the next
+            continue
+    # Every candidate failed.
+    collector.record_request(model, (time.time() - start_time) * 1000, error=True)
+    return web.json_response(
+        {"error": {"message": f"no reachable node is serving '{model}' ({last_err})",
+                   "type": "server_error"}},
+        status=502,
+    )
 
 async def handle_cluster_info(request: web.Request) -> web.Response:
     """Return the current cluster topology from this node's perspective."""

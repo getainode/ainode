@@ -95,6 +95,16 @@ async def handle_model_load(request: web.Request) -> web.Response:
         except Exception as exc:
             return web.json_response({"error": f"Engine unavailable: {exc}"}, status=503)
 
+    # Per-load KV-cache knob: lets a caller cap vLLM's GPU reservation so small
+    # models don't hog a unified-memory node (and several can stack). Threads
+    # into the serve args via config.gpu_memory_utilization (nvidia.py).
+    gmu = body.get("gpu_memory_utilization")
+    if config is not None and gmu is not None:
+        try:
+            config.gpu_memory_utilization = max(0.05, min(0.95, float(gmu)))
+        except (TypeError, ValueError):
+            pass
+
     # Update the running config so downstream proxying to vLLM points at the new model
     if config is not None and getattr(config, "model", None) != model:
         config.model = model
@@ -141,6 +151,16 @@ async def handle_model_load(request: web.Request) -> web.Response:
     except Exception:
         pass
 
+    def _clear_model_claim():
+        # routing-truth: a failed launch must stop this node advertising a model
+        # it isn't serving, or it becomes a ghost the federated router 502s on.
+        if config is not None:
+            config.model = None
+            try:
+                config.save()
+            except Exception:
+                pass
+
     # Launch path
     success = False
     plan_dict = None
@@ -153,9 +173,11 @@ async def handle_model_load(request: web.Request) -> web.Response:
             # Current VLLMEngine.build_cmd already handles single-GPU; just start.
             success = engine.start()
     except Exception as exc:
+        _clear_model_claim()
         return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
 
     if not success:
+        _clear_model_claim()
         return web.json_response({"error": "Failed to launch engine"}, status=500)
 
     return web.json_response({

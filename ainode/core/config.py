@@ -37,7 +37,12 @@ class NodeConfig:
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     models_dir: str = str(MODELS_DIR)
     max_model_len: Optional[int] = None
-    gpu_memory_utilization: float = 0.9
+    # vLLM sizes the KV cache to this fraction of the GPU regardless of model
+    # size, so 0.9 made a tiny model reserve ~110 GB on a 122 GB unified-memory
+    # node — starving the OS and blocking model stacking. 0.5 is a safer default
+    # for GB10 (still fits a 70B / per-node MoE share); push it higher per-load
+    # (gpu_memory_utilization in the load body) for big-MoE long-context runs.
+    gpu_memory_utilization: float = 0.5
     quantization: Optional[str] = None  # awq, gptq, fp8, None
     trust_remote_code: bool = False
 
