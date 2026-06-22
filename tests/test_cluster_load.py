@@ -235,6 +235,45 @@ def test_load_appends_when_boot_engine_already_seeded(monkeypatch):
     assert cfg.model == "boot-model"      # shared config still the primary's
 
 
+def test_instance_manifest_persist_and_replay(monkeypatch, tmp_path):
+    """Always-on: the loaded solo set is persisted, and on a simulated restart the
+    replay re-loads the STACKED extras (skipping the boot primary) — no duplicates."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load two solo models — both captured in the manifest with their gmu.
+    mr.append_solo_instance(app, "model-A", 0.3)
+    mr.append_solo_instance(app, "model-B", 0.25)
+    saved = mr.load_instance_manifest()
+    assert {e["model"] for e in saved} == {"model-A", "model-B"}
+    assert any(e["gpu_memory_utilization"] == 0.25 for e in saved)
+
+    # Simulate a restart: fresh app where the boot engine has claimed model-A as
+    # primary. Replay must bring back model-B only (A already loaded), no dupes.
+    cfg2 = NodeConfig(node_id="spark1", api_port=8000)
+    cfg2.save = lambda: None
+    app2 = {"engine": None, "config": cfg2, "cluster_state": ClusterState(),
+            "ray_autostart_state": None}
+    # Boot seeding loads the primary WITHOUT rewriting the manifest (persist=False),
+    # mirroring server startup — so the saved [A,B] set survives for replay.
+    mr.append_solo_instance(app2, "model-A", 0.3, persist=False)  # boot primary
+
+    async def _noop_sleep(*a, **k):
+        return None
+    monkeypatch.setattr(mr.asyncio, "sleep", _noop_sleep)
+    asyncio.run(mr.replay_instances_on_startup(app2))
+
+    models = {i.record.model for i in app2["instances"].instances()}
+    assert models == {"model-A", "model-B"}
+
+
 def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
     """Unloading one stacked model stops ONLY that instance; the co-resident one
     keeps serving and stays in the manager."""

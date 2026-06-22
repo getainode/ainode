@@ -270,6 +270,16 @@ async def _on_startup(app: web.Application) -> None:
     announcement: NodeAnnouncement = app["announcement"]
     cluster: ClusterState = app["cluster_state"]
 
+    # Always-on: re-load the persisted solo instance set so a `systemctl restart
+    # ainode` brings every previously-loaded model back with no manual step.
+    try:
+        from ainode.models.api_routes import replay_instances_on_startup
+        app["_instance_replay_task"] = asyncio.get_event_loop().create_task(
+            replay_instances_on_startup(app)
+        )
+    except Exception:
+        logger.exception("Failed to schedule instance replay")
+
     if config.cluster_enabled:
         # Start broadcast sender
         _collector = app.get("metrics_collector")
@@ -393,6 +403,17 @@ async def _cluster_sync_loop(app: web.Application) -> None:
 
 
 async def _on_cleanup(app: web.Application) -> None:
+    # Stop the instance-replay task if still running
+    replay_task = app.get("_instance_replay_task")
+    if replay_task:
+        replay_task.cancel()
+        try:
+            await replay_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
     # Stop cluster sync task
     sync_task = app.get("_cluster_sync_task")
     if sync_task:

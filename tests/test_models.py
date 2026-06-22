@@ -267,7 +267,11 @@ class TestRecommendations:
     def test_recommend_large_gpu(self, manager: ModelManager):
         huge = max(info.min_memory_gb for info in FALLBACK_CATALOG.values()) + 1
         recs = manager.recommend_for_gpu(huge)
-        assert len(recs) == len(FALLBACK_CATALOG)
+        # Every fallback model fits a huge GPU. The catalog also merges curated
+        # cluster models (some small quantized ones now fit too), so assert the
+        # fallback set is fully recommended rather than an exact count.
+        rec_ids = {r["id"] for r in recs}
+        assert {info.id for info in FALLBACK_CATALOG.values()} <= rec_ids
 
     def test_recommend_tiny_gpu(self, manager: ModelManager):
         recs = manager.recommend_for_gpu(1)

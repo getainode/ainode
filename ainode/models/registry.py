@@ -136,6 +136,40 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 # them. NVFP4 is native on Blackwell; these run distributed (TP=N) across nodes.
 
 CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
+    # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
+    # The everyday "always-on" tier: fit one node, serve at interactive speed, and
+    # stack several per node. proven_tp=1 (no distribution). verified=True is set
+    # ONLY after a real completion was observed on the cluster.
+    "qwen3.5-9b-awq": ModelInfo(
+        id="qwen3.5-9b-awq",
+        name="Qwen3.5 9B (AWQ-4bit)",
+        hf_repo="QuantTrio/Qwen3.5-9B-AWQ",
+        size_gb=12.0,
+        description="Fast dense 9B, AWQ-4bit (awq_marlin). ~19 tok/s single-stream on one GB10. Great default chat model.",
+        quantization="AWQ", min_memory_gb=14, family="qwen", params_b=9.0,
+        proven_tp=1, verified=True,
+        context_length=262144, license="Apache 2.0", recommended=True, format="awq",
+    ),
+    "qwen3.5-4b-awq": ModelInfo(
+        id="qwen3.5-4b-awq",
+        name="Qwen3.5 4B (AWQ-4bit)",
+        hf_repo="QuantTrio/Qwen3.5-4B-AWQ",
+        size_gb=4.0,
+        description="Tiny dense 4B, AWQ-4bit. Lowest latency / highest QPS — good for high-volume prod routes.",
+        quantization="AWQ", min_memory_gb=6, family="qwen", params_b=4.0,
+        proven_tp=1, verified=False,
+        context_length=262144, license="Apache 2.0", format="awq",
+    ),
+    "qwen3.5-35b-a3b-awq": ModelInfo(
+        id="qwen3.5-35b-a3b-awq",
+        name="Qwen3.5 35B-A3B MoE (AWQ-4bit)",
+        hf_repo="QuantTrio/Qwen3.5-35B-A3B-AWQ",
+        size_gb=24.0,
+        description="MoE (3B active/token), AWQ-4bit. ~27 tok/s single-stream on one GB10 — fast decode AND large-model quality. The flagship single-node model.",
+        quantization="AWQ", min_memory_gb=28, family="qwen", params_b=35.0,
+        proven_tp=1, verified=True,
+        context_length=262144, license="Apache 2.0", recommended=True, format="awq",
+    ),
     "qwen3-235b-a22b-nvfp4": ModelInfo(
         id="qwen3-235b-a22b-nvfp4",
         name="Qwen3-235B-A22B (NVFP4)",

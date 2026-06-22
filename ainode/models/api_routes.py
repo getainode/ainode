@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from pathlib import Path
@@ -41,6 +42,175 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_post("/api/models/delete-repo", handle_delete_repo)
     app.router.add_post("/api/models/{model_id}/download", handle_download_model)
     app.router.add_delete("/api/models/{model_id}", handle_delete_model)
+
+
+# -- Instance persistence (always-on) ----------------------------------------
+# A node's loaded solo instances live in a tiny on-disk manifest (one JSON file
+# under AINODE_HOME — no DB) so a `systemctl restart ainode` brings the same
+# model set back automatically, no manual reload. The manifest is just each
+# model + its KV reservation; the engine rebuilds the container from that.
+
+def _manifest_path() -> Path:
+    from ainode.core.config import AINODE_HOME
+    return Path(AINODE_HOME) / "instances.json"
+
+
+def save_instance_manifest(app) -> None:
+    """Write the current solo instance set (model + gpu_memory_utilization)."""
+    manager = app.get("instances")
+    if manager is None:
+        return
+    entries = []
+    for inst in manager.instances():
+        cfg = getattr(inst.backend, "config", None)
+        # Only persist solo instances — distributed (head) instances are out of
+        # scope for auto-replay (they need peer coordination).
+        if getattr(cfg, "distributed_mode", "solo") not in ("solo", None):
+            continue
+        entries.append({
+            "model": inst.record.model,
+            "gpu_memory_utilization": getattr(cfg, "gpu_memory_utilization", None),
+        })
+    try:
+        p = _manifest_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"instances": entries}))
+    except Exception:
+        pass
+
+
+def load_instance_manifest() -> list:
+    try:
+        p = _manifest_path()
+        if not p.exists():
+            return []
+        return json.loads(p.read_text()).get("instances", []) or []
+    except Exception:
+        return []
+
+
+def append_solo_instance(app, model: str, gmu=None, *, persist: bool = True) -> dict:
+    """APPEND a solo instance through the InstanceManager — the shared core of the
+    /api/models/load solo path AND the startup replay. Returns a plain dict (no
+    HTTP). Each model gets its own container/port/config snapshot so several stack
+    on one node; the first becomes the primary wired to app["engine"]."""
+    from dataclasses import replace
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+    from ainode.engine.backends import get_backend
+
+    config = app.get("config")
+    if config is None:
+        return {"ok": False, "error": "Engine not initialized", "status": 503}
+
+    manager = app.get("instances")
+    if manager is None:
+        manager = InstanceManager(base_port=config.api_port)
+        app["instances"] = manager
+
+    # Re-loading a model already up replaces THAT instance (stop it first), not
+    # the whole node — other stacked instances are untouched.
+    existing = manager.by_model(model)
+    replaced_primary = existing is not None and app.get("engine") is existing.backend
+    if existing is not None:
+        try:
+            existing.backend.stop()
+        except Exception:
+            pass
+        manager.remove(existing.record.instance_id)
+
+    is_primary = manager.is_empty()
+    port = manager.allocate_port()
+    name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
+    instance_id = f"{config.node_id or 'head'}:{model}"
+
+    inst_config = replace(config, model=model, distributed_mode="solo",
+                          peer_ips=[], api_port=port)
+    if gmu is not None:
+        inst_config = replace(inst_config, gpu_memory_utilization=gmu)
+
+    def _clear():
+        # routing-truth: a failed primary launch must stop the node advertising a
+        # model it isn't serving, or the federated router 502s on the ghost.
+        if is_primary and config is not None:
+            config.model = None
+            try:
+                config.save()
+            except Exception:
+                pass
+
+    backend = get_backend(inst_config, instance_id=name_token)
+    try:
+        ok = backend.start()
+    except Exception as exc:
+        _clear()
+        return {"ok": False, "error": f"Launch failed: {exc}", "status": 500}
+    if not ok:
+        _clear()
+        return {"ok": False, "error": "Failed to launch engine", "status": 500}
+
+    manager.add(InstanceRecord(
+        instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
+        peer_ips=[], api_port=port, tensor_parallel_size=1, status="starting"), backend)
+
+    if is_primary:
+        # Back-compat: the proxy/status path reads app["config"] + app["engine"].
+        config.model = model
+        config.distributed_mode = "solo"
+        config.peer_ips = []
+        if gmu is not None:
+            config.gpu_memory_utilization = gmu
+        try:
+            config.save()
+        except Exception:
+            pass
+        app["engine"] = backend
+    elif replaced_primary:
+        # Reloaded the primary while a stack exists: keep app["engine"] on the live
+        # backend (not the stopped old one) so status/proxy don't dangle.
+        config.model = model
+        try:
+            config.save()
+        except Exception:
+            pass
+        app["engine"] = backend
+
+    if persist:
+        save_instance_manifest(app)
+    return {"ok": True, "model": model, "instance_id": instance_id,
+            "api_port": port, "stacked": not is_primary}
+
+
+async def replay_instances_on_startup(app) -> None:
+    """Always-on: after boot, re-load the persisted solo instance set so a node
+    restart brings every previously-loaded model back with no manual step. The
+    boot engine claims the primary (config.model); this replays the stacked rest."""
+    config = app.get("config")
+    if config is None:
+        return
+    entries = load_instance_manifest()
+    if not entries:
+        return
+    # Let the boot engine claim the base port as primary first.
+    await asyncio.sleep(15)
+    manager = app.get("instances")
+    have = {i.record.model for i in manager.instances()} if manager is not None else set()
+    if getattr(config, "model", None):
+        have.add(config.model)
+    loop = asyncio.get_event_loop()
+    for e in entries:
+        m = e.get("model")
+        if not m or m in have:
+            continue
+        try:
+            # backend.start() shells out to docker — run off the event loop.
+            await loop.run_in_executor(
+                None,
+                lambda mm=m, g=e.get("gpu_memory_utilization"): append_solo_instance(app, mm, g, persist=False),
+            )
+            have.add(m)
+        except Exception:
+            pass
 
 
 # -- Handlers ------------------------------------------------------------------
@@ -159,88 +329,22 @@ async def handle_model_load(request: web.Request) -> web.Response:
         })
 
     # --- Solo path: APPEND an instance via the InstanceManager ------------------
-    # A solo load no longer REPLACES the running model. Each model gets its own
-    # container name + port + config snapshot, so several stack on one node. The
-    # 5s sync loop broadcasts manager.records() → /v1/models + routing see them.
+    # A solo load no longer REPLACES the running model. Each model stacks (own
+    # container/port/config snapshot); the set is persisted for auto-replay on
+    # restart. Shared with the startup replay via append_solo_instance().
     if config is None:
         return web.json_response({"error": "Engine not initialized"}, status=503)
 
-    from dataclasses import replace
-    from ainode.discovery.instance import InstanceRecord
-    from ainode.engine.instance_manager import InstanceManager
-    from ainode.engine.backends import get_backend
-
-    manager = request.app.get("instances")
-    if manager is None:
-        manager = InstanceManager(base_port=config.api_port)
-        request.app["instances"] = manager
-
-    # Re-loading a model already up replaces THAT instance (stop it first) — not
-    # the whole node. Other stacked instances are untouched.
-    existing = manager.by_model(model)
-    replaced_primary = existing is not None and request.app.get("engine") is existing.backend
-    if existing is not None:
-        try:
-            existing.backend.stop()
-        except Exception:
-            pass
-        manager.remove(existing.record.instance_id)
-
-    is_primary = manager.is_empty()
-    port = manager.allocate_port()
-    name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
-    instance_id = f"{config.node_id or 'head'}:{model}"
-
-    inst_config = replace(config, model=model, distributed_mode="solo",
-                          peer_ips=[], api_port=port)
-    if gmu is not None:
-        inst_config = replace(inst_config, gpu_memory_utilization=gmu)
-
-    backend = get_backend(inst_config, instance_id=name_token)
-    try:
-        success = backend.start()
-    except Exception as exc:
-        if is_primary:
-            _clear_model_claim()
-        return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
-    if not success:
-        if is_primary:
-            _clear_model_claim()
-        return web.json_response({"error": "Failed to launch engine"}, status=500)
-
-    manager.add(InstanceRecord(
-        instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
-        peer_ips=[], api_port=port, tensor_parallel_size=1, status="starting"), backend)
-
-    if is_primary:
-        # Back-compat: the proxy/status path reads app["config"] + app["engine"].
-        config.model = model
-        config.distributed_mode = "solo"
-        config.peer_ips = []
-        if gmu is not None:
-            config.gpu_memory_utilization = gmu
-        try:
-            config.save()
-        except Exception:
-            pass
-        request.app["engine"] = backend
-    elif replaced_primary:
-        # Reloaded the primary model while a stack exists: keep app["engine"]
-        # pointing at the live backend (not the stopped old one) so the
-        # status/proxy back-compat path doesn't dangle.
-        config.model = model
-        try:
-            config.save()
-        except Exception:
-            pass
-        request.app["engine"] = backend
-
+    result = append_solo_instance(request.app, model, gmu)
+    if not result.get("ok"):
+        return web.json_response({"error": result.get("error")},
+                                 status=result.get("status", 500))
     return web.json_response({
         "status": "launching",
-        "model": model,
-        "instance_id": instance_id,
-        "api_port": port,
-        "stacked": not is_primary,
+        "model": result["model"],
+        "instance_id": result["instance_id"],
+        "api_port": result["api_port"],
+        "stacked": result["stacked"],
         "distributed": False,
     })
 
@@ -299,6 +403,8 @@ async def handle_model_unload(request: web.Request) -> web.Response:
                     config.save()
                 except Exception as exc:
                     errors.append(f"config.save: {exc}")
+            # Persist the reduced set so a restart doesn't resurrect the unloaded one.
+            save_instance_manifest(request.app)
             return web.json_response({
                 "stopped": True, "model": model,
                 "instance_id": inst.record.instance_id,
