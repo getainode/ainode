@@ -184,18 +184,40 @@ def append_solo_instance(app, model: str, gmu=None, *, persist: bool = True) -> 
             "api_port": port, "stacked": not is_primary}
 
 
+async def _wait_port_ready(port: int, timeout: float = 300.0) -> bool:
+    """Poll http://localhost:<port>/v1/models until it serves (200) or times out."""
+    import urllib.request
+    loop = asyncio.get_event_loop()
+
+    def _probe() -> bool:
+        try:
+            with urllib.request.urlopen(f"http://localhost:{port}/v1/models", timeout=3) as r:
+                return getattr(r, "status", r.getcode()) == 200
+        except Exception:
+            return False
+
+    for _ in range(max(1, int(timeout // 3))):
+        if await loop.run_in_executor(None, _probe):
+            return True
+        await asyncio.sleep(3)
+    return False
+
+
 async def replay_instances_on_startup(app) -> None:
     """Always-on: after boot, re-load the persisted solo instance set so a node
     restart brings every previously-loaded model back with no manual step. The
-    boot engine claims the primary (config.model); this replays the stacked rest."""
+    boot engine claims the primary (config.model); this replays the stacked rest.
+
+    Loads are SERIALIZED — the boot primary must serve before the first stack, and
+    each stacked model must bind before the next — because concurrent vLLM loads on
+    a unified-memory node race for memory and one gets OOM-killed."""
     config = app.get("config")
     if config is None:
         return
     entries = load_instance_manifest()
     if not entries:
         return
-    # Let the boot engine claim the base port as primary first.
-    await asyncio.sleep(15)
+    await asyncio.sleep(10)
 
     # Orphan sweep: stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive
     # the orchestrator restart, but the in-memory manager does not — so a surviving
@@ -214,6 +236,9 @@ async def replay_instances_on_startup(app) -> None:
     except Exception:
         logger.exception("orphan container sweep failed")
 
+    # Wait for the boot primary to actually serve before stacking on top of it.
+    await _wait_port_ready(config.api_port, timeout=300)
+
     manager = app.get("instances")
     have = {i.record.model for i in manager.instances()} if manager is not None else set()
     if getattr(config, "model", None):
@@ -225,13 +250,16 @@ async def replay_instances_on_startup(app) -> None:
             continue
         try:
             # backend.start() shells out to docker — run off the event loop.
-            await loop.run_in_executor(
+            res = await loop.run_in_executor(
                 None,
                 lambda mm=m, g=e.get("gpu_memory_utilization"): append_solo_instance(app, mm, g, persist=False),
             )
             have.add(m)
+            # Serialize: let this model bind before launching the next one.
+            if isinstance(res, dict) and res.get("ok") and res.get("api_port"):
+                await _wait_port_ready(res["api_port"], timeout=300)
         except Exception:
-            pass
+            logger.exception("replay load failed for %s", m)
 
 
 # -- Handlers ------------------------------------------------------------------
