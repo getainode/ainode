@@ -155,9 +155,9 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Qwen3.5 4B (AWQ-4bit)",
         hf_repo="QuantTrio/Qwen3.5-4B-AWQ",
         size_gb=4.0,
-        description="Tiny dense 4B, AWQ-4bit. Lowest latency / highest QPS — good for high-volume prod routes.",
+        description="Tiny dense 4B, AWQ-4bit. ~15 tok/s single-stream (dense AWQ is dequant-bound on GB10, not size-bound — the MoE is the fast pick). Lowest memory / highest QPS for batched routes.",
         quantization="AWQ", min_memory_gb=6, family="qwen", params_b=4.0,
-        proven_tp=1, verified=False,
+        proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", format="awq",
     ),
     "qwen3.5-35b-a3b-awq": ModelInfo(
