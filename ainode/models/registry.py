@@ -170,6 +170,27 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
+    # --- Community daily-driver MoE picks (DGX Spark forum + r/LocalLLaMA, 2026) ---
+    "nemotron-cascade-2-30b-a3b-nvfp4": ModelInfo(
+        id="nemotron-cascade-2-30b-a3b-nvfp4",
+        name="Nemotron Cascade 2 30B-A3B (NVFP4)",
+        hf_repo="chankhavu/Nemotron-Cascade-2-30B-A3B-NVFP4",
+        size_gb=18.0,
+        description="NVIDIA's distilled hybrid (mamba+attention) MoE, 3B active. Blackwell-native NVFP4 — ~32 tok/s single-stream on one GB10 (eager-on; the ~60 t/s Spark forum reports need CUDA graphs/eager-off). Fast daily driver, great for stacking.",
+        quantization="NVFP4", min_memory_gb=22, family="nemotron", params_b=30.0,
+        proven_tp=1, verified=True,
+        context_length=131072, license="NVIDIA Open Model", recommended=True, format="nvfp4",
+    ),
+    "minimax-m2.7-awq": ModelInfo(
+        id="minimax-m2.7-awq",
+        name="MiniMax-M2.7 (AWQ-4bit)",
+        hf_repo="demon-zombie/MiniMax-M2.7-AWQ-4bit",
+        size_gb=120.0,
+        description="The community's top agentic-coding pick — 'Sonnet at home'. Large MoE (A10B active), AWQ-4bit. ~42 tok/s across 2 Sparks (TP=2). fp8 KV recommended.",
+        quantization="AWQ", min_memory_gb=130, family="minimax", params_b=230.0,
+        proven_tp=2, verified=False,
+        context_length=131072, license="MiniMax", recommended=True, format="awq",
+    ),
     "qwen3-235b-a22b-nvfp4": ModelInfo(
         id="qwen3-235b-a22b-nvfp4",
         name="Qwen3-235B-A22B (NVFP4)",
