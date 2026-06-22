@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +14,8 @@ from aiohttp import web
 
 from ainode.core.gpu import detect_gpu
 from ainode.models.registry import ModelManager
+
+logger = logging.getLogger(__name__)
 
 
 def register_model_routes(app: web.Application, manager: Optional[ModelManager] = None) -> None:
@@ -193,6 +196,24 @@ async def replay_instances_on_startup(app) -> None:
         return
     # Let the boot engine claim the base port as primary first.
     await asyncio.sleep(15)
+
+    # Orphan sweep: stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive
+    # the orchestrator restart, but the in-memory manager does not — so a surviving
+    # suffixed container is an orphan the replay is about to relaunch. Remove them
+    # first or the relaunch's `--name` collides (Conflict). The primary
+    # `ainode-vllm-node-solo` (no suffix) is owned/pre-cleaned by the boot engine.
+    try:
+        import subprocess
+        ps = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
+            capture_output=True, text=True, timeout=20)
+        ids = [i for i in ps.stdout.split() if i]
+        if ids:
+            subprocess.run(["docker", "rm", "-f", *ids],
+                           capture_output=True, text=True, timeout=60)
+    except Exception:
+        logger.exception("orphan container sweep failed")
+
     manager = app.get("instances")
     have = {i.record.model for i in manager.instances()} if manager is not None else set()
     if getattr(config, "model", None):
