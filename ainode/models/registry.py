@@ -8,12 +8,22 @@ fallback for offline/error situations.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Optional
+
+
+def _download_max_workers() -> int:
+    """Parallel-connection cap for model downloads (AINODE_DOWNLOAD_MAX_WORKERS,
+    default 4). Keeps a fat HF pull from saturating the uplink."""
+    try:
+        return max(1, int(os.environ.get("AINODE_DOWNLOAD_MAX_WORKERS", "4")))
+    except (TypeError, ValueError):
+        return 4
 
 from ainode.core.config import AINODE_HOME, MODELS_DIR
 
@@ -969,6 +979,10 @@ class ModelManager:
             repo_id=info.hf_repo,
             local_dir=str(local_dir),
             local_dir_use_symlinks=False,
+            # Cap parallel file connections so a fat model pull can't monopolise
+            # the uplink (ponytail: bounds parallelism, not absolute byte-rate —
+            # upgrade to a tc/trickle shaper if a single stream still saturates).
+            max_workers=_download_max_workers(),
         )
 
         return Path(download_path)

@@ -320,6 +320,7 @@ class TestDownload:
             repo_id="meta-llama/Llama-3.2-3B-Instruct",
             local_dir=str(expected_dir),
             local_dir_use_symlinks=False,
+            max_workers=4,  # uplink-friendly parallel-connection cap
         )
         assert result == expected_dir
 

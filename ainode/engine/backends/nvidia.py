@@ -569,6 +569,70 @@ class NvidiaBackend(EngineBackend):
         safe_ip = peer_ip.replace(".", "-").replace(":", "-")
         return f"{WORKER_CONTAINER_NAME_PREFIX}-{safe_ip}{self._name_suffix()}"
 
+    # Container-side mount point for AINode's on-disk model store (read-only).
+    MODELS_MOUNT = "/ainode-models"
+
+    def _host_path(self, container_path: str) -> str:
+        """Translate a path under AINODE_HOME (this orchestrator's *container*
+        view) to the equivalent *host* path, so a docker ``-v`` SOURCE resolves
+        on the host daemon — not to a stray root-owned dir.
+
+        AINode runs inside a container that bind-mounts a host dir at AINODE_HOME
+        (the systemd unit: ``-v <host>/.ainode:/root/.ainode``). When we then spawn
+        the vLLM container we pass ``-v <our-path>:...`` to the SAME host daemon,
+        which reads the SOURCE literally — so it must be the host path, not ours.
+        The unit sets ``AINODE_HOST_HOME`` to the host dir it mounted. No-op when
+        unset (AINode running directly on the host, where the two paths coincide).
+        """
+        host_home = os.environ.get("AINODE_HOST_HOME")
+        if not host_home:
+            return container_path
+        from ainode.core.config import AINODE_HOME
+        home = str(AINODE_HOME)
+        if container_path == home or container_path.startswith(home + os.sep):
+            return host_home.rstrip("/") + container_path[len(home):]
+        return container_path
+
+    def _local_model_dir(self) -> Optional[str]:
+        """This model's on-disk weight dir (flat ``org--name`` layout written by
+        our downloader), container-side path — or None if not downloaded.
+
+        When present we serve it DIRECTLY (mounted at MODELS_MOUNT) instead of
+        passing the HF repo-id, so vLLM never re-downloads 10s–100s of GB it
+        already has on disk (the wart that nuked the WAN on a TP=2 launch)."""
+        if not self.config.model:
+            return None
+        slug = self.config.model.replace("/", "--")
+        d = Path(self.config.models_dir) / slug
+        try:
+            if d.is_dir() and any(d.iterdir()):
+                return str(d)
+        except OSError:
+            pass
+        return None
+
+    def _serve_target_and_name_args(self) -> tuple:
+        """Return ``(serve_target, extra_args)`` for ``vllm serve``.
+
+        If the model is on disk AND the host mount is trustworthy, serve the local
+        mount path and pin the API id with ``--served-model-name <repo-id>`` so
+        /v1/models is unchanged. Otherwise serve the repo-id (vLLM downloads it).
+
+        "Trustworthy" = we're either running directly on the host (the -v source
+        path coincides) or AINODE_HOST_HOME tells us the host path for the source.
+        When AINode runs in a container WITHOUT that env, the -v source would
+        resolve to an empty root-owned dir, so we must NOT point vLLM at it —
+        falling back to the repo-id keeps the current (re-download) behaviour and
+        guarantees no regression before the systemd unit sets AINODE_HOST_HOME."""
+        in_container = os.environ.get("AINODE_IN_CONTAINER")
+        mount_trustworthy = (not in_container) or bool(os.environ.get("AINODE_HOST_HOME"))
+        if mount_trustworthy:
+            local = self._local_model_dir()
+            if local:
+                slug = self.config.model.replace("/", "--")
+                return f"{self.MODELS_MOUNT}/{slug}", ["--served-model-name", self.config.model]
+        return self.config.model, []
+
     def _build_solo_docker_cmd(self, container_name: str) -> List[str]:
         """Single-container solo mode — ``docker run ... vllm serve ...``.
 
@@ -577,7 +641,9 @@ class NvidiaBackend(EngineBackend):
         vLLM process.
         """
         nccl_env = self._build_nccl_env(is_head=True)
-        hf_cache = self._head_hf_cache()
+        hf_cache = self._host_path(self._head_hf_cache())
+        models_src = self._host_path(str(Path(self.config.models_dir)))
+        serve_target, name_args = self._serve_target_and_name_args()
 
         cmd: List[str] = [
             "docker",
@@ -596,12 +662,17 @@ class NvidiaBackend(EngineBackend):
             "10.24g",
             "-v",
             f"{hf_cache}:/root/.cache/huggingface",
+            # Mount the on-disk model store read-only so an already-downloaded
+            # model serves straight from disk (no re-download).
+            "-v",
+            f"{models_src}:{self.MODELS_MOUNT}:ro",
         ]
         for key, value in nccl_env.items():
             cmd.extend(["-e", f"{key}={value}"])
 
-        cmd.extend([NVIDIA_VLLM_IMAGE, "vllm", "serve", self.config.model])
+        cmd.extend([NVIDIA_VLLM_IMAGE, "vllm", "serve", serve_target])
         cmd.extend(self._build_vllm_serve_args(tp_size=1))
+        cmd.extend(name_args)
         return cmd
 
     def _build_ray_docker_cmd(
@@ -665,7 +736,10 @@ class NvidiaBackend(EngineBackend):
             "--gpus", "all",
             "--shm-size", "10.24g",
             "--entrypoint", "/bin/bash",
-            "-v", f"{hf_cache_dir}:/root/.cache/huggingface",
+            # host-path the SOURCE so the host docker daemon mounts the real
+            # dir, not a stray root-owned path (see _host_path). A no-op for the
+            # peer's home-dir cache, which isn't under AINODE_HOME.
+            "-v", f"{self._host_path(hf_cache_dir)}:/root/.cache/huggingface",
         ]
         for key, value in nccl_env.items():
             cmd.extend(["-e", f"{key}={value}"])

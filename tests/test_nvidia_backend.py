@@ -1043,3 +1043,84 @@ def test_ensure_peer_has_model_noop_when_head_lacks_it(tmp_path, monkeypatch):
     monkeypatch.setattr(nv.subprocess, "run", lambda args, **kw: (calls.append(args) or _fake_proc()))
     b._ensure_peer_has_model("10.100.0.13", "/home/sem/ainode-nvidia-cache")
     assert calls == []   # head has no weights → nothing to do, no ssh
+
+
+# ---------------------------------------------------------------------------
+# Serve-from-disk + host-path mount fixes (no re-download wart)
+# ---------------------------------------------------------------------------
+
+def test_host_path_translates_only_under_ainode_home(monkeypatch):
+    from ainode.core.config import AINODE_HOME
+    b = NvidiaBackend(_make_config())
+    home = str(AINODE_HOME)
+    # unset -> identity
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    assert b._host_path(f"{home}/models/hf-cache") == f"{home}/models/hf-cache"
+    # set -> AINODE_HOME prefix swapped for the host path
+    monkeypatch.setenv("AINODE_HOST_HOME", "/home/sem/.ainode")
+    assert b._host_path(f"{home}/models/hf-cache") == "/home/sem/.ainode/models/hf-cache"
+    # paths NOT under AINODE_HOME (e.g. a peer's home cache) are left alone
+    assert b._host_path("/home/ubuntu/ainode-nvidia-cache") == "/home/ubuntu/ainode-nvidia-cache"
+
+
+def test_solo_cmd_serves_local_weights_when_downloaded(tmp_path, monkeypatch):
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)  # host run -> mount trustworthy
+    model = "Qwen/Qwen3.5-9B-AWQ"
+    slug = "Qwen--Qwen3.5-9B-AWQ"
+    (tmp_path / slug).mkdir()
+    (tmp_path / slug / "config.json").write_text("{}")  # looks downloaded
+    b = NvidiaBackend(_make_config(model=model, models_dir=str(tmp_path)))
+    cmd = b._build_solo_docker_cmd("c1")
+    # serves the on-disk mount path, not the repo-id, and pins the API name
+    i = cmd.index("serve")
+    assert cmd[i + 1] == f"/ainode-models/{slug}"
+    assert "--served-model-name" in cmd and cmd[cmd.index("--served-model-name") + 1] == model
+    # the model store is mounted read-only
+    assert f"{tmp_path}:/ainode-models:ro" in cmd
+
+
+def test_solo_cmd_falls_back_to_repo_id_when_containerized_without_host_home(tmp_path, monkeypatch):
+    # In a container with no AINODE_HOST_HOME the -v source can't be trusted to
+    # hold the weights, so we must NOT serve the local path (would be empty).
+    monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    model = "Qwen/Qwen3.5-9B-AWQ"
+    slug = "Qwen--Qwen3.5-9B-AWQ"
+    (tmp_path / slug).mkdir()
+    (tmp_path / slug / "config.json").write_text("{}")
+    b = NvidiaBackend(_make_config(model=model, models_dir=str(tmp_path)))
+    cmd = b._build_solo_docker_cmd("c1")
+    assert cmd[cmd.index("serve") + 1] == model        # repo-id, safe fallback
+    assert "--served-model-name" not in cmd
+
+
+def test_solo_cmd_serves_repo_id_when_not_downloaded(tmp_path, monkeypatch):
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    b = NvidiaBackend(_make_config(model="Qwen/Qwen3.5-9B-AWQ", models_dir=str(tmp_path)))
+    cmd = b._build_solo_docker_cmd("c1")
+    i = cmd.index("serve")
+    assert cmd[i + 1] == "Qwen/Qwen3.5-9B-AWQ"        # falls back to repo-id
+    assert "--served-model-name" not in cmd
+
+
+def test_solo_cmd_host_paths_the_mount_sources(tmp_path, monkeypatch):
+    from ainode.core.config import AINODE_HOME
+    monkeypatch.setenv("AINODE_HOST_HOME", "/host/.ainode")
+    # models_dir under AINODE_HOME so the translation applies
+    md = f"{AINODE_HOME}/models"
+    b = NvidiaBackend(_make_config(model="x/y", models_dir=md))
+    cmd = b._build_solo_docker_cmd("c1")
+    joined = " ".join(cmd)
+    assert "/host/.ainode/models:/ainode-models:ro" in joined        # models mount host-pathed
+    assert "/host/.ainode/models/hf-cache:/root/.cache/huggingface" in joined  # hf cache host-pathed
+
+
+def test_download_max_workers_env(monkeypatch):
+    from ainode.models.registry import _download_max_workers
+    monkeypatch.delenv("AINODE_DOWNLOAD_MAX_WORKERS", raising=False)
+    assert _download_max_workers() == 4
+    monkeypatch.setenv("AINODE_DOWNLOAD_MAX_WORKERS", "2")
+    assert _download_max_workers() == 2
+    monkeypatch.setenv("AINODE_DOWNLOAD_MAX_WORKERS", "junk")
+    assert _download_max_workers() == 4

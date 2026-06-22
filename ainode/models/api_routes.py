@@ -17,6 +17,23 @@ from ainode.models.registry import ModelManager
 
 logger = logging.getLogger(__name__)
 
+# Serialize model downloads so two concurrent fat pulls can't gang up on the
+# uplink. Concurrency is AINODE_MAX_CONCURRENT_DOWNLOADS (default 1). Lazily
+# built so the asyncio primitive binds to the running loop.
+_DOWNLOAD_SEM = None
+
+
+def _download_gate():
+    global _DOWNLOAD_SEM
+    if _DOWNLOAD_SEM is None:
+        import os
+        try:
+            n = max(1, int(os.environ.get("AINODE_MAX_CONCURRENT_DOWNLOADS", "1")))
+        except (TypeError, ValueError):
+            n = 1
+        _DOWNLOAD_SEM = asyncio.Semaphore(n)
+    return _DOWNLOAD_SEM
+
 
 def register_model_routes(app: web.Application, manager: Optional[ModelManager] = None) -> None:
     """Register model management routes on the aiohttp app."""
@@ -757,17 +774,22 @@ async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str,
                 if jobs.get(job_id, {}).get("_cancel"):
                     raise _DownloadCancelled("Download cancelled by user")
 
+            from ainode.models.registry import _download_max_workers
             try:
                 snapshot_download(
                     repo_id=hf_repo,
                     local_dir=str(target),
                     tqdm_class=None,
+                    max_workers=_download_max_workers(),  # don't monopolise the uplink
                 )
             except _DownloadCancelled:
                 raise
             return str(target)
 
-        await loop.run_in_executor(None, _do_download)
+        # Serialize downloads (one fat pull at a time) so two concurrent model
+        # downloads can't gang up on the link — what stacked Nemotron+MiniMax did.
+        async with _download_gate():
+            await loop.run_in_executor(None, _do_download)
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["finished_at"] = time.time()
         jobs[job_id]["progress"] = 100.0
@@ -929,7 +951,8 @@ async def _run_download(
     """Run model download in a thread so we don't block the event loop."""
     loop = asyncio.get_event_loop()
     try:
-        await loop.run_in_executor(None, manager.download_model, model_id)
+        async with _download_gate():  # serialize with other downloads
+            await loop.run_in_executor(None, manager.download_model, model_id)
         jobs[job_id]["status"] = "complete"
     except Exception as exc:
         jobs[job_id]["status"] = "failed"
