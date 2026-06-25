@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import json
 import logging
 import time
@@ -478,37 +479,65 @@ async def handle_model_unload(request: web.Request) -> web.Response:
                 "errors": errors,
             })
 
-    if engine is not None:
+    # Was THIS node actually serving the requested model? (back-compat: no model
+    # given → stop whatever is local.) Only then is a local "stopped" truthful —
+    # the old code returned stopped:true even when engine was None or serving a
+    # different model, which is why the dashboard's Unload button silently no-op'd.
+    served_here = engine is not None and (not model or getattr(config, "model", None) == model)
+    if served_here:
         try:
             if engine.is_running():
                 engine.stop()
-            # Both a live stop and an already-dead engine mean not-serving.
-            stopped = True
         except Exception as exc:
             errors.append(f"engine.stop(): {exc}")
-            stopped = True
-        # Always force the latch down so a phantom doesn't re-advertise.
         try:
-            engine._ready = False
+            engine._ready = False  # force the latch down so a phantom doesn't re-advertise
         except Exception:
             pass
-    else:
-        stopped = True
-
-    try:
-        config.model = None
-        if getattr(config, "distributed_mode", "") == "head":
-            config.distributed_mode = "solo"
         try:
+            config.model = None
+            if getattr(config, "distributed_mode", "") == "head":
+                config.distributed_mode = "solo"
             config.save()
         except Exception as exc:
-            errors.append(f"config.save: {exc}")
-    except Exception as exc:
-        errors.append(f"config clear: {exc}")
+            errors.append(f"config clear: {exc}")
+        return web.json_response({"stopped": True, "model": model, "scope": "local", "errors": errors})
+
+    # Not serving here. `fanout=0` marks a fan-out child — stop, don't recurse
+    # (prevents an unload broadcast storm). Otherwise the model lives on another
+    # node: fan the unload out to online peers (each peer's local unload is
+    # idempotent) so the head can unload a remote-node instance.
+    if request.query.get("fanout") == "0":
+        return web.json_response({"stopped": False, "model": model, "scope": "local-miss", "errors": errors})
+
+    cluster = request.app.get("cluster_state")
+    session = request.app.get("client_session")
+    remote_stopped = False
+    peers_reached = 0
+    if cluster is not None and session is not None and model:
+        for node in cluster.members():
+            if node.node_id == config.node_id:
+                continue
+            host = node.fabric_ip or node.node_name
+            if not host:
+                continue
+            url = f"http://{host}:{node.web_port}/api/models/unload?fanout=0"
+            try:
+                async with session.post(url, json={"model": model},
+                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    peers_reached += 1
+                    jr = await r.json()
+                    if jr.get("stopped"):
+                        remote_stopped = True
+                        errors.extend(jr.get("errors") or [])
+            except Exception as exc:
+                errors.append(f"peer {node.node_id}: {exc}")
 
     return web.json_response({
-        "stopped": stopped,
-        "model": body.get("model"),
+        "stopped": remote_stopped,
+        "model": model,
+        "scope": "remote-fanout",
+        "peers_reached": peers_reached,
         "errors": errors,
     })
 
