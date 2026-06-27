@@ -344,6 +344,27 @@ async def _on_startup(app: web.Application) -> None:
             )
 
 
+async def _engine_serving(backend, loop) -> bool:
+    """True iff the engine's OpenAI API actually answers right now.
+
+    The latched `ready` flag never flips False when an engine crashes or is
+    killed out-of-band, so a dead engine reads READY forever (phantom-READY →
+    ghost routing → 502s). An active localhost probe is the truthful signal —
+    and it correctly reads False while a model is still loading (api not up
+    yet), so we never advertise a not-yet-serving OR already-dead engine.
+
+    health_check() uses a blocking 5s-timeout urlopen, so run it in the default
+    executor to keep the event loop free (a hung engine must not stall sync).
+    """
+    if backend is None:
+        return False
+    try:
+        hc = await loop.run_in_executor(None, backend.health_check)
+        return bool(hc.get("api_responding"))
+    except Exception:
+        return False
+
+
 async def _cluster_sync_loop(app: web.Application) -> None:
     """Periodically sync the listener registry into ClusterState."""
     try:
@@ -365,23 +386,33 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                     "distributed_mode": getattr(config, "distributed_mode", "solo") or "solo",
                 }
                 dmode = updates["distributed_mode"]
-                engine_ready = bool(engine is not None and getattr(engine, "ready", False))
-                # Re-broadcast the live primary model every cycle. Without this the
-                # announcement's `model` field is frozen at its startup value, so
-                # /api/nodes (reads n.model) goes stale while /v1/models (reads
-                # n.instances) stays fresh — and unloads never clear, leaving
-                # phantom-READY panels + ghost routing until restart (BUG A).
-                # Members serve via the head's sharded engine, not their own model.
-                updates["model"] = "" if dmode == "member" else (config.model or "")
+                loop = asyncio.get_event_loop()
+                # Liveness: the latched `ready` flag never flips False when an engine
+                # crashes or is killed out-of-band, so a dead engine reads READY forever
+                # (phantom-READY → ghost routing → 502s, BUG A FIX 2). Probe the engine's
+                # own API instead (see _engine_serving) — also reads False while loading,
+                # so we never advertise a not-yet-serving OR already-dead engine.
+                # ponytail: one localhost probe per instance per 5s cycle; a transient
+                # blip drops the model for one cycle and self-heals on the next probe.
+                engine_serving = await _engine_serving(engine, loop)
+                engine_proc_alive = bool(engine is not None and engine.is_running())
+                # Re-broadcast the live primary model every cycle, gated on real
+                # liveness — fixes both the stale `model` field (BUG A) and the
+                # phantom-READY-after-crash case (FIX 2). Members serve via the head's
+                # sharded engine, not their own model.
+                updates["model"] = "" if (dmode == "member" or not engine_serving) else (config.model or "")
                 if dmode == "member":
                     updates["status"] = "member-ready"
                 elif engine is not None:
-                    updates["status"] = "serving" if engine_ready else "starting"
+                    updates["status"] = (
+                        "serving" if engine_serving
+                        else ("starting" if engine_proc_alive else "stopped")
+                    )
 
                 # Advertise distributed instance metadata once the head's
                 # sharded engine is serving — the UI uses this to render
                 # "DISTRIBUTED TP=N across X nodes".
-                if dmode == "head" and engine_ready:
+                if dmode == "head" and engine_serving:
                     peer_ips = list(getattr(config, "peer_ips", []) or [])
                     if peer_ips:
                         updates["distributed_instance_id"] = f"{config.node_id or 'head'}:{config.model}"
@@ -394,10 +425,16 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                     updates["distributed_peers"] = []
                 manager = app.get("instances")
                 if manager is not None and not manager.is_empty():
-                    updates["instances"] = [r.to_dict() for r in manager.records()]
+                    # Only advertise instances whose engine actually answers — a dead
+                    # stacked instance drops out of the broadcast within one cycle.
+                    live_records = []
+                    for inst in manager.instances():
+                        if await _engine_serving(inst.backend, loop):
+                            live_records.append(inst.record)
+                    updates["instances"] = [r.to_dict() for r in live_records]
                 else:
                     updates["instances"] = (
-                        _head_instances(config) if (dmode == "head" and engine_ready) else []
+                        _head_instances(config) if (dmode == "head" and engine_serving) else []
                     )
                 if sender:
                     sender.update_announcement(**updates)
