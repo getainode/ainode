@@ -76,6 +76,32 @@ def _manifest_path() -> Path:
     return Path(AINODE_HOME) / "instances.json"
 
 
+def consume_start_clean() -> bool:
+    """One-shot 'start clean' signal: skip replaying persisted models this boot.
+
+    A node restart otherwise reloads config.model (boot engine) + the stacked
+    manifest, so 'restart to free a node' just reloads. This lets an operator
+    start a node idle. Triggered by:
+      - env AINODE_START_CLEAN truthy (persists across restarts), or
+      - a sentinel file <AINODE_HOME>/.start-clean — a single-use
+        `touch ~/.ainode/.start-clean && systemctl restart ainode` knob,
+        consumed (deleted) here so the next restart serves normally.
+    Non-destructive: the on-disk config + manifest are left intact.
+    """
+    import os
+    from ainode.core.config import AINODE_HOME
+    env = str(os.environ.get("AINODE_START_CLEAN", "")).strip().lower() in ("1", "true", "yes", "on")
+    sentinel_present = False
+    try:
+        sentinel = Path(AINODE_HOME) / ".start-clean"
+        if sentinel.exists():
+            sentinel_present = True
+            sentinel.unlink()
+    except Exception:
+        pass
+    return env or sentinel_present
+
+
 def save_instance_manifest(app) -> None:
     """Write the current solo instance set (model + gpu_memory_utilization)."""
     manager = app.get("instances")

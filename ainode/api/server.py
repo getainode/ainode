@@ -272,13 +272,18 @@ async def _on_startup(app: web.Application) -> None:
 
     # Always-on: re-load the persisted solo instance set so a `systemctl restart
     # ainode` brings every previously-loaded model back with no manual step.
-    try:
-        from ainode.models.api_routes import replay_instances_on_startup
-        app["_instance_replay_task"] = asyncio.get_event_loop().create_task(
-            replay_instances_on_startup(app)
-        )
-    except Exception:
-        logger.exception("Failed to schedule instance replay")
+    # Skipped when the operator requested a clean boot (closet #310, set in the
+    # CLI start path) so a restart can actually free the node.
+    if getattr(config, "_skip_replay", False):
+        logger.info("start-clean: skipping persisted-instance replay")
+    else:
+        try:
+            from ainode.models.api_routes import replay_instances_on_startup
+            app["_instance_replay_task"] = asyncio.get_event_loop().create_task(
+                replay_instances_on_startup(app)
+            )
+        except Exception:
+            logger.exception("Failed to schedule instance replay")
 
     if config.cluster_enabled:
         # Start broadcast sender

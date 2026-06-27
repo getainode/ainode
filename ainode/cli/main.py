@@ -140,6 +140,32 @@ def cmd_start(args):
         config.node_id = str(uuid.uuid4())[:8]
         config.save()
 
+    # Start-clean (closet #310): one-shot operator knob to skip replaying
+    # persisted models this boot, so `restart` actually frees a node (replay
+    # otherwise reloads config.model + the stacked manifest). Non-destructive —
+    # on-disk config is untouched, so a normal restart resumes serving.
+    from ainode.models.api_routes import consume_start_clean
+    if consume_start_clean():
+        if config.model:
+            console.print("  [yellow]Start-clean — not replaying persisted model(s) this boot.[/yellow]\n")
+        config.model = None
+        config._skip_replay = True
+        # Actually free the node: a vLLM engine container is a sibling spawned via
+        # docker.sock, so the ainode restart does NOT stop it — and with no boot
+        # engine to reclaim it, it would keep holding memory. Sweep them here.
+        try:
+            import subprocess
+            ps = subprocess.run(
+                ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo"],
+                capture_output=True, text=True, timeout=20)
+            ids = [i for i in ps.stdout.split() if i]
+            if ids:
+                subprocess.run(["docker", "rm", "-f", *ids],
+                               capture_output=True, text=True, timeout=60)
+                console.print(f"  [dim]Start-clean — freed {len(ids)} engine container(s).[/dim]\n")
+        except Exception:
+            pass
+
     # Detect GPU
     gpu = detect_gpu()
     if gpu:
