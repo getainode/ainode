@@ -366,6 +366,13 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                 }
                 dmode = updates["distributed_mode"]
                 engine_ready = bool(engine is not None and getattr(engine, "ready", False))
+                # Re-broadcast the live primary model every cycle. Without this the
+                # announcement's `model` field is frozen at its startup value, so
+                # /api/nodes (reads n.model) goes stale while /v1/models (reads
+                # n.instances) stays fresh — and unloads never clear, leaving
+                # phantom-READY panels + ghost routing until restart (BUG A).
+                # Members serve via the head's sharded engine, not their own model.
+                updates["model"] = "" if dmode == "member" else (config.model or "")
                 if dmode == "member":
                     updates["status"] = "member-ready"
                 elif engine is not None:
