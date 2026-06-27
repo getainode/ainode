@@ -23,10 +23,12 @@ import os
 import sys
 from pathlib import Path
 
-# ponytail: dense text models only (AutoModelForCausalLM, ignore=["lm_head"]).
-# Multimodal (Qwen3.5-VL / Ornith) needs AutoProcessor + a vision ignore-list and
-# is Phase 2 — see the locked contract.
+# Plain dense text models: only lm_head stays out of quantization.
 _DEFAULT_IGNORE = ["lm_head"]
+# Multimodal-config models (Qwen3.5 family is *ForConditionalGeneration* with a
+# bundled vision tower): keep the vision tower + lm_head + embeddings unquantized,
+# or the saved checkpoint is corrupt/unservable.
+_MM_IGNORE = ["re:.*lm_head", "re:visual.*", "re:model.visual.*", "re:.*embed_tokens$"]
 
 
 def _progress(phase: str, pct: float, msg: str = "") -> None:
@@ -101,6 +103,45 @@ def _build_recipe(scheme: str, ignore: list):
     raise ValueError(f"unsupported scheme '{scheme}' (expected awq|nvfp4)")
 
 
+def _load_model_and_processor(model_src: str):
+    """Return (model, processor, is_multimodal).
+
+    Qwen3.5-family models are *ForConditionalGeneration* — a wrapper config with a
+    bundled vision tower + a text sub-config. Loading them with AutoModelForCausalLM
+    collapses the save to the TEXT sub-config (Qwen3_5TextConfig), which vLLM refuses
+    to serve. For those, load the FULL model class + AutoProcessor so save_pretrained
+    emits the complete (servable) config. Plain text models keep the simple path.
+    """
+    import transformers
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+
+    cfg = AutoConfig.from_pretrained(model_src, trust_remote_code=True)
+    archs = list(getattr(cfg, "architectures", None) or [])
+    arch = archs[0] if archs else ""
+    multimodal = (
+        "ConditionalGeneration" in arch
+        or hasattr(cfg, "vision_config")
+        or hasattr(cfg, "text_config")
+    )
+    if not multimodal:
+        model = AutoModelForCausalLM.from_pretrained(model_src, torch_dtype="auto", trust_remote_code=True)
+        return model, AutoTokenizer.from_pretrained(model_src, trust_remote_code=True), False
+
+    _log(f"Multimodal-config model ({arch}) — loading full model + processor")
+    model = None
+    try:
+        from transformers import AutoModelForImageTextToText
+        model = AutoModelForImageTextToText.from_pretrained(model_src, torch_dtype="auto", trust_remote_code=True)
+    except Exception as exc:
+        _log(f"AutoModelForImageTextToText failed ({exc}); trying {arch} directly")
+        ModelClass = getattr(transformers, arch, None)
+        if ModelClass is None:
+            raise
+        model = ModelClass.from_pretrained(model_src, torch_dtype="auto", trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(model_src, trust_remote_code=True)
+    return model, processor, True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AINode quantization runner")
     parser.add_argument("--config", required=True, help="Path to quant config JSON")
@@ -125,7 +166,7 @@ def main() -> None:
     calib_dataset = config.get("calib_dataset") or "HuggingFaceH4/ultrachat_200k"
     n_samples = int(config.get("calib_samples", 256))
     max_seq_length = int(config.get("max_seq_length", 2048))
-    ignore = config.get("ignore") or _DEFAULT_IGNORE
+    ignore_override = config.get("ignore")  # default chosen after we know the arch
 
     hf_token = config.get("hf_token") or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if hf_token:
@@ -135,7 +176,6 @@ def main() -> None:
     _progress("starting", 2, f"quantize {base_model} -> {scheme}")
     try:
         import torch  # noqa: F401
-        from transformers import AutoModelForCausalLM, AutoTokenizer
         from llmcompressor import oneshot
     except ImportError as exc:
         print(
@@ -149,8 +189,9 @@ def main() -> None:
     model_src = _resolve_model(base_model)
 
     _progress("loading_weights", 10, "loading base model (bf16)")
-    model = AutoModelForCausalLM.from_pretrained(model_src, torch_dtype="auto")
-    tokenizer = AutoTokenizer.from_pretrained(model_src)
+    model, processor, multimodal = _load_model_and_processor(model_src)
+    ignore = ignore_override or (_MM_IGNORE if multimodal else _DEFAULT_IGNORE)
+    tokenizer = getattr(processor, "tokenizer", processor)  # for chat-template calibration
 
     _progress("calibrating", 30, f"building {n_samples} calibration samples")
     calib = _build_calibration(calib_dataset, tokenizer, n_samples, max_seq_length)
@@ -159,10 +200,9 @@ def main() -> None:
     recipe = _build_recipe(scheme, ignore)
     oneshot(
         model=model,
-        # Pass the tokenizer explicitly: llm-compressor's auto processor-init
-        # pulls in mistral_common, which has a version conflict in this image
-        # (ImportError: ReasoningEffort) and aborts on some models (e.g. Qwen3.5).
-        processor=tokenizer,
+        # Pass the processor explicitly: llm-compressor's auto processor-init pulls
+        # in mistral_common (ImportError: ReasoningEffort) on some models.
+        processor=processor,
         dataset=calib,
         recipe=recipe,
         max_seq_length=max_seq_length,
@@ -172,7 +212,7 @@ def main() -> None:
     _progress("saving", 90, f"writing checkpoint -> {output_dir}")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output_dir, save_compressed=True)
-    tokenizer.save_pretrained(output_dir)
+    processor.save_pretrained(output_dir)  # writes the FULL config + tokenizer/preprocessor
 
     # Marker the orchestrator polls to confirm a real artifact (not an empty
     # --rm container layer — see the AINODE_HOST_HOME tripwire in the contract).
