@@ -27,8 +27,14 @@ from pathlib import Path
 _DEFAULT_IGNORE = ["lm_head"]
 # Multimodal-config models (Qwen3.5 family is *ForConditionalGeneration* with a
 # bundled vision tower): keep the vision tower + lm_head + embeddings unquantized,
-# or the saved checkpoint is corrupt/unservable.
-_MM_IGNORE = ["re:.*lm_head", "re:visual.*", "re:model.visual.*", "re:.*embed_tokens$"]
+# or the saved checkpoint is corrupt/unservable. Qwen3.5 is also a HYBRID model —
+# its Gated-DeltaNet linear-attention projections (linear_attn.in_proj_a/b) are tiny
+# (out=16) and 4-bit-quantizing them yields layers Marlin can't tile
+# ("output_size_per_partition=32 not divisible by 64"); keep them in bf16 too.
+_MM_IGNORE = [
+    "re:.*lm_head", "re:visual.*", "re:model.visual.*",
+    "re:.*embed_tokens$", "re:.*linear_attn.*",
+]
 
 
 def _progress(phase: str, pct: float, msg: str = "") -> None:
@@ -109,11 +115,11 @@ def _load_model_and_processor(model_src: str):
     Qwen3.5-family models are *ForConditionalGeneration* — a wrapper config with a
     bundled vision tower + a text sub-config. Loading them with AutoModelForCausalLM
     collapses the save to the TEXT sub-config (Qwen3_5TextConfig), which vLLM refuses
-    to serve. For those, load the FULL model class + AutoProcessor so save_pretrained
-    emits the complete (servable) config. Plain text models keep the simple path.
+    to serve. For those, load the FULL model class so save_pretrained emits the complete
+    (servable) config. Plain text models keep the simple path.
     """
     import transformers
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     cfg = AutoConfig.from_pretrained(model_src, trust_remote_code=True)
     archs = list(getattr(cfg, "architectures", None) or [])
@@ -123,12 +129,16 @@ def _load_model_and_processor(model_src: str):
         or hasattr(cfg, "vision_config")
         or hasattr(cfg, "text_config")
     )
+    # AutoTokenizer (NOT AutoProcessor) even for multimodal: we quantize the text decoder
+    # with text calibration, and AutoProcessor drags in the broken mistral_common
+    # (ImportError: ReasoningEffort) in this image. The servable fix is the FULL config —
+    # from loading the full model class + model.save_pretrained, not the image processor.
+    tokenizer = AutoTokenizer.from_pretrained(model_src, trust_remote_code=True)
     if not multimodal:
         model = AutoModelForCausalLM.from_pretrained(model_src, torch_dtype="auto", trust_remote_code=True)
-        return model, AutoTokenizer.from_pretrained(model_src, trust_remote_code=True), False
+        return model, tokenizer, False
 
-    _log(f"Multimodal-config model ({arch}) — loading full model + processor")
-    model = None
+    _log(f"Multimodal-config model ({arch}) — loading full model (keeps complete config)")
     try:
         from transformers import AutoModelForImageTextToText
         model = AutoModelForImageTextToText.from_pretrained(model_src, torch_dtype="auto", trust_remote_code=True)
@@ -138,8 +148,7 @@ def _load_model_and_processor(model_src: str):
         if ModelClass is None:
             raise
         model = ModelClass.from_pretrained(model_src, torch_dtype="auto", trust_remote_code=True)
-    processor = AutoProcessor.from_pretrained(model_src, trust_remote_code=True)
-    return model, processor, True
+    return model, tokenizer, True
 
 
 def main() -> None:
@@ -212,7 +221,16 @@ def main() -> None:
     _progress("saving", 90, f"writing checkpoint -> {output_dir}")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output_dir, save_compressed=True)
-    processor.save_pretrained(output_dir)  # writes the FULL config + tokenizer/preprocessor
+    processor.save_pretrained(output_dir)  # writes the FULL config + tokenizer
+    if multimodal:
+        # vLLM loads the image processor for *ForConditionalGeneration models; save it
+        # too (AutoImageProcessor avoids the broken mistral_common that AutoProcessor hits).
+        try:
+            from transformers import AutoImageProcessor
+            AutoImageProcessor.from_pretrained(model_src, trust_remote_code=True).save_pretrained(output_dir)
+            _log("saved image processor (preprocessor_config.json)")
+        except Exception as exc:
+            _log(f"no image processor saved ({exc}) — may need --language-model-only to serve")
 
     # Marker the orchestrator polls to confirm a real artifact (not an empty
     # --rm container layer — see the AINODE_HOST_HOME tripwire in the contract).
