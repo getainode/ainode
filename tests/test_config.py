@@ -12,7 +12,7 @@ def test_config_defaults():
     assert config.web_port == 3000
     assert config.host == "0.0.0.0"
     assert config.model == "meta-llama/Llama-3.2-3B-Instruct"
-    assert config.gpu_memory_utilization == 0.9
+    assert config.gpu_memory_utilization == 0.5  # lowered for unified-memory (was 0.9)
     assert config.onboarded is False
     assert config.node_id is None
 

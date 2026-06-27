@@ -71,12 +71,13 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     When min_nodes > 1, this endpoint flips the local engine into head mode:
     it discovers member nodes from the cluster state, takes their peer IPs
     from UDP recvfrom, writes them into config, stops the current (solo)
-    engine, and starts the distributed engine which shells out to eugr's
-    launch-cluster.sh. When min_nodes == 1, it falls through to the
-    existing single-node load path (/api/models/load).
+    engine, and starts the distributed engine via the configured backend
+    (eugr's launch-cluster.sh, or NvidiaBackend's run_cluster path).
+    When min_nodes == 1, it falls through to the existing single-node load
+    path (/api/models/load).
     """
     from ainode.core.config import NodeConfig
-    from ainode.engine.docker_engine import DockerEngine
+    from ainode.engine.backends import get_backend
 
     global _active_sharding
 
@@ -93,6 +94,18 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         min_nodes = int(body.get("min_nodes", 1) or 1)
     except (TypeError, ValueError):
         min_nodes = 1
+
+    # Explicit node selection (preferred): the exact nodes to span, head = this
+    # node + the rest as peers. `tp_size` is the legacy count form. Either sets
+    # the effective node count so the min_nodes<=1 solo path still triggers.
+    node_ids = body.get("node_ids") or None
+    if node_ids:
+        min_nodes = len(node_ids)
+    elif body.get("tp_size"):
+        try:
+            min_nodes = int(body.get("tp_size"))
+        except (TypeError, ValueError):
+            pass
 
     strategy_str = body.get("strategy", "tensor_parallel")
     # We accept but don't gate on strategy here — vLLM picks TP vs PP via
@@ -115,68 +128,119 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         shim = _ReqShim(request, {"model": model})
         return await handle_model_load(shim)
 
-    # Distributed path. Find discovered member nodes on our cluster_interface
-    # subnet and use their peer IPs as authoritative addresses.
+    # Distributed path. Resolve the participating peers to their FABRIC IPs
+    # (BUG D: never the mgmt-LAN UDP peer_ip, which lands a Ray worker on a
+    # non-GPU address). Two selection modes:
+    #   node_ids  — explicit set chosen in the UI; head = this node, peers = rest
+    #   min_nodes — legacy count: take the first (N-1) discovered members
     members = [
         n for n in cluster.members()
         if getattr(n, "distributed_mode", "solo") == "member"
         and (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "member-ready", "serving")
     ]
-    peer_ips = [n.peer_ip for n in members if getattr(n, "peer_ip", None)]
-    if len(peer_ips) < (min_nodes - 1):
+    fabric_of = lambda n: (getattr(n, "fabric_ip", "") or "").strip()
+    members_dump = [
+        {"node_id": n.node_id, "node_name": n.node_name, "fabric_ip": fabric_of(n),
+         "status": n.status.value if hasattr(n.status, "value") else str(n.status)}
+        for n in members
+    ]
+
+    if node_ids:
+        # Head is always this node; peers are the other selected nodes.
+        wanted = [nid for nid in node_ids if nid != config.node_id]
+        by_id = {n.node_id: n for n in members}
+        missing = [nid for nid in wanted if nid not in by_id]
+        if missing:
+            return web.json_response({
+                "error": f"Selected node(s) not available as members: {missing}",
+                "discovered_members": members_dump,
+            }, status=422)
+        chosen = [by_id[nid] for nid in wanted]
+    else:
+        want_peers = max(0, min_nodes - 1)
+        if len(members) < want_peers:
+            return web.json_response({
+                "error": (
+                    f"Requested {want_peers + 1} node(s) but only {len(members) + 1} "
+                    f"available (1 head + {len(members)} member(s))."
+                ),
+                "discovered_members": members_dump,
+            }, status=422)
+        chosen = members[:want_peers]
+
+    # Refuse to launch on a peer with no known fabric IP — that's exactly the
+    # BUG-D failure mode (would fall back to a mgmt address).
+    no_fabric = [n.node_id for n in chosen if not fabric_of(n)]
+    if no_fabric:
         return web.json_response({
-            "error": (
-                f"Requested min_nodes={min_nodes} but only {len(peer_ips)+1} "
-                f"node(s) available (1 head + {len(peer_ips)} member(s) with "
-                f"known peer IPs). Ensure member nodes are running and "
-                f"broadcasting on the cluster_interface subnet."
-            ),
-            "discovered_members": [
-                {"node_id": n.node_id, "node_name": n.node_name,
-                 "peer_ip": getattr(n, "peer_ip", None),
-                 "status": n.status.value if hasattr(n.status, "value") else str(n.status)}
-                for n in members
-            ],
+            "error": f"No fabric IP known for node(s) {no_fabric}; cannot launch over the fabric.",
+            "hint": "Those nodes must broadcast a fabric_ip (cluster_interface configured).",
+            "discovered_members": members_dump,
         }, status=422)
 
-    chosen_peers = peer_ips[: min_nodes - 1]
+    chosen_peers = [fabric_of(n) for n in chosen]
 
-    # Flip local config to head mode and persist.
-    config.model = model
-    config.distributed_mode = "head"
-    config.peer_ips = chosen_peers
-    try:
-        config.save()
-    except Exception:
-        logger.exception("Failed to persist config.json before distributed launch")
+    # P2-2: APPEND a new instance — do NOT tear down existing ones. Each instance
+    # gets its own port (8000, 8001, …), container-name token, and config SNAPSHOT
+    # (never the shared app["config"], which would cross-wire instances).
+    from dataclasses import replace
 
-    # Hot-swap the engine: stop the solo vLLM (if running) and build a
-    # fresh DockerEngine bound to the updated config for the distributed
-    # launch. We don't replace request.app["engine"] until success so the
-    # status endpoint keeps working during the switch.
-    try:
-        if engine is not None and engine.is_running():
-            engine.stop()
-    except Exception:
-        logger.exception("Engine.stop() failed during distributed hot-swap")
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
 
-    new_engine = DockerEngine(config)
+    manager = request.app.get("instances")
+    if manager is None:
+        manager = InstanceManager(base_port=config.api_port)
+        request.app["instances"] = manager
+
+    # Re-launching a model that's already up replaces THAT instance (stop it first).
+    existing = manager.by_model(model)
+    if existing is not None:
+        try:
+            existing.backend.stop()
+        except Exception:
+            logger.exception("stop() failed replacing instance for %s", model)
+        manager.remove(existing.record.instance_id)
+
+    is_primary = manager.is_empty()
+    port = manager.allocate_port()
+    name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
+    instance_id = f"{config.node_id or 'head'}:{model}"
+
+    inst_config = replace(config, model=model, distributed_mode="head",
+                          peer_ips=chosen_peers, api_port=port)
+    backend = get_backend(inst_config, instance_id=name_token)
     try:
-        started = new_engine.start_distributed()
+        started = backend.start_distributed()
     except Exception as exc:
         logger.exception("start_distributed raised")
         return web.json_response({"error": f"Distributed launch failed: {exc}"}, status=500)
-
     if not started:
         return web.json_response({"error": "Distributed launch returned False"}, status=500)
 
-    request.app["engine"] = new_engine
+    manager.add(InstanceRecord(
+        instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
+        peer_ips=chosen_peers, api_port=port,
+        tensor_parallel_size=1 + len(chosen_peers), status="starting"), backend)
+
+    if is_primary:
+        # Back-compat: the proxy/status path reads app["config"] + app["engine"].
+        config.model = model
+        config.distributed_mode = "head"
+        config.peer_ips = chosen_peers
+        try:
+            config.save()
+        except Exception:
+            logger.exception("Failed to persist config.json before distributed launch")
+        request.app["engine"] = backend
 
     return web.json_response({
         "status": "launching",
+        "instance_id": instance_id,
         "model": model,
         "distributed_mode": "head",
         "peer_ips": chosen_peers,
+        "api_port": port,
         "tensor_parallel_size": 1 + len(chosen_peers),
         "strategy": strategy_str,
     })
@@ -184,20 +248,43 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
 
 async def handle_sharding_status(request: web.Request) -> web.Response:
     """GET /api/sharding/status — current sharding state and Ray cluster health."""
-    ray_status = get_ray_status()
     engine = request.app.get("engine")
 
     engine_running = False
     engine_ready = False
     if engine is not None:
-        engine_running = engine.is_running()
+        try:
+            engine_running = engine.is_running()
+        except Exception:
+            engine_running = False
         engine_ready = getattr(engine, "ready", False)
+
+    # When a distributed head engine is up, derive ray health from the engine
+    # itself — the orchestrator container has no ray binary to probe.
+    engine_config = getattr(engine, "config", None) if engine is not None else None
+    distributed_mode = getattr(engine_config, "distributed_mode", "solo")
+    peer_ips = getattr(engine_config, "peer_ips", None) or []
+
+    if distributed_mode == "head" and peer_ips and engine_running:
+        probe = get_ray_status()
+        ray = {
+            "running": True,
+            "is_head": True,
+            "num_nodes": 1 + len(peer_ips),
+            "total_cpus": getattr(probe, "total_cpus", 0) or 0,
+            "total_gpus": getattr(probe, "total_gpus", 0) or 0,
+            "error": None,
+            "source": "engine",
+        }
+    else:
+        ray = get_ray_status().to_dict()
+        ray["source"] = "ray_probe"
 
     result = {
         "active_sharding": _active_sharding.to_dict() if _active_sharding else None,
         "engine_running": engine_running,
         "engine_ready": engine_ready,
-        "ray": ray_status.to_dict(),
+        "ray": ray,
     }
 
     return web.json_response(result)

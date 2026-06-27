@@ -14,11 +14,15 @@ import pytest
 
 from ainode.models.registry import (
     FALLBACK_CATALOG,
+    CURATED_CLUSTER_MODELS,
     MODEL_CATALOG,
     CatalogAggregator,
     ModelInfo,
     ModelManager,
 )
+
+# The catalog = fallback (offline) + always-merged curated cluster models.
+CATALOG_SIZE = len(FALLBACK_CATALOG) + len(CURATED_CLUSTER_MODELS)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +102,18 @@ class TestCatalog:
         assert "hf_repo" in d
         assert "size_gb" in d
 
+    def test_curated_models_carry_proven_config(self, manager):
+        cat = manager.get_catalog_map()
+        seventyb = cat["llama-3.3-70b-nvfp4"]
+        assert seventyb.proven_tp == 2 and seventyb.verified is True
+        big = cat["qwen3-235b-a22b-nvfp4"]
+        assert big.proven_tp == 4 and big.verified is True
+        # an unverified curated entry still carries a proven_tp default but verified=False
+        assert cat["qwen3.5-397b-a17b-nvfp4"].verified is False
+        # fields reach the dict the API serializes
+        d = seventyb.to_dict()
+        assert d["proven_tp"] == 2 and d["verified"] is True
+
 
 # ---------------------------------------------------------------------------
 # Aggregator tests (unit — mocked, no network)
@@ -146,7 +162,7 @@ class TestAggregator:
 class TestManagerList:
     def test_list_available_all_not_downloaded(self, manager: ModelManager):
         models = manager.list_available()
-        assert len(models) == len(FALLBACK_CATALOG)
+        assert len(models) == CATALOG_SIZE
         for m in models:
             assert m["downloaded"] is False
 
@@ -178,6 +194,46 @@ class TestManagerList:
         assert downloaded[0]["id"] == "some-org/custom-model"
         assert downloaded[0]["hf_repo"] == "some-org/custom-model"
         assert downloaded[0]["downloaded"] is True
+
+    def test_hf_cache_nested_curated_model_downloaded(self, manager: ModelManager):
+        """A curated catalog model cached out-of-band at hf-cache/hub/ must read
+        as downloaded (via _find_model_dir), not just when surfaced as an extra."""
+        nested = manager.models_dir / "hf-cache" / "hub" / "models--nvidia--Qwen3-235B-A22B-NVFP4"
+        nested.mkdir(parents=True)
+        (nested / "config.json").write_text('{"test": true}')
+
+        by_repo = {m["hf_repo"]: m for m in manager.list_available()}
+        assert "nvidia/Qwen3-235B-A22B-NVFP4" in by_repo
+        assert by_repo["nvidia/Qwen3-235B-A22B-NVFP4"]["downloaded"] is True
+
+        dl = manager.list_downloaded()
+        assert any(d["hf_repo"] == "nvidia/Qwen3-235B-A22B-NVFP4" for d in dl)
+
+    def test_hf_cache_nested_noncatalog_model_surfaced(self, manager: ModelManager):
+        """A NON-catalog model at hf-cache/hub/ is surfaced as a user-downloaded extra."""
+        slug = "models--acme--Nested-Cache-7B"
+        nested = manager.models_dir / "hf-cache" / "hub" / slug
+        nested.mkdir(parents=True)
+        (nested / "config.json").write_text('{"test": true}')
+
+        avail = {m["id"]: m for m in manager.list_available()}
+        assert slug in avail
+        assert avail[slug]["downloaded"] is True
+        assert avail[slug]["hf_repo"] == "acme/Nested-Cache-7B"
+
+    def test_hf_cache_nested_dedupes_against_standard_path(self, manager: ModelManager):
+        """Same NON-catalog model in both hub/ and hf-cache/hub/ is surfaced once."""
+        slug = "models--acme--Dup-Test-7B"
+        for sub in (manager.models_dir / "hub", manager.models_dir / "hf-cache" / "hub"):
+            d = sub / slug
+            d.mkdir(parents=True)
+            (d / "config.json").write_text('{"test": true}')
+
+        avail_ids = [m["id"] for m in manager.list_available()]
+        assert avail_ids.count(slug) == 1
+
+        dl = manager.list_downloaded()
+        assert sum(1 for d in dl if d["hf_repo"] == "acme/Dup-Test-7B") == 1
 
 
 class TestManagerInfo:
@@ -211,7 +267,11 @@ class TestRecommendations:
     def test_recommend_large_gpu(self, manager: ModelManager):
         huge = max(info.min_memory_gb for info in FALLBACK_CATALOG.values()) + 1
         recs = manager.recommend_for_gpu(huge)
-        assert len(recs) == len(FALLBACK_CATALOG)
+        # Every fallback model fits a huge GPU. The catalog also merges curated
+        # cluster models (some small quantized ones now fit too), so assert the
+        # fallback set is fully recommended rather than an exact count.
+        rec_ids = {r["id"] for r in recs}
+        assert {info.id for info in FALLBACK_CATALOG.values()} <= rec_ids
 
     def test_recommend_tiny_gpu(self, manager: ModelManager):
         recs = manager.recommend_for_gpu(1)
@@ -260,6 +320,7 @@ class TestDownload:
             repo_id="meta-llama/Llama-3.2-3B-Instruct",
             local_dir=str(expected_dir),
             local_dir_use_symlinks=False,
+            max_workers=4,  # uplink-friendly parallel-connection cap
         )
         assert result == expected_dir
 
@@ -308,8 +369,8 @@ class TestModelAPI:
         assert resp.status == 200
         data = await resp.json()
         assert "models" in data
-        assert len(data["models"]) == len(FALLBACK_CATALOG)
-        assert data["count"] == len(FALLBACK_CATALOG)
+        assert len(data["models"]) == CATALOG_SIZE
+        assert data["count"] == CATALOG_SIZE
 
     @pytest.mark.asyncio
     async def test_get_model(self, app, aiohttp_client):

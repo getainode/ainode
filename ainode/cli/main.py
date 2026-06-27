@@ -140,6 +140,32 @@ def cmd_start(args):
         config.node_id = str(uuid.uuid4())[:8]
         config.save()
 
+    # Start-clean (closet #310): one-shot operator knob to skip replaying
+    # persisted models this boot, so `restart` actually frees a node (replay
+    # otherwise reloads config.model + the stacked manifest). Non-destructive —
+    # on-disk config is untouched, so a normal restart resumes serving.
+    from ainode.models.api_routes import consume_start_clean
+    if consume_start_clean():
+        if config.model:
+            console.print("  [yellow]Start-clean — not replaying persisted model(s) this boot.[/yellow]\n")
+        config.model = None
+        config._skip_replay = True
+        # Actually free the node: a vLLM engine container is a sibling spawned via
+        # docker.sock, so the ainode restart does NOT stop it — and with no boot
+        # engine to reclaim it, it would keep holding memory. Sweep them here.
+        try:
+            import subprocess
+            ps = subprocess.run(
+                ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo"],
+                capture_output=True, text=True, timeout=20)
+            ids = [i for i in ps.stdout.split() if i]
+            if ids:
+                subprocess.run(["docker", "rm", "-f", *ids],
+                               capture_output=True, text=True, timeout=60)
+                console.print(f"  [dim]Start-clean — freed {len(ids)} engine container(s).[/dim]\n")
+        except Exception:
+            pass
+
     # Detect GPU
     gpu = detect_gpu()
     if gpu:
@@ -204,8 +230,8 @@ def cmd_start(args):
         return
 
     if in_container or config.engine_strategy == "docker":
-        from ainode.engine.docker_engine import build_engine
-        engine = build_engine(config)
+        from ainode.engine.backends import get_backend
+        engine = get_backend(config)
     else:
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)
@@ -319,8 +345,8 @@ def cmd_status(args):
 
     # Engine health check — dispatch by engine_strategy for parity with cmd_start.
     if config.engine_strategy == "docker":
-        from ainode.engine.docker_engine import DockerEngine
-        engine = DockerEngine(config)
+        from ainode.engine.backends import get_backend
+        engine = get_backend(config)
     else:
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)
@@ -723,6 +749,23 @@ def main():
     auth_sub.add_parser("status", help="Show auth status")
     auth_sub.add_parser("new-key", help="Generate a new API key")
     auth_parser.set_defaults(func=cmd_auth)
+
+    # doctor — health report. Stub for v0.4.x; full impl in v0.5.0.
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Run a cluster/node health report (stub — v0.5.0 for full report)",
+    )
+    doctor_parser.add_argument("--peer", help="Run doctor against a remote peer over SSH (v0.5.0)")
+    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable output (v0.5.0)")
+    doctor_parser.add_argument("--fix", action="store_true", help="Offer per-item auto-fix prompts (v0.5.0)")
+
+    def _cmd_doctor(a):
+        # Lazy import — the module is dependency-free today but a future
+        # full impl will pull in ainode.cluster.hca_discovery etc.
+        from ainode.cli.doctor import cmd_doctor
+        return cmd_doctor(a)
+
+    doctor_parser.set_defaults(func=_cmd_doctor)
 
     args = parser.parse_args()
 

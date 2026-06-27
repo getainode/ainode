@@ -12,6 +12,185 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.22] — 2026-06-20
+
+### Added
+- **Concurrent multi-instance serving (P2-2).** A head node can now run several
+  distributed instances at once: an `InstanceManager` tracks them, each gets its own
+  api port (8000, 8001, …), Ray port (6379, 6380, …), MASTER_PORT, container names, and
+  config snapshot. `/api/sharding/launch` now **appends** an instance instead of tearing
+  down the running one; eject/unload stops a single instance by model. The announcement
+  advertises all instances a head runs. Route-by-model on :3000 is P2-3 (a 2nd instance
+  is reachable on its own port for now).
+
+---
+
+## [0.4.21] — 2026-06-20
+
+### Changed
+- **Weight distribution prefers rsync** (resumable + incremental) over tar-over-ssh; the
+  image now ships rsync. A dropped transfer no longer re-sends the whole model on relaunch.
+  Falls back to tar if rsync is absent.
+
+---
+
+## [0.4.20] — 2026-06-20
+
+### Added
+- **Phase 3a — auto-distribute weights at launch.** A distributed launch now ensures
+  each selected peer has the model in its cache; if missing, the head streams the
+  weights over the fabric (tar-over-ssh; the image has no rsync) before starting that
+  peer's worker. No more manual pre-placement — pick any nodes and launch. Reports a
+  `distributing` load phase. Skips peers that already have it.
+
+---
+
+## [0.4.19] — 2026-06-20
+
+### Fixed
+- **Server MODEL INFO "Size on disk" now shows the real size** (completes B2). The
+  server view loads a raw `/api/models` catalog into `_serverState` and reads
+  `local_size_gb`/`size_gb` — the loaded-model object had no size and
+  `this.state.catalog` was never populated in this view (and remapped the field).
+
+---
+
+## [0.4.18] — 2026-06-20
+
+### Fixed
+- **Server view "Reachable at" no longer renders blank** — falls back through
+  `reachable_at[1] → [0] → "—"` (was blank when the preferred entry was empty).
+- **Server MODEL INFO shows real values** — Quantization (e.g. NVFP4) and Arch
+  (family) and Size on disk are now derived from the catalog/model-id instead of
+  showing `none` / the org name / `—`. (Real arch like `LlamaForCausalLM` needs the
+  per-model config.json — tracked as a follow-up.)
+- **`fabric_ip` now live in `/api/nodes`** (carried in this roll; was added to
+  `/api/cluster/resources` in 0.4.17).
+
+---
+
+## [0.4.17] — 2026-06-20
+
+### Fixed
+- **Node-picker pills no longer wrap.** `.node-dot` was a fixed 40px circle (sized for the
+  old single-digit count picker); node-name labels like "Spark-4" wrapped to two lines. Now an
+  auto-width pill (`nowrap`), so "Spark-1 ★" / "Spark-4" render on one line.
+
+### Added
+- **`fabric_ip` in `/api/nodes`** — each node's cluster-fabric IP is exposed for UI/debugging
+  (the launch already resolves it server-side; this just surfaces it).
+
+---
+
+## [0.4.16] — 2026-06-20
+
+### Added
+- **Proven-config catalog.** Curated models carry `proven_tp` + `verified`; the launch
+  dropdown marks verified models with ✓ and picking a model pre-selects its proven node
+  count in the picker (70B → 2, 235B → 4).
+
+### Changed
+- **`NVIDIA_VLLM_IMAGE` is env-resolved** with the proven GB10 default
+  (`scitrera/dgx-spark-vllm:0.17.0-t5`); no deployment hand-seds the source anymore.
+
+---
+
+## [0.4.15] — 2026-06-20
+
+### Fixed
+- **Dashboard showed a distributed instance as `SINGLE`.** A running TP=N model
+  rendered as single-node because (1) `distributed_instance.model` came back empty
+  when the head had started idle then launched (stale announcement model) — the UI
+  gates its DISTRIBUTED card on that field; and (2) membership matched `peer_ips`
+  (now fabric IPs) against `node_id`. The cluster/resources builder now reads the
+  model from the instance_id and resolves fabric-IP peers back to member node_ids
+  (`peer_node_ids` / `member_names`); the UI keys on those and no longer over-counts
+  idle `member`-mode nodes. Verified in a live browser.
+
+---
+
+## [0.4.14] — 2026-06-20
+
+### Added
+- **Node selection for distributed launch.** The launch panel is now a per-node
+  picker (head pinned ★, others toggle) instead of a count selector; the launch
+  POSTs explicit `node_ids`, so you choose *which* nodes span a model (head +
+  selected peers), not just how many.
+- **Single stable endpoint, visible loading.** `:3000` returns a clear
+  `503 {load_phase}` during a model swap instead of proxying into a hang.
+
+### Fixed
+- **BUG D — distributed launch now uses FABRIC IPs.** Nodes broadcast their
+  fabric IP (`NodeAnnouncement.fabric_ip`); the head resolves participating peers
+  to fabric IPs and refuses to launch on a node with no known fabric IP. The old
+  path used the mgmt-LAN UDP source IP, landing a Ray worker on a non-GPU address.
+
+---
+
+## [0.4.13] — 2026-06-18
+
+### Added (Phase 3 — model lifecycle, in-app)
+- **Curated cluster models in the catalog (3b)** — the frontier/NVFP4 models this GB10 cluster runs (235B/397B/405B-NVFP4, 70B, GLM) are now always merged into the catalog (`CURATED_CLUSTER_MODELS`), so they're discoverable + downloadable instead of only appearing once on disk. `_find_model_dir` now resolves downloaded-state across all on-disk layouts (`org--name`, `hub/`, `hf-cache/hub/`), so a catalog model present anywhere reads as downloaded.
+- **Live load-phase card during spin-up (3c)** — `NvidiaBackend` tracks a coarse load phase (`starting→loading_weights→distributed_init→profiling→ready`) from engine log markers, exposed via `health_check` + `/api/status` `load_phase`. The instances panel shows a LAUNCHING card with the phase + a progress bar through the multi-minute launch; a stall is visible as the phase that stops advancing.
+
+### Added (Phase 3 — telemetry fan-out, shipped in the 0.4.12 lab build)
+- **Per-peer GPU telemetry fan-out** — every node now stamps live VRAM/util/temp onto its 5s discovery broadcast (`NodeAnnouncement` gains `gpu_memory_used_mb`/`gpu_memory_total_mb`/`gpu_utilization`/`gpu_temp`, default-valued so older nodes stay compatible). `BroadcastSender` refreshes them each tick from the node's `MetricsCollector`; `ClusterNode` carries them; `/api/nodes` exposes `gpu_memory_used_pct`/`gpu_utilization`/`gpu_temp` per node (local node read fresh from its own collector). The cluster graphic now shows real VRAM on **all** nodes, not just the head — closing the Phase-1 worker-VRAM gap.
+
+---
+
+## [0.4.11] — 2026-06-17
+
+### Fixed (dashboard now reports the truth — Phase 1+2)
+- **Phantom READY eliminated** — `/api/status` `engine_ready` is now a live `/v1/models` probe each call (latched `engine.ready` no longer trusted); the instances panel + master node card derive status from it (READY vs STARTING) instead of a hardcoded `READY`.
+- **Per-node VRAM no longer stuck at 0%** — `metrics/collector.py` falls back to `psutil` for GB10 unified memory (nvidia-smi reports N/A), and the UI merges live GPU metrics into the (local) node so the memory ring shows real %. *(Per-peer VRAM still pending a metrics fan-out — Phase 3.)*
+- **Cluster graphic shows distributed membership** — participating nodes are stamped with the model + `TP=N` from the authoritative `/api/cluster/resources` `distributed_instance` (the old path keyed off `active_sharding`, which is `null` while serving, so workers showed nothing).
+- **Ray status no longer falsely "not installed"** — `/api/sharding/status` derives Ray health from the head engine when a distributed instance is serving (the orchestrator container has no `ray` binary to probe).
+- **DELETE works on a dead/phantom instance** — `unload` force-clears (`stopped: true`) when the engine is unreachable instead of blocking on a `SIGTERM` that can't confirm.
+
+### Changed
+- **AUTO sharding now defaults to Tensor parallel** (was Pipeline) — matches the distributed launch path and this hardware. Launch UI defaults the Sharding pill to **Tensor** and relabels the node selector "Tensor Parallel Size (nodes)".
+- **Launch dropdown marks model state** — loaded (●) / on-disk (○) so you can tell what's downloaded.
+
+---
+
+## [0.4.10] — 2026-06-17
+
+### Fixed
+- **GB10 (sm120) frontier-MoE inference no longer crashes on the first request** — `NvidiaBackend` now passes **`--enforce-eager`**. vLLM auto-selects the FlashInfer attention backend on Blackwell, whose prefill kernel (`BatchPrefillWithPagedKVCache`) emits an `illegal instruction` **under CUDA-graph capture** on GB10/sm120 and kills EngineCore on the first real prefill (the engine loads, reports READY, then suicides — vLLM SIGTERMs its own Ray workers; `/v1/models` 200 is not proof the engine works). `--enforce-eager` disables graph capture and the same FlashInfer kernel runs clean. Verified live: `nvidia/Qwen3-235B-A22B-NVFP4` at TP=4 across 4× GB10 survived a 3,513-token prefill and stayed alive. (`ainode/engine/backends/nvidia.py`)
+- **`models/hf-cache/hub/` now scanned for downloaded models** — `registry.py` `list_available` + `list_downloaded` previously walked only `models/` and `models/hub/`, so HF-transfer downloads (e.g. the 235B) were invisible in the launch dropdown despite being on disk. +2 tests.
+
+### Changed
+- **`NvidiaBackend` sets `VLLM_ATTENTION_BACKEND` (env-overridable, default `TRITON_ATTN`)** — **currently a no-op**: the scitrera/vLLM 0.17.1 serving image does not honor it (ranks still log `Using FLASHINFER`). Retained as a hedge for a build that does (correct value may be `TRITON_ATTN_VLLM_V1`). `--enforce-eager` above is what actually prevents the crash; re-enabling CUDA graphs for throughput will require a working non-FlashInfer backend first.
+- **Adopted the DOX `AGENTS.md` edit-contract convention** — root `AGENTS.md` + a child at `ainode/engine/AGENTS.md` (distributed-launch + GB10 vLLM-flag invariants), plus a chain-walk pointer atop `CLAUDE.md`. References only; no duplication.
+
+### Known limitations
+- **The lab's serving image (`scitrera/dgx-spark-vllm:0.17.0-t5`) is still injected by a build-time patch, not the repo.** `NVIDIA_VLLM_IMAGE` is hardcoded to `nvcr.io/nvidia/vllm:26.02-py3` (vLLM 0.15.1, can't serve MoE); the deployed `0.4.10` image is built `FROM` the patched orchestrator with the scitrera repoint re-applied. Follow-up: make `NVIDIA_VLLM_IMAGE` env/config-driven so a clean `Dockerfile.ainode` build is the canonical path. Until then, a from-scratch repo build regresses the serving image.
+
+---
+
+## [0.4.9] — 2026-04-18
+
+### Fixed
+- **4-node distributed inference: `NCCL_IB_HCA` now auto-detected per-node** — four bugs in the NCCL environment generator prevented TP=4 ring formation on any cluster with heterogeneous HCA naming (MOFED `mlx5_*` on some nodes, stock Ubuntu `rocep*`/`roceP*` on others), or with vestigial direct-connect ports on dual-homed nodes:
+  1. `_detect_ib_hca()` filtered `ibdev2netdev` output by the `mlx5_` prefix and silently returned empty on non-MOFED nodes, triggering a hardcoded `mlx5_0` fallback that pointed at a direct-connect port. Now accepts both naming schemes.
+  2. `_detect_ib_hca()` did not filter by port `(Up)` state. Down ports could poison the output. Fixed to match eugr's autodiscover contract.
+  3. Detection ran on the head only and broadcast one value cluster-wide. New startup shim (`scripts/nccl-env-init.sh`) runs inside each vllm_node container via `docker run --entrypoint` and exports the correct node-local `NCCL_IB_HCA`.
+  4. `_write_eugr_env()` conflated `IB_IF` (HCA device name in eugr's model) with `cluster_interface` (netdev). Fixed so eugr's `launch-cluster.sh` receives a real HCA list for `NCCL_IB_HCA`.
+- **Direct-connect HCAs now excluded from NCCL ring automatically** — detection now filters HCAs to those whose netdev IP is on the cluster subnet (derived from `cluster_interface`). On Sparks 1 & 2 in our reference cluster, this keeps `mlx5_1` / `mlx5_3` (switch-facing) and drops `mlx5_0` (10.0.0.x direct-connect), eliminating one source of TP=4 hangs.
+
+### Changed
+- **ainode systemd unit now mounts `/mnt/shared-models`** via `docker --mount type=bind`. Required by the new per-node NCCL shim publish path. Uses `--mount` (not `-v`) so the service **fails loudly** if the path is missing rather than silently degrading to partial fix.
+
+### Upgrade notes
+- **Create `/mnt/shared-models` on every node before upgrading** — `sudo mkdir -p /mnt/shared-models`. NFS mount recommended for clusters (so the master's `docker run -v` mount on each peer resolves to shared model files and the NCCL init shim). On the master, bind-mount or NFS-export the path from your model storage location.
+- The v0.4.9 fix is fully effective only when every node has `/mnt/shared-models` populated. Without it, the service fails to start until the path exists. Create the dir, or downgrade if you're not ready.
+
+### Known limitations
+- The per-node NCCL shim is distributed via `/mnt/shared-models`, not baked into the `ainode-base` image. Clusters without shared storage get a startup failure by design. `TODO(v0.4.10)` — move the shim into `ainode-base` so the mount becomes optional and `ainode-base` containers have the shim natively.
+- Performance numbers for TP=2 on direct-connect 10.0.0.0/24 (advertised in v0.4.0's README as "NET/IB RoCE @ 200 Gb/s") have not been re-measured on the switched fabric post-fix. v0.4.9 smoke test captures live `NCCL_DEBUG=INFO`, `ib_write_bw`, and pre/post TP=2 throughput to `ops/runbooks/2026-04-18-v0.4.9-verification.md`. If results differ from v0.4.0's claim, a README footnote will acknowledge the earlier measurement was on direct-connect and may have been partially socket-fallback.
+
+---
+
 ## [0.4.8] — 2026-04-17
 
 ### Fixed

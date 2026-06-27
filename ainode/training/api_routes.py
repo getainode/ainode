@@ -87,6 +87,40 @@ async def handle_submit_job(request: web.Request) -> web.Response:
         if node_config and getattr(node_config, "hf_token", None):
             body["hf_token"] = node_config.hf_token
 
+    # Quantize jobs: default a clean on-disk output name, and refuse if this node
+    # is already serving a model — quantization needs the node's full unified
+    # memory, so running it against a live model OOMs (operator guardrail; pass
+    # force=true to override).
+    if body.get("method") == "quantize":
+        if not body.get("out_slug"):
+            base = (body.get("base_model") or "").rstrip("/").replace("/", "--")
+            if base:
+                body["out_slug"] = f"{base}-{(body.get('scheme') or 'awq').lower()}"
+        if body.get("push_to_hf"):
+            from ainode.models.hf_upload import resolve_hf_token, assert_write_scope
+            tok = resolve_hf_token(request.app, body.get("hf_token"))
+            try:
+                assert_write_scope(tok)
+            except Exception as exc:
+                return web.json_response({"error": f"push_to_hf: {exc}"}, status=400)
+            # Carry the resolved (write-preferred) token into the job so the
+            # post-quant push uses it — NodeConfig.hf_token may be unset while the
+            # write token lives in the Secrets store.
+            body["hf_token"] = tok
+        if not body.get("force"):
+            instances = request.app.get("instances")
+            engine = request.app.get("engine")
+            cfg = request.app.get("config")
+            busy = (instances is not None and not instances.is_empty()) or (
+                engine is not None and getattr(cfg, "model", None)
+            )
+            if busy:
+                return web.json_response({
+                    "error": "This node is serving a model. Quantization needs the full "
+                             "unified memory — unload all models on this node first "
+                             "(or resubmit with force=true)."
+                }, status=409)
+
     try:
         config = TrainingConfig.from_dict(body)
     except Exception as exc:

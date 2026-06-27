@@ -51,6 +51,37 @@ else
     git -C "$WORKTREE" checkout -q "$EUGR_COMMIT"
 fi
 
+# -- Patch eugr's Dockerfile: vanilla NCCL for switched topology ------------
+# Eugr's Dockerfile defaults to building NCCL from the ``dgxspark-3node-ring``
+# branch of zyang-dev/nccl. That patch is for a 3-node direct-connect mesh
+# topology only (see eugr's docs/NETWORKING.md § "3-node mesh", line 400+).
+# For switched topology — our target: Sparks connected via a QSFP switch —
+# eugr's own docs (NETWORKING.md § "Dual Sparks or Sparks via QSFP switch",
+# line 355+) specify vanilla NCCL v2.28.3-1 from github.com/NVIDIA/nccl.git.
+# Running the mesh patch on switched topology produced NCCL init hangs in
+# ncclCommInitRank; see ops/runbooks/2026-04-18-v0.4.9-verification.md for
+# the evidence trail.
+#
+# We swap the clone line in place rather than forking eugr's Dockerfile so
+# EUGR_COMMIT bumps pull cleanly and this single line is the only re-audit.
+# If eugr changes the NCCL source format and the grep below doesn't match,
+# the script exits — a silently-skipped sed would leave the mesh NCCL in
+# place and the hang would reappear.
+DOCKERFILE="$WORKTREE/Dockerfile"
+OLD_NCCL='git clone -b dgxspark-3node-ring https://github.com/zyang-dev/nccl.git'
+NEW_NCCL='git clone -b v2.28.3-1 https://github.com/NVIDIA/nccl.git'
+echo "==> Patching eugr Dockerfile: vanilla NCCL for switched topology"
+if grep -qF "$OLD_NCCL" "$DOCKERFILE"; then
+    sed -i "s|$OLD_NCCL|$NEW_NCCL|" "$DOCKERFILE"
+    echo "    swapped: dgxspark-3node-ring (mesh) -> v2.28.3-1 (vanilla, switched)"
+elif grep -qF "$NEW_NCCL" "$DOCKERFILE"; then
+    echo "    already patched (idempotent re-run)"
+else
+    echo "!! expected NCCL clone line not found in $DOCKERFILE" >&2
+    echo "   Eugr may have changed the NCCL source; re-audit the patch in this script." >&2
+    exit 1
+fi
+
 echo "==> Building eugr image (prebuilt vLLM wheels expected; ~12 min)"
 pushd "$WORKTREE" >/dev/null
 ./build-and-copy.sh --tag "vllm-node:${EUGR_SHORT}"

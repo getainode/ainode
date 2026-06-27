@@ -30,7 +30,7 @@
         <button class="nav-pill active" data-view="dashboard">Cluster</button>
         <button class="nav-pill" data-view="chat">Chat</button>
         <button class="nav-pill" data-view="server">Server</button>
-        <button class="nav-pill" data-view="downloads">Downloads</button>
+        <button class="nav-pill" data-view="downloads">Models</button>
         <button class="nav-pill" data-view="training">Training</button>
         <button class="nav-pill" data-view="config">Config</button>
       </nav>
@@ -89,8 +89,8 @@
       <!-- Downloads view -->
       <div id="view-downloads" class="view" style="display:none">
         <div class="view-header">
-          <h2>Downloads</h2>
-          <p>Manage model downloads across the cluster</p>
+          <h2>Models</h2>
+          <p>Installed models on your cluster, plus Hugging Face downloads</p>
         </div>
         <div id="downloads-content"></div>
       </div>
@@ -153,15 +153,15 @@
           </select>
           <label class="form-label">Sharding</label>
           <div class="pill-group" id="sharding-pills">
-            <button class="pill active" data-value="pipeline">Pipeline</button>
-            <button class="pill" data-value="tensor">Tensor</button>
+            <button class="pill active" data-value="tensor">Tensor</button>
+            <button class="pill" data-value="pipeline">Pipeline</button>
           </div>
-          <label class="form-label">Minimum Nodes</label>
+          <label class="form-label">Nodes (★ = head; click to add)</label>
           <div class="node-selector" id="node-selector">
-            <!-- Populated dynamically based on discovered cluster size -->
+            <!-- One toggle per discovered node; populated dynamically -->
           </div>
           <div class="launch-hint" id="launch-hint">
-            Solo mode — runs on this node only.
+            Solo — runs on this node only (TP=1).
           </div>
           <button class="btn-nvidia btn-full" id="launch-btn">LAUNCH</button>
         </div>

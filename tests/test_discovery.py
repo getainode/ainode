@@ -51,6 +51,10 @@ class TestNodeAnnouncement:
             "unified_memory", "model", "status", "api_port", "web_port", "timestamp",
             "cluster_id", "role", "is_master",
             "distributed_mode", "distributed_instance_id", "distributed_peers",
+            # GPU telemetry fan-out (0.4.12) + fabric IP for distributed launch (BUG D)
+            "gpu_memory_used_mb", "gpu_memory_total_mb", "gpu_utilization", "gpu_temp",
+            "fabric_ip",
+            "instances",  # Phase 2: distributed instances this node heads
         }
         assert set(data.keys()) == expected_keys
 

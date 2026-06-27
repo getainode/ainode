@@ -27,7 +27,7 @@ const AINode = {
     abortController: null,
     shardingStatus: null,
     currentView: 'dashboard',
-    modelsFilter: 'all',
+    modelsFilter: 'catalog',
     modelsSearch: '',
     modelsSort: 'recommended',
     configSection: 'credentials',
@@ -299,11 +299,15 @@ const AINode = {
       this.fetchJSON('/api/nodes'),
       this.fetchJSON('/api/sharding/status'),
       this.fetchJSON('/api/cluster/resources'),
+      this.fetchJSON('/v1/models'),   // federated fleet union (F1) — every node's model
     ]);
     this.state.status = results[0];
     this.state.nodes = results[1]?.nodes || [];
     this.state.shardingStatus = results[2];
     this.state.clusterResources = results[3];
+    // Fleet-wide loaded models: ids from the federated /v1/models union, so the
+    // chat dropdown + INSTANCES panel see models on ALL nodes, not just local.
+    this.state.fleetModels = ((results[4] && results[4].data) || []).map(function (m) { return m.id; });
 
     this.updateTopBar();
     this.updateClusterHero();
@@ -598,18 +602,38 @@ const AINode = {
         engine_ready: s.engine_ready,
       }];
 
-      // Annotate with sharding info
-      var shardInfo = this.state.shardingStatus && this.state.shardingStatus.active_sharding;
-      if (shardInfo && shardInfo.shard_map) {
+      // MEMBERSHIP — stamp model + TP=N onto participating nodes from the
+      // authoritative distributed_instance (cluster/resources). Keep any
+      // distinct per-node model; never overwrite it. Solo mode (di null) no-op.
+      var di = this.state.clusterResources && this.state.clusterResources.distributed_instance;
+      if (di && di.model) {
+        // Members are EXACTLY the head + this instance's peers (resolved to
+        // node_ids server-side). Don't mark every 'member'-mode node — that
+        // over-counts idle members not in this instance.
+        var memberIds = di.peer_node_ids || di.peer_ips || [];
         topoNodes = topoNodes.map(function (n) {
-          var shard = shardInfo.shard_map[n.node_id];
-          if (shard) {
-            n.shard_role = shard.role;
-            n.shard_layers = shard.layers;
-            n.shard_memory_gb = shard.estimated_memory_gb;
-            n.sharded_model = shardInfo.model;
+          var participates =
+            n.node_id === di.head_node_id ||
+            memberIds.indexOf(n.node_id) !== -1;
+          if (participates) {
+            n.model = n.model || di.model;
+            n.tp_size = di.tensor_parallel_size;
           }
           return n;
+        });
+      }
+
+      // VRAM — merge this node's live GPU metrics so the ring shows real %.
+      // Only mutates the local node; remote nodes keep their static totals.
+      var gm = this.state.metrics && this.state.metrics.gpu;
+      if (gm && !gm.error && gm.memory_total_mb > 0) {
+        var localId = s.node_id;
+        topoNodes.forEach(function (n) {
+          if (n.node_id === localId || topoNodes.length === 1) {
+            n.gpu_memory_used_pct = Math.round((gm.memory_used_mb / gm.memory_total_mb) * 100);
+            n.gpu_utilization = gm.utilization_percent;
+            n.gpu_temp = gm.temperature_c;
+          }
         });
       }
       // Pass engine_ready so the topology can drive the loading → real transition.
@@ -628,6 +652,15 @@ const AINode = {
     if (!container) return;
     var self = this;
     var s = this.state.status;
+    var live = !!(s && s.engine_ready);
+    var phase = (s && s.load_phase) || 'idle';
+    // Coarse phase → [label, percent] for the launching card (3c).
+    var PHASE_INFO = {
+      idle: ['starting', 8], starting: ['starting', 12],
+      loading_weights: ['loading weights', 40],
+      distributed_init: ['connecting nodes', 62],
+      profiling: ['profiling', 84], ready: ['ready', 100],
+    };
     var instances = [];
 
     // Distributed instance (authoritative from /api/cluster/resources) —
@@ -642,25 +675,33 @@ const AINode = {
         model: di.model,
         strategy: 'distributed',
         tp_size: di.tensor_parallel_size,
-        nodes: [di.head_node_id].concat(di.peer_ips || []),
-        status: 'READY',
-        badge: 'DISTRIBUTED · TP=' + di.tensor_parallel_size,
+        nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
+        status: live ? 'READY' : 'STARTING',
+        // A single-node serve is SOLO even when the head advertises a
+        // distributed_instance (it's configured with peers) — only badge
+        // DISTRIBUTED when there's real cross-node tensor parallelism.
+        badge: (di.tensor_parallel_size > 1) ? ('DISTRIBUTED · TP=' + di.tensor_parallel_size) : 'SOLO · TP=1',
       });
     }
 
-    // Collect from models_loaded (skip the one we already rendered distributed)
-    if (s && s.models_loaded) {
-      s.models_loaded.forEach(function (modelName) {
-        if (distModel && modelName === distModel) return;
-        instances.push({
-          model: modelName,
-          strategy: 'single',
-          nodes: [s.node_id || 'local'],
-          status: 'READY',
-          badge: 'SINGLE',
-        });
+    // Fleet-wide: one card per node serving a solo model, across ALL nodes
+    // (not just local) — sourced from cluster /api/nodes so the panel matches
+    // the federated /v1/models the chat dropdown uses. Skip the distributed one.
+    var seen = {};
+    (this.state.nodes || []).forEach(function (n) {
+      var modelName = n.model;
+      if (!modelName || (distModel && modelName === distModel)) return;
+      var key = modelName + '@' + (n.node_id || n.hostname);
+      if (seen[key]) return;
+      seen[key] = true;
+      instances.push({
+        model: modelName,
+        strategy: 'single',
+        nodes: [n.hostname || n.node_id],
+        status: n.engine_ready ? 'READY' : 'STARTING',
+        badge: 'SINGLE',
       });
-    }
+    });
 
     // Collect from sharding status (legacy — keep for pipeline/tensor runs
     // that don't come through the cluster/resources distributed_instance)
@@ -674,13 +715,26 @@ const AINode = {
           model: sh.model,
           strategy: sh.strategy || 'pipeline',
           nodes: shardNodes,
-          status: 'READY',
+          status: live ? 'READY' : 'STARTING',
           badge: (sh.strategy || 'pipeline').toUpperCase(),
         });
       } else {
         already.strategy = sh.strategy || 'pipeline';
         already.nodes = shardNodes.length > 0 ? shardNodes : already.nodes;
       }
+    }
+
+    // Launching card (3c): a model is configured and the engine is spinning up
+    // but hasn't registered as an instance yet — show its load phase so the
+    // multi-minute launch doesn't read as "nothing running".
+    if (instances.length === 0 && s && s.model && !live) {
+      instances.push({
+        model: s.model,
+        strategy: 'launching',
+        nodes: [s.node_id || 'local'],
+        status: 'STARTING',
+        badge: 'LAUNCHING',
+      });
     }
 
     if (instances.length === 0) {
@@ -698,8 +752,15 @@ const AINode = {
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
         '<div class="instance-footer">' +
-        '<span class="instance-status ready">READY</span>' +
-        '<button class="instance-delete" data-model="' + self.esc(inst.model) + '">DELETE</button>' +
+        (inst.status === 'READY'
+          ? '<span class="instance-status ready">READY</span>'
+          : (function () {
+              var pi = PHASE_INFO[phase] || ['starting', 10];
+              return '<span class="instance-status starting">' + self.esc(pi[0].toUpperCase()) + ' · ' + pi[1] + '%</span>' +
+                '<span style="display:inline-block;width:90px;height:5px;background:#1f2a1f;border-radius:3px;margin:0 8px;vertical-align:middle;overflow:hidden">' +
+                '<span style="display:block;height:100%;width:' + pi[1] + '%;background:#76c043;transition:width .4s"></span></span>';
+            })()) +
+        '<button class="instance-delete" data-model="' + self.esc(inst.model) + '">UNLOAD</button>' +
         '</div>' +
         '</div>';
     }).join('');
@@ -757,24 +818,31 @@ const AINode = {
     var launchHint = document.getElementById('launch-hint');
     var self = this;
 
+    // One toggle per real node. The head (this node) is pinned-selected; the
+    // others default OFF (so a fresh launch is solo TP=1 — the common case).
+    // Click a node to add it; TP size = number of selected nodes. The launch
+    // POSTs the selected node_ids (resolved to fabric IPs server-side).
     this._renderNodeDots = function () {
       if (!nodeSelector) return;
-      var clusterSize = Math.max(1, (self.state.nodes || []).length);
-      var currentActive = nodeSelector.querySelector('.node-dot.active');
-      var currentVal = currentActive ? parseInt(currentActive.dataset.value) || 1 : 1;
-      // Only re-render if count changed
-      var dotCount = nodeSelector.querySelectorAll('.node-dot').length;
-      if (dotCount === clusterSize) return;
-      var html = '';
-      for (var i = 1; i <= clusterSize; i++) {
-        html += '<button class="node-dot' + (i === Math.min(currentVal, clusterSize) ? ' active' : '') + '" data-value="' + i + '">' + i + '</button>';
-      }
-      nodeSelector.innerHTML = html;
-      // Re-bind click handlers
+      var headId = self.state.status && self.state.status.node_id;
+      var nodes = (self.state.nodes || []).slice();
+      if (!nodes.length && headId) nodes = [{ node_id: headId, node_name: 'this node' }];
+      var key = nodes.map(function (n) { return n.node_id; }).join(',');
+      if (nodeSelector.dataset.nodekey === key) return; // node set unchanged
+      nodeSelector.dataset.nodekey = key;
+      nodeSelector.innerHTML = nodes.map(function (n) {
+        var isHead = headId && n.node_id === headId;
+        var label = (n.node_name || n.node_id || '').replace(/-DGX|-GX10/i, '');
+        return '<button class="node-dot' + (isHead ? ' active head' : '') + '"'
+          + ' data-node-id="' + self.esc(n.node_id) + '"'
+          + (isHead ? ' data-head="1"' : '')
+          + ' title="' + self.esc(n.node_name || n.node_id) + (isHead ? ' (head — always included)' : '') + '">'
+          + self.esc(label) + (isHead ? ' ★' : '') + '</button>';
+      }).join('');
       nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
         dot.addEventListener('click', function () {
-          nodeSelector.querySelectorAll('.node-dot').forEach(function (d) { d.classList.remove('active'); });
-          dot.classList.add('active');
+          if (dot.dataset.head) return; // head can't be deselected
+          dot.classList.toggle('active');
           updateLaunchHint();
         });
       });
@@ -782,27 +850,65 @@ const AINode = {
     };
     this._renderNodeDots();
 
+    // Pre-select head + (tp-1) peers — used when a model's proven TP is chosen.
+    this._selectNodes = function (tp) {
+      var sel = document.getElementById('node-selector'); if (!sel) return;
+      var peersWanted = Math.max(0, tp - 1), peerN = 0;
+      sel.querySelectorAll('.node-dot').forEach(function (d) {
+        if (d.dataset.head) { d.classList.add('active'); return; }
+        if (peerN < peersWanted) { d.classList.add('active'); peerN++; }
+        else { d.classList.remove('active'); }
+      });
+      updateLaunchHint();
+    };
+
+    // Activate a specific set of node ids (head always stays on).
+    this._selectNodeIds = function (ids) {
+      var sel = document.getElementById('node-selector'); if (!sel) return;
+      var want = {}; (ids || []).forEach(function (id) { want[id] = true; });
+      sel.querySelectorAll('.node-dot').forEach(function (d) {
+        if (d.dataset.head) { d.classList.add('active'); return; }
+        d.classList.toggle('active', !!want[d.dataset.nodeId]);
+      });
+    };
+
+    // Fit-aware hint, recomputed on every refresh + node/strategy change so it
+    // survives polling. Reads the selected model's size and each node's free mem.
     function updateLaunchHint() {
       if (!launchHint) return;
-      var activeDot = nodeSelector && nodeSelector.querySelector('.node-dot.active');
-      var n = activeDot ? parseInt(activeDot.dataset.value) || 1 : 1;
+      var active = nodeSelector ? nodeSelector.querySelectorAll('.node-dot.active') : [];
+      var n = active.length || 1;
+      var names = Array.prototype.map.call(active, function (d) { return d.textContent.replace('★', '').trim(); }).join(' + ');
       var strategyPill = document.querySelector('#sharding-pills .pill.active');
-      var strat = strategyPill ? strategyPill.dataset.value : 'pipeline';
-      if (n <= 1) {
-        launchHint.textContent = 'Solo mode — runs on this node only.';
-        launchHint.className = 'launch-hint';
+      var strat = strategyPill ? strategyPill.dataset.value : 'tensor';
+      var stratLabel = strat.charAt(0).toUpperCase() + strat.slice(1);
+      launchHint.className = 'launch-hint';
+
+      var msel = document.getElementById('launch-model');
+      var opt = msel && msel.selectedIndex >= 0 ? msel.options[msel.selectedIndex] : null;
+      var size = opt ? parseFloat(opt.getAttribute('data-size-gb') || '0') : 0;
+      var minMem = opt ? parseFloat(opt.getAttribute('data-min-mem') || '0') : 0;
+      var req = (minMem && minMem > size) ? minMem : size * 1.2;
+      if (!opt || !opt.value || !req) {  // no model picked yet → plain text
+        launchHint.textContent = n <= 1 ? 'Solo — runs on this node only (TP=1).'
+          : stratLabel + ' · TP=' + n + ' across ' + names + '.';
+        return;
+      }
+
+      var byId = {};
+      (self.state.nodes || []).forEach(function (nd) { byId[nd.node_id] = nd; });
+      var freeOf = function (nd) { return nd ? Math.max(0, (nd.gpu_memory_gb || 0) * (1 - (nd.gpu_memory_used_pct || 0) / 100)) : 0; };
+      var perShard = req / n;
+      var frees = Array.prototype.map.call(active, function (d) { return freeOf(byId[d.dataset.nodeId]); });
+      var minFree = frees.length ? Math.min.apply(null, frees) : 0;
+      if (minFree < perShard) {
+        launchHint.className = 'launch-hint warn';
+        launchHint.textContent = '⚠ Needs ~' + Math.round(perShard) + ' GB/node but a selected node has only ~' +
+          Math.round(minFree) + ' GB free — unload a model to free space.';
+      } else if (n <= 1) {
+        launchHint.textContent = '✓ Runs solo on ' + (names || 'this node') + ' (TP=1) — ~' + Math.round(req) + ' GB.';
       } else {
-        // Count available member peers for honesty.
-        var cr = self.state.clusterResources;
-        var members = 0;
-        if (cr && cr.nodes) {
-          members = cr.nodes.filter(function (x) { return x.distributed_mode === 'member'; }).length;
-        }
-        var enough = members >= (n - 1);
-        launchHint.textContent = 'Distributed ' + strat.toUpperCase() + ' · ' + n + ' nodes'
-          + (enough ? ' — will place ' + (n - 1) + ' Ray worker(s) on discovered member node(s).'
-                    : ' — need ' + (n - 1) + ' member peer(s), ' + members + ' discovered.');
-        launchHint.className = 'launch-hint' + (enough ? '' : ' warn');
+        launchHint.textContent = '✓ ' + stratLabel + ' · TP=' + n + ' across ' + names + ' (~' + Math.round(perShard) + ' GB/node).';
       }
     }
     // (dot click handlers bound inside _renderNodeDots)
@@ -819,6 +925,45 @@ const AINode = {
     if (launchBtn) {
       launchBtn.addEventListener('click', function () { self.launchInstance(); });
     }
+  },
+
+  // Auto-pick sharding + nodes for the selected model, aware of free memory on
+  // each node (a node already serving a model has ~85% reserved by vLLM, so it
+  // reads as nearly full). m: {proven_tp, size_gb, min_mem}.
+  recommendLaunch(m) {
+    var nodes = (this.state.nodes || []).filter(function (n) { return n.status !== 'offline'; });
+    var size = m.size_gb || 0;
+    if (!nodes.length || (!size && !m.min_mem)) return;
+    var freeOf = function (n) { return Math.max(0, (n.gpu_memory_gb || 0) * (1 - (n.gpu_memory_used_pct || 0) / 100)); };
+    var headId = this.state.status && this.state.status.node_id;
+    var head = nodes.find(function (n) { return n.node_id === headId; }) || nodes[0];
+    var peers = nodes.filter(function (n) { return n !== head; }).sort(function (a, b) {
+      var am = a.model ? 1 : 0, bm = b.model ? 1 : 0;
+      if (am !== bm) return am - bm;          // prefer idle nodes over busy ones
+      return freeOf(b) - freeOf(a);           // then the most free
+    });
+    var N = nodes.length;
+    var req = (m.min_mem && m.min_mem > size) ? m.min_mem : size * 1.2;
+
+    // Tensor is the proven strategy on this hardware.
+    var pills = document.getElementById('sharding-pills');
+    if (pills) pills.querySelectorAll('.pill').forEach(function (p) { p.classList.toggle('active', p.dataset.value === 'tensor'); });
+
+    // Smallest TP (>= proven_tp) where head + (tp-1) peers each hold req/tp.
+    var rec = null;
+    [1, 2, 4, 8].forEach(function (tp) {
+      if (rec || tp > N) return;
+      if (m.proven_tp && tp < m.proven_tp) return;
+      var perShard = req / tp;
+      if (freeOf(head) < perShard) return;
+      var okPeers = peers.filter(function (n) { return freeOf(n) >= perShard; });
+      if (okPeers.length >= tp - 1) rec = { tp: tp, peers: okPeers.slice(0, tp - 1) };
+    });
+
+    // Set node selection; the fit-aware updater renders the hint (and survives polling).
+    var ids = rec ? [head.node_id].concat(rec.peers.map(function (n) { return n.node_id; })) : [head.node_id];
+    if (this._selectNodeIds) this._selectNodeIds(ids);
+    if (this._launchHintUpdater) this._launchHintUpdater();
   },
 
   populateLaunchModels() {
@@ -872,9 +1017,27 @@ const AINode = {
           var repo = m.hf_repo || m.id;
           var label = m.name || repo;
           var sizeNote = m.size_gb ? ' (' + Math.round(m.size_gb) + ' GB)' : '';
-          return '<option value="' + self.esc(repo) + '">' + self.esc(label) + sizeNote + '</option>';
+          var isLoaded = ((self.state.status && self.state.status.models_loaded) || []).indexOf(repo) !== -1;
+          var onDiskNow = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[repo]) || !!diskSet[repo];
+          var glyph = isLoaded ? '● ' : (onDiskNow ? '○ ' : '');
+          var verifiedMark = m.verified ? ' ✓' : '';
+          var pt = m.proven_tp || 0;
+          return '<option value="' + self.esc(repo) + '" data-proven-tp="' + pt + '"'
+            + ' data-size-gb="' + (m.size_gb || 0) + '" data-min-mem="' + (m.min_memory_gb || 0) + '">'
+            + glyph + self.esc(label) + sizeNote + verifiedMark + '</option>';
         }).join('');
       if (cv) select.value = cv;
+      // Picking a model auto-recommends sharding + nodes from its size and the
+      // free memory on each node.
+      select.onchange = function () {
+        var opt = select.options[select.selectedIndex];
+        if (!opt || !opt.value) return;
+        self.recommendLaunch({
+          proven_tp: parseInt(opt.getAttribute('data-proven-tp') || '0', 10),
+          size_gb: parseFloat(opt.getAttribute('data-size-gb') || '0'),
+          min_mem: parseFloat(opt.getAttribute('data-min-mem') || '0'),
+        });
+      };
     });
   },
 
@@ -884,17 +1047,18 @@ const AINode = {
     if (!model) { this.toast('Select a model first', 'error'); return; }
 
     var pillGroup = document.getElementById('sharding-pills');
-    var strategy = 'pipeline';
+    var strategy = 'tensor';
     if (pillGroup) {
       var activePill = pillGroup.querySelector('.pill.active');
       if (activePill) strategy = activePill.dataset.value;
     }
 
     var nodeSelector = document.getElementById('node-selector');
-    var minNodes = 1;
+    var nodeIds = [];
     if (nodeSelector) {
-      var activeDot = nodeSelector.querySelector('.node-dot.active');
-      if (activeDot) minNodes = parseInt(activeDot.dataset.value) || 1;
+      nodeSelector.querySelectorAll('.node-dot.active').forEach(function (d) {
+        if (d.dataset.nodeId) nodeIds.push(d.dataset.nodeId);
+      });
     }
 
     var launchBtn = document.getElementById('launch-btn');
@@ -902,12 +1066,12 @@ const AINode = {
 
     try {
       var endpoint, body;
-      if (minNodes > 1) {
-        // Sharded launch
+      if (nodeIds.length > 1) {
+        // Distributed launch on the chosen nodes (head = this node + the rest).
         endpoint = '/api/sharding/launch';
-        body = { model: model, strategy: strategy, min_nodes: minNodes };
+        body = { model: model, strategy: strategy, node_ids: nodeIds };
       } else {
-        // Single node launch
+        // Single node launch.
         endpoint = '/api/models/load';
         body = { model: model };
       }
@@ -1090,7 +1254,9 @@ const AINode = {
     if (!select) return;
     var s = this.state.status;
     if (!s) return;
-    var models = s.models_loaded || [];
+    // Prefer the fleet-wide union (every node's model) over local models_loaded.
+    var models = (this.state.fleetModels && this.state.fleetModels.length)
+      ? this.state.fleetModels : (s.models_loaded || []);
     var cv = select.value;
     if (models.length === 0) {
       select.innerHTML = '<option>No models loaded</option>';
@@ -2205,25 +2371,25 @@ const AINode = {
         '<div id="downloads-queue" class="downloads-queue"></div>' +
         '<div class="downloads-toolbar">' +
         '<input type="text" id="hf-search-input" class="search-input" placeholder="Search HuggingFace (e.g. llama, qwen, mistral, phi)..." value="' + this.esc(query) + '" autofocus>' +
-        '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
+        '<button id="hf-back-btn" class="btn-sm hf-back-btn">← Back to Catalog</button>' +
         '</div>' +
         '<div id="downloads-results"></div>';
       container.innerHTML = toolbarHtml;
-    } else {
-      var pillsEl = container.querySelector('#downloads-filters');
-      if (pillsEl) pillsEl.innerHTML = filterPills;
     }
 
     var resultsContainer = container.querySelector('#downloads-results');
     var countEl = container.querySelector('#hf-count');
 
-    // Rebind filter pills
-    container.querySelectorAll('.downloads-filter').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        self.state.modelsFilter = btn.dataset.filter;
+    // Back to the two-list catalog.
+    var backBtn = container.querySelector('#hf-back-btn');
+    if (backBtn && !backBtn.dataset.bound) {
+      backBtn.dataset.bound = '1';
+      backBtn.addEventListener('click', function () {
+        self.state.modelsSearch = '';
+        self.state.modelsFilter = 'catalog';
         self.renderDownloads();
       });
-    });
+    }
 
     // Bind search input (debounced)
     var input = container.querySelector('#hf-search-input');
@@ -2259,60 +2425,123 @@ const AINode = {
     fetch('/api/models/search?q=' + encodeURIComponent(query) + '&limit=50')
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        var models = data.models || [];
-        if (countEl) countEl.textContent = models.length + ' results for "' + query + '"';
-        if (models.length === 0) {
-          if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">No models found.</div>';
-          return;
-        }
-        var rows = models.map(function (m) {
-          var isLoaded = loaded.includes(m.hf_repo);
-          var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.hf_repo]);
-          var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
-          var fits = gpuMem > 0 && m.size_gb > 0 && gpuMem >= m.size_gb;
-          var fitBadge = (gpuMem > 0 && m.size_gb > 0) ? (fits ?
-            '<span class="fit-badge fits">Fits GPU</span>' :
-            '<span class="fit-badge no-fit">Too large</span>') : '';
-          var catalogBadge = m.in_catalog ? '<span class="fit-badge rec">In Catalog</span>' : '';
-          var statusBadge = isLoaded ?
-            '<span class="model-badge loaded">Loaded</span>' :
-            isOnDisk ?
-            '<span class="model-badge loaded">Downloaded</span>' :
-            '<span class="model-badge available">Available</span>';
-          var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' downloads' : '';
-          var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
-          var statsLine = [downloadsStr, likesStr].filter(Boolean).join(' · ');
-          var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
-          var downloadBtn = isOnDisk ? '' :
-            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>';
-          return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
-            '<div class="download-card-main">' +
-            '<div class="download-card-info">' +
-            '<div class="download-card-header">' +
-            '<div class="download-card-name">' + self.esc(m.name) + '</div>' +
-            '<div class="download-card-badges">' + catalogBadge + fitBadge + statusBadge + '</div>' +
-            '</div>' +
-            '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
-            '<div class="download-card-desc">' + sizeStr + (statsLine ? ' &middot; ' + statsLine : '') + '</div>' +
-            '</div>' +
-            '<div class="download-card-actions">' + detailsBtn + downloadBtn + '</div>' +
-            '</div>' +
-            '</div>';
-        }).join('');
-        if (resultsContainer) {
-          resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
-          self.bindRepoDownloadButtons(resultsContainer);
-        }
+        self._hfResults = data.models || [];
+        self._hfQuery = query;
+        self.state.hfShowAll = false;  // reset the reveal on each new search
+        self.renderHfResults();
       })
       .catch(function (err) {
-        if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Search failed: ' + err.message + '</div>';
+        var rc = document.getElementById('downloads-results');
+        if (rc) rc.innerHTML = '<div class="downloads-empty">Search failed: ' + err.message + '</div>';
       });
+  },
+
+  // Render cached HF results, hiding models that can't run here (incompatible
+  // engine or too large) unless "Show all" is toggled (then shown dimmed).
+  renderHfResults() {
+    var self = this;
+    var models = this._hfResults || [];
+    var query = this._hfQuery || '';
+    var loaded = (this.state.status && this.state.status.models_loaded) || [];
+    var resultsContainer = document.getElementById('downloads-results');
+    var countEl = document.getElementById('hf-count');
+    if (!resultsContainer) return;
+
+    var runnable = models.filter(function (m) { return self.hfRunnable(m); });
+    var hiddenCount = models.length - runnable.length;
+    var showAll = !!this.state.hfShowAll;
+    var shown = showAll ? models : runnable;
+
+    if (countEl) {
+      countEl.textContent = runnable.length + ' runnable for "' + query + '"' +
+        (hiddenCount ? ' · ' + hiddenCount + ' hidden' : '');
+    }
+
+    function card(m) {
+      var isLoaded = loaded.includes(m.hf_repo);
+      var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.hf_repo]);
+      var dimmed = !self.hfRunnable(m);
+      var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
+      var fitBadge = self.placementBadge(m);
+      var catalogBadge = m.in_catalog ? '<span class="fit-badge rec">✓ Recommended</span>' : '';
+      var quantBadge = m.quant ? '<span class="fit-badge ' + (/MLX|GGUF/.test(m.quant) ? 'untested' : 'quant') + '">' + self.esc(m.quant) + '</span>' : '';
+      var statusBadge = isLoaded ? '<span class="model-badge loaded">Loaded</span>'
+        : isOnDisk ? '<span class="model-badge loaded">Downloaded</span>'
+        : '<span class="model-badge available">Available</span>';
+      var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' downloads' : '';
+      var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
+      var downloadBtn = isOnDisk ? '' : '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>';
+      return '<div class="download-card' + (dimmed ? ' dimmed' : '') + '" data-model-id="' + self.esc(m.hf_repo) + '">' +
+        '<div class="download-card-main">' +
+        '<div class="download-card-info">' +
+        '<div class="download-card-header">' +
+        '<div class="download-card-name">' + self.esc(m.name) + '</div>' +
+        '<div class="download-card-badges">' + catalogBadge + quantBadge + fitBadge + statusBadge + '</div>' +
+        '</div>' +
+        '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
+        '<div class="download-card-desc">' + sizeStr + (downloadsStr ? ' &middot; ' + downloadsStr : '') + '</div>' +
+        '</div>' +
+        '<div class="download-card-actions">' + detailsBtn + downloadBtn + '</div>' +
+        '</div>' +
+        '</div>';
+    }
+
+    var body = shown.length
+      ? '<div class="downloads-grid">' + shown.map(card).join('') + '</div>'
+      : '<div class="downloads-empty">No models here can run on this cluster.</div>';
+    var toggle = hiddenCount ? '<div class="hf-toggle-row"><button id="hf-show-all" class="btn-sm">' +
+      (showAll ? 'Hide incompatible / too-large' : 'Show ' + hiddenCount + ' hidden (incompatible or too large)') +
+      '</button></div>' : '';
+    resultsContainer.innerHTML = body + toggle;
+    self.bindRepoDownloadButtons(resultsContainer);
+    var tbtn = document.getElementById('hf-show-all');
+    if (tbtn) tbtn.addEventListener('click', function () {
+      self.state.hfShowAll = !self.state.hfShowAll;
+      self.renderHfResults();
+    });
   },
 
   formatNumber(n) {
     if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return String(n);
+  },
+
+  // Placement of a model on THIS cluster. Returns {known, tooLarge, tp, label, cls}.
+  // Accepts catalog-shaped (sizeGb/minMem/proven_tp) or HF-shaped (size_gb) models.
+  placementInfo(model) {
+    var nodes = this.state.nodes || [];
+    var nodeCount = nodes.length || 1;
+    var st = this.state.status;
+    var perNode = (st && st.gpu && st.gpu.memory_total_mb) ? st.gpu.memory_total_mb / 1024
+      : ((nodes[0] && nodes[0].gpu_memory_gb) || 0);
+    var size = model.sizeGb || model.size_gb || 0;
+    if (!size || !perNode) return { known: false };  // unknown size → make no claim
+    // ponytail: weights × 1.2 for KV/activation headroom; minMem wins if curated.
+    var req = (model.minMem && model.minMem > size) ? model.minMem : size * 1.2;
+    var needed = Math.ceil(req / perNode);
+    var neededTp = needed <= 1 ? 1 : needed <= 2 ? 2 : needed <= 4 ? 4 : 8;
+    // Honor the proven launch config when it's at least what memory requires.
+    var tp = (model.proven_tp && model.proven_tp >= neededTp) ? model.proven_tp : neededTp;
+    if (needed > nodeCount || tp > nodeCount) {
+      return { known: true, tooLarge: true, label: 'Too large for cluster', cls: 'no-fit' };
+    }
+    if (tp === 1) return { known: true, tooLarge: false, tp: 1, label: 'Runs on 1 node', cls: 'fits' };
+    return { known: true, tooLarge: false, tp: tp, label: 'Good for TP=' + tp + ' · ' + tp + ' nodes', cls: 'cluster' };
+  },
+
+  placementBadge(model) {
+    var p = this.placementInfo(model);
+    return p.known ? '<span class="fit-badge ' + p.cls + '">' + p.label + '</span>' : '';
+  },
+
+  // Can AINode's vLLM engine serve this repo? MLX is Apple-only, GGUF is llama.cpp.
+  hfRunnable(m) {
+    var repo = (m.hf_repo || '').toLowerCase();
+    var vllmOk = m.vllm_ok !== false && !/mlx|gguf|ggml/.test(repo);
+    var info = this.placementInfo(m);
+    // Unknown size (GGUF etc.) can't be placed — treat as not-runnable-here.
+    return vllmOk && info.known && !info.tooLarge;
   },
 
   renderDownloads() {
@@ -2366,6 +2595,10 @@ const AINode = {
             hf_repo: m.hf_repo || '',
             context_length: m.context_length || 0,
             license: m.license || '',
+            verified: m.verified === true,
+            curated: m.curated === true,
+            proven_tp: m.proven_tp || 1,
+            downloaded: m.downloaded === true,
           };
         });
         self.renderDownloads();
@@ -2376,109 +2609,55 @@ const AINode = {
 
     var catalog = this.state.catalog;
     var query = (this.state.modelsSearch || '').toLowerCase();
-    var totalCount = catalog.length;
+    var dlMap = this.state.downloadedModels || {};
 
-    // Build filter pills now so HF branch can use them
-    var allFilters = ['all', 'recommended', 'downloaded', 'trending', 'openrouter', 'latest', 'huggingface'];
-    var filterLabels = {
-      all: 'All',
-      recommended: 'Recommended',
-      downloaded: 'Downloaded',
-      trending: '🔥 Trending',
-      openrouter: '🚀 Most Used',
-      latest: '✨ Latest',
-      huggingface: '🤗 Search HF',
-    };
-    var filterPills = allFilters.map(function (f) {
-      var active = self.state.modelsFilter === f ? ' active' : '';
-      return '<button class="pill downloads-filter' + active + '" data-filter="' + f + '">' + filterLabels[f] + '</button>';
-    }).join('');
-
-    // Live-fetch filters — delegate to renderLiveCatalog
-    if (['trending', 'openrouter', 'latest'].indexOf(this.state.modelsFilter) !== -1) {
-      return this.renderLiveCatalog(container, loaded, gpuMem, filterPills, this.state.modelsFilter);
-    }
-
-    // HuggingFace live search mode
+    // Browse HuggingFace — the single escape hatch for grabbing anything not
+    // in our known-good catalog.
     if (this.state.modelsFilter === 'huggingface') {
-      return this.renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, filterPills, totalCount);
+      return this.renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, '', catalog.length);
     }
 
-    var models = catalog.filter(function (m) {
-      if (query && m.id.toLowerCase().indexOf(query) === -1 &&
-          m.desc.toLowerCase().indexOf(query) === -1 &&
-          (m.family || '').toLowerCase().indexOf(query) === -1) return false;
-      var isLoaded = loaded.includes(m.id);
-      var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.id]);
-      if (self.state.modelsFilter === 'downloaded' && !isOnDisk) return false;
-      if (self.state.modelsFilter === 'available' && isLoaded) return false;
-      if (self.state.modelsFilter === 'recommended' && !m.recommended) return false;
-      return true;
-    });
-
-    if (this.state.modelsSort === 'size-asc') models.sort(function (a, b) { return a.sizeGb - b.sizeGb; });
-    else if (this.state.modelsSort === 'size-desc') models.sort(function (a, b) { return b.sizeGb - a.sizeGb; });
-    else if (this.state.modelsSort === 'name') models.sort(function (a, b) { return a.id.localeCompare(b.id); });
-    else {
-      // Default: recommended first, then by size
-      models.sort(function (a, b) {
-        if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
-        return a.sizeGb - b.sizeGb;
-      });
+    function matchesQuery(m) {
+      if (!query) return true;
+      return (m.id || '').toLowerCase().indexOf(query) !== -1 ||
+             (m.name || '').toLowerCase().indexOf(query) !== -1 ||
+             (m.desc || '').toLowerCase().indexOf(query) !== -1 ||
+             (m.family || '').toLowerCase().indexOf(query) !== -1;
+    }
+    function isOnDisk(m) {
+      return m.downloaded === true || !!dlMap[m.hf_repo] || !!dlMap[m.id] ||
+             loaded.includes(m.slug) || loaded.includes(m.id);
     }
 
-    var filteredCount = models.length;
+    // Two lists, period: what you HAVE (on disk) and the curated CATALOG you can
+    // grab (our known-good picks, verified ones badged). Anything else: Browse HF.
+    var installed = catalog.filter(function (m) { return isOnDisk(m) && matchesQuery(m); });
+    var knownGood = catalog.filter(function (m) { return m.curated === true && !isOnDisk(m) && matchesQuery(m); });
+    var bySize = function (a, b) { return (a.sizeGb || 0) - (b.sizeGb || 0); };
+    installed.sort(bySize);
+    knownGood.sort(bySize);
 
-    // If we're coming from HF mode, clear the container
-    if (container.querySelector('#hf-search-input')) {
-      container.innerHTML = '';
-    }
-
-    // Render toolbar once; only results re-render on search
-    var needsToolbar = !container.querySelector('#downloads-search');
-    var html = '';
-    if (needsToolbar) {
-      html += '<div class="downloads-header">' +
-        '<h2 class="view-title">Model Catalog</h2>' +
-        '<div class="downloads-count" id="downloads-count">' + filteredCount + ' of ' + totalCount + ' models</div>' +
-        '</div>' +
-        '<div id="downloads-queue" class="downloads-queue"></div>' +
-        '<div class="downloads-toolbar">' +
-        '<input type="text" id="downloads-search" class="search-input" placeholder="Search models, families, or descriptions..." value="' + this.esc(this.state.modelsSearch) + '">' +
-        '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
-        '</div>' +
-        '<div id="downloads-results"></div>';
-    } else {
-      // Just update count + filter pills
-      var countEl = container.querySelector('#downloads-count');
-      if (countEl) countEl.textContent = filteredCount + ' of ' + totalCount + ' models';
-      var pillsEl = container.querySelector('#downloads-filters');
-      if (pillsEl) pillsEl.innerHTML = filterPills;
-    }
-
-    // Results list HTML (rebuilt on every render, but appended separately)
-    var resultsRows = models.map(function (model) {
-      var isLoaded = loaded.includes(model.id);
+    function cardHtml(model) {
+      var isLoaded = loaded.includes(model.slug) || loaded.includes(model.id);
+      var onDisk = isOnDisk(model);
       var fits = gpuMem >= (model.minMem || model.sizeGb);
-      var fitBadge = gpuMem > 0 ? (fits ?
-        '<span class="fit-badge fits">Fits GPU</span>' :
-        '<span class="fit-badge no-fit">Too large</span>') : '';
+      var fitBadge = self.placementBadge(model);
       var statusBadge = isLoaded ?
         '<span class="model-badge loaded">Loaded</span>' :
-        '<span class="model-badge available">Available</span>';
-      var recBadge = model.recommended ? '<span class="fit-badge rec">Recommended</span>' : '';
+        (onDisk ? '<span class="model-badge loaded">On disk</span>' :
+          '<span class="model-badge available">Available</span>');
+      var verBadge = model.verified ? '<span class="fit-badge rec">✓ Verified on GB10</span>'
+        : (model.curated ? '<span class="fit-badge untested">Curated · untested</span>' : '');
       var quantBadge = model.quantization ? '<span class="fit-badge quant">' + self.esc(model.quantization.toUpperCase()) + '</span>' : '';
       var paramsText = model.params ? model.params + ' params' : '';
-      var ageText = model.created_at ? self.relativeTime(model.created_at) : '';
-      var downloadsText = model.downloads ? self.formatNumber(model.downloads) + ' ⬇' : '';
-      var descParts = [paramsText, model.size, ageText, downloadsText].filter(Boolean);
+      var descParts = [paramsText, model.size].filter(Boolean);
       var capabilityBadges = self.renderCapabilityBadges(model);
-      var isDownloaded = model.downloaded === true;
-      var actionBtn = isDownloaded
+      var actionBtn = onDisk
         ? '<button class="btn-sm downloads-delete-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Delete</button>'
         : '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Download</button>';
       var shardBtn = '';
-      if (!fits && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb && !isDownloaded) {
+      var needsCluster = !fits || (model.proven_tp || 1) > 1;
+      if (needsCluster && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb && !onDisk) {
         shardBtn = '<button class="btn-sm downloads-shard-btn" data-model-id="' + self.esc(model.id) + '">Shard Across Cluster</button>';
       }
       var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(model.hf_repo || model.id) + '">Details</button>';
@@ -2487,32 +2666,53 @@ const AINode = {
         '<div class="download-card-info">' +
         '<div class="download-card-header">' +
         '<div class="download-card-name">' + self.esc(model.name || model.id) + '</div>' +
-        '<div class="download-card-badges">' + recBadge + quantBadge + capabilityBadges + fitBadge + statusBadge + '</div>' +
+        '<div class="download-card-badges">' + verBadge + quantBadge + capabilityBadges + fitBadge + statusBadge + '</div>' +
         '</div>' +
-        '<div class="download-card-repo">' + self.esc(model.id) + '</div>' +
+        '<div class="download-card-repo">' + self.esc(model.hf_repo || model.id) + '</div>' +
         '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
         '</div>' +
         '<div class="download-card-actions">' + detailsBtn + actionBtn + shardBtn + '</div>' +
         '</div>' +
         '</div>';
-    }).join('');
-
-    var resultsHtml = '<div class="downloads-grid">' + resultsRows + '</div>';
-    if (models.length === 0) {
-      resultsHtml = '<div class="downloads-empty">No models match your filters.</div>';
     }
 
-    // First render: inject full toolbar + results
+    function sectionHtml(title, sub, items, emptyMsg) {
+      var body = items.length
+        ? '<div class="downloads-grid">' + items.map(cardHtml).join('') + '</div>'
+        : '<div class="downloads-empty">' + emptyMsg + '</div>';
+      return '<section class="downloads-section">' +
+        '<div class="downloads-section-title">' + title +
+        ' <span class="downloads-section-count">' + items.length + '</span>' +
+        ' <span class="downloads-section-sub">' + sub + '</span></div>' +
+        body + '</section>';
+    }
+
+    // Toolbar once; only #downloads-results re-renders on search (keeps focus).
+    var needsToolbar = !container.querySelector('#downloads-search');
     if (needsToolbar) {
-      container.innerHTML = html;
+      container.innerHTML =
+        '<div class="downloads-header downloads-actions-row">' +
+        '<button id="browse-hf-btn" class="btn-sm">🤗 Browse Hugging Face</button>' +
+        '</div>' +
+        '<div id="downloads-queue" class="downloads-queue"></div>' +
+        '<div class="downloads-toolbar">' +
+        '<input type="text" id="downloads-search" class="search-input" placeholder="Filter your models and catalog..." value="' + this.esc(this.state.modelsSearch) + '">' +
+        '</div>' +
+        '<div id="downloads-results"></div>';
     }
-    // Update only the results area so search input keeps focus
+
+    var catalogEmpty = query ? 'No catalog models match.'
+      : 'You already have every curated model. Use 🤗 Browse Hugging Face to grab anything else.';
+
     var resultsContainer = container.querySelector('#downloads-results');
     if (resultsContainer) {
-      resultsContainer.innerHTML = resultsHtml;
+      resultsContainer.innerHTML =
+        sectionHtml('Installed', 'on your nodes — what you have', installed,
+          query ? 'No installed models match.' : 'Nothing downloaded yet. Grab one from the catalog below.') +
+        sectionHtml('Catalog', 'curated known-good picks — ready to download', knownGood, catalogEmpty);
     }
 
-    // Bind search (only once, on first render)
+    // Bind search once.
     var searchInput = document.getElementById('downloads-search');
     if (searchInput && !searchInput.dataset.bound) {
       searchInput.dataset.bound = '1';
@@ -2522,18 +2722,18 @@ const AINode = {
       });
     }
 
-    // Bind filter pills (rebind each time since innerHTML was replaced)
-    container.querySelectorAll('.downloads-filter').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        self.state.modelsFilter = btn.dataset.filter;
+    // Bind Browse HuggingFace.
+    var hfBtn = document.getElementById('browse-hf-btn');
+    if (hfBtn && !hfBtn.dataset.bound) {
+      hfBtn.dataset.bound = '1';
+      hfBtn.addEventListener('click', function () {
+        self.state.modelsFilter = 'huggingface';
         self.renderDownloads();
       });
-    });
+    }
 
-    // Bind download buttons — unified to repo-based download with progress view
+    // Bind download/delete/details + queue.
     self.bindRepoDownloadButtons(container);
-
-    // Render active downloads queue
     self.renderDownloadsQueue();
 
     // Bind shard buttons
@@ -2807,6 +3007,20 @@ const AINode = {
           '<div class="quickstart-grid">' + quickstart + '</div>' +
         '</div>' +
         '<div>' +
+          '<div class="training-section-head"><h3>Quantize a Model</h3><span class="muted">Shrink to AWQ / NVFP4 — runs on a free node, lands in Installed</span></div>' +
+          '<div class="quantize-panel">' +
+            '<div class="form-grid">' +
+              '<div class="form-group"><label class="form-label">Base model (HF repo or installed)</label><input type="text" id="q-base" class="form-input" placeholder="Qwen/Qwen3.5-4B"></div>' +
+              '<div class="form-group"><label class="form-label">Scheme</label><select id="q-scheme" class="form-input"><option value="awq">AWQ (W4A16 — proven on GB10)</option><option value="nvfp4">NVFP4 (Blackwell-native)</option></select></div>' +
+              '<div class="form-group"><label class="form-label">Calibration samples</label><input type="number" id="q-calib" class="form-input" value="256" min="16" max="1024"></div>' +
+            '</div>' +
+            '<label class="form-label" style="display:block;margin-top:8px"><input type="checkbox" id="q-push"> Push result to Hugging Face</label>' +
+            '<input type="text" id="q-repo" class="form-input" placeholder="HF repo name (optional; namespace from your write token)" style="margin-top:6px">' +
+            '<div class="form-hint">Target node must be idle — quantization needs the full GPU memory (unload models first).</div>' +
+            '<button class="btn-nvidia" id="q-submit" style="margin-top:10px">Quantize &rsaquo;</button>' +
+          '</div>' +
+        '</div>' +
+        '<div>' +
           '<div class="training-section-head"><h3>Recent Activity</h3><span class="muted">' + recent.length + ' run' + (recent.length === 1 ? '' : 's') + '</span></div>' +
           '<div class="recent-activity-list">' + recentHtml + '</div>' +
         '</div>' +
@@ -2816,6 +3030,39 @@ const AINode = {
       btn.addEventListener('click', function () {
         self.showNewRunWizard({ method: btn.dataset.qsBtn === 'full' ? 'full' : 'lora', distributed: btn.dataset.qsBtn === 'distributed' });
       });
+    });
+
+    var qBtn = container.querySelector('#q-submit');
+    if (qBtn) qBtn.addEventListener('click', async function () {
+      var base = (container.querySelector('#q-base').value || '').trim();
+      if (!base) { self.toast('Enter a base model to quantize', 'error'); return; }
+      var payload = {
+        method: 'quantize',
+        base_model: base,
+        scheme: container.querySelector('#q-scheme').value,
+        calib_samples: parseInt(container.querySelector('#q-calib').value, 10) || 256,
+        push_to_hf: container.querySelector('#q-push').checked,
+      };
+      var repo = (container.querySelector('#q-repo').value || '').trim();
+      if (repo) payload.hf_repo = repo;
+      qBtn.disabled = true; qBtn.textContent = 'Submitting…';
+      try {
+        var resp = await fetch('/api/training/jobs', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        var result = await resp.json();
+        if (!resp.ok) {
+          self.toast('Error: ' + (result.error || 'Failed to start quantize job'), 'error');
+          qBtn.disabled = false; qBtn.textContent = 'Quantize ›'; return;
+        }
+        self.toast('Quantize job started', 'success');
+        self.state.trainingTab = 'runs';
+        if (self.renderTrainingSidebar) self.renderTrainingSidebar();
+        self.renderTraining();
+      } catch (e) {
+        self.toast('Network error: ' + e.message, 'error');
+        qBtn.disabled = false; qBtn.textContent = 'Quantize ›';
+      }
     });
     container.querySelectorAll('.training-job-card').forEach(function (card) {
       card.addEventListener('click', function () {
@@ -4767,11 +5014,16 @@ const AINode = {
     if (!this._serverState.endpoints) {
       this._serverState.endpoints = await this.fetchJSON('/api/server/endpoints');
     }
+    // Raw catalog (size_gb / local_size_gb / architecture) for MODEL INFO — the
+    // loaded-model object lacks size, and this.state.catalog (live-catalog view)
+    // isn't loaded here and remaps the fields.
+    if (!this._serverState.modelsCatalog) {
+      var _md = await this.fetchJSON('/api/models');
+      this._serverState.modelsCatalog = (_md && _md.models) || [];
+    }
 
     var s = status || { status: 'stopped', reachable_at: [], loaded_models: [] };
-    var primaryUrl = (s.reachable_at && s.reachable_at.length > 1)
-      ? s.reachable_at[1]
-      : (s.reachable_at && s.reachable_at[0]) || '—';
+    var primaryUrl = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '—';
 
     var html = '';
 
@@ -5293,10 +5545,16 @@ const AINode = {
       return;
     }
     var self = this;
-    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || '—';
-    var arch = (model.id || '').split('/')[0] || 'unknown';
+    var primary = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '—';
+    // Pull derivable fields from the catalog (size/arch/quant) — the served
+    // model object lacks them. Real arch (e.g. LlamaForCausalLM) needs the
+    // per-model config.json (owned follow-up); family is a truthful stand-in.
+    var _cat = (this._serverState.modelsCatalog || []).find(function (c) { return (c.hf_repo || c.id) === model.id; }) || {};
+    var arch = model.architecture || _cat.architecture || _cat.family || AINode._modelFamily(model.id) || '—';
     var fileName = (model.id || '').split('/').pop();
-    var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes) : '—';
+    var _catSize = _cat.local_size_gb || _cat.size_gb;
+    var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes)
+      : (_catSize ? Math.round(_catSize) + ' GB' : '—');
 
     var html = '';
     html += '<div class="panel-section">';
@@ -5343,6 +5601,23 @@ const AINode = {
     });
   },
 
+  _modelQuant(id) {
+    var m = (id || '').toUpperCase().match(/NVFP4|MXFP4|AWQ|GPTQ|FP8|INT4|INT8/);
+    return m ? m[0] : '';
+  },
+
+  _modelFamily(id) {
+    var n = (id || '').split('/').pop().toLowerCase();
+    if (n.indexOf('llama') >= 0) return 'Llama';
+    if (n.indexOf('qwen') >= 0) return 'Qwen';
+    if (n.indexOf('glm') >= 0) return 'GLM';
+    if (n.indexOf('mixtral') >= 0 || n.indexOf('mistral') >= 0) return 'Mistral';
+    if (n.indexOf('deepseek') >= 0) return 'DeepSeek';
+    if (n.indexOf('phi') >= 0) return 'Phi';
+    if (n.indexOf('gemma') >= 0) return 'Gemma';
+    return '';
+  },
+
   _renderServerInfoTab(tab, model, arch, fileName, sizeStr) {
     if (tab === 'load') {
       return '<div class="server-info-section">' +
@@ -5366,7 +5641,7 @@ const AINode = {
       '<div class="server-info-row"><span class="label">Model</span><span class="mono val">' + AINode.esc(model.id) + '</span></div>' +
       '<div class="server-info-row"><span class="label">File</span><span class="mono val">' + AINode.esc(fileName) + '</span></div>' +
       '<div class="server-info-row"><span class="label">Format</span><span class="val">' + AINode.esc(model.format || 'SafeTensors') + '</span></div>' +
-      '<div class="server-info-row"><span class="label">Quantization</span><span class="val">' + AINode.esc(model.quantization || 'none') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Quantization</span><span class="val">' + AINode.esc(model.quantization || AINode._modelQuant(model.id) || 'none') + '</span></div>' +
       '<div class="server-info-row"><span class="label">Arch</span><span class="val">' + AINode.esc(arch) + '</span></div>' +
       '<div class="server-info-row"><span class="label">Capabilities</span><span class="val">' + (caps || '—') + '</span></div>' +
       '<div class="server-info-row"><span class="label">Domain</span><span class="val">' + AINode.esc(model.type || 'llm') + '</span></div>' +

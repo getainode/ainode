@@ -8,12 +8,44 @@ fallback for offline/error situations.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import shutil
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+# Bytes-per-element for the dtypes HF reports in safetensors metadata. Lets us
+# compute real download size for quantized models (NVFP4 weights land as U8).
+_DTYPE_BYTES = {
+    "F64": 8, "I64": 8, "U64": 8,
+    "F32": 4, "I32": 4, "U32": 4,
+    "BF16": 2, "F16": 2, "I16": 2, "U16": 2,
+    "F8_E4M3": 1, "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1,
+    "F4": 0.5, "FP4": 0.5,
+}
+
+
+def _safetensors_size_gb(safetensors) -> float:
+    """Real on-disk size (decimal GB) from HF safetensors dtype breakdown."""
+    params = getattr(safetensors, "parameters", None)
+    if not params:
+        return 0.0
+    total_bytes = sum(_DTYPE_BYTES.get(dt, 2) * n for dt, n in params.items())
+    return round(total_bytes / 1e9, 1)
+
+
+def _download_max_workers() -> int:
+    """Parallel-connection cap for model downloads (AINODE_DOWNLOAD_MAX_WORKERS,
+    default 4). Keeps a fat HF pull from saturating the uplink."""
+    try:
+        return max(1, int(os.environ.get("AINODE_DOWNLOAD_MAX_WORKERS", "4")))
+    except (TypeError, ValueError):
+        return 4
 
 from ainode.core.config import AINODE_HOME, MODELS_DIR
 
@@ -34,6 +66,13 @@ class ModelInfo:
     context_length: int = 0
     license: str = ""
     recommended: bool = False
+    # Cluster-proven config: proven_tp = node count to launch at; verified = we've
+    # actually served it on this hardware (drives the picker default + a ✓ badge).
+    proven_tp: int = 0
+    verified: bool = False
+    # True for our hand-picked CURATED_CLUSTER_MODELS — drives the "Catalog"
+    # (known-good to grab) list, separate from on-disk / HF-sweep entries.
+    curated: bool = False
     created_at: str = ""
     downloads: int = 0
     likes: int = 0
@@ -123,6 +162,153 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 }
 
 
+# ---- Curated cluster models (always discoverable) --------------------------
+#
+# The live HF sweep (top-downloads) misses the frontier/NVFP4 models this GB10
+# cluster actually runs — so they were undiscoverable in the catalog and only
+# appeared once already on disk. These curated entries are ALWAYS merged into
+# the catalog (see ModelManager.get_catalog) so an operator can find + download
+# them. NVFP4 is native on Blackwell; these run distributed (TP=N) across nodes.
+
+CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
+    # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
+    # The everyday "always-on" tier: fit one node, serve at interactive speed, and
+    # stack several per node. proven_tp=1 (no distribution). verified=True is set
+    # ONLY after a real completion was observed on the cluster.
+    "qwen3.5-9b-awq": ModelInfo(
+        id="qwen3.5-9b-awq",
+        name="Qwen3.5 9B (AWQ-4bit)",
+        hf_repo="QuantTrio/Qwen3.5-9B-AWQ",
+        size_gb=12.0,
+        description="Fast dense 9B, AWQ-4bit (awq_marlin). ~19 tok/s single-stream on one GB10. Great default chat model.",
+        quantization="AWQ", min_memory_gb=14, family="qwen", params_b=9.0,
+        proven_tp=1, verified=True,
+        context_length=262144, license="Apache 2.0", recommended=True, format="awq",
+    ),
+    "qwen3.5-4b-awq": ModelInfo(
+        id="qwen3.5-4b-awq",
+        name="Qwen3.5 4B (AWQ-4bit)",
+        hf_repo="QuantTrio/Qwen3.5-4B-AWQ",
+        size_gb=4.0,
+        description="Tiny dense 4B, AWQ-4bit. ~15 tok/s single-stream (dense AWQ is dequant-bound on GB10, not size-bound — the MoE is the fast pick). Lowest memory / highest QPS for batched routes.",
+        quantization="AWQ", min_memory_gb=6, family="qwen", params_b=4.0,
+        proven_tp=1, verified=True,
+        context_length=262144, license="Apache 2.0", format="awq",
+    ),
+    "qwen3.5-35b-a3b-awq": ModelInfo(
+        id="qwen3.5-35b-a3b-awq",
+        name="Qwen3.5 35B-A3B MoE (AWQ-4bit)",
+        hf_repo="QuantTrio/Qwen3.5-35B-A3B-AWQ",
+        size_gb=24.0,
+        description="MoE (3B active/token), AWQ-4bit. ~27 tok/s single-stream on one GB10 — fast decode AND large-model quality. The flagship single-node model.",
+        quantization="AWQ", min_memory_gb=28, family="qwen", params_b=35.0,
+        proven_tp=1, verified=True,
+        context_length=262144, license="Apache 2.0", recommended=True, format="awq",
+    ),
+    "llama-3.1-8b-nvfp4": ModelInfo(
+        id="llama-3.1-8b-nvfp4",
+        name="Llama 3.1 8B Instruct (NVFP4)",
+        hf_repo="nvidia/Llama-3.1-8B-Instruct-NVFP4",
+        size_gb=6.0,
+        description="Dense 8B, Blackwell-native NVFP4 — ~18 tok/s single-stream on one GB10 (dense is bandwidth-bound). Solid general-purpose chat model, light enough to stack.",
+        quantization="NVFP4", min_memory_gb=8, family="llama", params_b=8.0,
+        proven_tp=1, verified=True,
+        context_length=131072, license="Llama 3.1", recommended=True, format="nvfp4",
+    ),
+    # --- Community daily-driver MoE picks (DGX Spark forum + r/LocalLLaMA, 2026) ---
+    "nemotron-cascade-2-30b-a3b-nvfp4": ModelInfo(
+        id="nemotron-cascade-2-30b-a3b-nvfp4",
+        name="Nemotron Cascade 2 30B-A3B (NVFP4)",
+        hf_repo="chankhavu/Nemotron-Cascade-2-30B-A3B-NVFP4",
+        size_gb=18.0,
+        description="NVIDIA's distilled hybrid (mamba+attention) MoE, 3B active. Blackwell-native NVFP4 — ~32 tok/s single-stream on one GB10 (eager-on; the ~60 t/s Spark forum reports need CUDA graphs/eager-off). Fast daily driver, great for stacking.",
+        quantization="NVFP4", min_memory_gb=22, family="nemotron", params_b=30.0,
+        proven_tp=1, verified=True,
+        context_length=131072, license="NVIDIA Open Model", recommended=True, format="nvfp4",
+    ),
+    "minimax-m2.7-awq": ModelInfo(
+        id="minimax-m2.7-awq",
+        name="MiniMax-M2.7 (AWQ-4bit)",
+        hf_repo="demon-zombie/MiniMax-M2.7-AWQ-4bit",
+        size_gb=120.0,
+        description="The community's top agentic-coding pick — 'Sonnet at home'. Large MoE (A10B active), AWQ-4bit. ~42 tok/s across 2 Sparks (TP=2). fp8 KV recommended.",
+        quantization="AWQ", min_memory_gb=130, family="minimax", params_b=230.0,
+        proven_tp=2, verified=False,
+        context_length=131072, license="MiniMax", recommended=True, format="awq",
+    ),
+    "qwen3-235b-a22b-nvfp4": ModelInfo(
+        id="qwen3-235b-a22b-nvfp4",
+        name="Qwen3-235B-A22B (NVFP4)",
+        hf_repo="nvidia/Qwen3-235B-A22B-NVFP4",
+        size_gb=250.0,
+        description="Frontier MoE (A22B active). Runs distributed TP=4 on the cluster. NVFP4 for GB10.",
+        quantization="NVFP4", min_memory_gb=275, family="qwen", params_b=235.0,
+        proven_tp=4, verified=True,
+        context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
+    ),
+    "qwen3.5-397b-a17b-nvfp4": ModelInfo(
+        id="qwen3.5-397b-a17b-nvfp4",
+        name="Qwen3.5-397B-A17B (NVFP4)",
+        hf_repo="nvidia/Qwen3.5-397B-A17B-NVFP4",
+        size_gb=468.0,
+        description="Frontier MoE (A17B active) — the cluster's design point. Distributed TP=4. NVFP4.",
+        quantization="NVFP4", min_memory_gb=500, family="qwen", params_b=397.0,
+        proven_tp=4, verified=False,
+        context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
+    ),
+    "llama-3.1-405b-nvfp4": ModelInfo(
+        id="llama-3.1-405b-nvfp4",
+        name="Llama 3.1 405B Instruct (NVFP4)",
+        hf_repo="nvidia/Llama-3.1-405B-Instruct-NVFP4",
+        size_gb=437.0,
+        description="Dense 405B, NVFP4. Needs the cluster's pooled memory (TP=4).",
+        quantization="NVFP4", min_memory_gb=470, family="llama", params_b=405.0,
+        proven_tp=4, verified=False,
+        context_length=131072, license="Llama 3.1", format="nvfp4",
+    ),
+    "llama-3.1-405b-awq": ModelInfo(
+        id="llama-3.1-405b-awq",
+        name="Llama 3.1 405B Instruct (AWQ-INT4)",
+        hf_repo="hugging-quants/Meta-Llama-3.1-405B-Instruct-AWQ-INT4",
+        size_gb=408.0,
+        description="Dense 405B, AWQ-INT4. Distributed TP=4.",
+        quantization="AWQ", min_memory_gb=440, family="llama", params_b=405.0,
+        proven_tp=4, verified=False,
+        context_length=131072, license="Llama 3.1", format="awq",
+    ),
+    "llama-3.3-70b-nvfp4": ModelInfo(
+        id="llama-3.3-70b-nvfp4",
+        name="Llama 3.3 70B Instruct (NVFP4)",
+        hf_repo="nvidia/Llama-3.3-70B-Instruct-NVFP4",
+        size_gb=80.0,
+        description="Dense 70B, NVFP4. Fits TP=2; bandwidth-bound single-stream on GB10.",
+        quantization="NVFP4", min_memory_gb=88, family="llama", params_b=70.0,
+        proven_tp=2, verified=True,
+        context_length=131072, license="Llama 3.3", recommended=True, format="nvfp4",
+    ),
+    "glm-5.1": ModelInfo(
+        id="glm-5.1",
+        name="GLM-5.1",
+        hf_repo="zai-org/GLM-5.1",
+        size_gb=874.0,
+        description="Large GLM. Needs the full cluster's pooled memory (TP=4).",
+        quantization=None, min_memory_gb=900, family="glm", params_b=0.0,
+        proven_tp=4, verified=False,
+        context_length=131072, license="GLM",
+    ),
+    "glm-5.2-reap-504b-nvfp4": ModelInfo(
+        id="glm-5.2-reap-504b-nvfp4",
+        name="GLM-5.2 NVFP4 REAP-504B",
+        hf_repo="madeby561/GLM-5.2-NVFP4-REAP-504B",
+        size_gb=309.0,
+        description="REAP-pruned GLM-5.2 MoE, NVFP4 for GB10. ~309 GB on disk — needs the cluster's pooled memory (TP=4). DeepSeek Sparse Attention. NOT yet load-tested on GB10.",
+        quantization="NVFP4", min_memory_gb=360, family="glm", params_b=504.0,
+        proven_tp=4, verified=False,
+        context_length=131072, license="MIT", recommended=False, format="nvfp4",
+    ),
+}
+
+
 # Backward-compat alias — external code may still import MODEL_CATALOG.
 MODEL_CATALOG: dict[str, ModelInfo] = FALLBACK_CATALOG
 
@@ -182,7 +368,7 @@ class CatalogAggregator:
             seen_ids: set[str] = set()
             for q in queries:
                 try:
-                    iterator = api.list_models(direction=-1, **q)
+                    iterator = api.list_models(**q)  # `direction` dropped in hub >=1.x
                 except Exception:
                     continue
                 for m in iterator:
@@ -625,7 +811,16 @@ class ModelManager:
             models = self._aggregator.fetch(force_refresh=refresh)
             if not models:
                 models = list(FALLBACK_CATALOG.values())
-            self._catalog_cache = {m.id: m for m in models}
+            merged = {m.id: m for m in models}
+            # Always merge the curated cluster models — the live HF sweep misses
+            # them, so without this they're undiscoverable until already on disk.
+            # Skip any whose hf_repo a live entry already covers (don't clobber).
+            existing_repos = {m.hf_repo.lower() for m in merged.values()}
+            for cid, info in CURATED_CLUSTER_MODELS.items():
+                info.curated = True  # mark our hand-picked known-good set
+                if cid not in merged and info.hf_repo.lower() not in existing_repos:
+                    merged[cid] = info
+            self._catalog_cache = merged
         return list(self._catalog_cache.values())
 
     def get_catalog_map(self, refresh: bool = False) -> dict[str, ModelInfo]:
@@ -666,7 +861,11 @@ class ModelManager:
         # Merge in downloaded-but-not-in-catalog entries. HF's cache layout is
         # models_dir/hub/models--<org>--<name>/ — skip control dirs like
         # .locks, xet, blobs, snapshots and anything not prefixed `models--`.
-        scan_roots = [self.models_dir, self.models_dir / "hub"]
+        scan_roots = [
+            self.models_dir,
+            self.models_dir / "hub",
+            self.models_dir / "hf-cache" / "hub",  # out-of-band HF_HOME=models/hf-cache downloads
+        ]
         seen_slugs: set[str] = set()
         for root in scan_roots:
             if not root.exists():
@@ -757,12 +956,13 @@ class ModelManager:
                 # Direct download: org--name
                 _add(child, name.replace("--", "/", 1))
 
-        # Also scan hub/ subdirectory (HF nested cache layout)
-        hub = self.models_dir / "hub"
-        if hub.is_dir():
-            for child in sorted(hub.iterdir()):
-                if child.is_dir() and child.name.startswith("models--"):
-                    _add(child, child.name[len("models--"):].replace("--", "/", 1))
+        # Also scan nested HF cache layouts: models_dir/hub and the out-of-band
+        # models_dir/hf-cache/hub (HF_HOME=models/hf-cache downloads land here).
+        for hub in (self.models_dir / "hub", self.models_dir / "hf-cache" / "hub"):
+            if hub.is_dir():
+                for child in sorted(hub.iterdir()):
+                    if child.is_dir() and child.name.startswith("models--"):
+                        _add(child, child.name[len("models--"):].replace("--", "/", 1))
 
         return downloaded
 
@@ -825,6 +1025,10 @@ class ModelManager:
             repo_id=info.hf_repo,
             local_dir=str(local_dir),
             local_dir_use_symlinks=False,
+            # Cap parallel file connections so a fat model pull can't monopolise
+            # the uplink (ponytail: bounds parallelism, not absolute byte-rate —
+            # upgrade to a tc/trickle shaper if a single stream still saturates).
+            max_workers=_download_max_workers(),
         )
 
         return Path(download_path)
@@ -851,15 +1055,33 @@ class ModelManager:
     def _model_dir_info(self, info: ModelInfo) -> Path:
         return self.models_dir / self._repo_to_dirname(info.hf_repo)
 
+    def _find_model_dir(self, info: ModelInfo) -> Optional[Path]:
+        """Return the on-disk dir for a model across every layout we support.
+
+        A model can live as: direct ``org--name`` (our downloader), flat HF
+        ``models--org--name``, HF cache ``hub/models--org--name``, or out-of-band
+        ``hf-cache/hub/models--org--name`` (HF_HOME downloads). Catalog entries
+        (incl. the curated cluster models) must detect all of them — otherwise an
+        on-disk model reads as "not downloaded". Mirrors the list_available scan.
+        """
+        hf_slug = "models--" + info.hf_repo.replace("/", "--")
+        candidates = [
+            self.models_dir / self._repo_to_dirname(info.hf_repo),  # org--name
+            self.models_dir / hf_slug,
+            self.models_dir / "hub" / hf_slug,
+            self.models_dir / "hf-cache" / "hub" / hf_slug,
+        ]
+        for d in candidates:
+            if d.exists() and any(d.iterdir()):
+                return d
+        return None
+
     def _is_downloaded_info(self, info: ModelInfo) -> bool:
-        d = self._model_dir_info(info)
-        return d.exists() and any(d.iterdir())
+        return self._find_model_dir(info) is not None
 
     def _local_size_gb_info(self, info: ModelInfo) -> Optional[float]:
-        d = self._model_dir_info(info)
-        if not d.exists():
-            return None
-        return self._dir_size_gb(d)
+        d = self._find_model_dir(info)
+        return self._dir_size_gb(d) if d else None
 
     @staticmethod
     def _dir_size_gb(path: Path) -> float:
@@ -871,28 +1093,37 @@ class ModelManager:
         try:
             from huggingface_hub import HfApi
             api = HfApi()
+            # huggingface_hub >=1.x dropped `direction`/`task`; use pipeline_tag.
+            # expand=safetensors pulls the dtype breakdown so we can show real size.
             models = api.list_models(
                 search=query,
-                filter="text-generation",
+                pipeline_tag="text-generation",
                 limit=limit,
                 sort="downloads",
-                direction=-1,
+                expand=["safetensors"],
             )
-            catalog_ids = set(self.get_catalog_map().keys())
+            catalog_repos = {info.hf_repo.lower() for info in self.get_catalog()}
             results = []
             for m in models:
                 repo = m.id
+                repo_l = repo.lower()
                 slug = repo.replace("/", "--").lower()
-                size_gb = 0.0
-                if hasattr(m, "safetensors") and m.safetensors:
-                    total_params = m.safetensors.get("total", 0)
-                    size_gb = (total_params * 2) / (1024 ** 3)
-                card_data = getattr(m, "cardData", None)
-                license_str = ""
-                if isinstance(card_data, dict):
-                    lic = card_data.get("license", "")
-                    if isinstance(lic, str):
-                        license_str = lic
+                size_gb = _safetensors_size_gb(getattr(m, "safetensors", None))
+                sf = getattr(m, "safetensors", None)
+                total_params = getattr(sf, "total", 0) if sf else 0
+                # Quant/engine from repo name — drives the badge AND the
+                # "can it run on vLLM/GB10" filter (MLX=Apple, GGUF=llama.cpp).
+                quant = ""
+                for tag, label in (
+                    ("nvfp4", "NVFP4"), ("mxfp4", "MXFP4"), ("w4afp8", "W4AFP8"),
+                    ("w4a16", "W4A16"), ("awq", "AWQ"), ("gptq", "GPTQ"),
+                    ("int4", "INT4"), ("int8", "INT8"), ("fp8", "FP8"),
+                    ("gguf", "GGUF"), ("mlx", "MLX"), ("bf16", "BF16"), ("fp16", "FP16"),
+                ):
+                    if tag in repo_l:
+                        quant = label
+                        break
+                vllm_ok = not ("mlx" in repo_l or "gguf" in repo_l or "ggml" in repo_l)
                 results.append({
                     "id": slug,
                     "name": repo.split("/")[-1],
@@ -900,16 +1131,48 @@ class ModelManager:
                     "size_gb": round(size_gb, 1),
                     "description": (m.pipeline_tag or "text-generation") + " model",
                     "family": repo.split("/")[0].lower(),
-                    "params_b": round((size_gb / 2), 2) if size_gb > 0 else 0,
+                    "params_b": round(total_params / 1e9, 1) if total_params else 0,
                     "context_length": 0,
-                    "license": license_str,
+                    "license": "",
                     "recommended": False,
+                    "quant": quant,
+                    "vllm_ok": vllm_ok,
                     "downloads": getattr(m, "downloads", 0),
                     "likes": getattr(m, "likes", 0),
-                    "in_catalog": slug in catalog_ids,
+                    "in_catalog": repo_l in catalog_repos,
                 })
+            # Always surface curated matches for the query — HF's download-sorted
+            # page often ranks our vetted pick past the limit, so inject it.
+            ql = query.lower()
+            have = {r["hf_repo"].lower() for r in results}
+            for info in self.get_catalog():
+                if not getattr(info, "curated", False):
+                    continue
+                hay = (info.hf_repo + " " + info.name + " " + (info.family or "")).lower()
+                if ql in hay and info.hf_repo.lower() not in have:
+                    results.append({
+                        "id": info.hf_repo.replace("/", "--").lower(),
+                        "name": info.name,
+                        "hf_repo": info.hf_repo,
+                        "size_gb": info.size_gb,
+                        "description": info.description,
+                        "family": info.family,
+                        "params_b": info.params_b,
+                        "context_length": info.context_length,
+                        "license": info.license,
+                        "recommended": info.recommended,
+                        "quant": (info.quantization or info.format or "").upper(),
+                        "vllm_ok": True,
+                        "proven_tp": info.proven_tp,
+                        "downloads": 0,
+                        "likes": 0,
+                        "in_catalog": True,
+                    })
+            # Vetted (in-catalog) pick first, then most-downloaded.
+            results.sort(key=lambda r: (not r["in_catalog"], -(r["downloads"] or 0)))
             return results
-        except Exception:
+        except Exception as e:
+            logger.warning("HuggingFace search failed for %r: %s", query, e)
             return []
 
     def _find_catalog_by_dir(self, dirname: str) -> Optional[ModelInfo]:

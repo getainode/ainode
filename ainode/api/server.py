@@ -58,8 +58,11 @@ def create_app(
     ----------
     config : NodeConfig
         Node configuration (defaults created if None).
-    engine : VLLMEngine | None
-        Optional engine instance for health/status queries.
+    engine : EngineBackend | VLLMEngine | None
+        Optional engine instance for health/status queries. May be any of
+        the concrete backends in :mod:`ainode.engine.backends` (eugr,
+        nvidia) or the legacy :class:`ainode.engine.vllm_engine.VLLMEngine`
+        pip-venv engine.
     """
     if config is None:
         config = NodeConfig()
@@ -80,6 +83,23 @@ def create_app(
     app["config"] = config
     app["auth_config"] = auth_config
     app["engine"] = engine
+    # Seed the InstanceManager with the boot engine as the PRIMARY instance, so
+    # a later solo load APPENDS on the next port (8001…) instead of colliding
+    # with the boot container on the legacy name/port. The boot engine is owned
+    # by `ainode start` and binds `ainode-vllm-node-solo` + api_port; without
+    # this seed the manager would hand the same name/port to a 2nd backend and
+    # the two fight (repeated docker-name Conflict, neither serving).
+    if engine is not None and getattr(config, "model", None) \
+            and (getattr(config, "distributed_mode", "solo") or "solo") == "solo":
+        from ainode.discovery.instance import InstanceRecord
+        from ainode.engine.instance_manager import InstanceManager
+        _seed = InstanceManager(base_port=config.api_port)
+        _seed.add(InstanceRecord(
+            instance_id=f"{config.node_id or 'head'}:{config.model}",
+            model=config.model, head_node_id=config.node_id or "head",
+            peer_ips=[], api_port=config.api_port, tensor_parallel_size=1,
+            status="starting"), engine)
+        app["instances"] = _seed
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
     app["metrics_collector"] = collector
@@ -91,7 +111,12 @@ def create_app(
     app["broadcast_listener"] = None
     app["secrets_manager"] = SecretsManager()
     app["embedding_manager"] = EmbeddingManager()
-    app["ray_autostart_state"] = RayAutostartState()
+    # Ray autostart is only meaningful for the legacy eugr backend. The NVIDIA
+    # backend manages its own Ray lifecycle via run_cluster.sh at model-load time;
+    # running `ray start` here fights with that (session-name mismatch on peer
+    # nodes, port conflicts on port 6379). Disable the autostart loop in that case.
+    _engine_backend_for_ray = (getattr(config, "engine_backend", None) or "eugr").lower()
+    app["ray_autostart_state"] = RayAutostartState(enabled=(_engine_backend_for_ray == "eugr"))
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -105,6 +130,8 @@ def create_app(
     app.router.add_get("/api/cluster/resources", handle_cluster_resources)
     app.router.add_post("/api/cluster/role", handle_cluster_set_role)
     app.router.add_post("/api/cluster/id", handle_cluster_set_id)
+    app.router.add_post("/api/cluster/load", handle_cluster_load)
+    app.router.add_post("/api/cluster/unload", handle_cluster_unload)
     app.router.add_post("/api/cluster/update-all", handle_cluster_update_all)
     app.router.add_get("/api/cluster/update-status", handle_cluster_update_status)
     app.router.add_get("/api/config", handle_get_config)
@@ -113,7 +140,7 @@ def create_app(
     app.router.add_post("/api/engine/update", handle_engine_update)
     app.router.add_patch("/api/config", handle_patch_config)
 
-    app.router.add_get("/v1/models", proxy_to_vllm)
+    app.router.add_get("/v1/models", handle_v1_models)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
 
@@ -149,12 +176,45 @@ def create_app(
     return app
 
 
+def _head_instances(config) -> list:
+    """Phase 2: the instances list this node HEADS, as wire dicts.
+
+    Today there's at most one (derived from config), so this returns a 0- or
+    1-element list. When the engine layer owns multiple instances (P2-2) it will
+    return all of them. Mirrors the legacy distributed_instance_id/peers.
+    """
+    from ainode.discovery.instance import InstanceRecord
+
+    peer_ips = list(getattr(config, "peer_ips", []) or [])
+    if not peer_ips:
+        return []
+    iid = f"{config.node_id or 'head'}:{config.model}"
+    return [InstanceRecord(
+        instance_id=iid,
+        model=config.model or "",
+        head_node_id=config.node_id or "unknown",
+        peer_ips=peer_ips,
+        api_port=config.api_port,
+        tensor_parallel_size=1 + len(peer_ips),
+        status="serving",
+    ).to_dict()]
+
+
 def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     """Create a NodeAnnouncement from current node state."""
     gpu: Optional[GPUInfo] = detect_gpu()
     gpu_name = gpu.name if gpu else "CPU"
     gpu_memory_gb = round(gpu.memory_total_mb / 1024, 1) if gpu else 0.0
     unified_memory = gpu.unified_memory if gpu else False
+
+    # This node's fabric IP, so a head can launch us over the cluster fabric
+    # (BUG D fix — not the mgmt-LAN UDP source address).
+    fabric_ip = ""
+    try:
+        from ainode.cluster.hca_discovery import detect_fabric_ip
+        fabric_ip = detect_fabric_ip(getattr(config, "cluster_interface", "") or "") or ""
+    except Exception:
+        pass
 
     engine_ready = False
     if engine is not None:
@@ -198,6 +258,8 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         distributed_mode=distributed_mode,
         distributed_instance_id=distributed_instance_id,
         distributed_peers=distributed_peers,
+        fabric_ip=fabric_ip,
+        instances=(_head_instances(config) if (distributed_mode == "head" and engine_ready) else []),
     )
 
 
@@ -208,11 +270,30 @@ async def _on_startup(app: web.Application) -> None:
     announcement: NodeAnnouncement = app["announcement"]
     cluster: ClusterState = app["cluster_state"]
 
+    # Always-on: re-load the persisted solo instance set so a `systemctl restart
+    # ainode` brings every previously-loaded model back with no manual step.
+    # Skipped when the operator requested a clean boot (closet #310, set in the
+    # CLI start path) so a restart can actually free the node.
+    if getattr(config, "_skip_replay", False):
+        logger.info("start-clean: skipping persisted-instance replay")
+    else:
+        try:
+            from ainode.models.api_routes import replay_instances_on_startup
+            app["_instance_replay_task"] = asyncio.get_event_loop().create_task(
+                replay_instances_on_startup(app)
+            )
+        except Exception:
+            logger.exception("Failed to schedule instance replay")
+
     if config.cluster_enabled:
         # Start broadcast sender
+        _collector = app.get("metrics_collector")
         sender = BroadcastSender(
             announcement=announcement,
             discovery_port=config.discovery_port,
+            # Stamp live GPU telemetry onto every broadcast so the head can
+            # render real per-peer VRAM/util (metrics fan-out).
+            metrics_provider=(_collector.get_gpu_metrics if _collector else None),
         )
         await sender.start()
         app["broadcast_sender"] = sender
@@ -258,13 +339,35 @@ async def _on_startup(app: web.Application) -> None:
                 return None
             return f"{name}:6379"
 
-        app["_ray_autostart_task"] = asyncio.get_event_loop().create_task(
-            _ray_autostart_loop(
-                cluster_state=cluster,
-                get_master_address=_get_master_address,
-                state=app["ray_autostart_state"],
+        if app["ray_autostart_state"].enabled:
+            app["_ray_autostart_task"] = asyncio.get_event_loop().create_task(
+                _ray_autostart_loop(
+                    cluster_state=cluster,
+                    get_master_address=_get_master_address,
+                    state=app["ray_autostart_state"],
+                )
             )
-        )
+
+
+async def _engine_serving(backend, loop) -> bool:
+    """True iff the engine's OpenAI API actually answers right now.
+
+    The latched `ready` flag never flips False when an engine crashes or is
+    killed out-of-band, so a dead engine reads READY forever (phantom-READY →
+    ghost routing → 502s). An active localhost probe is the truthful signal —
+    and it correctly reads False while a model is still loading (api not up
+    yet), so we never advertise a not-yet-serving OR already-dead engine.
+
+    health_check() uses a blocking 5s-timeout urlopen, so run it in the default
+    executor to keep the event loop free (a hung engine must not stall sync).
+    """
+    if backend is None:
+        return False
+    try:
+        hc = await loop.run_in_executor(None, backend.health_check)
+        return bool(hc.get("api_responding"))
+    except Exception:
+        return False
 
 
 async def _cluster_sync_loop(app: web.Application) -> None:
@@ -288,16 +391,33 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                     "distributed_mode": getattr(config, "distributed_mode", "solo") or "solo",
                 }
                 dmode = updates["distributed_mode"]
-                engine_ready = bool(engine is not None and getattr(engine, "ready", False))
+                loop = asyncio.get_event_loop()
+                # Liveness: the latched `ready` flag never flips False when an engine
+                # crashes or is killed out-of-band, so a dead engine reads READY forever
+                # (phantom-READY → ghost routing → 502s, BUG A FIX 2). Probe the engine's
+                # own API instead (see _engine_serving) — also reads False while loading,
+                # so we never advertise a not-yet-serving OR already-dead engine.
+                # ponytail: one localhost probe per instance per 5s cycle; a transient
+                # blip drops the model for one cycle and self-heals on the next probe.
+                engine_serving = await _engine_serving(engine, loop)
+                engine_proc_alive = bool(engine is not None and engine.is_running())
+                # Re-broadcast the live primary model every cycle, gated on real
+                # liveness — fixes both the stale `model` field (BUG A) and the
+                # phantom-READY-after-crash case (FIX 2). Members serve via the head's
+                # sharded engine, not their own model.
+                updates["model"] = "" if (dmode == "member" or not engine_serving) else (config.model or "")
                 if dmode == "member":
                     updates["status"] = "member-ready"
                 elif engine is not None:
-                    updates["status"] = "serving" if engine_ready else "starting"
+                    updates["status"] = (
+                        "serving" if engine_serving
+                        else ("starting" if engine_proc_alive else "stopped")
+                    )
 
                 # Advertise distributed instance metadata once the head's
                 # sharded engine is serving — the UI uses this to render
                 # "DISTRIBUTED TP=N across X nodes".
-                if dmode == "head" and engine_ready:
+                if dmode == "head" and engine_serving:
                     peer_ips = list(getattr(config, "peer_ips", []) or [])
                     if peer_ips:
                         updates["distributed_instance_id"] = f"{config.node_id or 'head'}:{config.model}"
@@ -308,6 +428,19 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                 elif dmode != "head":
                     updates["distributed_instance_id"] = None
                     updates["distributed_peers"] = []
+                manager = app.get("instances")
+                if manager is not None and not manager.is_empty():
+                    # Only advertise instances whose engine actually answers — a dead
+                    # stacked instance drops out of the broadcast within one cycle.
+                    live_records = []
+                    for inst in manager.instances():
+                        if await _engine_serving(inst.backend, loop):
+                            live_records.append(inst.record)
+                    updates["instances"] = [r.to_dict() for r in live_records]
+                else:
+                    updates["instances"] = (
+                        _head_instances(config) if (dmode == "head" and engine_serving) else []
+                    )
                 if sender:
                     sender.update_announcement(**updates)
                     # Keep the app-level announcement in sync so /api/status sees fresh values
@@ -319,6 +452,17 @@ async def _cluster_sync_loop(app: web.Application) -> None:
 
 
 async def _on_cleanup(app: web.Application) -> None:
+    # Stop the instance-replay task if still running
+    replay_task = app.get("_instance_replay_task")
+    if replay_task:
+        replay_task.cancel()
+        try:
+            await replay_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
     # Stop cluster sync task
     sync_task = app.get("_cluster_sync_task")
     if sync_task:
@@ -399,21 +543,31 @@ async def handle_status(request: web.Request) -> web.Response:
 
     gpu: Optional[GPUInfo] = detect_gpu()
     gpu_info = asdict(gpu) if gpu else None
+    # detect_gpu() caches and reports free==total on GB10 unified memory, so the
+    # dashboard showed 0% used. Overlay the collector's live psutil reading — the
+    # same source /api/nodes uses — so the two endpoints agree.
+    if gpu_info is not None:
+        collector = request.app.get("metrics_collector")
+        if collector is not None:
+            try:
+                m = collector.get_gpu_metrics() or {}
+                if not m.get("error"):
+                    total_mb = m.get("memory_total_mb") or gpu_info.get("memory_total_mb")
+                    used_mb = m.get("memory_used_mb")
+                    if total_mb:
+                        gpu_info["memory_total_mb"] = round(total_mb)
+                        if used_mb is not None:
+                            gpu_info["memory_free_mb"] = max(0, round(total_mb - used_mb))
+            except Exception:
+                pass
 
     engine_ready = False
     models_loaded: list[str] = []
 
-    # First try our managed engine
-    if engine is not None:
-        engine_ready = getattr(engine, "ready", False)
-        try:
-            hc = engine.health_check()
-            models_loaded = hc.get("models_loaded", [])
-        except Exception:
-            pass
-
-    # Fallback: probe vLLM directly (handles Docker-managed vLLM)
-    if not models_loaded and session is not None:
+    # Live-probe wins: a vLLM that answers /v1/models with >=1 model right now
+    # is the single source of liveness. The latched engine.ready is no longer
+    # trusted for status (wait_ready still uses it internally).
+    if session is not None:
         try:
             vllm_url = f"http://localhost:{config.api_port}/v1/models"
             async with session.get(vllm_url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
@@ -422,7 +576,15 @@ async def handle_status(request: web.Request) -> web.Response:
                     models_loaded = [m.get("id", "") for m in data.get("data", [])]
                     engine_ready = len(models_loaded) > 0
         except Exception:
-            pass
+            engine_ready = False
+    elif engine is not None:
+        # No HTTP session — fall back to the managed engine's health check.
+        try:
+            hc = engine.health_check()
+            models_loaded = hc.get("models_loaded", [])
+            engine_ready = bool(hc.get("api_responding")) and len(models_loaded) > 0
+        except Exception:
+            engine_ready = False
 
     cluster: ClusterState = request.app["cluster_state"]
     master = cluster.get_master()
@@ -434,6 +596,13 @@ async def handle_status(request: web.Request) -> web.Response:
         "model": config.model,
         "gpu": gpu_info,
         "engine_ready": engine_ready,
+        # Coarse engine load phase for the UI launching card (3c):
+        # idle | starting | loading_weights | distributed_init | profiling | ready
+        # Truthful phase: the live /v1/models probe above is the reliable
+        # readiness signal — the engine's _ready latch can miss the vLLM startup
+        # log marker and stay False on a model that is actually serving. Report
+        # 'ready' when the probe says serving; else the engine's coarse phase.
+        "load_phase": ("ready" if engine_ready else (getattr(engine, "load_phase", "idle") if engine is not None else "idle")),
         "uptime": round(time.time() - start_time, 1),
         "version": __version__,
         "powered_by": "argentos.ai",
@@ -451,6 +620,8 @@ async def handle_nodes(request: web.Request) -> web.Response:
     cluster: ClusterState = request.app["cluster_state"]
 
     cluster_nodes = cluster.get_nodes(include_offline=False)
+    collector = request.app.get("metrics_collector")
+    local_id = config.node_id
     if cluster_nodes:
         nodes_list = []
         for n in cluster_nodes:
@@ -461,9 +632,30 @@ async def handle_nodes(request: web.Request) -> web.Response:
             ready = status_str in ("online", "serving") or (
                 dmode == "member" and status_str in ("online", "member-ready")
             )
+            # Live GPU telemetry: peers come from their broadcast; the local
+            # node's ClusterNode is built once at startup, so read it fresh
+            # from our own collector here. (metrics fan-out)
+            used_mb = float(getattr(n, "gpu_memory_used_mb", 0.0) or 0.0)
+            total_mb = float(getattr(n, "gpu_memory_total_mb", 0.0) or 0.0)
+            util = float(getattr(n, "gpu_utilization", 0.0) or 0.0)
+            temp = float(getattr(n, "gpu_temp", 0.0) or 0.0)
+            if n.node_id == local_id and collector is not None:
+                try:
+                    m = collector.get_gpu_metrics() or {}
+                    if not m.get("error"):
+                        used_mb = float(m.get("memory_used_mb", used_mb) or used_mb)
+                        total_mb = float(m.get("memory_total_mb", total_mb) or total_mb)
+                        util = float(m.get("utilization_percent", util) or util)
+                        temp = float(m.get("temperature_c", temp) or temp)
+                except Exception:
+                    pass
+            if not total_mb and n.gpu_memory_gb:
+                total_mb = n.gpu_memory_gb * 1024
+            used_pct = round(used_mb / total_mb * 100) if total_mb else 0
             nodes_list.append({
                 "node_id": n.node_id,
                 "node_name": n.node_name,
+                "fabric_ip": getattr(n, "fabric_ip", "") or "",
                 "host": "localhost",
                 "api_port": n.api_port,
                 "web_port": n.web_port,
@@ -471,6 +663,9 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "gpu_name": n.gpu_name,
                 "gpu_memory_gb": n.gpu_memory_gb,
                 "unified_memory": n.unified_memory,
+                "gpu_memory_used_pct": used_pct,
+                "gpu_utilization": round(util),
+                "gpu_temp": round(temp),
                 "status": status_str,
                 "engine_ready": ready,
                 "distributed_mode": dmode,
@@ -495,22 +690,149 @@ async def handle_nodes(request: web.Request) -> web.Response:
         }]
     return web.json_response({"nodes": nodes_list})
 
+async def _cluster_dispatch(request: web.Request, path: str):
+    """F2: forward a load/unload to a node's local /api/models endpoint.
+
+    node_id == this node → call the local handler directly (back-compat). Remote →
+    POST over the fabric to http://<fabric_ip>:<web_port><path>. Reuses each node's
+    existing /api/models/load|unload; the master never SSHes.
+    """
+    config: NodeConfig = request.app["config"]
+    cluster = request.app.get("cluster_state")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    node_id = (body.get("node_id") or "").strip()
+    if not node_id or node_id == config.node_id:
+        # Local: hand the body to the local model handler unchanged.
+        from ainode.models.api_routes import handle_model_load, handle_model_unload
+
+        class _Shim:
+            def __init__(self, orig, b):
+                self._o, self._b = orig, b
+            def __getattr__(self, k):
+                return getattr(self._o, k)
+            async def json(self):
+                return self._b
+        handler = handle_model_load if path.endswith("/load") else handle_model_unload
+        return await handler(_Shim(request, body))
+
+    node = cluster.get_node(node_id) if cluster is not None else None
+    host = (getattr(node, "fabric_ip", "") or "") if node else ""
+    if not host:
+        return web.json_response(
+            {"error": f"node '{node_id}' not found or has no fabric IP"}, status=404)
+    url = f"http://{host}:{node.web_port}{path}"
+    session: aiohttp.ClientSession = request.app["client_session"]
+    fwd = {k: v for k, v in body.items() if k != "node_id"}
+    try:
+        async with session.post(url, json=fwd, timeout=aiohttp.ClientTimeout(total=60)) as up:
+            data = await up.read()
+            # web.Response rejects a content_type carrying a charset; the node's
+            # json_response sends "application/json; charset=utf-8" — strip it.
+            ctype = up.headers.get("Content-Type", "application/json").split(";")[0].strip()
+            return web.Response(status=up.status, body=data, content_type=ctype)
+    except aiohttp.ClientError as exc:
+        return web.json_response(
+            {"error": f"failed to reach node '{node_id}' at {url}: {exc}"}, status=502)
+
+
+async def handle_cluster_load(request: web.Request) -> web.Response:
+    """POST /api/cluster/load {node_id, model} — load a model on any node (F2)."""
+    return await _cluster_dispatch(request, "/api/models/load")
+
+
+async def handle_cluster_unload(request: web.Request) -> web.Response:
+    """POST /api/cluster/unload {node_id, model} — unload on any node (F2)."""
+    return await _cluster_dispatch(request, "/api/models/unload")
+
+
+def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int) -> list:
+    """All (host, port) currently serving `model` (routing-truth).
+
+    Returns a LIST so proxy_to_vllm can fail over when the first target is a
+    stale/ghost claim (a node that crashed but still advertises the model). A
+    crashed node is indistinguishable from a live one in cluster state, so
+    failover — not ordering — is what makes routing robust. Local node first
+    (cheapest hop), then remote peers.
+    """
+    local, remote = [], []
+    for n in (cluster.members() if cluster is not None else []):
+        status = n.status.value if hasattr(n.status, "value") else str(n.status)
+        if status not in ("online", "serving", "member-ready"):
+            continue
+        is_local = n.node_id == local_node_id
+        host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
+        if not host:
+            continue
+        node_port = local_port if is_local else n.api_port
+        bucket = local if is_local else remote
+        seen = set()
+        # The node's primary/solo model is served on its main api_port.
+        if getattr(n, "model", "") == model and node_port not in seen:
+            bucket.append((host, node_port)); seen.add(node_port)
+        # Each stacked instance is served on its OWN port — a co-resident 2nd
+        # model on this node lives at :8001, not the node's main :8000.
+        for inst in (getattr(n, "instances", []) or []):
+            if inst.get("model") != model:
+                continue
+            iport = inst.get("api_port") or node_port
+            if iport not in seen:
+                bucket.append((host, iport)); seen.add(iport)
+    return local + remote
+
+
+def _routing_table(cluster, local_node_id: str, local_port: int) -> dict:
+    """model name → (host, port) for every model served across the fleet (F1).
+
+    Built from cluster broadcast state: each node advertises its solo model and
+    any instances it heads. The local node routes to localhost; remote nodes to
+    their fabric IP (reachable from the master over the cluster fabric).
+    """
+    table: dict = {}
+    for n in cluster.members():
+        status = n.status.value if hasattr(n.status, "value") else str(n.status)
+        if status not in ("online", "serving", "member-ready"):
+            continue
+        is_local = n.node_id == local_node_id
+        host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
+        if not host:
+            continue
+        port = local_port if is_local else n.api_port
+        if getattr(n, "model", ""):
+            table.setdefault(n.model, (host, port))
+        for inst in (getattr(n, "instances", []) or []):
+            m = inst.get("model")
+            if m:
+                table.setdefault(m, (host, inst.get("api_port") or port))
+    return table
+
+
+async def handle_v1_models(request: web.Request) -> web.Response:
+    """Federated /v1/models — the UNION of models served across the fleet (F1)."""
+    config: NodeConfig = request.app["config"]
+    cluster = request.app.get("cluster_state")
+    table = _routing_table(cluster, config.node_id, config.api_port) if cluster is not None else {}
+    if not table and config.model:
+        table = {config.model: ("localhost", config.api_port)}
+    data = [{"id": m, "object": "model", "owned_by": "ainode"} for m in sorted(table)]
+    return web.json_response({"object": "list", "data": data})
+
+
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
-    """Forward the request to the local vLLM server and stream the response back."""
+    """Forward the request to the node serving the requested model (F1 federation)."""
     config: NodeConfig = request.app["config"]
     session: aiohttp.ClientSession = request.app["client_session"]
     collector: MetricsCollector = request.app["metrics_collector"]
-    vllm_url = f"http://localhost:{config.api_port}{request.path}"
-
-    # Extract model name for metrics
+    # Extract the model name first — it drives BOTH routing and metrics.
     model = config.model or "unknown"
     body_bytes = None
     if request.method == "POST":
         body_bytes = await request.read()
         try:
             import json as _json
-            body_json = _json.loads(body_bytes)
-            model = body_json.get("model", model)
+            model = _json.loads(body_bytes).get("model", model)
         except Exception:
             pass
     # Tag the request so the server-view log middleware can capture the model
@@ -519,52 +841,73 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     except Exception:
         pass
 
-    # Build upstream request kwargs
+    # Federated routing with failover (F1 + routing-truth): try every node that
+    # serves this model (ready ones first), so a stale/ghost claim from a crashed
+    # node doesn't 502 a request another node can serve. Built from cluster state.
+    cluster = request.app.get("cluster_state")
+    candidates = _routing_candidates(cluster, model, config.node_id, config.api_port)
+    if not candidates:
+        if model and model != "unknown" and cluster is not None and cluster.members():
+            return web.json_response(
+                {"error": {"type": "model_not_found",
+                           "message": f"Model '{model}' is not loaded on any node",
+                           "code": "model_not_found"}},
+                status=404)
+        candidates = [("localhost", config.api_port)]  # back-compat: empty fleet → local
+
+    # Build upstream request kwargs. Strip content-length: aiohttp recomputes it
+    # from `data`, and forwarding the original alongside makes the upstream wait
+    # for a body that never arrives (the proxy hangs). Strip host/transfer-encoding
+    # for the usual reverse-proxy reasons.
     kwargs: dict = {
         "headers": {k: v for k, v in request.headers.items()
-                    if k.lower() not in ("host", "transfer-encoding")},
+                    if k.lower() not in ("host", "transfer-encoding", "content-length")},
+        # Fast failover: a dead/ghost node must fail the CONNECT quickly so the
+        # loop moves on to the next candidate — but leave total uncapped so a live
+        # node's slow cold-start generation (35s+) can still stream to completion.
+        "timeout": aiohttp.ClientTimeout(total=None, sock_connect=5),
     }
     if body_bytes is not None:
         kwargs["data"] = body_bytes
 
     start_time = time.time()
-    try:
-        async with session.request(request.method, vllm_url, **kwargs) as upstream:
-            # Detect SSE streaming
-            is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")
-
-            if is_sse:
-                resp = web.StreamResponse(
-                    status=upstream.status,
-                    headers={
-                        "Content-Type": "text/event-stream",
-                        "Cache-Control": "no-cache",
-                        "X-Accel-Buffering": "no",
-                    },
-                )
-                await resp.prepare(request)
-                async for chunk in upstream.content.iter_any():
-                    await resp.write(chunk)
-                await resp.write_eof()
-                latency_ms = (time.time() - start_time) * 1000
-                collector.record_request(model, latency_ms, error=False)
-                return resp
-            else:
+    last_err = None
+    for host, port in candidates:
+        vllm_url = f"http://{host}:{port}{request.path}"
+        try:
+            async with session.request(request.method, vllm_url, **kwargs) as upstream:
+                is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")
+                if is_sse:
+                    resp = web.StreamResponse(
+                        status=upstream.status,
+                        headers={
+                            "Content-Type": "text/event-stream",
+                            "Cache-Control": "no-cache",
+                            "X-Accel-Buffering": "no",
+                        },
+                    )
+                    await resp.prepare(request)
+                    async for chunk in upstream.content.iter_any():
+                        await resp.write(chunk)
+                    await resp.write_eof()
+                    collector.record_request(model, (time.time() - start_time) * 1000, error=False)
+                    return resp
                 body = await upstream.read()
-                latency_ms = (time.time() - start_time) * 1000
-                collector.record_request(model, latency_ms, error=False)
+                collector.record_request(model, (time.time() - start_time) * 1000, error=False)
                 return web.Response(
-                    status=upstream.status,
-                    body=body,
-                    content_type=upstream.headers.get("Content-Type", "application/json"),
+                    status=upstream.status, body=body,
+                    content_type=upstream.headers.get("Content-Type", "application/json").split(";")[0].strip(),
                 )
-    except aiohttp.ClientError:
-        latency_ms = (time.time() - start_time) * 1000
-        collector.record_request(model, latency_ms, error=True)
-        return web.json_response(
-            {"error": {"message": "vLLM engine not reachable", "type": "server_error"}},
-            status=502,
-        )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_err = exc  # unreachable / connect-timeout (likely a ghost) — try the next
+            continue
+    # Every candidate failed.
+    collector.record_request(model, (time.time() - start_time) * 1000, error=True)
+    return web.json_response(
+        {"error": {"message": f"no reachable node is serving '{model}' ({last_err})",
+                   "type": "server_error"}},
+        status=502,
+    )
 
 async def handle_cluster_info(request: web.Request) -> web.Response:
     """Return the current cluster topology from this node's perspective."""
@@ -619,28 +962,61 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
     total_vram = sum(float(n.gpu_memory_gb or 0) for n in ready)
     total_gpus = len(ready)  # one GPU per node today; future: per-node GPU count
 
-    # Surface the distributed instance (if any) — the head broadcasts it;
-    # everybody else can tell from cluster state.
-    distributed_instance = None
+    # Phase 2: the LIST of distributed instances across all nodes — each head
+    # advertises the instances it heads. Resolve each instance's peer FABRIC IPs
+    # (BUG D) back to member node ids/names. `distributed_instance` (singular)
+    # stays = the first one, for one release of back-compat.
+    by_fabric = {
+        (getattr(m, "fabric_ip", "") or ""): m
+        for m in cluster.members() if getattr(m, "fabric_ip", "")
+    }
+
+    def _resolve_instance(head, inst):
+        iid = inst.get("instance_id", "") or ""
+        peers = list(inst.get("peer_ips", []) or [])
+        peer_node_ids, member_names = [], [head.node_name]
+        for ip in peers:
+            m = by_fabric.get(ip)
+            peer_node_ids.append(m.node_id if m else ip)
+            member_names.append(m.node_name if m else ip)
+        # model can be stale ("") if the head started idle; it's authoritative in
+        # instance_id ("<node_id>:<model>").
+        model = inst.get("model") or (iid.split(":", 1)[1] if ":" in iid else "") or head.model
+        return {
+            "instance_id": iid,
+            "head_node_id": head.node_id,
+            "head_node_name": head.node_name,
+            "peer_ips": peers,
+            "peer_node_ids": peer_node_ids,
+            "member_names": member_names,
+            "tensor_parallel_size": inst.get("tensor_parallel_size") or (1 + len(peers)),
+            "model": model,
+            "status": inst.get("status", "serving"),
+        }
+
+    distributed_instances = []
     for n in ready:
-        iid = getattr(n, "distributed_instance_id", None)
-        if iid:
-            peers = list(getattr(n, "distributed_peers", []) or [])
-            distributed_instance = {
-                "instance_id": iid,
-                "head_node_id": n.node_id,
-                "head_node_name": n.node_name,
-                "peer_ips": peers,
-                "tensor_parallel_size": 1 + len(peers),
-                "model": n.model,
-            }
-            break
+        node_instances = list(getattr(n, "instances", []) or [])
+        if not node_instances:
+            # Back-compat: an older node advertises only the singular fields.
+            iid = getattr(n, "distributed_instance_id", None)
+            if iid:
+                node_instances = [{
+                    "instance_id": iid,
+                    "model": (iid.split(":", 1)[1] if ":" in iid else getattr(n, "model", "")),
+                    "peer_ips": list(getattr(n, "distributed_peers", []) or []),
+                }]
+        for inst in node_instances:
+            distributed_instances.append(_resolve_instance(n, inst))
+
+    distributed_instance = distributed_instances[0] if distributed_instances else None
 
     nodes_payload = []
     for n in ready:
         nodes_payload.append({
             "node_id": n.node_id,
             "hostname": n.node_name,
+            "fabric_ip": getattr(n, "fabric_ip", "") or "",
             "vram_gb": round(float(n.gpu_memory_gb or 0), 1),
             "gpus": 1,
             "gpu_name": n.gpu_name,
@@ -661,6 +1037,7 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         "total_nodes": len(ready),
         "nodes": nodes_payload,
         "distributed_instance": distributed_instance,
+        "distributed_instances": distributed_instances,
         "ray": ray_state.to_dict(),
     })
 

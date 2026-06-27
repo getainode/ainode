@@ -1042,6 +1042,12 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
   background: rgba(118, 185, 0, 0.06);
   letter-spacing: 0.2px;
 }
+
+.launch-hint.warn {
+  border-left-color: #d9a441;
+  background: rgba(217, 164, 65, 0.08);
+  color: #e3c07a;
+}
 .launch-hint.warn {
   color: #ffb84d;
   border-left-color: #ffb84d;
@@ -1777,18 +1783,21 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
 /* Node selector dots */
 .node-selector {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
   margin: 8px 0 8px 0;
 }
 
 .node-dot {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  display: flex;
+  flex: 0 0 auto;
+  height: 34px;
+  border-radius: 17px;
+  padding: 0 14px;
+  white-space: nowrap;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 12.5px;
   font-weight: 700;
   font-family: var(--font-mono);
   cursor: pointer;
@@ -2233,6 +2242,115 @@ select {
   color: var(--text-muted);
   font-family: var(--font-mono);
   letter-spacing: 0.5px;
+}
+
+/* Two-list layout: Installed (what you have) + Catalog (what you can grab). */
+.downloads-section {
+  margin-top: 4px;
+}
+
+.downloads-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 18px 32px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-primary);
+}
+
+.downloads-section-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: #0a0a0a;
+  background: var(--nvidia-green);
+  border-radius: 10px;
+  padding: 1px 9px;
+}
+
+.downloads-section-sub {
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
+}
+
+/* Dimmed: shown only via "Show all", can't run on this cluster. */
+.download-card.dimmed {
+  opacity: 0.4;
+}
+
+.hf-toggle-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 32px 28px;
+}
+
+/* Browse HF / Back / Show-all — neutral outline matching the Details button. */
+#browse-hf-btn,
+#hf-show-all,
+.hf-back-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-hover);
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+#browse-hf-btn:hover,
+#hf-show-all:hover,
+.hf-back-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--nvidia-green);
+  border-color: var(--nvidia-green-dim);
+}
+
+.hf-back-btn {
+  align-self: flex-start;
+}
+
+/* Delete — danger outline, consistent with the red DELETE in the instances panel. */
+.downloads-delete-btn {
+  background: transparent !important;
+  color: var(--red) !important;
+  border: 1px solid rgba(255, 51, 51, 0.4) !important;
+  font-weight: 600 !important;
+}
+
+.downloads-delete-btn:hover {
+  background: var(--red-glow) !important;
+  border-color: var(--red) !important;
+  box-shadow: 0 0 12px var(--red-glow) !important;
+}
+
+/* Browse HF lives alone on its row, pushed right under the page title. */
+.downloads-actions-row {
+  justify-content: flex-end;
+  padding-top: 16px;
+  padding-bottom: 0;
+}
+
+/* Curated-but-not-yet-load-tested — amber, distinct from the green verified ✓. */
+.fit-badge.untested {
+  color: #d9a441;
+  border-color: rgba(217, 164, 65, 0.45);
+  background: rgba(217, 164, 65, 0.08);
+}
+
+/* Multi-node placement (TP=2/4) — purple, matching the Shard button. */
+.fit-badge.cluster {
+  color: #b794f6;
+  border-color: rgba(139, 92, 246, 0.45);
+  background: rgba(139, 92, 246, 0.08);
 }
 
 .downloads-toolbar {

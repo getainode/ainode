@@ -30,10 +30,23 @@ class NodeConfig:
 
     # Engine
     engine_strategy: str = "pip"  # "pip" | "docker"
+    # Which Docker-engine backend to use when engine_strategy == "docker".
+    #   "eugr"   — eugr/spark-vllm-docker (v0.4.x default)
+    #   "nvidia" — NVIDIA's nvcr.io/nvidia/vllm (v0.5.0+, opt-in)
+    engine_backend: str = "eugr"
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     models_dir: str = str(MODELS_DIR)
     max_model_len: Optional[int] = None
-    gpu_memory_utilization: float = 0.9
+    # vLLM sizes the KV cache to this fraction of the GPU regardless of model
+    # size, so 0.9 made a tiny model reserve ~110 GB on a 122 GB unified-memory
+    # node — starving the OS and blocking model stacking. 0.5 is a safer default
+    # for GB10 (still fits a 70B / per-node MoE share); push it higher per-load
+    # (gpu_memory_utilization in the load body) for big-MoE long-context runs.
+    gpu_memory_utilization: float = 0.5
+    # KV-cache precision. fp8 is the GB10 design default — required for long
+    # context (32k+) or vLLM OOMs sizing the cache at bf16 (see engine/AGENTS.md).
+    # Set "" / "auto" to let vLLM choose if a model/quant ever rejects fp8.
+    kv_cache_dtype: str = "fp8"
     quantization: Optional[str] = None  # awq, gptq, fp8, None
     trust_remote_code: bool = False
 

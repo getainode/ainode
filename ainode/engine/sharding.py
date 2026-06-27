@@ -138,8 +138,8 @@ class ShardingPlanner:
             # Pipeline parallel splits layers across nodes.
             per_node = model_size_gb / num_nodes
         else:
-            # Auto: assume pipeline for multi-node (lower overhead)
-            per_node = model_size_gb / num_nodes
+            # Auto: tensor parallel (matches launch path)
+            per_node = (model_size_gb / num_nodes) * 1.10
 
         return per_node * MEMORY_OVERHEAD_FACTOR
 
@@ -166,8 +166,9 @@ class ShardingPlanner:
 
         Strategy:
         - If model fits on a single node, don't shard.
-        - If model needs multiple nodes, use pipeline parallel (simpler over network).
-        - tensor_parallel is used only within a single node with multiple GPUs.
+        - If model needs multiple nodes, default to tensor parallel
+          (TP=num_nodes, PP=1) — this matches the distributed launch path.
+        - Pass an explicit ShardingStrategy.PIPELINE_PARALLEL to override.
         """
         model_size = estimate_model_size(model_id)
         required = model_size * MEMORY_OVERHEAD_FACTOR
@@ -222,7 +223,7 @@ class ShardingPlanner:
 
         # Determine actual strategy
         if strategy == ShardingStrategy.AUTO:
-            effective_strategy = ShardingStrategy.PIPELINE_PARALLEL
+            effective_strategy = ShardingStrategy.TENSOR_PARALLEL
         else:
             effective_strategy = strategy
 

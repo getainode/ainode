@@ -18,12 +18,20 @@ set -euo pipefail
 # -- Defaults ---------------------------------------------------------------
 AINODE_VERSION="${AINODE_VERSION:-0.4.1}"
 AINODE_IMAGE="${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
+# NVIDIA official vLLM engine image — pre-pulled so first dashboard launch
+# doesn't hit a 5–10 min download. Override with AINODE_NVIDIA_IMAGE=skip to
+# suppress, or a custom tag for testing.
+AINODE_NVIDIA_IMAGE="${AINODE_NVIDIA_IMAGE:-nvcr.io/nvidia/vllm:26.02-py3}"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
 AINODE_PEERS="${AINODE_PEERS:-}"           # comma-separated IPs
 AINODE_SSH_USER="${AINODE_SSH_USER:-$USER}"
 AINODE_JOB="${AINODE_JOB:-solo}"          # solo | master | worker
 SETUP_SSH="false"
 USER_MODE="false"
+
+# NGC / HF token locations (read-only hints; we never write these).
+NGC_TOKEN_FILE="${NGC_TOKEN_FILE:-/etc/ainode/ngc.token}"
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-$HOME/.cache/huggingface/token}"
 
 # -- Arg parsing ------------------------------------------------------------
 while [ $# -gt 0 ]; do
@@ -56,6 +64,17 @@ log "Checking prerequisites"
 command -v docker >/dev/null 2>&1 || die "docker not found. Install: https://docs.docker.com/engine/install/"
 docker info >/dev/null 2>&1 || die "docker daemon not reachable — run 'sudo systemctl start docker' or add \$USER to the 'docker' group"
 
+# /mnt/shared-models is required by the v0.4.9 systemd unit (--mount type=bind
+# fails loudly if the source doesn't exist). Surface the setup requirement
+# here instead of waiting for first-start to fail with a cryptic docker error.
+# For clusters: make this an NFS mount from the master's model storage. For
+# single-node: a directory is enough. See CHANGELOG v0.4.9 for context.
+# TODO(v0.4.10): once the NCCL init shim is baked into ainode-base, this
+# path becomes optional and the precheck can be dropped.
+if [ ! -d /mnt/shared-models ]; then
+    die "AINode v0.4.9+ requires /mnt/shared-models to exist for the per-node NCCL init shim.\n  Create it before re-running this installer:\n    sudo mkdir -p /mnt/shared-models\n  For clusters, mount shared model storage there (NFS from master recommended)."
+fi
+
 # GPU check (nvidia-container-toolkit). AINode targets NVIDIA GB10; skip if
 # missing, let the container fail fast with a clear error.
 if ! docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
@@ -67,8 +86,68 @@ fi
 log "Preparing $AINODE_HOME"
 mkdir -p "$AINODE_HOME"/{models,logs,datasets,training}
 
-log "Pulling $AINODE_IMAGE (this is a one-time ~18 GB download)"
+log "Pulling $AINODE_IMAGE (AINode orchestrator; slim — ~500 MB)"
 docker pull "$AINODE_IMAGE"
+
+# -- 2a. NGC login (for nvcr.io/nvidia/vllm image pull) -------------------
+# The NVIDIA engine backend requires a pull from NGC. Non-interactive login
+# prefers a token file or env var; otherwise prints a clear next-step.
+nvidia_image_pulled() {
+    docker image inspect "$AINODE_NVIDIA_IMAGE" >/dev/null 2>&1
+}
+
+ngc_login_noninteractive() {
+    local key=""
+    if [ -n "${NGC_API_KEY:-}" ]; then
+        key="$NGC_API_KEY"
+    elif [ -r "$NGC_TOKEN_FILE" ]; then
+        key="$(tr -d '[:space:]' < "$NGC_TOKEN_FILE")"
+    fi
+    if [ -z "$key" ]; then
+        return 1
+    fi
+    # NGC uses a literal '$oauthtoken' as the username (single-quoted on
+    # purpose — it is NOT a shell variable). See
+    # https://docs.nvidia.com/ngc/gpu-cloud/ngc-private-registry-user-guide/.
+    echo "$key" | docker login nvcr.io -u '$oauthtoken' --password-stdin >/dev/null 2>&1
+}
+
+if [ "$AINODE_NVIDIA_IMAGE" = "skip" ]; then
+    warn "Skipping NVIDIA vLLM image pre-pull (AINODE_NVIDIA_IMAGE=skip)"
+elif nvidia_image_pulled; then
+    log "NVIDIA vLLM image already present: $AINODE_NVIDIA_IMAGE"
+else
+    log "Pulling NVIDIA vLLM engine image: $AINODE_NVIDIA_IMAGE"
+    log "  (~15 GB; takes 5–10 minutes on a 1 Gbps link. One-time operation.)"
+    if ngc_login_noninteractive; then
+        log "  NGC login: OK (from NGC_API_KEY or $NGC_TOKEN_FILE)"
+    else
+        warn "NGC credentials not found in \$NGC_API_KEY or $NGC_TOKEN_FILE."
+        warn "  Pre-pull skipped. The NVIDIA engine backend will fail until you"
+        warn "  run:"
+        warn "     docker login nvcr.io"
+        warn "  (username: \$oauthtoken   password: your NGC API key from https://ngc.nvidia.com)"
+    fi
+    if docker pull "$AINODE_NVIDIA_IMAGE"; then
+        log "  NVIDIA vLLM image pulled: $AINODE_NVIDIA_IMAGE"
+    else
+        warn "  docker pull $AINODE_NVIDIA_IMAGE failed (likely 401 / unauthenticated)."
+        warn "  Fix:  docker login nvcr.io   (see https://ngc.nvidia.com for an API key)"
+        warn "  Continuing — AINode will still install; the NVIDIA engine will error until the pull succeeds."
+    fi
+fi
+
+# -- 2b. HuggingFace token hint --------------------------------------------
+# We never capture or write the token — just nudge the user so gated-model
+# downloads don't fail with a cryptic 403 at first launch.
+if [ -n "${HF_TOKEN:-}" ] || [ -r "$HF_TOKEN_FILE" ]; then
+    log "HuggingFace token: OK (env var or $HF_TOKEN_FILE)"
+else
+    warn "HuggingFace token NOT configured."
+    warn "  Gated models (Llama, Nemotron, Gemma, ...) will fail to download without this."
+    warn "  Fix:  hf auth login          (stores at $HF_TOKEN_FILE)"
+    warn "    or: export HF_TOKEN=hf_... (in your shell profile)"
+fi
 
 # Write initial config.json if not already present.
 # No model is set — the user picks one via the web UI after install.
@@ -161,6 +240,7 @@ EXEC_START="/usr/bin/docker run --rm --name ainode \
  -v ${AINODE_HOME}:/root/.ainode \
  -v /var/run/docker.sock:/var/run/docker.sock \
  -v ${HOME}/.ssh:/host-ssh:ro \
+ --mount type=bind,source=/mnt/shared-models,target=/mnt/shared-models,bind-propagation=rshared \
  -e AINODE_HOME=/root/.ainode \
  -e NVIDIA_VISIBLE_DEVICES=all \
  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
