@@ -59,7 +59,7 @@ class TrainingConfig:
     """Configuration for a training/fine-tuning job."""
 
     base_model: str
-    dataset_path: str
+    dataset_path: str = ""  # required for training (enforced in validate); quantize omits it
     output_dir: Optional[str] = None
     method: str = "lora"
     num_epochs: int = 3
