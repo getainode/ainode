@@ -363,7 +363,9 @@ class TrainingJob:
                 if rc == 0:
                     self.status = JobStatus.COMPLETED
                     self.progress = 100.0
-                    self._log("Training completed successfully")
+                    self._log("Job completed successfully")
+                    if getattr(self.config, "method", "") == "quantize" and getattr(self.config, "push_to_hf", False):
+                        await self._push_to_hf()
                 else:
                     self.status = JobStatus.FAILED
                     self._log(f"Training process exited with code {rc}")
@@ -371,6 +373,26 @@ class TrainingJob:
             pass
         finally:
             self.end_time = time.time()
+
+    async def _push_to_hf(self) -> None:
+        """After a quantize job completes, push the on-disk checkpoint to HF.
+        Pure huggingface_hub (no torch) — run the blocking upload off the loop."""
+        c = self.config
+        out_dir = str(AINODE_HOME / "models" / (c.out_slug or ""))
+        repo = c.hf_repo or c.out_slug
+        token = c.hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        if not repo or not token:
+            self._log("push_to_hf: missing repo or token — skipped")
+            return
+        try:
+            from ainode.models.hf_upload import upload_checkpoint
+            loop = asyncio.get_event_loop()
+            url = await loop.run_in_executor(
+                None, lambda: upload_checkpoint(out_dir, repo, token, None, True)
+            )
+            self._log(f"push_to_hf: uploaded to {url}")
+        except Exception as exc:
+            self._log(f"push_to_hf failed: {exc}")
 
     def _parse_progress(self, line: str) -> None:
         """Parse structured progress output from the training script.
@@ -387,6 +409,8 @@ class TrainingJob:
                     self.current_loss = payload["loss"]
                 if "progress" in payload:
                     self.progress = payload["progress"]
+                if "pct" in payload:  # quantize runner emits {phase, pct, msg}
+                    self.progress = payload["pct"]
             except (json.JSONDecodeError, IndexError):
                 pass
 

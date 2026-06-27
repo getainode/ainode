@@ -510,6 +510,7 @@ class NvidiaBackend(EngineBackend):
                 "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
             ),
         }
+        env.update(self._nvfp4_serve_env())
         if hca:
             env["NCCL_IB_HCA"] = hca
         return env
@@ -615,6 +616,37 @@ class NvidiaBackend(EngineBackend):
         except OSError:
             pass
         return None
+
+    def _is_nvfp4_model(self) -> bool:
+        """Detect NVFP4 from the on-disk config.json quantization metadata (with
+        the model id as a fallback) so the MARLIN serve env is applied only when
+        needed."""
+        mid = (self.config.model or "").lower()
+        if "nvfp4" in mid:
+            return True
+        local = self._local_model_dir()
+        if not local:
+            return False
+        try:
+            cfg = json.loads((Path(local) / "config.json").read_text())
+            blob = json.dumps(cfg.get("quantization_config") or {}).lower()
+            return "nvfp4" in blob or "fp4" in blob
+        except Exception:
+            return False
+
+    def _nvfp4_serve_env(self) -> Dict[str, str]:
+        """GB10/sm121 NVFP4 serve fix: the default FlashInfer CUTLASS FP4 GEMM
+        emits `cvt .e2m1x2` PTX that ptxas rejects on sm_121 (fatal even with
+        --enforce-eager). Force the MARLIN backend — env-only, no image rebuild,
+        and more KV-cache-memory-efficient. Applied only when serving an NVFP4
+        model. See memory ainode-gb10-quant-nvfp4-serving."""
+        if not self._is_nvfp4_model():
+            return {}
+        return {
+            "VLLM_USE_FLASHINFER_MOE_FP4": "0",
+            "VLLM_NVFP4_GEMM_BACKEND": "marlin",
+            "VLLM_TEST_FORCE_FP8_MARLIN": "1",
+        }
 
     def _serve_target_and_name_args(self) -> tuple:
         """Return ``(serve_target, extra_args)`` for ``vllm serve``.
