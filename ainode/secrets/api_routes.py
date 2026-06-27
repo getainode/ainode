@@ -142,10 +142,22 @@ async def _test_huggingface(token: str) -> web.Response:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    # Surface the token's scope so the user knows read-only vs write
+                    # (whoami-v2 reports auth.accessToken.role: read | write | fineGrained).
+                    role = (((data.get("auth") or {}).get("accessToken") or {}).get("role") or "").lower()
+                    can_write = role in ("write", "finegrained")
+                    label = {"write": "write", "finegrained": "fine-grained", "read": "read-only"}.get(role, "unknown")
+                    name = data.get("name") or data.get("fullname") or "authenticated"
+                    msg = f"{name} — {label} token"
+                    if not can_write:
+                        msg += " (read-only — add a write token to push to the Hub)"
                     return web.json_response({
                         "ok": True,
                         "service": "huggingface",
-                        "identity": data.get("name") or data.get("fullname") or "authenticated",
+                        "identity": name,
+                        "scope": label,
+                        "can_write": can_write,
+                        "message": msg,
                     })
                 return web.json_response(
                     {"ok": False, "service": "huggingface", "message": f"HTTP {resp.status}"},

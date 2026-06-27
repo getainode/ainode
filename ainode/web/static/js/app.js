@@ -3007,6 +3007,20 @@ const AINode = {
           '<div class="quickstart-grid">' + quickstart + '</div>' +
         '</div>' +
         '<div>' +
+          '<div class="training-section-head"><h3>Quantize a Model</h3><span class="muted">Shrink to AWQ / NVFP4 — runs on a free node, lands in Installed</span></div>' +
+          '<div class="quantize-panel">' +
+            '<div class="form-grid">' +
+              '<div class="form-group"><label class="form-label">Base model (HF repo or installed)</label><input type="text" id="q-base" class="form-input" placeholder="Qwen/Qwen3.5-4B"></div>' +
+              '<div class="form-group"><label class="form-label">Scheme</label><select id="q-scheme" class="form-input"><option value="awq">AWQ (W4A16 — proven on GB10)</option><option value="nvfp4">NVFP4 (Blackwell-native)</option></select></div>' +
+              '<div class="form-group"><label class="form-label">Calibration samples</label><input type="number" id="q-calib" class="form-input" value="256" min="16" max="1024"></div>' +
+            '</div>' +
+            '<label class="form-label" style="display:block;margin-top:8px"><input type="checkbox" id="q-push"> Push result to Hugging Face</label>' +
+            '<input type="text" id="q-repo" class="form-input" placeholder="HF repo name (optional; namespace from your write token)" style="margin-top:6px">' +
+            '<div class="form-hint">Target node must be idle — quantization needs the full GPU memory (unload models first).</div>' +
+            '<button class="btn-nvidia" id="q-submit" style="margin-top:10px">Quantize &rsaquo;</button>' +
+          '</div>' +
+        '</div>' +
+        '<div>' +
           '<div class="training-section-head"><h3>Recent Activity</h3><span class="muted">' + recent.length + ' run' + (recent.length === 1 ? '' : 's') + '</span></div>' +
           '<div class="recent-activity-list">' + recentHtml + '</div>' +
         '</div>' +
@@ -3016,6 +3030,39 @@ const AINode = {
       btn.addEventListener('click', function () {
         self.showNewRunWizard({ method: btn.dataset.qsBtn === 'full' ? 'full' : 'lora', distributed: btn.dataset.qsBtn === 'distributed' });
       });
+    });
+
+    var qBtn = container.querySelector('#q-submit');
+    if (qBtn) qBtn.addEventListener('click', async function () {
+      var base = (container.querySelector('#q-base').value || '').trim();
+      if (!base) { self.toast('Enter a base model to quantize', 'error'); return; }
+      var payload = {
+        method: 'quantize',
+        base_model: base,
+        scheme: container.querySelector('#q-scheme').value,
+        calib_samples: parseInt(container.querySelector('#q-calib').value, 10) || 256,
+        push_to_hf: container.querySelector('#q-push').checked,
+      };
+      var repo = (container.querySelector('#q-repo').value || '').trim();
+      if (repo) payload.hf_repo = repo;
+      qBtn.disabled = true; qBtn.textContent = 'Submitting…';
+      try {
+        var resp = await fetch('/api/training/jobs', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        var result = await resp.json();
+        if (!resp.ok) {
+          self.toast('Error: ' + (result.error || 'Failed to start quantize job'), 'error');
+          qBtn.disabled = false; qBtn.textContent = 'Quantize ›'; return;
+        }
+        self.toast('Quantize job started', 'success');
+        self.state.trainingTab = 'runs';
+        if (self.renderTrainingSidebar) self.renderTrainingSidebar();
+        self.renderTraining();
+      } catch (e) {
+        self.toast('Network error: ' + e.message, 'error');
+        qBtn.disabled = false; qBtn.textContent = 'Quantize ›';
+      }
     });
     container.querySelectorAll('.training-job-card').forEach(function (card) {
       card.addEventListener('click', function () {

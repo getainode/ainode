@@ -19,12 +19,14 @@ def resolve_hf_token(app, override: Optional[str] = None) -> Optional[str]:
         return override
     secrets = app.get("secrets_manager")
     if secrets is not None:
-        try:
-            tok = secrets.get("huggingface_token")
-            if tok:
-                return tok
-        except Exception:
-            pass
+        # Prefer a dedicated write token over the (possibly read-only) main token.
+        for key in ("huggingface_write_token", "huggingface_token"):
+            try:
+                tok = secrets.get(key)
+                if tok:
+                    return tok
+            except Exception:
+                pass
     cfg = app.get("config")
     if cfg is not None and getattr(cfg, "hf_token", None):
         return cfg.hf_token

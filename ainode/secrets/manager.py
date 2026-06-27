@@ -32,8 +32,15 @@ SECRETS_FILE = AINODE_HOME / "secrets.json"
 # Known credential keys with metadata for the UI.
 KNOWN_SECRETS: Dict[str, Dict[str, str]] = {
     "huggingface_token": {
-        "label": "HuggingFace Token",
-        "description": "Required to download gated models (Llama, Mistral, etc.) from the Hub.",
+        "label": "HuggingFace Token (read)",
+        "description": "Download gated models (Llama, Mistral, etc.) from the Hub. A read token is enough; Test shows the detected scope.",
+        "docs_url": "https://huggingface.co/settings/tokens",
+        "prefix_hint": "hf_",
+        "testable": "huggingface",
+    },
+    "huggingface_write_token": {
+        "label": "HuggingFace Token (write)",
+        "description": "Optional — a WRITE-scoped token used to PUSH quantized/fine-tuned models to the Hub. Add this if your main token is read-only.",
         "docs_url": "https://huggingface.co/settings/tokens",
         "prefix_hint": "hf_",
         "testable": "huggingface",
