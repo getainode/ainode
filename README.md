@@ -33,7 +33,7 @@ platform, open source ChatGPT alternative.
 <p align="center">
   <a href="https://ainode.dev">ainode.dev</a>
   &nbsp;·&nbsp;
-  <a href="https://docs.argentos.ai">docs</a>
+  <a href="https://docs.ainode.dev">docs</a>
   &nbsp;·&nbsp;
   <a href="#getting-started--step-by-step">Getting Started</a>
   &nbsp;·&nbsp;
@@ -140,7 +140,7 @@ current member list with per-node role, address, and last-seen.
    ```
    That one-liner performs:
    ```
-   docker pull ghcr.io/getainode/ainode:0.4.0
+   docker pull ghcr.io/getainode/ainode:latest
    systemctl enable --now ainode.service
    ```
 3. **Open the UI** at `http://<your-ip>:3000`. First-run onboarding walks
@@ -154,8 +154,9 @@ images — GHCR is canonical (what the installer uses), Docker Hub is a
 public mirror:
 
 ```bash
-docker pull ghcr.io/getainode/ainode:0.4.0      # canonical
-docker pull argentaios/ainode:0.4.0              # Docker Hub mirror
+docker pull ghcr.io/getainode/ainode:latest      # canonical (always newest)
+docker pull argentaios/ainode:latest             # Docker Hub mirror
+# pin a release instead: …/ainode:0.4.44
 ```
 
 ### Two nodes (distributed mode)
@@ -198,6 +199,36 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 
 ---
 
+## Quantize a model (AWQ / NVFP4)
+
+AINode can compress a full-precision model to 4-bit **in the browser**, on your
+own GPU — no external service. Open **Training → Quantize a Model**:
+
+1. **Base model** — a Hugging Face repo id (`Qwen/Qwen3.5-4B`) or an installed model.
+2. **Scheme** — **AWQ** (W4A16, proven on GB10 via `awq_marlin`) or **NVFP4**
+   (Blackwell-native 4-bit float).
+3. **Calibration samples** — default 256 (from `HuggingFaceH4/ultrachat_200k`).
+4. *(optional)* **Push result to Hugging Face** — requires a **write** token;
+   pushes a private repo under your namespace.
+
+The target node must be **idle** — quantization needs the full unified memory, so
+AINode refuses to start a quant job while a model is loaded (unload first, or pass
+`force=true`). The output lands in **Installed** as `<org--name>-<scheme>`, ready
+to serve.
+
+> AWQ is the proven path on GB10. NVFP4 quantization is newer; **NVFP4 on
+> multimodal models (e.g. Qwen3.5) is experimental and not yet verified** — prefer
+> AWQ for the Qwen3.5 family today.
+
+**Hugging Face tokens (read vs write).** AINode keeps credentials in a local
+Secrets store (`~/.ainode/secrets.json`, mode 0600, obfuscated at rest) with two
+HF slots: a **read** token (download gated models) and a **write** token (push to
+the Hub — read-only tokens are rejected before any multi-GB transfer). Set them in
+**Config → Secrets** (each has a **Test** button showing the detected scope), or
+set the read token with `ainode config --hf-token hf_xxx`.
+
+---
+
 ## Features
 
 | Feature | Status |
@@ -227,6 +258,14 @@ panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
 | Cluster-wide update from master UI (`⬆ Update all` button) | ✅ |
 | Topology loading animation + per-node fade-in | ✅ |
 | AWQ models on GB10 (sm_12.1) — `awq_marlin` kernel fix | ✅ |
+| In-browser quantization (AWQ W4A16 / NVFP4) → serve or push to HF | ✅ v0.4.44 |
+| Push quantized / fine-tuned models to Hugging Face (write-token) | ✅ |
+| Secrets store (HF read + HF write + NGC + W&B + OpenAI), masked + testable | ✅ |
+| Federated master router — route `/v1/*` by model name across the cluster | ✅ |
+| Load / unload any model on any node from the master UI | ✅ |
+| Model stacking — N concurrent models per node, persisted + replayed on boot | ✅ |
+| Serve models from on-disk weights (`~/.ainode/models/<slug>`) | ✅ |
+| fp8 KV-cache default on GB10 (long-context headroom) | ✅ |
 
 ---
 
@@ -248,7 +287,7 @@ practical.
 
 ---
 
-## State of Distributed Inference (April 2026)
+## State of Distributed Inference (June 2026)
 
 We owe readers the honest picture, not a checkmark-soup. Here's what's
 really running on our hardware.
@@ -272,11 +311,20 @@ really running on our hardware.
 - **Inference throughput:** ~35 tok/s for a warmed-up model over
   the RoCE fabric.
 
-### What doesn't work yet
+- **Four-node TP=4** — verified live on frontier MoE: `nvidia/Qwen3-235B-A22B-NVFP4`
+  served at TP=4 across 4× GB10 (~16–17 t/s single-stream, survived a 3,513-token
+  prefill). The GB10 sm120 fix was `--enforce-eager` (vLLM's FlashInfer prefill
+  kernel emits an `illegal instruction` under CUDA-graph capture on GB10).
+- **Federated serving** — a master routes `/v1/*` to the node holding each model;
+  models load/unload per node from the browser.
+- **Model stacking** — multiple models per node, persisted and replayed on boot.
+- **In-browser quantization** — AWQ and NVFP4 jobs run on an idle node and land
+  the result in Installed (optionally pushed to Hugging Face).
 
-- **TP=4 distributed inference** across all four nodes — cluster forms
-  correctly, distributed launch under test.
+### What still needs care
+
 - **Ray over Tailscale** — use physical cables or a dedicated switch.
+- **Single NIC per cluster subnet** — multi-NIC ambiguity still breaks the NCCL ring.
 
 ### Lessons learned the hard way
 
@@ -555,8 +603,11 @@ scrape_configs:
 - [x] Training artifact retrieval, LoRA merge, checkpoint resume
 - [x] Evaluation loop + W&B integration
 - [x] Prometheus metrics endpoint (`/metrics`)
-- [ ] 4-node TP=4 sharded inference (cluster hardware ready, launch under test)
-- [ ] Model marketplace (quantized variants, custom registries)
+- [x] 4-node TP=4 sharded inference (verified — 235B-A22B-NVFP4)
+- [x] In-browser quantization (AWQ / NVFP4) + push to Hugging Face
+- [x] Federated multi-model serving (master routes `/v1/*` by model name)
+- [x] Model stacking (N models per node, persisted + replayed)
+- [ ] Model marketplace (custom registries)
 - [ ] Mobile-friendly UI
 
 ---

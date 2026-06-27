@@ -12,6 +12,98 @@ _Next release — changes accumulate here until tagged._
 
 ---
 
+## [0.4.44] — 2026-06-27
+
+### Added
+- **In-browser quantization (Quantize feature).** New **Training → Quantize a
+  Model** panel and `POST /api/training/jobs` with `method:"quantize"`. Runs
+  llm-compressor one-shot PTQ inside a GPU container, producing a
+  compressed-tensors checkpoint vLLM serves natively. Schemes: **AWQ** (W4A16,
+  serves as `awq_marlin` on GB10) and **NVFP4** (Blackwell-native). Output lands
+  in the model store at `~/.ainode/models/<org--name>-<scheme>`, discoverable in
+  Installed.
+- **Push quantized models to Hugging Face.** Optional `push_to_hf` uploads a
+  private repo under the write-token owner's namespace after the job exits.
+- **Hugging Face _write_ token + Secrets slot.** `huggingface_write_token`
+  preferred over the read token for pushes; read-only tokens are rejected up
+  front (no wasted multi-GB transfer). Secrets store also holds NGC / W&B /
+  OpenAI keys, masked with a per-key Test.
+- **Idle-node guardrail.** A quant job is refused with `409` if the node is
+  serving a model (quantization needs the full unified memory); override with
+  `force=true`.
+
+### Fixed
+- **Qwen3.5 family quantizes to a servable checkpoint.** These are
+  `*ForConditionalGeneration` (bundled vision tower + text sub-config) and hybrid
+  (Gated-DeltaNet linear attention). The runner now loads the full model class so
+  `save_pretrained` emits the complete config, ignores the vision tower /
+  embeddings / `lm_head` and the tiny `linear_attn` projections (Marlin can't
+  tile them), and saves the image processor. AWQ verified servable;
+  NVFP4-on-Qwen3.5 remains experimental.
+- Quant job bodies parse without a dataset; output always written to the
+  RW-mounted model store (never the throwaway `--rm` layer); tokenizer passed as
+  processor to avoid the `mistral_common` import conflict.
+- `service/systemd.py` image tag now follows `__version__` (was pinned to an old
+  tag, so a fresh install could render a unit pulling the wrong image).
+
+---
+
+## [0.4.38] – [0.4.42] — 2026-06-25..26
+
+### Added
+- **Models page redesign** — two lists (Installed vs Browse), smarter live HF
+  browse, and the instance control relabeled **DELETE → UNLOAD** (a real unload,
+  including force-clear of dead/phantom instances).
+- **fp8 KV-cache default on GB10 vLLM serve** — long-context headroom by default.
+- **`start-clean` knob** — skip model replay on boot.
+
+### Fixed
+- **BUG A (discovery cache).** The cluster re-broadcasts the live model each sync
+  cycle, and discovery probes engine _liveness_ (`/v1/models`) instead of a
+  latched "ready" flag, so a node that died no longer advertises a stale model.
+- Dashboard displays the truthful state (no phantom READY).
+
+---
+
+## [0.4.32] – [0.4.37] — 2026-06-23..24
+
+### Added
+- **Model stacking — N models per node.** Solo loads append into an
+  `InstanceManager` instead of fighting over the primary slot; the boot engine
+  seeds the manager so it doesn't collide on `:8000`.
+- **AWQ catalog + always-on instance persistence** — running instances persist
+  and replay on restart (orphan sweep first; loads serialized to avoid
+  concurrent-load OOM).
+- **Serve models from on-disk weights** (`~/.ainode/models/<slug>`) + per-node
+  download cap. Community MoE picks added (Nemotron Cascade 2, MiniMax-M2.7);
+  4B-AWQ verified (~15 t/s — dense AWQ is dequant-bound on GB10).
+
+---
+
+## [0.4.24] – [0.4.31] — 2026-06-21
+
+### Added
+- **Federated master router (F1).** The master routes `/v1/*` requests to the
+  node serving the requested model.
+- **Load / unload any model on any node from the master (F2).**
+- **Federation usable from the browser** — per-node memory-utilization knob,
+  fleet UI, routing failover, and GB10 unified-memory telemetry.
+
+### Fixed
+- Federation proxy: strip forwarded charset/Content-Length, drop the stale 503
+  guard; `--include-dashboard` is head-only (restores worker join); `start_solo`
+  pre-cleans its container name for idempotent launch.
+
+---
+
+## [0.4.23] — 2026-06-21
+
+### Added
+- Auto-distribute weights at launch (rsync-preferred) groundwork toward
+  federation.
+
+---
+
 ## [0.4.22] — 2026-06-20
 
 ### Added
