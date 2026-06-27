@@ -117,7 +117,11 @@ def main() -> None:
     # Output lands in the RW-mounted model store at /ainode-models/<out-slug> →
     # host ~/.ainode/models/<out-slug>, where the serve/catalog path auto-finds it.
     out_slug = config.get("out_slug") or (base_model.replace("/", "--") + "-" + scheme)
-    output_dir = config.get("output_dir") or f"/ainode-models/{out_slug}"
+    # ALWAYS write into the RW-mounted model store — never config["output_dir"],
+    # which the orchestrator sets to its job-dir path (~/.ainode/training/jobs/...);
+    # that path doesn't exist in this container, so output would land in the
+    # throwaway --rm layer and be lost (job still reports success).
+    output_dir = f"/ainode-models/{out_slug}"
     calib_dataset = config.get("calib_dataset") or "HuggingFaceH4/ultrachat_200k"
     n_samples = int(config.get("calib_samples", 256))
     max_seq_length = int(config.get("max_seq_length", 2048))
