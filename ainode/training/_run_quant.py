@@ -155,6 +155,10 @@ def main() -> None:
     recipe = _build_recipe(scheme, ignore)
     oneshot(
         model=model,
+        # Pass the tokenizer explicitly: llm-compressor's auto processor-init
+        # pulls in mistral_common, which has a version conflict in this image
+        # (ImportError: ReasoningEffort) and aborts on some models (e.g. Qwen3.5).
+        processor=tokenizer,
         dataset=calib,
         recipe=recipe,
         max_seq_length=max_seq_length,
