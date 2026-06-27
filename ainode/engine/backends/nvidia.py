@@ -856,6 +856,11 @@ class NvidiaBackend(EngineBackend):
             # throughput needs a working non-FlashInfer backend first.
             "--enforce-eager",
         ]
+        # fp8 KV cache — the GB10 design default (engine/AGENTS.md): required for
+        # long context or vLLM OOMs sizing the cache at bf16. Config-driven so a
+        # model/quant that rejects fp8 can fall back via kv_cache_dtype="".
+        if getattr(self.config, "kv_cache_dtype", ""):
+            args.extend(["--kv-cache-dtype", self.config.kv_cache_dtype])
         if tp_size > 1:
             args.extend(["--tensor-parallel-size", str(tp_size)])
             args.extend(["--distributed-executor-backend", "ray"])

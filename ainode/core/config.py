@@ -43,6 +43,10 @@ class NodeConfig:
     # for GB10 (still fits a 70B / per-node MoE share); push it higher per-load
     # (gpu_memory_utilization in the load body) for big-MoE long-context runs.
     gpu_memory_utilization: float = 0.5
+    # KV-cache precision. fp8 is the GB10 design default — required for long
+    # context (32k+) or vLLM OOMs sizing the cache at bf16 (see engine/AGENTS.md).
+    # Set "" / "auto" to let vLLM choose if a model/quant ever rejects fp8.
+    kv_cache_dtype: str = "fp8"
     quantization: Optional[str] = None  # awq, gptq, fp8, None
     trust_remote_code: bool = False
 
