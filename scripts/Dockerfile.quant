@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.6
+#
+# AINode quantization-job image.
+#
+# The slim orchestrator (Dockerfile.ainode) has NO torch — so quantization runs
+# in a spawned GPU container, the same way inference does. We build on the proven
+# NVIDIA/Spark vLLM image (torch + CUDA + working sm120/Blackwell kernels already
+# present) and add llm-compressor. This image is SEPARATE from the serve image on
+# purpose: llm-compressor pins transformers/compressed-tensors, and we must not
+# let that perturb the version vLLM serves with.
+#
+# Build (on an aarch64 GB10, where the base is already pulled):
+#   docker build -f scripts/Dockerfile.quant -t ainode-quant:0.17.0-t5 .
+#
+# The orchestrator spawns it via docker.sock, mounting ~/.ainode/models RW and a
+# per-job config; CMD is overridden with the actual --config path.
+
+ARG BASE=scitrera/dgx-spark-vllm:0.17.0-t5
+FROM ${BASE}
+
+LABEL org.opencontainers.image.source="https://github.com/getainode/ainode"
+LABEL org.opencontainers.image.description="AINode quantization job container (vLLM base + llm-compressor)."
+
+# Pin against the base image's existing torch/transformers where possible; fall
+# back to an unpinned install if the constraint can't be satisfied on this base.
+RUN pip install --no-cache-dir "llmcompressor>=0.9" \
+    || pip install --no-cache-dir llmcompressor
+
+# Standalone runner — no ainode package import, so the image stays decoupled.
+COPY ainode/training/_run_quant.py /opt/ainode/run_quant.py
+
+# Neutralize the base image's vllm-serve entrypoint; the orchestrator supplies
+# the full `python3 /opt/ainode/run_quant.py --config ...` command.
+ENTRYPOINT []
+CMD ["python3", "/opt/ainode/run_quant.py", "--help"]

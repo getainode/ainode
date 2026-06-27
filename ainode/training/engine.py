@@ -37,6 +37,23 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+QUANT_IMAGE = os.environ.get("AINODE_QUANT_IMAGE") or "ainode-quant:0.17.0-t5"
+
+
+def _host_path(container_path: str) -> str:
+    """Translate an AINODE_HOME path (orchestrator *container* view) to the host
+    path so a docker ``-v`` SOURCE resolves on the host daemon. Mirrors
+    NvidiaBackend._host_path. No-op when AINODE_HOST_HOME is unset (AINode running
+    directly on the host, where the two paths coincide)."""
+    host_home = os.environ.get("AINODE_HOST_HOME")
+    if not host_home:
+        return container_path
+    home = str(AINODE_HOME)
+    if container_path == home or container_path.startswith(home + os.sep):
+        return host_home.rstrip("/") + container_path[len(home):]
+    return container_path
+
+
 @dataclass
 class TrainingConfig:
     """Configuration for a training/fine-tuning job."""
@@ -67,6 +84,14 @@ class TrainingConfig:
     eval_split: float = 0.1          # fraction of dataset to hold out for evaluation (0 = no eval)
     eval_steps: int = 0              # evaluate every N steps (0 = once per epoch)
     wandb_project: Optional[str] = None  # if set, enable W&B logging to this project
+    # Quantize-job fields (method == "quantize") — runs llm-compressor in a GPU
+    # container, producing a servable AWQ/NVFP4 checkpoint. See _run_quant.py.
+    scheme: Optional[str] = None                      # "awq" | "nvfp4"
+    calib_dataset: str = "HuggingFaceH4/ultrachat_200k"
+    calib_samples: int = 256
+    out_slug: Optional[str] = None                    # output dir name under ~/.ainode/models
+    push_to_hf: bool = False
+    hf_repo: Optional[str] = None                     # target repo; namespace defaults to whoami
 
     def validate(self) -> list[str]:
         """Return a list of validation errors (empty means valid)."""
@@ -75,7 +100,9 @@ class TrainingConfig:
         if not self.base_model or not self.base_model.strip():
             errors.append("base_model is required")
 
-        if not self.dataset_path or not self.dataset_path.strip():
+        if self.method == "quantize":
+            pass  # quantize calibrates on calib_dataset, not a training dataset_path
+        elif not self.dataset_path or not self.dataset_path.strip():
             errors.append("dataset_path is required")
         else:
             ds = self.dataset_path.strip()
@@ -88,8 +115,10 @@ class TrainingConfig:
                 if not ds.startswith(datasets_dir):
                     errors.append(f"dataset_path absolute paths must be under {datasets_dir}")
 
-        if self.method not in ("lora", "full", "qlora"):
-            errors.append(f"method must be 'lora', 'qlora' or 'full', got '{self.method}'")
+        if self.method not in ("lora", "full", "qlora", "quantize"):
+            errors.append(f"method must be 'lora', 'qlora', 'full' or 'quantize', got '{self.method}'")
+        if self.method == "quantize" and self.scheme not in ("awq", "nvfp4"):
+            errors.append(f"scheme must be 'awq' or 'nvfp4' for a quantize job, got '{self.scheme}'")
 
         if self.num_nodes < 1:
             errors.append("num_nodes must be >= 1")
@@ -256,6 +285,9 @@ class TrainingJob:
         """
         c = self.config
 
+        if c.method == "quantize":
+            return self._build_quant_command(config_path)
+
         nproc = max(1, int(_detect_local_gpu_count()))
         needs_ddp = c.distributed or c.num_nodes > 1 or (c.method == "full" and nproc > 1)
 
@@ -276,6 +308,38 @@ class TrainingJob:
             "-m", "ainode.training._run_training",
             "--config", str(config_path),
         ]
+
+    def _build_quant_command(self, config_path: Path) -> list[str]:
+        """Quantization runs in a spawned GPU container — the slim orchestrator has
+        no torch. Mirror the inference docker-run pattern (--gpus all, host-translated
+        mounts), but mount the model store READ-WRITE so the runner reads the base
+        weights and writes the quantized checkpoint to ~/.ainode/models/<out-slug>.
+        Foreground (no -d): the existing Popen monitor streams AINODE_PROGRESS and
+        the container exit code signals completion. Single-node, single-GPU."""
+        c = self.config
+        # Host-path prereq (contract tripwire): in-container without AINODE_HOST_HOME
+        # the RW model mount resolves to an empty root-owned host dir and the output
+        # is written into a throwaway --rm layer (lost on exit). Fail loud.
+        if os.environ.get("AINODE_IN_CONTAINER") and not os.environ.get("AINODE_HOST_HOME"):
+            raise RuntimeError(
+                "quantize requires AINODE_HOST_HOME (the host path mounted at AINODE_HOME) "
+                "so the output mount is host-backed — refusing to run, the checkpoint would be lost."
+            )
+        models_host = _host_path(str(AINODE_HOME / "models"))
+        jobdir_host = _host_path(str(self._job_dir))
+        token = c.hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+        cmd: list[str] = [
+            "docker", "run", "--rm",
+            "--name", f"ainode-quant-{self.job_id}",
+            "--gpus", "all", "--network", "host", "--ipc=host", "--shm-size", "16g",
+            "-v", f"{models_host}:/ainode-models",            # RW: read base + write output
+            "-v", f"{jobdir_host}:/job:ro",                   # config.json
+            "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",     # persist HF pulls into the store
+        ]
+        if token:
+            cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
+        cmd += [QUANT_IMAGE, "python3", "/opt/ainode/run_quant.py", "--config", "/job/config.json"]
+        return cmd
 
     async def _monitor(self) -> None:
         """Read subprocess output and update progress."""
