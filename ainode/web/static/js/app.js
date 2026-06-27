@@ -677,7 +677,10 @@ const AINode = {
         tp_size: di.tensor_parallel_size,
         nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
         status: live ? 'READY' : 'STARTING',
-        badge: 'DISTRIBUTED · TP=' + di.tensor_parallel_size,
+        // A single-node serve is SOLO even when the head advertises a
+        // distributed_instance (it's configured with peers) — only badge
+        // DISTRIBUTED when there's real cross-node tensor parallelism.
+        badge: (di.tensor_parallel_size > 1) ? ('DISTRIBUTED · TP=' + di.tensor_parallel_size) : 'SOLO · TP=1',
       });
     }
 

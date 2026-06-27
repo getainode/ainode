@@ -752,7 +752,7 @@
   function Topology(canvas) {
     const renderer = new TopologyRenderer(canvas);
     return {
-      update(nodes) { renderer.update(nodes); },
+      update(nodes, engineReady) { renderer.update(nodes, engineReady); },
       destroy() {},
       get onNodeSelect() { return renderer.onNodeSelect; },
       set onNodeSelect(fn) { renderer.onNodeSelect = fn; },

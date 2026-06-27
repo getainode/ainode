@@ -543,6 +543,23 @@ async def handle_status(request: web.Request) -> web.Response:
 
     gpu: Optional[GPUInfo] = detect_gpu()
     gpu_info = asdict(gpu) if gpu else None
+    # detect_gpu() caches and reports free==total on GB10 unified memory, so the
+    # dashboard showed 0% used. Overlay the collector's live psutil reading — the
+    # same source /api/nodes uses — so the two endpoints agree.
+    if gpu_info is not None:
+        collector = request.app.get("metrics_collector")
+        if collector is not None:
+            try:
+                m = collector.get_gpu_metrics() or {}
+                if not m.get("error"):
+                    total_mb = m.get("memory_total_mb") or gpu_info.get("memory_total_mb")
+                    used_mb = m.get("memory_used_mb")
+                    if total_mb:
+                        gpu_info["memory_total_mb"] = round(total_mb)
+                        if used_mb is not None:
+                            gpu_info["memory_free_mb"] = max(0, round(total_mb - used_mb))
+            except Exception:
+                pass
 
     engine_ready = False
     models_loaded: list[str] = []
@@ -581,7 +598,11 @@ async def handle_status(request: web.Request) -> web.Response:
         "engine_ready": engine_ready,
         # Coarse engine load phase for the UI launching card (3c):
         # idle | starting | loading_weights | distributed_init | profiling | ready
-        "load_phase": (getattr(engine, "load_phase", "idle") if engine is not None else "idle"),
+        # Truthful phase: the live /v1/models probe above is the reliable
+        # readiness signal — the engine's _ready latch can miss the vLLM startup
+        # log marker and stay False on a model that is actually serving. Report
+        # 'ready' when the probe says serving; else the engine's coarse phase.
+        "load_phase": ("ready" if engine_ready else (getattr(engine, "load_phase", "idle") if engine is not None else "idle")),
         "uptime": round(time.time() - start_time, 1),
         "version": __version__,
         "powered_by": "argentos.ai",

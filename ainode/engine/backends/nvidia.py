@@ -379,7 +379,7 @@ class NvidiaBackend(EngineBackend):
             "process_alive": self.is_running(),
             "api_responding": False,
             "models_loaded": [],
-            "load_phase": self._load_phase,
+            "load_phase": self.load_phase,
         }
         try:
             url = f"http://127.0.0.1:{self.config.api_port}/v1/models"
@@ -401,8 +401,13 @@ class NvidiaBackend(EngineBackend):
 
     @property
     def load_phase(self) -> str:
-        """Coarse engine load phase for the UI launching card (3c)."""
-        return self._load_phase
+        """Coarse engine load phase for the UI launching card (3c).
+
+        Derive 'ready' from the readiness latch: wait_ready() can set _ready via
+        the API-poll path before _stream_logs sees the startup log line, which
+        left _load_phase stuck at 'starting' on a model that is actually serving.
+        """
+        return "ready" if self._ready else self._load_phase
 
     @property
     def api_url(self) -> str:
