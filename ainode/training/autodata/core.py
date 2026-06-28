@@ -11,9 +11,10 @@ level so tests inject a fake and run the whole loop with no network. See demo() 
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -38,6 +39,7 @@ class AutoDataConfig:
     system_prompt: str = ""        # optional system msg for solvers + emitted data
     judge_mode: str = "rubric"     # "rubric" (LLM) or "exact" (string match vs reference)
     concurrency: int = 8
+    retries: int = 2               # transient HTTP/parse retries per model call
     out: str = ""                  # JSONL output path (optional)
 
     @staticmethod
@@ -48,7 +50,7 @@ class AutoDataConfig:
             challenger=ep("challenger"), weak=ep("weak"), strong=ep("strong"), judge=ep("judge"),
             n_tasks=int(d.get("n_tasks", 50)), system_prompt=d.get("system_prompt", ""),
             judge_mode=d.get("judge_mode", "rubric"), concurrency=int(d.get("concurrency", 8)),
-            out=d.get("out", ""),
+            retries=int(d.get("retries", 2)), out=d.get("out", ""),
         )
 
 
@@ -70,8 +72,24 @@ def _http_chat(ep: Endpoint, messages: list, json_mode: bool = False) -> str:
 call_model = _http_chat
 
 
-def _norm(s: str) -> str:
-    return " ".join((s or "").lower().split())
+def _retry(fn, attempts: int = 2, base_delay: float = 0.5):
+    """Run fn(); retry on ANY exception up to `attempts` extra times with exp backoff.
+    Used to absorb transient HTTP timeouts and malformed-JSON responses (each retry
+    re-calls the model, so a bad parse gets a fresh generation)."""
+    last = None
+    for i in range(attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — transient model/HTTP/parse failures
+            last = exc
+            if i < attempts:
+                time.sleep(base_delay * (2 ** i))
+    raise last
+
+
+def _norm(s) -> str:
+    # coerce non-str (the Challenger may emit numeric/None references) before normalizing
+    return " ".join(str("" if s is None else s).lower().split())
 
 
 def generate_tasks(cfg: AutoDataConfig) -> list:
@@ -81,16 +99,18 @@ def generate_tasks(cfg: AutoDataConfig) -> list:
         'Return STRICT JSON only: {"tasks":[{"input":"<the task prompt the solver sees>",'
         '"reference":"<the correct answer, or null if open-ended>"}]}'
     )
-    out = call_model(cfg.challenger,
-                     [{"role": "system", "content": cfg.gen_prompt}, {"role": "user", "content": user}],
-                     True)
-    tasks = json.loads(out).get("tasks", [])
+    def _gen():
+        out = call_model(cfg.challenger,
+                         [{"role": "system", "content": cfg.gen_prompt}, {"role": "user", "content": user}],
+                         True)
+        return json.loads(out).get("tasks", [])
+    tasks = _retry(_gen, cfg.retries)
     return [t for t in tasks if isinstance(t, dict) and t.get("input")][: cfg.n_tasks]
 
 
-def solve(ep: Endpoint, system: str, x: str) -> str:
+def solve(ep: Endpoint, system: str, x: str, retries: int = 2) -> str:
     msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": x}]
-    return call_model(ep, msgs, False)
+    return _retry(lambda: call_model(ep, msgs, False), retries)
 
 
 def judge_correct(cfg: AutoDataConfig, x: str, output: str, reference) -> int:
@@ -101,11 +121,18 @@ def judge_correct(cfg: AutoDataConfig, x: str, output: str, reference) -> int:
     prompt = (f"Task:\n{x}\n\nCandidate answer:\n{output}{ref}\n\n"
               'Is the candidate answer correct and high-quality for this task? '
               'Return STRICT JSON only: {"correct": true|false}.')
-    out = call_model(cfg.judge, [{"role": "user", "content": prompt}], True)
-    try:
+    def _grade():
+        out = call_model(cfg.judge, [{"role": "user", "content": prompt}], True)
         return int(bool(json.loads(out).get("correct")))
+    try:
+        return _retry(_grade, cfg.retries)
     except Exception:
-        return int("true" in out.lower()[:24])
+        # last-ditch: one plain (non-JSON-mode) call with a lenient parse
+        try:
+            out = call_model(cfg.judge, [{"role": "user", "content": prompt}], False).lower()
+            return int('"correct": true' in out or out.strip().startswith(("yes", "true")))
+        except Exception:
+            return 0
 
 
 def run(config, on_progress=None) -> dict:
@@ -119,7 +146,8 @@ def run(config, on_progress=None) -> dict:
 
     def process(t):
         x, ref = t["input"], t.get("reference")
-        w, s = solve(cfg.weak, cfg.system_prompt, x), solve(cfg.strong, cfg.system_prompt, x)
+        w = solve(cfg.weak, cfg.system_prompt, x, cfg.retries)
+        s = solve(cfg.strong, cfg.system_prompt, x, cfg.retries)
         return x, s, judge_correct(cfg, x, w, ref), judge_correct(cfg, x, s, ref)
 
     with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
