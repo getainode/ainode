@@ -21,8 +21,11 @@ SERVICE_NAME = "ainode.service"
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 
-# Image tag bumped when we cut a release and republish to GHCR.
-AINODE_IMAGE_TAG = "0.4.31"
+# Image tag follows the package version so a fresh install pulls the matching
+# image (env override for testing pre-release tags). Republished to GHCR per release.
+from ainode import __version__ as _AINODE_VERSION
+
+AINODE_IMAGE_TAG = os.environ.get("AINODE_IMAGE_TAG") or _AINODE_VERSION
 AINODE_IMAGE = f"ghcr.io/getainode/ainode:{AINODE_IMAGE_TAG}"
 
 UNIT_FILE_TEMPLATE = """\
