@@ -661,14 +661,21 @@ class NvidiaBackend(EngineBackend):
         resolve to an empty root-owned dir, so we must NOT point vLLM at it —
         falling back to the repo-id keeps the current (re-download) behaviour and
         guarantees no regression before the systemd unit sets AINODE_HOST_HOME."""
+        # API id(s) clients address the model by. Custom aliases (e.g. "Aegis-14B")
+        # win; otherwise pin the repo-id so /v1/models is stable even when serving
+        # from a local mount path. A list emits multiple --served-model-name values.
+        names = self.config.served_model_name or [self.config.model]
+        name_args: List[str] = ["--served-model-name", *names]
         in_container = os.environ.get("AINODE_IN_CONTAINER")
         mount_trustworthy = (not in_container) or bool(os.environ.get("AINODE_HOST_HOME"))
         if mount_trustworthy:
             local = self._local_model_dir()
             if local:
                 slug = self.config.model.replace("/", "--")
-                return f"{self.MODELS_MOUNT}/{slug}", ["--served-model-name", self.config.model]
-        return self.config.model, []
+                return f"{self.MODELS_MOUNT}/{slug}", name_args
+        # Remote (vLLM downloads the repo-id) — previously emitted NO name args, so
+        # the served id was the full repo-id with no alias option. Now aliasable too.
+        return self.config.model, name_args
 
     def _build_solo_docker_cmd(self, container_name: str) -> List[str]:
         """Single-container solo mode — ``docker run ... vllm serve ...``.

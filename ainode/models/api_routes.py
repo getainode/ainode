@@ -114,10 +114,16 @@ def save_instance_manifest(app) -> None:
         # scope for auto-replay (they need peer coordination).
         if getattr(cfg, "distributed_mode", "solo") not in ("solo", None):
             continue
-        entries.append({
+        entry = {
             "model": inst.record.model,
             "gpu_memory_utilization": getattr(cfg, "gpu_memory_utilization", None),
-        })
+        }
+        # round-trip per-load overrides so restart-replay restores aliases + ctx len
+        for k in _OVERRIDE_KEYS:
+            v = getattr(cfg, k, None)
+            if v is not None:
+                entry[k] = v
+        entries.append(entry)
     try:
         p = _manifest_path()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -136,7 +142,11 @@ def load_instance_manifest() -> list:
         return []
 
 
-def append_solo_instance(app, model: str, gmu=None, *, persist: bool = True) -> dict:
+_OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
+                  "quantization", "trust_remote_code")
+
+
+def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: bool = True) -> dict:
     """APPEND a solo instance through the InstanceManager — the shared core of the
     /api/models/load solo path AND the startup replay. Returns a plain dict (no
     HTTP). Each model gets its own container/port/config snapshot so several stack
@@ -175,6 +185,11 @@ def append_solo_instance(app, model: str, gmu=None, *, persist: bool = True) -> 
                           peer_ips=[], api_port=port)
     if gmu is not None:
         inst_config = replace(inst_config, gpu_memory_utilization=gmu)
+    if overrides:
+        allowed = {k: v for k, v in overrides.items()
+                   if k in _OVERRIDE_KEYS and v is not None}
+        if allowed:
+            inst_config = replace(inst_config, **allowed)
 
     def _clear():
         # routing-truth: a failed primary launch must stop the node advertising a
@@ -296,7 +311,7 @@ async def replay_instances_on_startup(app) -> None:
             # backend.start() shells out to docker — run off the event loop.
             res = await loop.run_in_executor(
                 None,
-                lambda mm=m, g=e.get("gpu_memory_utilization"): append_solo_instance(app, mm, g, persist=False),
+                lambda mm=m, g=e.get("gpu_memory_utilization"), ov={k: e[k] for k in _OVERRIDE_KEYS if k in e}: append_solo_instance(app, mm, g, overrides=ov, persist=False),
             )
             have.add(m)
             # Serialize: let this model bind before launching the next one.
@@ -354,6 +369,26 @@ async def handle_model_load(request: web.Request) -> web.Response:
             gmu = max(0.05, min(0.95, float(raw_gmu)))
         except (TypeError, ValueError):
             gmu = None
+
+    # Per-load config overrides applied to the per-instance snapshot only (NOT the
+    # shared app config). served_model_name = API alias(es); the rest let stacked
+    # models differ in context length / KV dtype / quant without cross-wiring.
+    overrides: dict = {}
+    smn = body.get("served_model_name")
+    if isinstance(smn, str):
+        smn = [smn]
+    if isinstance(smn, list) and smn:
+        overrides["served_model_name"] = [str(s) for s in smn if str(s).strip()]
+    if body.get("max_model_len") is not None:
+        try:
+            overrides["max_model_len"] = int(body["max_model_len"])
+        except (TypeError, ValueError):
+            pass
+    for k in ("kv_cache_dtype", "quantization"):
+        if body.get(k) is not None:
+            overrides[k] = body[k]
+    if body.get("trust_remote_code") is not None:
+        overrides["trust_remote_code"] = bool(body["trust_remote_code"])
 
     # Decide: single-node or distributed?
     sharding_config = None
@@ -428,7 +463,7 @@ async def handle_model_load(request: web.Request) -> web.Response:
     if config is None:
         return web.json_response({"error": "Engine not initialized"}, status=503)
 
-    result = append_solo_instance(request.app, model, gmu)
+    result = append_solo_instance(request.app, model, gmu, overrides=overrides)
     if not result.get("ok"):
         return web.json_response({"error": result.get("error")},
                                  status=result.get("status", 500))
