@@ -1092,7 +1092,8 @@ def test_solo_cmd_falls_back_to_repo_id_when_containerized_without_host_home(tmp
     b = NvidiaBackend(_make_config(model=model, models_dir=str(tmp_path)))
     cmd = b._build_solo_docker_cmd("c1")
     assert cmd[cmd.index("serve") + 1] == model        # repo-id, safe fallback
-    assert "--served-model-name" not in cmd
+    # served id is now explicitly pinned to the repo-id (stable /v1/models; aliasable)
+    assert cmd[cmd.index("--served-model-name") + 1] == model
 
 
 def test_solo_cmd_serves_repo_id_when_not_downloaded(tmp_path, monkeypatch):
@@ -1101,7 +1102,8 @@ def test_solo_cmd_serves_repo_id_when_not_downloaded(tmp_path, monkeypatch):
     cmd = b._build_solo_docker_cmd("c1")
     i = cmd.index("serve")
     assert cmd[i + 1] == "Qwen/Qwen3.5-9B-AWQ"        # falls back to repo-id
-    assert "--served-model-name" not in cmd
+    # served id now explicitly pinned to the repo-id (was implicit before)
+    assert cmd[cmd.index("--served-model-name") + 1] == "Qwen/Qwen3.5-9B-AWQ"
 
 
 def test_solo_cmd_host_paths_the_mount_sources(tmp_path, monkeypatch):

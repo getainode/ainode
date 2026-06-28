@@ -36,6 +36,10 @@ class NodeConfig:
     engine_backend: str = "eugr"
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     models_dir: str = str(MODELS_DIR)
+    # Optional API aliases for /v1/models — emitted as ``--served-model-name a b c``.
+    # Lets a client/router address the model by a short name (e.g. "Aegis-14B")
+    # instead of the repo-id/slug. Falls back to ``model`` when unset.
+    served_model_name: Optional[List[str]] = None
     max_model_len: Optional[int] = None
     # vLLM sizes the KV cache to this fraction of the GPU regardless of model
     # size, so 0.9 made a tiny model reserve ~110 GB on a 122 GB unified-memory
