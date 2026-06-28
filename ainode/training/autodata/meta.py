@@ -18,22 +18,25 @@ from . import core
 from .core import AutoDataConfig, run
 
 
-def _optimize_prompt(ep, current_prompt: str, task_spec: str, report: dict, retries: int = 2) -> str:
-    """Ask an LLM to rewrite the generator prompt toward the ZPD, given last round's stats."""
-    stats = (f"yield={report.get('yield_pct', 0)}% kept={report['kept']} "
-             f"too_easy={report['too_easy']} (both strong+weak solved) "
-             f"too_hard={report['too_hard']} (both failed) total={report['total']}")
+def _optimize_prompt(ep, rounds: list, task_spec: str, retries: int = 2) -> str:
+    """Propose the NEXT generator prompt from the FULL round trajectory, so the optimizer
+    learns from an overshoot (too_hard) instead of repeating it. too_easy = both solved
+    (push harder); too_hard = both failed (dial back)."""
+    traj = "\n".join(
+        f"Round {e['round']}: yield={e['yield_pct']}% too_easy={e['too_easy']} "
+        f"too_hard={e['too_hard']}  | prompt: {e['prompt']}"
+        for e in rounds)
     msg = (
         "You tune the SYSTEM PROMPT of a task-generator in a synthetic-data pipeline. "
-        "We keep only tasks a STRONG model solves but a WEAK model fails (the zone of "
-        "proximal development). Current generator prompt:\n"
-        f"---\n{current_prompt}\n---\n"
+        "We keep only tasks a STRONG model solves but a WEAK model FAILS (the zone of "
+        "proximal development). too_easy = both solved (too easy); too_hard = both failed "
+        "(too hard). Trajectory so far:\n"
+        f"{traj}\n\n"
         f"Task domain: {task_spec}\n"
-        f"Last round: {stats}\n"
-        "If too_easy dominates, make generated tasks HARDER / more multi-step so the weak "
-        "model fails. If too_hard dominates, make them EASIER / clearer so the strong model "
-        "still solves. Maximize the strong-solves-weak-fails zone. "
-        'Return STRICT JSON only: {"prompt": "<the rewritten generator system prompt>"}.'
+        "Propose the NEXT generator prompt to MAXIMIZE yield — LEARN from the trajectory: "
+        "if a prompt overshot to too_hard, dial difficulty back; if too_easy, push harder; "
+        "converge toward the middle. "
+        'Return STRICT JSON only: {"prompt": "<the next generator system prompt>"}.'
     )
 
     def _opt():
@@ -85,7 +88,8 @@ def meta_optimize(config, target_yield: float = 30, max_rounds: int = 4,
         if rep["yield_pct"] >= target_yield or r == max_rounds:
             break
         try:
-            cfg.gen_prompt = _optimize_prompt(opt_ep, cfg.gen_prompt, cfg.task_spec, rep, cfg.retries)
+            # feed the full trajectory so the optimizer corrects an overshoot, not repeats it
+            cfg.gen_prompt = _optimize_prompt(opt_ep, rounds, cfg.task_spec, cfg.retries)
         except Exception:
             break                                   # can't improve P → stop
 
@@ -103,9 +107,9 @@ def demo() -> None:
     def fake(ep, messages, json_mode):
         sysmsg = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
         last = messages[-1]["content"]
-        if json_mode and "rewritten generator" in last:        # optimizer: bump difficulty
-            d = int((re.search(r"DIFF=(\d+)", last) or [0, "0"])[1])
-            return json.dumps({"prompt": f"DIFF={d + 1}"})
+        if json_mode and "task-generator" in last:             # optimizer: bump difficulty
+            ds = [int(x) for x in re.findall(r"DIFF=(\d+)", last)]
+            return json.dumps({"prompt": f"DIFF={(max(ds) if ds else 0) + 1}"})
         if json_mode and "Generate" in last:                   # challenger: emit tasks at DIFF
             d = int((re.search(r"DIFF=(\d+)", sysmsg) or [0, "0"])[1])
             return json.dumps({"tasks": [{"input": f"L{d}_{i}", "reference": None} for i in range(6)]})
