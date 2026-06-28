@@ -8,7 +8,17 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Next release — changes accumulate here until tagged._
+### Added
+- **AutoData (training utility, MVP)** — agentic Δ-filtered synthetic-data generation
+  (Meta Autodata). `ainode/training/autodata/`: a Challenger generates tasks, weak +
+  strong solvers attempt each, a Judge grades both, and only `Δ = I_strong - I_weak == 1`
+  examples (strong solves, weak fails — the "zone of proximal development") are kept and
+  emitted as ShareGPT JSONL with a yield report. Pure HTTP over AInode-served
+  OpenAI-compatible endpoints (no torch — runs in the slim orchestrator). CLI:
+  `python -m ainode.training.autodata.run --config cfg.json`. Validated live on the GB10
+  fleet (Aegis-14B challenger/strong/judge + Qwen2.5-0.5B weak): 12 tasks → 1 kept,
+  correctly bucketing too-easy/too-hard. Orchestrator meta-optimization + `lift`
+  document-ingestion are deferred (v2).
 
 ---
 
