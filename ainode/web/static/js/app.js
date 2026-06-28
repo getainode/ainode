@@ -313,6 +313,12 @@ const AINode = {
     this.updateClusterHero();
     this.updateChatModelSelect();
 
+    // Don't rebuild the view + right panel out from under an active interaction
+    // (dragging a node pill, selecting text to copy, a mid-click) — that 5s flicker
+    // was wiping clicks/selection. State is already updated above, so the next idle
+    // tick renders fresh.
+    if (this._userBusy()) return;
+
     // Preserve scroll position of the main content area across periodic
     // re-renders — the 5s poll was rebuilding innerHTML and bouncing the
     // user back to the top of long lists.
@@ -365,8 +371,23 @@ const AINode = {
     }
   },
 
+  // True while the user is actively interacting, so the periodic poll doesn't
+  // rebuild the DOM mid-action (drag / text-selection / just-clicked).
+  _userBusy() {
+    if (this._pointerDown) return true;
+    if (this._lastInteract && (Date.now() - this._lastInteract) < 1200) return true;
+    try { if (String(window.getSelection())) return true; } catch (_) {}
+    return false;
+  },
+
   startPolling() {
     var self = this;
+    // Track active interaction so the poll won't rebuild the DOM out from under it.
+    if (!this._interactionWired) {
+      this._interactionWired = true;
+      document.addEventListener('pointerdown', function () { self._pointerDown = true; self._lastInteract = Date.now(); }, true);
+      document.addEventListener('pointerup', function () { self._pointerDown = false; self._lastInteract = Date.now(); }, true);
+    }
     // Status + nodes every 5s
     this.state.pollInterval = setInterval(function () { self.refresh(); }, 5000);
     // Metrics every 3s
