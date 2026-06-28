@@ -2565,6 +2565,7 @@ const AINode = {
           if (repo) map[repo] = true;
         });
         self.state.downloadedModels = map;
+        self.state.downloadedList = (data.models || data || []);
         self.renderDownloads();
       }).catch(function () {});
     }
@@ -2633,6 +2634,19 @@ const AINode = {
     // grab (our known-good picks, verified ones badged). Anything else: Browse HF.
     var installed = catalog.filter(function (m) { return isOnDisk(m) && matchesQuery(m); });
     var knownGood = catalog.filter(function (m) { return m.curated === true && !isOnDisk(m) && matchesQuery(m); });
+    // Add disk models NOT in the catalog (a plain HF repo you downloaded, e.g. Ornith) — else
+    // they vanish from this page despite being on disk + launchable. Mirrors the launch dropdown.
+    var inInstalled = {};
+    installed.forEach(function (m) { if (m.hf_repo) inInstalled[m.hf_repo] = true; if (m.id) inInstalled[m.id] = true; });
+    (self.state.downloadedList || []).forEach(function (m) {
+      var repo = m.hf_repo || m.id;
+      if (!repo || inInstalled[repo]) return;
+      var sz = m.size_gb || m.local_size_gb || 0;
+      var entry = { id: repo, slug: m.id || repo, name: m.name || repo.split('/').pop(),
+        size: '~' + Math.round(sz) + ' GB', sizeGb: sz, desc: m.description || 'Downloaded model',
+        quantization: m.quantization || null, minMem: m.min_memory_gb || sz, hf_repo: repo, downloaded: true };
+      if (matchesQuery(entry)) installed.push(entry);
+    });
     var bySize = function (a, b) { return (a.sizeGb || 0) - (b.sizeGb || 0); };
     installed.sort(bySize);
     knownGood.sort(bySize);
