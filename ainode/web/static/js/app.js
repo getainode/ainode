@@ -229,6 +229,9 @@ const AINode = {
     if (view === 'downloads' && prevView !== 'downloads') {
       this._downloadsViewInitialized = false;  // force full render on entry
     }
+    if (view === 'training' && prevView !== 'training') {
+      this._autodataViewInitialized = false;   // force full render of the AutoData panel on entry
+    }
     // Update nav pill active state
     document.querySelectorAll('.nav-pill').forEach(function (el) {
       el.classList.toggle('active', el.dataset.view === view);
@@ -2869,6 +2872,7 @@ const AINode = {
     var tab = this.state.trainingTab || 'overview';
     var items = [
       { id: 'overview',   label: 'Overview',   icon: '&#9711;' },
+      { id: 'autodata',   label: 'AutoData',   icon: '&#9883;' },
       { id: 'datasets',   label: 'Datasets',   icon: '&#8864;' },
       { id: 'runs',       label: 'Runs',       icon: '&#9873;' },
       { id: 'templates',  label: 'Templates',  icon: '&#9641;' },
@@ -2932,6 +2936,7 @@ const AINode = {
         self.state.trainingTab = btn.dataset.tab;
         self.state.trainingView = 'list';
         self.state.trainingDetailId = null;
+        self._autodataViewInitialized = false;  // full-render the AutoData panel on (re)entry
         self.renderTrainingSidebar();
         self.renderTraining();
       });
@@ -2994,6 +2999,12 @@ const AINode = {
 
     switch (tab) {
       case 'overview':   this.renderTrainingOverview(container); break;
+      case 'autodata':
+        // Mirror the downloads-view guard: full render on entry, then the 5s poll
+        // leaves the panel alone (the run has its own poller) so the form never flickers.
+        if (this._autodataViewInitialized) { /* in place — _pollAutoData owns #autodata-status */ }
+        else { this._autodataViewInitialized = true; this.renderTrainingAutoData(container); }
+        break;
       case 'datasets':   this.renderTrainingDatasets(container); break;
       case 'runs':       this.renderTrainingRuns(container); break;
       case 'templates':  this.renderTrainingTemplates(container); break;
@@ -3109,6 +3120,172 @@ const AINode = {
         self.renderTraining();
       });
     });
+  },
+
+  // ---- AutoData ----------------------------------------------------------
+  // Δ-filtered synthetic-data generation over four AInode-served models. The run
+  // executes server-side and calls back into the federated /v1 proxy, so every
+  // role endpoint is this server's own loopback + the picked served-model-name.
+  renderTrainingAutoData(container) {
+    var self = this;
+    var models = this.state.fleetModels || [];
+    var opts = models.map(function (m) {
+      return '<option value="' + self.esc(m) + '">' + self.esc(m) + '</option>';
+    }).join('');
+    var role = function (key, label, hint) {
+      return '<div class="form-group"><label class="form-label">' + label + '</label>' +
+        '<select id="ad-' + key + '" class="form-input">' + opts + '</select>' +
+        (hint ? '<div class="form-hint">' + hint + '</div>' : '') + '</div>';
+    };
+
+    container.innerHTML =
+      '<div class="training-overview">' +
+        '<div class="dataset-toolbar"><div>' +
+          '<h2 style="font-size:18px;font-weight:700">AutoData</h2>' +
+          '<p style="font-size:12.5px;color:var(--text-muted);margin-top:4px">Generate synthetic training data from your loaded models. The Challenger writes tasks, a weak and a strong solver answer them, and the Judge keeps only what the strong model gets right and the weak one misses — the result lands in Datasets, ready to train on.</p>' +
+        '</div></div>' +
+        (models.length ? '' : '<div class="form-hint" style="margin-bottom:10px">No models loaded — load at least one model (Models tab) so the four roles have an endpoint to call.</div>') +
+        '<div class="quantize-panel">' +
+          '<div class="form-grid">' +
+            role('challenger', 'Challenger (writes tasks)', 'A strong, creative model') +
+            role('weak', 'Weak solver', 'Smaller/faster — should miss the hard ones') +
+            role('strong', 'Strong solver', 'The teacher — its answers become the data') +
+            role('judge', 'Judge (grades answers)', '') +
+          '</div>' +
+          '<div class="form-group" style="margin-top:8px"><label class="form-label">Task spec</label>' +
+            '<textarea id="ad-task-spec" class="form-input" rows="2" placeholder="e.g. Challenging grade-school math word problems with a single numeric answer."></textarea></div>' +
+          '<div class="form-group"><label class="form-label">Generator prompt (Challenger system prompt)</label>' +
+            '<textarea id="ad-gen-prompt" class="form-input" rows="2" placeholder="e.g. You are an expert problem author. Write diverse, unambiguous tasks."></textarea></div>' +
+          '<div class="form-grid">' +
+            '<div class="form-group"><label class="form-label"># Tasks</label><input type="number" id="ad-n-tasks" class="form-input" value="20" min="1" max="500"></div>' +
+            '<div class="form-group"><label class="form-label">Judge mode</label><select id="ad-judge-mode" class="form-input">' +
+              '<option value="rubric">Rubric (LLM grades)</option>' +
+              '<option value="verify">Verify (math/numeric, rubric fallback)</option>' +
+              '<option value="exact">Exact (substring match)</option>' +
+            '</select></div>' +
+            '<div class="form-group"><label class="form-label">Dataset name</label><input type="text" id="ad-name" class="form-input" placeholder="optional"></div>' +
+          '</div>' +
+          '<label class="form-label" style="display:block;margin-top:8px"><input type="checkbox" id="ad-meta"> Meta-optimize — rewrite the generator prompt over several rounds to lift yield</label>' +
+          '<button class="btn-nvidia" id="ad-run" style="margin-top:10px"' + (models.length ? '' : ' disabled') + '>Run AutoData &rsaquo;</button>' +
+        '</div>' +
+        '<div id="autodata-status" style="margin-top:14px"></div>' +
+      '</div>';
+
+    this._renderAutoDataStatus();  // restore an in-flight/last run if we re-entered the tab
+
+    var runBtn = container.querySelector('#ad-run');
+    if (runBtn) runBtn.addEventListener('click', function () { self._startAutoDataRun(container); });
+  },
+
+  async _startAutoDataRun(container) {
+    var self = this;
+    var val = function (sel) { var el = container.querySelector(sel); return el ? el.value.trim() : ''; };
+    var pick = function (sel) { var el = container.querySelector(sel); return el ? el.value : ''; };
+    var taskSpec = val('#ad-task-spec'), genPrompt = val('#ad-gen-prompt');
+    if (!taskSpec || !genPrompt) { self.toast('Task spec and generator prompt are required', 'error'); return; }
+    if (!pick('#ad-challenger')) { self.toast('Load at least one model first', 'error'); return; }
+    // ponytail: the federated /v1 proxy is this same server; loopback + the served-model-name
+    // routes to whichever node serves it. Assumes the default api_port when the port is blank.
+    var base = 'http://localhost:' + (window.location.port || '8000') + '/v1';
+    var ep = function (sel) { return { url: base, model: pick(sel) }; };
+    var body = {
+      config: {
+        task_spec: taskSpec, gen_prompt: genPrompt,
+        challenger: ep('#ad-challenger'), weak: ep('#ad-weak'),
+        strong: ep('#ad-strong'), judge: ep('#ad-judge'),
+        n_tasks: parseInt(val('#ad-n-tasks'), 10) || 20,
+        judge_mode: pick('#ad-judge-mode'),
+      },
+      meta: container.querySelector('#ad-meta').checked,
+    };
+    var name = val('#ad-name');
+    if (name) body.name = name;
+
+    var runBtn = container.querySelector('#ad-run');
+    runBtn.disabled = true; runBtn.textContent = 'Starting…';
+    try {
+      var resp = await fetch('/api/training/autodata', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (!resp.ok) {
+        self.toast('Error: ' + (data.error || 'Failed to start AutoData'), 'error');
+        runBtn.disabled = false; runBtn.textContent = 'Run AutoData ›'; return;
+      }
+      self.state.autodataRun = { run_id: data.run_id, status: 'running', meta: body.meta };
+      self.toast('AutoData run started', 'success');
+      self._renderAutoDataStatus();
+      self._pollAutoData();
+    } catch (e) {
+      self.toast('Network error: ' + e.message, 'error');
+      runBtn.disabled = false; runBtn.textContent = 'Run AutoData ›';
+    }
+  },
+
+  _pollAutoData() {
+    var self = this;
+    if (this._autodataPollTimer) clearTimeout(this._autodataPollTimer);
+    var tick = async function () {
+      var cur = self.state.autodataRun;
+      if (!cur || !cur.run_id) return;
+      var data = await self.fetchJSON('/api/training/autodata/' + encodeURIComponent(cur.run_id));
+      if (data) {
+        self.state.autodataRun = data;
+        self._renderAutoDataStatus();
+        if (data.status === 'completed' || data.status === 'failed') {
+          var btn = document.getElementById('ad-run');
+          if (btn) { btn.disabled = false; btn.textContent = 'Run AutoData ›'; }
+          if (data.status === 'completed' && data.dataset_id) {
+            // pull the new dataset into state so it shows up the moment they open Datasets
+            var ds = await self.fetchJSON('/api/datasets');
+            if (ds && ds.datasets) self.state.datasets = ds.datasets;
+            self._renderAutoDataStatus();
+          }
+          return;  // terminal — stop polling
+        }
+      }
+      self._autodataPollTimer = setTimeout(tick, 3000);
+    };
+    tick();
+  },
+
+  _renderAutoDataStatus() {
+    var el = document.getElementById('autodata-status');
+    if (!el) return;
+    var self = this;
+    var run = this.state.autodataRun;
+    if (!run) { el.innerHTML = ''; return; }
+    var card = function (inner) {
+      return '<div style="padding:14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;font-size:13px;line-height:1.6">' + inner + '</div>';
+    };
+    if (run.status === 'running') {
+      el.innerHTML = card('<span class="job-status-badge status-running">Running</span> Generating &amp; Δ-filtering tasks…' + (run.meta ? ' (meta-optimizing the generator prompt)' : ''));
+      return;
+    }
+    if (run.status === 'failed') {
+      el.innerHTML = card('<span class="job-status-badge status-failed">Failed</span> ' + self.esc(run.error || 'Unknown error'));
+      return;
+    }
+    if (run.status === 'completed') {
+      var r = run.report || {};
+      var stats = run.meta
+        ? 'Kept <strong>' + (r.kept != null ? r.kept : '—') + '</strong> &middot; best yield <strong>' +
+            (r.best_yield != null ? r.best_yield + '%' : '—') + '</strong> &middot; <strong>' + (r.rounds != null ? r.rounds : '—') + '</strong> rounds'
+        : 'Kept <strong>' + (r.kept != null ? r.kept : '—') + '</strong> of <strong>' + (r.total != null ? r.total : '—') +
+            '</strong> &middot; yield <strong>' + (r.yield_pct != null ? r.yield_pct + '%' : '—') + '</strong> ' +
+            '<span class="muted">(too-easy ' + (r.too_easy || 0) + ' &middot; too-hard ' + (r.too_hard || 0) + ' &middot; errors ' + (r.errors || 0) + ')</span>';
+      var tail = run.dataset_id
+        ? '<div style="margin-top:10px"><button class="btn-nvidia" id="ad-goto-dataset">Open in Datasets &rsaquo;</button></div>'
+        : '<div style="margin-top:10px" class="muted">No rows kept — nothing to save. Try more tasks, or pick a wider weak/strong gap.</div>';
+      el.innerHTML = card('<span class="job-status-badge status-completed">Completed</span> ' + stats + tail);
+      var goto = document.getElementById('ad-goto-dataset');
+      if (goto) goto.addEventListener('click', function () {
+        self.state.trainingTab = 'datasets';
+        self._autodataViewInitialized = false;
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      });
+    }
   },
 
   // ---- Datasets ----------------------------------------------------------
