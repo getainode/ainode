@@ -16,6 +16,7 @@ from ainode.training.engine import (
 def setup_training_routes(app: web.Application, manager: TrainingManager) -> None:
     """Register training API routes on the aiohttp app."""
     app["training_manager"] = manager
+    app["autodata_runs"] = {}  # run_id -> status dict (in-memory; MVP)
 
     app.router.add_post("/api/training/jobs", handle_submit_job)
     app.router.add_get("/api/training/jobs", handle_list_jobs)
@@ -30,6 +31,8 @@ def setup_training_routes(app: web.Application, manager: TrainingManager) -> Non
     app.router.add_get("/api/training/templates", handle_templates)
     app.router.add_get("/api/training/stats", handle_stats)
     app.router.add_post("/api/training/estimate", handle_estimate)
+    app.router.add_post("/api/training/autodata", handle_autodata_run)
+    app.router.add_get("/api/training/autodata/{run_id}", handle_autodata_status)
 
 
 async def handle_templates(_request: web.Request) -> web.Response:
@@ -213,7 +216,6 @@ async def handle_get_logs(request: web.Request) -> web.Response:
 
 async def handle_get_output(request: web.Request) -> web.Response:
     """GET /api/training/jobs/:job_id/output — list artifact files from the output dir."""
-    import os
     manager: TrainingManager = request.app["training_manager"]
     job_id = request.match_info["job_id"]
 
@@ -513,3 +515,102 @@ async def handle_save_template(request: web.Request) -> web.Response:
         pass  # in-memory fallback is fine
 
     return web.json_response(template, status=201)
+
+
+# ---------------------------------------------------------------------------
+# AutoData — Δ-filtered synthetic-data generation -> registered dataset
+# ---------------------------------------------------------------------------
+# Closes the loop: an AutoData run (pure-HTTP, no torch) writes ShareGPT JSONL,
+# we register it with the DatasetManager, and the returned dataset_id drops
+# straight into a training job (POST /api/training/jobs {dataset_id}).
+
+
+async def handle_autodata_run(request: web.Request) -> web.Response:
+    """POST /api/training/autodata — start a background AutoData run.
+
+    Body: {config: {AutoData config}, meta?: bool, target_yield?, max_rounds?,
+    name?, description?}. Returns 202 + run_id; poll GET /api/training/autodata/{run_id}.
+    The run executes in a thread (it's blocking HTTP I/O) so the event loop never stalls.
+    """
+    import asyncio
+    import uuid
+    from pathlib import Path as _Path
+
+    from ainode.training.autodata.core import AutoDataConfig
+
+    dsm = request.app.get("dataset_manager")
+    if dsm is None:
+        return web.json_response({"error": "Dataset manager unavailable"}, status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    config = body.get("config")
+    if not isinstance(config, dict):
+        return web.json_response({"error": "config (object) is required"}, status=400)
+    try:
+        cfg = AutoDataConfig.from_dict(config)
+    except Exception as exc:
+        return web.json_response({"error": f"Invalid AutoData config: {exc}"}, status=400)
+
+    is_meta = bool(body.get("meta"))
+    target_yield = float(body.get("target_yield", 30))
+    max_rounds = int(body.get("max_rounds", 4))
+
+    run_id = uuid.uuid4().hex[:12]
+    # Write under the dataset store so add_local registers it in place (and the
+    # resulting absolute path satisfies TrainingConfig's datasets-dir guard).
+    out_path = _Path(dsm.root) / f"autodata-{run_id}.jsonl"
+    cfg.out = str(out_path)
+    name = (body.get("name") or f"autodata-{run_id}").strip()
+    description = body.get("description") or "AutoData Δ-filtered synthetic dataset"
+
+    runs = request.app["autodata_runs"]
+    runs[run_id] = {
+        "run_id": run_id, "status": "running", "meta": is_meta,
+        "dataset_id": None, "report": None, "rounds": None,
+        "out": str(out_path), "error": None,
+    }
+
+    loop = asyncio.get_event_loop()
+
+    async def _do_run() -> None:
+        try:
+            def _blocking() -> dict:
+                if is_meta:
+                    from ainode.training.autodata.meta import meta_optimize
+                    res = meta_optimize(cfg, target_yield=target_yield, max_rounds=max_rounds)
+                    report = {"kept": len(res["dataset"]), "best_yield": res["best_yield"],
+                              "rounds": len(res["rounds"])}
+                    return {"report": report, "rounds": res["rounds"]}
+                from ainode.training.autodata.core import run as _run
+                res = _run(cfg)
+                return {"report": res["report"], "rounds": None}
+
+            result = await loop.run_in_executor(None, _blocking)
+            ds = dsm.add_local(str(out_path), name=name, description=description) \
+                if out_path.exists() else None
+            runs[run_id].update(
+                status="completed", dataset_id=(ds.id if ds else None),
+                report=result["report"], rounds=result["rounds"],
+            )
+        except Exception as exc:  # noqa: BLE001 — surface any run failure to the poller
+            runs[run_id].update(status="failed", error=str(exc))
+
+    loop.create_task(_do_run())
+    return web.json_response(
+        {"run_id": run_id, "status": "running",
+         "poll": f"/api/training/autodata/{run_id}"},
+        status=202,
+    )
+
+
+async def handle_autodata_status(request: web.Request) -> web.Response:
+    """GET /api/training/autodata/{run_id} — poll an AutoData run."""
+    runs = request.app.get("autodata_runs", {})
+    run = runs.get(request.match_info["run_id"])
+    if run is None:
+        return web.json_response({"error": "AutoData run not found"}, status=404)
+    return web.json_response(run)

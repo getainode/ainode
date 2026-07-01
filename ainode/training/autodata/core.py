@@ -37,7 +37,7 @@ class AutoDataConfig:
     judge: Endpoint
     n_tasks: int = 50
     system_prompt: str = ""        # optional system msg for solvers + emitted data
-    judge_mode: str = "rubric"     # "rubric" (LLM) or "exact" (string match vs reference)
+    judge_mode: str = "rubric"     # "rubric" (LLM), "verify" (math/numeric, rubric fallback), or "exact" (substring)
     concurrency: int = 8
     retries: int = 2               # transient HTTP/parse retries per model call
     out: str = ""                  # JSONL output path (optional)
@@ -115,7 +115,15 @@ def solve(ep: Endpoint, system: str, x: str, retries: int = 2) -> str:
 
 def judge_correct(cfg: AutoDataConfig, x: str, output: str, reference) -> int:
     """1 if `output` is correct for task `x`, else 0."""
-    if cfg.judge_mode == "exact" and reference:
+    if cfg.judge_mode == "verify":
+        # Torch-free value verifier (math/numeric): definitive on parseable answers, None on
+        # open-ended/symbolic → fall through to the LLM rubric below. Fixes the thin-ZPD where
+        # exact-match misgraded formatting variants (0.5 vs 1/2) as wrong.
+        from .verify import is_correct
+        v = is_correct(output, reference)
+        if v is not None:
+            return int(v)
+    elif cfg.judge_mode == "exact" and reference:
         return int(_norm(reference) in _norm(output))
     ref = f"\n\nReference answer:\n{reference}" if reference else ""
     prompt = (f"Task:\n{x}\n\nCandidate answer:\n{output}{ref}\n\n"
@@ -220,7 +228,27 @@ def demo() -> None:
         assert rep["too_easy"] == 1, rep        # TASK_B
         assert rep["too_hard"] == 1, rep        # TASK_C
         assert out["kept"][0]["conversations"][-1]["value"] == "A", out["kept"]
-        print("autodata demo OK:", rep)
+
+        # verify-mode: the strong solver returns the RIGHT VALUE in a different FORMAT ("1/2"
+        # for reference "0.5"). exact-match misgrades it (-> too_hard); the verifier keeps it.
+        def fake_num(ep, messages, json_mode):
+            last = messages[-1]["content"]
+            if json_mode and "Generate" in last:
+                return json.dumps({"tasks": [{"input": "HALF", "reference": "0.5"}]})
+            if json_mode and "Candidate answer" in last:   # rubric (not reached for clean numeric)
+                return json.dumps({"correct": False})
+            return "1/2" if ep.model == "strong" else "999"
+        call_model = fake_num
+        base = dict(task_spec="x", gen_prompt="x", n_tasks=1, concurrency=1,
+                    challenger=Endpoint("u", "challenger"), weak=Endpoint("u", "weak"),
+                    strong=Endpoint("u", "strong"), judge=Endpoint("u", "judge"))
+        exact = run(AutoDataConfig(judge_mode="exact", **base))["report"]
+        ver = run(AutoDataConfig(judge_mode="verify", **base))["report"]
+        assert exact["kept"] == 0 and exact["too_hard"] == 1, exact   # format variant lost
+        assert ver["kept"] == 1 and ver["too_hard"] == 0, ver         # verifier recovers it
+        print("autodata demo OK:", rep,
+              "| signal shift exact->verify: kept", exact["kept"], "->", ver["kept"],
+              "too_hard", exact["too_hard"], "->", ver["too_hard"])
     finally:
         call_model = _http_chat
 
