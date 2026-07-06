@@ -615,6 +615,52 @@ class NvidiaBackend(EngineBackend):
             pass
         return None
 
+    def _is_multimodal_model(self) -> bool:
+        """Detect a vision/multimodal model from its on-disk ``config.json``.
+
+        True when config.json has a ``vision_config`` key, or any
+        ``architectures`` entry matches ``/VL|Vision|vision/``. Only the LOCAL
+        model dir is inspected: if config.json is unreadable (e.g. a remote
+        repo-id not yet downloaded), we return False so the caller keeps the fp8
+        default — we deliberately never fetch remote config here (no network in
+        the serve-args builder).
+
+        CEILING: a not-yet-downloaded VLM served by repo-id won't be detected
+        and will use the fp8 KV default until its weights are on disk.
+        """
+        local = self._local_model_dir()
+        if not local:
+            return False
+        try:
+            cfg = json.loads((Path(local) / "config.json").read_text())
+        except Exception:
+            return False
+        if "vision_config" in cfg:
+            return True
+        import re
+        archs = cfg.get("architectures") or []
+        if isinstance(archs, str):
+            archs = [archs]
+        return any(re.search(r"VL|Vision|vision", str(a)) for a in archs)
+
+    def _effective_kv_cache_dtype(self) -> str:
+        """Resolve the KV-cache dtype for serve args.
+
+        fp8 KV corrupts vision-model generation on GB10 (verified: Qwen2.5-VL
+        emits garbage on fp8, clean output on auto; text models are unaffected).
+        So the fp8 DEFAULT is downgraded to 'auto' for a multimodal model. Any
+        EXPLICIT ``kv_cache_dtype`` always wins — whether it's a non-fp8 value
+        (which isn't the default anyway) or an explicit 'fp8' flagged via
+        ``kv_cache_dtype_explicit`` (the user's opt-back-in for a VLM/vLLM combo
+        they know handles fp8 KV). A model whose config.json can't be read keeps
+        the fp8 default.
+        """
+        dtype = getattr(self.config, "kv_cache_dtype", "") or ""
+        explicit = getattr(self.config, "kv_cache_dtype_explicit", False)
+        if dtype == "fp8" and not explicit and self._is_multimodal_model():
+            return "auto"
+        return dtype
+
     def _is_nvfp4_model(self) -> bool:
         """Detect NVFP4 from the on-disk config.json quantization metadata (with
         the model id as a fallback) so the MARLIN serve env is applied only when
@@ -901,8 +947,11 @@ class NvidiaBackend(EngineBackend):
         # fp8 KV cache — the GB10 design default (engine/AGENTS.md): required for
         # long context or vLLM OOMs sizing the cache at bf16. Config-driven so a
         # model/quant that rejects fp8 can fall back via kv_cache_dtype="".
-        if getattr(self.config, "kv_cache_dtype", ""):
-            args.extend(["--kv-cache-dtype", self.config.kv_cache_dtype])
+        # _effective_kv_cache_dtype downgrades the fp8 DEFAULT to auto for
+        # multimodal models (fp8 corrupts VLM generation on GB10).
+        kv_dtype = self._effective_kv_cache_dtype()
+        if kv_dtype:
+            args.extend(["--kv-cache-dtype", kv_dtype])
         if tp_size > 1:
             args.extend(["--tensor-parallel-size", str(tp_size)])
             args.extend(["--distributed-executor-backend", "ray"])

@@ -51,6 +51,11 @@ class NodeConfig:
     # context (32k+) or vLLM OOMs sizing the cache at bf16 (see engine/AGENTS.md).
     # Set "" / "auto" to let vLLM choose if a model/quant ever rejects fp8.
     kv_cache_dtype: str = "fp8"
+    # Provenance of kv_cache_dtype: True only when a caller EXPLICITLY supplied it
+    # (per-load body or config). The multimodal fp8→auto safety downgrade
+    # (engine/backends/nvidia.py) fires only on the DEFAULT fp8 — an explicit
+    # fp8 request on a VLM is honored, giving the user a way to opt back in.
+    kv_cache_dtype_explicit: bool = False
     quantization: Optional[str] = None  # awq, gptq, fp8, None
     trust_remote_code: bool = False
 

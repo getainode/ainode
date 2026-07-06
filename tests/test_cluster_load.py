@@ -274,6 +274,132 @@ def test_instance_manifest_persist_and_replay(monkeypatch, tmp_path):
     assert models == {"model-A", "model-B"}
 
 
+def test_solo_load_persists_and_resets_primary_overrides(monkeypatch):
+    """A solo (primary) load persists EVERY per-load override onto the shared
+    NodeConfig — not just model + gmu — so the boot engine re-applies them after
+    a restart (the VLM-came-back-on-fp8 bug). Reloading the primary WITHOUT an
+    override resets that field to its NodeConfig default (no stale inheritance)."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load a VLM with the full set of per-load overrides.
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "gpu_memory_utilization": 0.6,
+        "max_model_len": 16384,
+        "kv_cache_dtype": "auto",
+        "served_model_name": "vl-alias",
+        "trust_remote_code": True,
+    })))
+    assert cfg.model == "Qwen/Qwen2.5-VL-7B-Instruct"
+    assert cfg.kv_cache_dtype == "auto"
+    assert cfg.max_model_len == 16384
+    assert cfg.served_model_name == ["vl-alias"]
+    assert cfg.trust_remote_code is True
+    assert cfg.gpu_memory_utilization == 0.6
+
+    # Reload the SAME primary with NO overrides → every field resets to default
+    # (kv back to fp8, ctx/alias cleared) rather than inheriting the prior load.
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Qwen2.5-VL-7B-Instruct"})))
+    defaults = NodeConfig()
+    assert cfg.kv_cache_dtype == defaults.kv_cache_dtype == "fp8"
+    assert cfg.max_model_len is None
+    assert cfg.served_model_name is None
+    assert cfg.trust_remote_code is False
+    assert cfg.gpu_memory_utilization == defaults.gpu_memory_utilization
+
+
+def test_next_model_launch_config_does_not_inherit_primary_overrides(monkeypatch):
+    """BLOCKER regression: loading model B after primary A must NOT leak A's
+    per-load overrides onto B's ACTUAL launch config. The shared app["config"]
+    still carries A's kv/quant/alias/trust after A's load, but a bare B load must
+    launch with clean NodeConfig defaults — else B (unquantized) gets A's
+    --quantization awq, unconsented --trust-remote-code, and A's alias."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Primary A with the full override set.
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "gpu_memory_utilization": 0.6,
+        "max_model_len": 32768,
+        "kv_cache_dtype": "auto",
+        "quantization": "awq",
+        "served_model_name": "vl-alias",
+        "trust_remote_code": True,
+    })))
+    # Bare stacked load of a DIFFERENT model B — no overrides supplied.
+    asyncio.run(mr.handle_model_load(
+        _Req(app, {"model": "meta-llama/Llama-3.2-3B-Instruct"})))
+
+    b_cfg = made["backends"][-1].config
+    defaults = NodeConfig()
+    assert b_cfg.model == "meta-llama/Llama-3.2-3B-Instruct"
+    assert b_cfg.kv_cache_dtype == defaults.kv_cache_dtype  # NOT "auto"
+    assert b_cfg.max_model_len is None                      # NOT 32768
+    assert b_cfg.quantization is None                       # NOT "awq"
+    assert b_cfg.trust_remote_code is False                 # NOT True
+    assert b_cfg.served_model_name is None                  # NOT ["vl-alias"]
+    assert b_cfg.gpu_memory_utilization == defaults.gpu_memory_utilization  # NOT 0.6
+
+
+def test_reload_same_primary_keeps_live_and_persisted_in_sync(monkeypatch):
+    """MAJOR regression: reloading the SAME primary without re-supplying an
+    override resets the live launch config AND the persisted NodeConfig to
+    defaults in lockstep — no live-vs-config.json divergence a later restart
+    would surface (the exact VLM-came-back-on-fp8 corruption)."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load VLM A with an explicit non-default kv.
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct", "kv_cache_dtype": "auto"})))
+    # Reload the SAME model, only bumping gmu (kv_cache_dtype NOT re-supplied).
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct", "gpu_memory_utilization": 0.7})))
+
+    live = made["backends"][-1].config
+    defaults = NodeConfig()
+    # Live backend and persisted shared config agree — both reset kv to default.
+    assert live.kv_cache_dtype == cfg.kv_cache_dtype == defaults.kv_cache_dtype
+    assert live.gpu_memory_utilization == cfg.gpu_memory_utilization == 0.7
+
+
+def test_explicit_kv_request_marks_provenance_on_launch_config(monkeypatch):
+    """Supplying kv_cache_dtype in the load body flags kv_cache_dtype_explicit on
+    BOTH the launch config and the persisted config, so nvidia.py's multimodal
+    fp8→auto downgrade is skipped for a user who explicitly asked for fp8 KV."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct", "kv_cache_dtype": "fp8"})))
+
+    b = made["backends"][-1].config
+    assert b.kv_cache_dtype == "fp8"
+    assert b.kv_cache_dtype_explicit is True
+    assert cfg.kv_cache_dtype_explicit is True  # persisted for restart too
+
+
 def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
     """Unloading one stacked model stops ONLY that instance; the co-resident one
     keeps serving and stays in the manager."""

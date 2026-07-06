@@ -368,6 +368,44 @@ async def test_autodata_route_closes_the_loop(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_autodata_meta_report_surfaces_best_lift_for_valset(client, monkeypatch):
+    """A meta run with objective=valset surfaces best_lift + best_score (what the
+    optimizer actually maximized) in the report — not just the Δ=1 yield proxy."""
+    c, _ = client
+
+    def _fake_meta(cfg, target_yield=30, max_rounds=4):
+        return {"best_prompt": "p", "best_yield": 42.0, "best_score": 0.25,
+                "best_lift": 0.25, "best_significant": True, "dataset": [{"a": 1}],
+                "rounds": [{}, {}], "objective": "valset", "out": ""}
+
+    monkeypatch.setattr("ainode.training.autodata.meta.meta_optimize", _fake_meta)
+
+    cfg = {
+        "task_spec": "x", "gen_prompt": "x", "n_tasks": 3, "concurrency": 1,
+        "challenger": {"url": "u", "model": "challenger"},
+        "weak": {"url": "u", "model": "weak"},
+        "strong": {"url": "u", "model": "strong"},
+        "judge": {"url": "u", "model": "judge"},
+    }
+    resp = await c.post("/api/training/autodata", json={"config": cfg, "meta": True})
+    assert resp.status == 202
+    run_id = (await resp.json())["run_id"]
+
+    data = None
+    for _ in range(200):
+        data = await (await c.get(f"/api/training/autodata/{run_id}")).json()
+        if data["status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.02)
+    assert data["status"] == "completed", data
+    report = data["report"]
+    assert report["best_lift"] == 0.25
+    assert report["best_score"] == 0.25
+    assert report["best_significant"] is True
+    assert report["best_yield"] == 42.0
+
+
+@pytest.mark.asyncio
 async def test_autodata_route_rejects_bad_body(client):
     c, _ = client
     resp = await c.post("/api/training/autodata", json={"meta": True})  # no config

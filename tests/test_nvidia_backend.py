@@ -8,6 +8,7 @@ actually invoking docker.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import Any, List
 from unittest import mock
@@ -1122,3 +1123,85 @@ def test_download_max_workers_env(monkeypatch):
     assert _download_max_workers() == 2
     monkeypatch.setenv("AINODE_DOWNLOAD_MAX_WORKERS", "junk")
     assert _download_max_workers() == 4
+
+
+# ---------------------------------------------------------------------------
+# Multimodal fp8-KV auto-skip — fp8 KV corrupts VLM generation on GB10
+# ---------------------------------------------------------------------------
+
+
+def _write_model_dir(tmp_path, *, vision=False, architectures=None, config_json=True):
+    """Create an on-disk model dir (flat org--name slug) with a config.json so
+    _local_model_dir resolves and _is_multimodal_model can read it."""
+    slug = "org--model"
+    d = tmp_path / slug
+    d.mkdir()
+    if config_json:
+        cfg: dict = {}
+        if vision:
+            cfg["vision_config"] = {"hidden_size": 8}
+        if architectures is not None:
+            cfg["architectures"] = architectures
+        (d / "config.json").write_text(json.dumps(cfg))
+    else:
+        (d / "placeholder.txt").write_text("x")  # dir non-empty, no config.json
+    return _make_config(model="org/model", models_dir=str(tmp_path))
+
+
+def _kv_dtype_arg(backend):
+    args = backend._build_vllm_serve_args(tp_size=1)
+    if "--kv-cache-dtype" not in args:
+        return None
+    return args[args.index("--kv-cache-dtype") + 1]
+
+
+def test_multimodal_vision_config_downgrades_fp8_to_auto(tmp_path):
+    cfg = _write_model_dir(tmp_path, vision=True)
+    cfg.kv_cache_dtype = "fp8"
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "auto"
+
+
+def test_multimodal_vl_architecture_downgrades_fp8_to_auto(tmp_path):
+    cfg = _write_model_dir(tmp_path, architectures=["Qwen2_5_VLForConditionalGeneration"])
+    cfg.kv_cache_dtype = "fp8"
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "auto"
+
+
+def test_text_model_keeps_fp8(tmp_path):
+    cfg = _write_model_dir(tmp_path, architectures=["LlamaForCausalLM"])
+    cfg.kv_cache_dtype = "fp8"
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "fp8"
+
+
+def test_explicit_non_default_kv_wins_for_multimodal(tmp_path):
+    """An explicit (non-'fp8') kv_cache_dtype is never downgraded, even for a VLM."""
+    cfg = _write_model_dir(tmp_path, vision=True)
+    cfg.kv_cache_dtype = "fp8_e5m2"
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "fp8_e5m2"
+
+
+def test_explicit_fp8_honored_for_multimodal(tmp_path):
+    """An EXPLICIT fp8 kv_cache_dtype (flagged kv_cache_dtype_explicit) is honored
+    even on a VLM — the safety downgrade only fires on the fp8 DEFAULT, so a user
+    who knows their VLM/vLLM combo handles fp8 KV can opt back in."""
+    cfg = _write_model_dir(tmp_path, vision=True)
+    cfg.kv_cache_dtype = "fp8"
+    cfg.kv_cache_dtype_explicit = True
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "fp8"
+
+
+def test_default_fp8_still_downgrades_for_multimodal(tmp_path):
+    """The fp8 DEFAULT (not explicitly requested) still downgrades to auto on a
+    VLM — provenance is what gates the downgrade, not the literal value alone."""
+    cfg = _write_model_dir(tmp_path, vision=True)
+    cfg.kv_cache_dtype = "fp8"
+    cfg.kv_cache_dtype_explicit = False
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "auto"
+
+
+def test_unreadable_config_keeps_fp8_default(tmp_path):
+    """No config.json (e.g. remote repo-id not yet downloaded) → keep fp8; we
+    never fetch remote config in the serve-args builder."""
+    cfg = _write_model_dir(tmp_path, config_json=False)
+    cfg.kv_cache_dtype = "fp8"
+    assert _kv_dtype_arg(NvidiaBackend(cfg)) == "fp8"
