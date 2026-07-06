@@ -343,9 +343,6 @@ const AINode = {
           this.renderDownloads();
         }
         break;
-      case 'models':
-        this.renderModels();
-        break;
       case 'training':
         this.renderTraining();
         break;
@@ -2057,12 +2054,30 @@ const AINode = {
 
   cancelDownload(jobId) {
     var self = this;
+    // Revert any rows for this job back to 'downloading' so the poll resumes
+    // and the cancel button (currently disabled/…) is redrawn fresh.
+    var revert = function () {
+      Object.keys(self.state.activeDownloads || {}).forEach(function (repo) {
+        var dl = self.state.activeDownloads[repo];
+        if (dl.jobId === jobId) {
+          dl.status = 'downloading';
+          self.renderQueueItemInPlace(repo);
+        }
+      });
+    };
     fetch('/api/models/download-cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_id: jobId }),
     })
-    .then(function (r) { return r.json(); })
+    .then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (!r.ok) {
+          throw new Error((data.error && data.error.message) || data.error || ('HTTP ' + r.status));
+        }
+        return data;
+      });
+    })
     .then(function (data) {
       if (data.status === 'cancelling') {
         // Mark the local state so the UI updates immediately
@@ -2073,9 +2088,15 @@ const AINode = {
             self.renderQueueItemInPlace(repo);
           }
         });
+      } else {
+        // Unexpected response shape — don't leave the row stuck.
+        revert();
       }
     })
-    .catch(function () { /* server will clean up */ });
+    .catch(function (err) {
+      self.toast('Cancel failed: ' + err.message, 'error');
+      revert();
+    });
   },
 
   renderQueueItem(dl) {
@@ -2865,28 +2886,8 @@ const AINode = {
   },
 
   // ========================================================================
-  //  MODELS VIEW (secondary, accessible from downloads or direct)
-  // ========================================================================
-
-  renderModels() {
-    // Reuse downloads rendering for the models view
-    this.renderDownloads();
-  },
-
-  // ========================================================================
   //  TRAINING VIEW  (overview / autodata / datasets / runs / templates)
   // ========================================================================
-
-  trainingModels: [
-    { id: 'meta-llama/Llama-3.2-3B-Instruct', name: 'Llama 3.2 3B Instruct', size: '~6 GB' },
-    { id: 'meta-llama/Llama-3.1-8B-Instruct', name: 'Llama 3.1 8B Instruct', size: '~16 GB' },
-    { id: 'meta-llama/Llama-3.1-70B-Instruct-AWQ', name: 'Llama 3.1 70B AWQ', size: '~38 GB' },
-    { id: 'Qwen/Qwen2.5-72B-Instruct', name: 'Qwen 2.5 72B Instruct', size: '~145 GB' },
-    { id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', name: 'DeepSeek R1 7B', size: '~14 GB' },
-    { id: 'mistralai/Mistral-7B-Instruct-v0.3', name: 'Mistral 7B v0.3', size: '~14 GB' },
-    { id: 'microsoft/Phi-3-mini-4k-instruct', name: 'Phi-3 Mini 4K', size: '~7.5 GB' },
-    { id: 'meta-llama/CodeLlama-34b-Instruct-hf', name: 'CodeLlama 34B', size: '~63 GB' },
-  ],
 
   // ---- Sidebar ------------------------------------------------------------
   async renderTrainingSidebar() {
@@ -3555,12 +3556,15 @@ const AINode = {
       : (((await this.fetchJSON('/api/datasets')) || {}).datasets || []);
     this.state.datasets = dsets;
 
-    // Try to get downloaded models from /api/models; fall back to built-in list
+    // Only offer models that are actually on disk — a run against a
+    // not-downloaded model would fail. When none are downloaded we leave the
+    // list empty and show an empty-state hint (the free-text HF-id input in
+    // step 1 still works). The backend only ever sets `downloaded`.
     var modelsResp = await this.fetchJSON('/api/models');
     var modelList = [];
     if (modelsResp && Array.isArray(modelsResp.models)) {
       modelList = modelsResp.models
-        .filter(function (m) { return m.downloaded || m.is_downloaded || m.status === 'downloaded'; })
+        .filter(function (m) { return m.downloaded; })
         // base_model = the canonical HF repo id (cards know it), NOT the on-disk
         // slug — the containerized runner hands base_model to
         // AutoTokenizer.from_pretrained, which rejects a '--' slug (HFValidationError).
@@ -3569,7 +3573,6 @@ const AINode = {
           return { id: repo, name: m.name || repo, size: m.size || m.size_gb || '' };
         });
     }
-    if (!modelList.length) modelList = this.trainingModels.slice();
 
     var initial = Object.assign({
       base_model: modelList[0] ? modelList[0].id : '',
@@ -3690,16 +3693,23 @@ const AINode = {
 
   _renderWizardStep1() {
     var s = this.state.wizardState;
-    var opts = (s.models || []).map(function (m) {
-      var active = m.id === s.base_model ? ' active' : '';
-      return '<div class="wizard-option' + active + '" data-model="' + AINode.esc(m.id) + '">' +
-        '<div class="wizard-option-title">' + AINode.esc(m.name || m.id) + '</div>' +
-        '<div class="wizard-option-sub">' + AINode.esc(m.id) + (m.size ? ' · ' + AINode.esc(m.size) : '') + '</div>' +
-        '</div>';
-    }).join('');
+    var models = s.models || [];
+    var grid;
+    if (models.length) {
+      grid = '<div class="wizard-option-grid">' + models.map(function (m) {
+        var active = m.id === s.base_model ? ' active' : '';
+        return '<div class="wizard-option' + active + '" data-model="' + AINode.esc(m.id) + '">' +
+          '<div class="wizard-option-title">' + AINode.esc(m.name || m.id) + '</div>' +
+          '<div class="wizard-option-sub">' + AINode.esc(m.id) + (m.size ? ' · ' + AINode.esc(m.size) : '') + '</div>' +
+          '</div>';
+      }).join('') + '</div>';
+    } else {
+      grid = '<div class="wizard-empty" style="padding:16px;color:var(--text-muted);font-size:13px">' +
+        'No downloaded models — download one from the Models page, or enter an HF id below.</div>';
+    }
     return '<h3>Choose a Base Model</h3>' +
       '<p class="panel-sub">Downloaded models are shown. Your fine-tune will build on top of this one.</p>' +
-      '<div class="wizard-option-grid">' + opts + '</div>' +
+      grid +
       '<div class="form-group" style="margin-top:16px"><label class="form-label">Or enter a HuggingFace model ID</label>' +
       '<input type="text" id="wz-custom-model" class="form-input" placeholder="org/model" value="' + AINode.esc(s.custom_model || '') + '"></div>';
   },
@@ -5562,8 +5572,30 @@ const AINode = {
         html += '</div>';
         body.innerHTML = html;
         body.querySelectorAll('[data-action="llm-load"]').forEach(function (btn) {
-          btn.addEventListener('click', function () {
-            self.toast('LLM load requires a restart with --model ' + btn.dataset.model + ' (coming soon via engine swap)', 'info');
+          btn.addEventListener('click', async function () {
+            var mid = btn.dataset.model;
+            btn.disabled = true;
+            btn.textContent = 'Loading…';
+            try {
+              var resp = await fetch('/api/models/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: mid }),
+              });
+              var payload = await resp.json().catch(function () { return {}; });
+              if (resp.ok && !payload.error) {
+                self.toast('Loaded ' + mid, 'success');
+                self.renderServer();
+              } else {
+                self.toast((payload.error && payload.error.message) || payload.error || 'Load failed', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Load';
+              }
+            } catch (err) {
+              self.toast('Load failed: ' + err.message, 'error');
+              btn.disabled = false;
+              btn.textContent = 'Load';
+            }
           });
         });
       } catch (err) {
