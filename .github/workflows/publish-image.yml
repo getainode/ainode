@@ -118,8 +118,12 @@ jobs:
 
       - name: Smoke test — image starts
         run: |
-          # Sanity: image runs, python imports ainode, version string matches.
-          docker run --rm ainode:${AINODE_VERSION} ainode --version
+          # Sanity: image runs and its baked version matches the release version.
+          # (--entrypoint: the image ENTRYPOINT execs `ainode start`, so bare args
+          # would be swallowed by the start subcommand.)
+          V_OUT=$(docker run --rm --entrypoint ainode "ainode:${AINODE_VERSION}" --version)
+          echo "image reports: ${V_OUT}"
+          echo "${V_OUT}" | grep -F "${AINODE_VERSION}"
 
       - name: Tag for registries
         if: steps.vars.outputs.push == 'true'
