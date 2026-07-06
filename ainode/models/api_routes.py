@@ -146,6 +146,27 @@ _OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
                   "quantization", "trust_remote_code")
 
 
+def _persist_primary_overrides(config, gmu, overrides) -> None:
+    """Persist per-load overrides onto the SHARED NodeConfig for the primary.
+
+    The primary solo model boots from ``NodeConfig`` (config.json) after a
+    `systemctl restart` — NOT from the stacked-instance manifest — so every
+    per-load override (kv_cache_dtype, max_model_len, served_model_name,
+    trust_remote_code, quantization, gpu_memory_utilization) must be written
+    here or the boot engine serves the model with stale/default values (the
+    live VLM-came-back-on-fp8 bug). Absent fields RESET to their NodeConfig
+    default rather than inheriting the previous load's value, so loading model
+    B after model A never carries A's overrides forward. Caller saves config.
+    """
+    from ainode.core.config import NodeConfig
+    defaults = NodeConfig()
+    config.gpu_memory_utilization = (
+        gmu if gmu is not None else defaults.gpu_memory_utilization)
+    ov = overrides or {}
+    for k in _OVERRIDE_KEYS:
+        setattr(config, k, ov[k] if k in ov else getattr(defaults, k))
+
+
 def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: bool = True) -> dict:
     """APPEND a solo instance through the InstanceManager — the shared core of the
     /api/models/load solo path AND the startup replay. Returns a plain dict (no
@@ -220,8 +241,7 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         config.model = model
         config.distributed_mode = "solo"
         config.peer_ips = []
-        if gmu is not None:
-            config.gpu_memory_utilization = gmu
+        _persist_primary_overrides(config, gmu, overrides)
         try:
             config.save()
         except Exception:
@@ -231,6 +251,7 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         # Reloaded the primary while a stack exists: keep app["engine"] on the live
         # backend (not the stopped old one) so status/proxy don't dangle.
         config.model = model
+        _persist_primary_overrides(config, gmu, overrides)
         try:
             config.save()
         except Exception:

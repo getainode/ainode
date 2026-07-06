@@ -274,6 +274,46 @@ def test_instance_manifest_persist_and_replay(monkeypatch, tmp_path):
     assert models == {"model-A", "model-B"}
 
 
+def test_solo_load_persists_and_resets_primary_overrides(monkeypatch):
+    """A solo (primary) load persists EVERY per-load override onto the shared
+    NodeConfig — not just model + gmu — so the boot engine re-applies them after
+    a restart (the VLM-came-back-on-fp8 bug). Reloading the primary WITHOUT an
+    override resets that field to its NodeConfig default (no stale inheritance)."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load a VLM with the full set of per-load overrides.
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "gpu_memory_utilization": 0.6,
+        "max_model_len": 16384,
+        "kv_cache_dtype": "auto",
+        "served_model_name": "vl-alias",
+        "trust_remote_code": True,
+    })))
+    assert cfg.model == "Qwen/Qwen2.5-VL-7B-Instruct"
+    assert cfg.kv_cache_dtype == "auto"
+    assert cfg.max_model_len == 16384
+    assert cfg.served_model_name == ["vl-alias"]
+    assert cfg.trust_remote_code is True
+    assert cfg.gpu_memory_utilization == 0.6
+
+    # Reload the SAME primary with NO overrides → every field resets to default
+    # (kv back to fp8, ctx/alias cleared) rather than inheriting the prior load.
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Qwen2.5-VL-7B-Instruct"})))
+    defaults = NodeConfig()
+    assert cfg.kv_cache_dtype == defaults.kv_cache_dtype == "fp8"
+    assert cfg.max_model_len is None
+    assert cfg.served_model_name is None
+    assert cfg.trust_remote_code is False
+    assert cfg.gpu_memory_utilization == defaults.gpu_memory_utilization
+
+
 def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
     """Unloading one stacked model stops ONLY that instance; the co-resident one
     keeps serving and stays in the manager."""

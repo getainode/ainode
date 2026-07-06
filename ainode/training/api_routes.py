@@ -633,6 +633,13 @@ async def handle_autodata_run(request: web.Request) -> web.Response:
                     res = meta_optimize(cfg, target_yield=target_yield, max_rounds=max_rounds)
                     report = {"kept": len(res["dataset"]), "best_yield": res["best_yield"],
                               "rounds": len(res["rounds"])}
+                    # valset objective: surface the held-out lift + active score the
+                    # meta loop already computed, so the run report reflects what the
+                    # optimizer actually maximized (not just the Δ=1 yield proxy).
+                    if res.get("objective") == "valset":
+                        report["best_lift"] = res.get("best_lift")
+                        report["best_score"] = res.get("best_score")
+                        report["best_significant"] = res.get("best_significant")
                     return {"report": report, "rounds": res["rounds"]}
                 from ainode.training.autodata.core import run as _run
                 res = _run(cfg)
