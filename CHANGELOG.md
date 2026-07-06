@@ -10,6 +10,47 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.1] — 2026-07-06
+
+> Same-day follow-up to 0.5.0: every defect found while live-proving the 0.5.0 fleet
+> (GUI sweep, browser-driven training, vision serving), fixed and review-gated.
+
+### Fixed
+- **Per-load overrides survive restarts** (#51) — solo loads persisted `kv_cache_dtype`
+  / `max_model_len` / aliases only to the stacked-instance manifest; the primary model
+  boots from `config.json` and silently lost them (a VLM loaded with `kv_cache_dtype=auto`
+  came back on fp8 → corrupted output). All override fields now persist and reset
+  correctly, with no cross-model inheritance on the launch config.
+- **fp8 KV cache off by default for multimodal models** (#51) — fp8 KV corrupts VLM
+  generation on GB10 (text models unaffected); vision models now default to `auto`,
+  explicit operator fp8 still honored via a provenance flag.
+- **Stacked-load admission guard** (#53) — stacked loads require explicit
+  `gpu_memory_utilization` (400) and reject when the node's projected total exceeds
+  0.9 (409) — the missing check let a default-sized second model hard-crash a node
+  (unified memory). Gate runs before any existing instance is touched.
+- **Training accepts on-disk models** (#53) — wizard cards submitted disk slugs
+  (`org--name`) that HF rejects; wizard now sends canonical repo ids and the container
+  builder maps any on-disk reference to its mount across all four disk layouts.
+- **Training/merge no longer require live PyPI** (#53) — peft wheel vendored per node
+  with a tolerant, import-guarded install chain (a review-caught event-loop freeze in
+  the wheel fetch was fixed with executor offloading).
+- **Node-targeted launches** (#53) — the launch form loaded on the head regardless of
+  node selection; now routes through `/api/cluster/load` with the chosen `node_id`,
+  plus a GMU input (validated on distributed launches too).
+- **Stacked instances visible** (#53) — `/api/nodes` surfaces per-node instances;
+  dashboard renders STACKED sub-cards (ports 8001+) with their own unload controls.
+- **GUI lifecycle polish** (#54) — Server-view LLM "Load" button actually loads
+  (was a "coming soon" toast); cancel-download failures surface a toast and recover
+  (true event delegation on the queue); training wizard shows an honest empty state
+  instead of hardcoded not-on-disk models; dead `renderModels()` view purged.
+
+### Added
+- **AutoData v2.2 live results** (#52) — first live val-set run on the fleet:
+  weak-solver lift **+0.458** (0.500 → 0.958 on 24 held-out GT probes),
+  exact-McNemar p=0.0005, 44% yield, early stop at target in round 1.
+
+---
+
 ## [0.5.0] — 2026-07-06
 
 > Consolidates the fleet-internal 0.4.45 / 0.4.46 builds (never published to GHCR)
