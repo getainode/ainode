@@ -888,6 +888,9 @@ const AINode = {
           if (dot.classList.contains('active') &&
               nodeSelector.querySelectorAll('.node-dot.active').length <= 1) return;
           dot.classList.toggle('active');
+          // The user hand-picked nodes for this pending launch — auto-recommend
+          // (fired on model-select onchange) must NOT clobber that choice.
+          self._launchNodesUserPicked = true;
           updateLaunchHint();
         });
       });
@@ -1006,8 +1009,11 @@ const AINode = {
     });
 
     // Set node selection; the fit-aware updater renders the hint (and survives polling).
+    // But if the user already hand-picked nodes for this launch, DON'T clobber their
+    // dots — a "pick node, then model" flow was landing the load on the head. We still
+    // recompute the hint text below so the recommendation is reflected.
     var ids = rec ? [head.node_id].concat(rec.peers.map(function (n) { return n.node_id; })) : [head.node_id];
-    if (this._selectNodeIds) this._selectNodeIds(ids);
+    if (!this._launchNodesUserPicked && this._selectNodeIds) this._selectNodeIds(ids);
     if (this._launchHintUpdater) this._launchHintUpdater();
   },
 
@@ -1139,6 +1145,9 @@ const AINode = {
         this.toast(data.error, 'error');
       } else {
         this.toast('Launched: ' + model, 'success');
+        // Launch submitted — the hand-picked-nodes intent is consumed, so the next
+        // model pick auto-recommends again.
+        this._launchNodesUserPicked = false;
         this.refresh();
       }
     } catch (err) {

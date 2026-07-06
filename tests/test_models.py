@@ -7,6 +7,8 @@ aggregator so they are deterministic and don't hit the network.
 
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -530,3 +532,158 @@ class TestStackedLoadAdmission:
             res = append_solo_instance(app, "B", 0.4, persist=False)
         assert res["ok"] is True and res["stacked"] is True
         b_backend.stop.assert_called_once()                # old instance freed AFTER admission
+
+
+# ---------------------------------------------------------------------------
+# M1: cancellable file-by-file repo download (_run_download_repo)
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio  # noqa: E402
+import sys as _sys  # noqa: E402
+from types import SimpleNamespace as _SNS  # noqa: E402
+
+from ainode.models import api_routes as _api_routes  # noqa: E402
+
+
+class _FakeHfHub:
+    """Stand-in for the huggingface_hub module: file-by-file download that
+    writes real bytes into local_dir (same layout snapshot_download produces)
+    and can invoke a hook after each file (to simulate a mid-download cancel).
+
+    Mirrors the API _do_download actually uses: HfApi().repo_info() to resolve
+    the file list + a pinned commit sha ONCE, then per-file hf_hub_download with
+    a revision= kwarg. Records the revision passed to each fetch so tests can
+    assert every file came from the single pinned commit."""
+
+    def __init__(self, files: dict, after_file=None, sha="deadbeefcafe"):
+        # files: {relative_path: bytes}
+        self._files = files
+        self._after_file = after_file
+        self.sha = sha
+        self.downloaded = []
+        self.revisions = []
+        self._lock = threading.Lock()
+        hub = self
+
+        class _FakeHfApi:
+            def __init__(self, token=None):
+                pass
+
+            def repo_info(self, repo_id):
+                return _SNS(
+                    sha=hub.sha,
+                    siblings=[_SNS(rfilename=f) for f in hub._files],
+                )
+
+        self.HfApi = _FakeHfApi
+
+    def hf_hub_download(self, repo_id, filename, local_dir, revision=None, token=None):
+        dest = Path(local_dir) / filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self._files[filename])
+        with self._lock:  # workers run in parallel now — guard the records
+            self.downloaded.append(filename)
+            self.revisions.append(revision)
+        if self._after_file is not None:
+            self._after_file(filename)
+        return str(dest)
+
+
+class TestCancellableRepoDownload:
+    def _run(self, tmp_path, fake, hf_repo, total_bytes):
+        manager = _SNS(models_dir=tmp_path)
+        jobs = {}
+        job_id = "job-1"
+        jobs[job_id] = {"model_id": hf_repo, "status": "downloading",
+                        "error": None, "finished_at": None}
+        with patch.dict(_sys.modules, {"huggingface_hub": fake}), \
+             patch.object(_api_routes, "_get_repo_total_bytes", return_value=total_bytes):
+            _asyncio.run(_api_routes._run_download_repo(manager, hf_repo, job_id, jobs))
+        return jobs[job_id], job_id
+
+    def test_completion_layout_identical_and_bytes_tracked(self, tmp_path):
+        files = {
+            "config.json": b'{"ok": true}',
+            "model.safetensors": b"\x00" * 2048,
+            "nested/tokenizer.json": b"abc",  # nested path must survive verbatim
+        }
+        total = sum(len(v) for v in files.values())
+        fake = _FakeHfHub(files)
+        hf_repo = "org/model-x"
+        job, _jid = self._run(tmp_path, fake, hf_repo, total)
+
+        assert job["status"] == "completed"
+        assert job["progress"] == 100.0
+        assert job["downloaded_bytes"] == total
+        assert job["total_bytes"] == total
+
+        # Layout: files land at target/<relative path>, IDENTICAL to what
+        # snapshot_download(local_dir=...) produces (load-bearing for on-disk-serve).
+        target = tmp_path / hf_repo.replace("/", "--")
+        for rel, data in files.items():
+            f = target / rel
+            assert f.is_file(), f"missing {rel}"
+            assert f.read_bytes() == data
+        # Every listed file was actually fetched.
+        assert set(fake.downloaded) == set(files.keys())
+        # Commit pinning: every file was fetched at the SINGLE sha resolved once
+        # from repo_info — not an unpinned per-file resolve of a moving `main`.
+        assert set(fake.revisions) == {fake.sha}
+
+    def test_cancel_between_files_sets_cancelled_and_removes_dir(self, tmp_path):
+        files = {"a.bin": b"1" * 512, "b.bin": b"2" * 512, "c.bin": b"3" * 512}
+        hf_repo = "org/model-y"
+        target = tmp_path / hf_repo.replace("/", "--")
+
+        # Simulate the user hitting Cancel right after the first file lands: the
+        # loop's between-files check must catch it before fetching the second.
+        state = {}
+
+        def _after(filename):
+            if filename == "a.bin":
+                state["jobs"][state["job_id"]]["_cancel"] = True
+
+        fake = _FakeHfHub(files, after_file=_after)
+
+        manager = _SNS(models_dir=tmp_path)
+        jobs = {}
+        job_id = "job-cancel"
+        jobs[job_id] = {"model_id": hf_repo, "status": "downloading",
+                        "error": None, "finished_at": None}
+        state["jobs"] = jobs
+        state["job_id"] = job_id
+
+        # Force serial (1 worker) so the between-files cancel check is deterministic:
+        # with the default parallel pool, files b/c could already be in flight past
+        # the cancel gate when the a.bin hook fires. Cancellation is best-effort per
+        # in-flight file; this pins the pool to 1 to assert the stop-before-next path.
+        with patch.dict(_sys.modules, {"huggingface_hub": fake}), \
+             patch.dict(os.environ, {"AINODE_DOWNLOAD_MAX_WORKERS": "1"}), \
+             patch.object(_api_routes, "_get_repo_total_bytes", return_value=1536):
+            _asyncio.run(_api_routes._run_download_repo(manager, hf_repo, job_id, jobs))
+
+        assert jobs[job_id]["status"] == "cancelled"
+        assert jobs[job_id]["finished_at"] is not None
+        # Only the first file was fetched; the loop stopped before the rest.
+        assert fake.downloaded == ["a.bin"]
+        # Partial dir is removed on cancel.
+        assert not target.exists()
+
+    def test_cancel_before_first_file(self, tmp_path):
+        # Cancel flag already set when the job starts → nothing downloads.
+        files = {"a.bin": b"x" * 256}
+        hf_repo = "org/model-z"
+        target = tmp_path / hf_repo.replace("/", "--")
+        fake = _FakeHfHub(files)
+
+        manager = _SNS(models_dir=tmp_path)
+        job_id = "job-pre"
+        jobs = {job_id: {"model_id": hf_repo, "status": "downloading",
+                         "error": None, "finished_at": None, "_cancel": True}}
+        with patch.dict(_sys.modules, {"huggingface_hub": fake}), \
+             patch.object(_api_routes, "_get_repo_total_bytes", return_value=256):
+            _asyncio.run(_api_routes._run_download_repo(manager, hf_repo, job_id, jobs))
+
+        assert jobs[job_id]["status"] == "cancelled"
+        assert fake.downloaded == []
+        assert not target.exists()

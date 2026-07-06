@@ -946,23 +946,67 @@ async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str,
 
     try:
         def _do_download():
-            from huggingface_hub import snapshot_download
+            # File-by-file (NOT snapshot_download) so a cancel is real: snapshot_download
+            # has no cancel hook, so the old _cancel flag was a no-op and a cancelled
+            # pull ran to completion. We resolve the repo ONCE, then fetch each file via
+            # hf_hub_download into the SAME local_dir — snapshot_download internally
+            # does exactly this per file, so the on-disk layout is identical (load-
+            # bearing for on-disk-serve) — checking the cancel flag between files.
+            #
+            # Two properties we must preserve from snapshot_download (it gave them for
+            # free; a naive loop drops both):
+            #   1. Commit pinning. snapshot_download resolves repo_info.sha ONCE and
+            #      passes revision=<sha> to every per-file fetch, so the whole snapshot
+            #      comes from one commit even if `main` moves mid-pull (these are often
+            #      actively-maintained community/quant repos, and a big pull is a wide
+            #      window). We do the same: repo_info once → pin its .sha → thread it
+            #      through every hf_hub_download. Without this, a push mid-download could
+            #      404 on a renamed file or silently mix artifacts from two commits.
+            #   2. Intra-repo parallelism. snapshot_download fetches with a worker pool
+            #      (max_workers). Serial file-by-file would multiply wall-clock on the
+            #      multi-shard, multi-hundred-GB repos this endpoint targets. We keep a
+            #      bounded ThreadPoolExecutor (_download_max_workers), still checking the
+            #      cancel flag before each file is submitted.
+            import os
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from huggingface_hub import HfApi, hf_hub_download
 
-            def _progress_callback(info):
-                # Check cancel flag on every chunk callback
+            from ainode.models.registry import _download_max_workers
+
+            token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+
+            def _check_cancel():
                 if jobs.get(job_id, {}).get("_cancel"):
                     raise _DownloadCancelled("Download cancelled by user")
 
-            from ainode.models.registry import _download_max_workers
-            try:
-                snapshot_download(
+            _check_cancel()
+            # Resolve files + pinned commit in one call so every file is from one commit.
+            info = HfApi(token=token).repo_info(repo_id=hf_repo)
+            revision = info.sha
+            files = [s.rfilename for s in (info.siblings or [])]
+
+            def _download_one(rfilename: str) -> None:
+                _check_cancel()  # stop between files — no mid-file hook exists
+                hf_hub_download(
                     repo_id=hf_repo,
+                    filename=rfilename,
+                    revision=revision,  # pin to the commit resolved above
                     local_dir=str(target),
-                    tqdm_class=None,
-                    max_workers=_download_max_workers(),  # don't monopolise the uplink
+                    token=token,
                 )
-            except _DownloadCancelled:
-                raise
+
+            _check_cancel()
+            max_workers = max(1, min(_download_max_workers(), len(files) or 1))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(_download_one, f) for f in files]
+                try:
+                    for fut in as_completed(futures):
+                        fut.result()  # propagate first error (incl. _DownloadCancelled)
+                except BaseException:
+                    for fut in futures:
+                        fut.cancel()  # drop not-yet-started files; in-flight finish
+                    raise
+            _check_cancel()  # a cancel arriving after the last file still counts
             return str(target)
 
         # Serialize downloads (one fat pull at a time) so two concurrent model
