@@ -63,6 +63,23 @@ def main() -> None:
         if resolved.exists():
             config["dataset_path"] = str(resolved)
 
+    # Resolve an on-disk base_model slug to a local directory. The container path
+    # (engine._build_container_command) already rewrites this to /ainode-models/<slug>;
+    # this keeps the host-venv path consistent so a slug like
+    # "qwen--qwen2.5-0.5b-instruct" loads from the models store instead of choking
+    # AutoTokenizer.from_pretrained on the '--' (HFValidationError). Only rewrites
+    # when a matching directory exists, else the hub repo id passes through.
+    bm = config.get("base_model", "")
+    if bm and "/" not in bm and not bm.startswith("/") and not bm.startswith("~"):
+        try:
+            from ainode.core.config import AINODE_HOME as _bm_home
+            _home = Path(_bm_home)
+        except Exception:
+            _home = Path(os.environ.get("AINODE_HOME", str(Path.home() / ".ainode")))
+        _cand = _home / "models" / bm
+        if _cand.is_dir():
+            config["base_model"] = str(_cand)
+
     # Inject HF token if provided in config — needed for gated repos (Llama etc.)
     hf_token = config.get("hf_token") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
     if hf_token:

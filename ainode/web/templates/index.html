@@ -163,6 +163,8 @@
           <div class="launch-hint" id="launch-hint">
             Solo — runs on this node only (TP=1).
           </div>
+          <label class="form-label">GPU memory fraction <span style="color:var(--text-muted);font-weight:400">(required when the node already serves a model)</span></label>
+          <input id="launch-gmu" class="form-input" type="number" min="0.05" max="0.95" step="0.05" placeholder="e.g. 0.4 for a stacked load">
           <button class="btn-nvidia btn-full" id="launch-btn">LAUNCH</button>
         </div>
       </div>

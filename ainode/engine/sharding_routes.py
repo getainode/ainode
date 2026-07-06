@@ -209,8 +209,22 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
     instance_id = f"{config.node_id or 'head'}:{model}"
 
+    # Honour a per-launch GPU memory fraction if the UI supplied one (the same
+    # #launch-gmu box the solo path uses). Without this the distributed backend
+    # always renders the shared NodeConfig default (0.5), silently dropping the
+    # value the user typed for a TP>1 launch. Ignore junk / out-of-range input.
+    overrides: dict = {}
+    gmu_raw = body.get("gpu_memory_utilization")
+    if gmu_raw is not None:
+        try:
+            gmu = float(gmu_raw)
+        except (TypeError, ValueError):
+            gmu = None
+        if gmu is not None and 0.0 < gmu <= 1.0:
+            overrides["gpu_memory_utilization"] = gmu
+
     inst_config = replace(config, model=model, distributed_mode="head",
-                          peer_ips=chosen_peers, api_port=port)
+                          peer_ips=chosen_peers, api_port=port, **overrides)
     backend = get_backend(inst_config, instance_id=name_token)
     try:
         started = backend.start_distributed()

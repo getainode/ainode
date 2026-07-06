@@ -115,6 +115,28 @@ def test_unknown_node_id_is_rejected():
     assert resp.status == 422
 
 
+def test_distributed_launch_honours_gpu_memory_utilization():
+    # The #launch-gmu box is sent for BOTH branches; a TP>1 launch must apply the
+    # typed value to the distributed backend, not silently drop it to the 0.5 default.
+    config, resp = _run(
+        {"model": "m", "node_ids": ["head", "m1"], "gpu_memory_utilization": 0.4},
+        [_member("m1", "10.100.0.13")],
+    )
+    assert resp.status == 200
+    assert _FakeBackend.last["config"].gpu_memory_utilization == 0.4
+
+
+def test_distributed_launch_ignores_out_of_range_gmu():
+    # Junk / out-of-range input falls back to the config default rather than
+    # forwarding a nonsense fraction to vLLM.
+    config, resp = _run(
+        {"model": "m", "node_ids": ["head", "m1"], "gpu_memory_utilization": 5},
+        [_member("m1", "10.100.0.13")],
+    )
+    assert resp.status == 200
+    assert _FakeBackend.last["config"].gpu_memory_utilization == NodeConfig().gpu_memory_utilization
+
+
 @pytest.mark.xfail(reason="F1 (0.4.26) removed proxy_to_vllm's 503 visible-loading guard "
                           "because engine.ready is stale-False even while serving; a correct "
                           "loading-state is an owned follow-up (restore once readiness is fixed).",
