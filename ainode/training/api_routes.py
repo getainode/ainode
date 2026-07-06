@@ -363,7 +363,13 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
         """Slim orchestrator (no peft/torch): spawn a GPU container to merge,
         streaming its stdout so the AINODE_PROGRESS protocol keeps working."""
         from ainode.training.engine import build_merge_command
-        cmd = build_merge_command(merge_job, job.config.base_model, adapter_dir, merged_dir, job.config.hf_token)
+        # build_merge_command can shell out to a blocking `pip download` (peft
+        # wheel vendoring, up to 120s on a cold cache) — build it OFF the loop so
+        # a slow/unreachable network can't freeze the whole API server.
+        cmd = await loop.run_in_executor(
+            None, build_merge_command, merge_job, job.config.base_model,
+            adapter_dir, merged_dir, job.config.hf_token,
+        )
         merge_job._log("Merge command: " + " ".join(cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,

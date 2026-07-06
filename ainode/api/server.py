@@ -673,6 +673,17 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "distributed_mode": dmode,
                 "distributed_instance_id": getattr(n, "distributed_instance_id", None),
                 "distributed_peers": list(getattr(n, "distributed_peers", []) or []),
+                # Per-node instance list (primary + any stacked models on ports
+                # 8001+). The node card renders a sub-row per stacked instance so
+                # they're no longer invisible in the dashboard. Same source the
+                # proxy's _routing_candidates uses, so views and routing agree.
+                "instances": [
+                    {"model": inst.get("model"),
+                     "api_port": inst.get("api_port"),
+                     "status": inst.get("status")}
+                    for inst in (getattr(n, "instances", []) or [])
+                    if isinstance(inst, dict) and inst.get("model")
+                ],
             })
     else:
         # Fallback: return this node

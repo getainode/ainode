@@ -209,10 +209,51 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         manager = InstanceManager(base_port=config.api_port)
         app["instances"] = manager
 
-    # Re-loading a model already up replaces THAT instance (stop it first), not
-    # the whole node — other stacked instances are untouched.
+    # Re-loading a model already up replaces THAT instance — other stacked
+    # instances are untouched. We must NOT stop it yet: the admission gate below
+    # can still reject the request (400/409), and killing the live instance
+    # BEFORE that check would leave the model unloaded on a "failed" request with
+    # no automatic restore. So decide admission first, then destroy.
     existing = manager.by_model(model)
     replaced_primary = existing is not None and app.get("engine") is existing.backend
+
+    def _existing_id():
+        return existing.record.instance_id if existing is not None else None
+
+    # This load becomes the primary iff no OTHER instance remains once `existing`
+    # (if any) is replaced — i.e. reloading the sole instance, or the very first
+    # load. Reloading a stacked model while the primary is up is NOT primary.
+    others = [i for i in manager.instances() if i.record.instance_id != _existing_id()]
+    is_primary = len(others) == 0
+
+    # Stacked-load admission control (unified-memory safety). A 2nd+ model on a
+    # busy node with the node default gpu_memory_utilization (0.5) can push total
+    # reservation past capacity and crash the whole GB10 (host death, power cycle).
+    # Reloading the primary keeps today's behavior. Reloading an existing stacked
+    # model excludes its own (about-to-be-freed) reservation from the running
+    # total. Runs BEFORE stop/remove so a rejection leaves the live model intact.
+    if not is_primary and not replaced_primary:
+        if gmu is None:
+            return {"ok": False, "status": 400,
+                    "error": ("A stacked load (2nd+ model on this node) must specify "
+                              "gpu_memory_utilization explicitly (e.g. 0.4) — refusing "
+                              "to inherit the node default and risk overcommitting "
+                              "unified memory.")}
+        existing_total = 0.0
+        for inst in others:
+            g = getattr(getattr(inst.backend, "config", None), "gpu_memory_utilization", None)
+            if g is not None:
+                existing_total += float(g)
+        projected = existing_total + gmu
+        if projected > 0.9:
+            return {"ok": False, "status": 409,
+                    "error": (f"Refusing stacked load: this node already reserves "
+                              f"{existing_total:.2f} of GPU memory across "
+                              f"{len(others)} instance(s); the requested "
+                              f"{gmu:.2f} would total {projected:.2f} (> 0.90 cap). "
+                              f"Unload a model or lower gpu_memory_utilization.")}
+
+    # Admission passed (or N/A) — NOW it's safe to tear down the old instance.
     if existing is not None:
         try:
             existing.backend.stop()
@@ -220,7 +261,6 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
             pass
         manager.remove(existing.record.instance_id)
 
-    is_primary = manager.is_empty()
     port = manager.allocate_port()
     name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
     instance_id = f"{config.node_id or 'head'}:{model}"

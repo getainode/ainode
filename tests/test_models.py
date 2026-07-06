@@ -433,3 +433,100 @@ class TestModelAPI:
         data = await resp.json()
         assert data["status"] == "refreshed"
         assert "count" in data
+
+
+# ---------------------------------------------------------------------------
+# D3: stacked-load admission control (append_solo_instance)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from ainode.models.api_routes import append_solo_instance  # noqa: E402
+from ainode.engine.instance_manager import InstanceManager  # noqa: E402
+from ainode.discovery.instance import InstanceRecord  # noqa: E402
+from ainode.core.config import NodeConfig  # noqa: E402
+
+
+def _stacked_app(*insts):
+    """Build a minimal app dict with an InstanceManager pre-loaded with fake
+    instances. Each `insts` entry is (model, gmu, port)."""
+    config = NodeConfig(node_id="n1", api_port=8000, model=insts[0][0] if insts else None)
+    mgr = InstanceManager(base_port=8000)
+    for model, gmu, port in insts:
+        backend = MagicMock()
+        backend.config = SimpleNamespace(gpu_memory_utilization=gmu, distributed_mode="solo")
+        mgr.add(InstanceRecord(instance_id="n1:" + model, model=model, api_port=port), backend)
+    return {"config": config, "instances": mgr}
+
+
+class TestStackedLoadAdmission:
+    def test_stacked_load_missing_gmu_rejected_400(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        res = append_solo_instance(app, "B", None)
+        assert res["ok"] is False
+        assert res["status"] == 400
+        assert "gpu_memory_utilization" in res["error"]
+
+    def test_stacked_load_overcommit_rejected_409(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        res = append_solo_instance(app, "B", 0.5)
+        assert res["ok"] is False
+        assert res["status"] == 409
+        assert "0.50" in res["error"]   # current total
+        assert "1.00" in res["error"]   # projected total
+
+    def test_stacked_load_under_cap_admitted(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        with patch("ainode.engine.backends.get_backend") as gb:
+            backend = MagicMock()
+            backend.start.return_value = True
+            gb.return_value = backend
+            res = append_solo_instance(app, "B", 0.4, persist=False)  # 0.5 + 0.4 = 0.9 ≤ cap
+        assert res["ok"] is True
+        assert res["stacked"] is True
+
+    def test_primary_load_unaffected_by_gmu_rule(self):
+        app = _stacked_app()  # empty manager → primary/solo load
+        with patch("ainode.engine.backends.get_backend") as gb:
+            backend = MagicMock()
+            backend.start.return_value = True
+            gb.return_value = backend
+            res = append_solo_instance(app, "A", None, persist=False)  # gmu None allowed for primary
+        assert res["ok"] is True
+        assert res["stacked"] is False
+
+    # -- reload of an ALREADY-stacked model: admission runs BEFORE teardown ----
+    #    A rejection must leave the live instance intact (not kill-then-reject).
+
+    def _reload_app(self):
+        """Primary A (0.5) + stacked B (0.3). Returns (app, B_backend)."""
+        app = _stacked_app(("A", 0.5, 8000), ("B", 0.3, 8001))
+        b_backend = app["instances"].by_model("B").backend
+        return app, b_backend
+
+    def test_reload_stacked_missing_gmu_400_does_not_stop_instance(self):
+        app, b_backend = self._reload_app()
+        res = append_solo_instance(app, "B", None)  # omit gmu
+        assert res["ok"] is False and res["status"] == 400
+        b_backend.stop.assert_not_called()                 # live model untouched
+        assert app["instances"].by_model("B") is not None  # still registered
+
+    def test_reload_stacked_overcommit_409_does_not_stop_instance(self):
+        app, b_backend = self._reload_app()
+        res = append_solo_instance(app, "B", 0.6)  # 0.5 (A) + 0.6 = 1.10 > cap
+        assert res["ok"] is False and res["status"] == 409
+        assert "0.50" in res["error"]                      # A's reservation only (B excluded)
+        b_backend.stop.assert_not_called()
+        assert app["instances"].by_model("B") is not None
+
+    def test_reload_stacked_under_cap_excludes_own_reservation(self):
+        # A(0.5)+B(0.3) live; reloading B at 0.4 must count only A (0.5)+0.4=0.9 ≤ cap,
+        # NOT 0.5+0.3+0.4. Old B is torn down; a fresh B backend replaces it.
+        app, b_backend = self._reload_app()
+        with patch("ainode.engine.backends.get_backend") as gb:
+            new_backend = MagicMock()
+            new_backend.start.return_value = True
+            gb.return_value = new_backend
+            res = append_solo_instance(app, "B", 0.4, persist=False)
+        assert res["ok"] is True and res["stacked"] is True
+        b_backend.stop.assert_called_once()                # old instance freed AFTER admission

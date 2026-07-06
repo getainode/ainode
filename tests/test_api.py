@@ -325,3 +325,63 @@ async def test_engine_update_skips_stop_when_unit_not_swappable(client, tmp_path
         if c.args and "stop" in c.args[0]
     ]
     assert stop_cmds == []
+
+
+# ---- D4: /api/cluster/load routes by node_id -------------------------------
+
+@pytest.mark.asyncio
+async def test_cluster_load_unknown_node_404(client):
+    """A node_id we don't know is honored (looked up) — not silently loaded local."""
+    resp = await client.post("/api/cluster/load", json={"model": "m", "node_id": "ghost-node"})
+    assert resp.status == 404
+    data = await resp.json()
+    assert "ghost-node" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_cluster_load_local_dispatch_passes_gmu(client, app, monkeypatch):
+    """node_id == this node dispatches to the LOCAL model handler, forwarding gmu."""
+    import ainode.models.api_routes as mr
+
+    calls = {}
+
+    def fake_append(app, model, gmu=None, *, overrides=None, persist=True):
+        calls["model"] = model
+        calls["gmu"] = gmu
+        return {"ok": True, "model": model, "instance_id": "n:x",
+                "api_port": 8000, "stacked": False}
+
+    monkeypatch.setattr(mr, "append_solo_instance", fake_append)
+    resp = await client.post("/api/cluster/load", json={
+        "model": "m", "node_id": "test-node-1", "gpu_memory_utilization": 0.4,
+    })
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["model"] == "m"
+    assert calls["model"] == "m"
+    assert calls["gmu"] == 0.4
+
+
+# ---- D5: /api/nodes includes per-node instances ----------------------------
+
+@pytest.mark.asyncio
+async def test_nodes_include_stacked_instances(client, app):
+    from ainode.discovery.cluster import ClusterNode
+    from ainode.discovery.broadcast import NodeStatus
+
+    cluster = app["cluster_state"]
+    cluster.add_node(ClusterNode(
+        node_id="n2", node_name="N2", gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model="primary-model", status=NodeStatus.ONLINE,
+        api_port=8000, web_port=8080, last_seen=0.0,
+        instances=[
+            {"model": "primary-model", "api_port": 8000, "status": "serving"},
+            {"model": "stacked-model", "api_port": 8001, "status": "serving"},
+        ],
+    ))
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    data = await resp.json()
+    n2 = next(n for n in data["nodes"] if n["node_id"] == "n2")
+    assert "instances" in n2
+    assert any(i["model"] == "stacked-model" and i["api_port"] == 8001 for i in n2["instances"])
