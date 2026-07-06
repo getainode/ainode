@@ -18,7 +18,7 @@ class TestUnitFileGeneration:
         assert "ghcr.io/getainode/ainode" in content
         assert "NVIDIA_VISIBLE_DEVICES=all" in content
         assert "After=network.target docker.service" in content
-        assert "Restart=on-failure" in content
+        assert "Restart=always" in content
 
     def test_generate_user_unit(self):
         """User-level unit file uses default.target."""
@@ -41,13 +41,40 @@ class TestUnitFileGeneration:
 
     def test_unit_has_restart_policy(self):
         content = systemd.generate_unit_file()
-        assert "Restart=on-failure" in content
+        # Restart=always so a deliberate self-stop during `ainode update` still
+        # relaunches on the new image.
+        assert "Restart=always" in content
         assert "RestartSec=10" in content
 
     def test_unit_has_description(self):
         content = systemd.generate_unit_file()
         assert "Description=AINode" in content
         assert "Documentation=https://ainode.dev" in content
+
+    def test_unit_has_swappable_image_mechanism(self):
+        """Image is swappable without re-rendering: env default + optional file."""
+        content = systemd.generate_unit_file()
+        # ExecStart references the systemd variable, not a literal tag.
+        assert "${AINODE_IMAGE}" in content
+        # Pinned Environment default is a concrete image ref.
+        assert "Environment=AINODE_IMAGE=ghcr.io/getainode/ainode:" in content
+        # Optional (-prefixed) override file, rendered AFTER the Environment line.
+        assert "EnvironmentFile=-" in content
+        assert "image.env" in content
+        env_line = content.index("Environment=AINODE_IMAGE=")
+        file_line = content.index("EnvironmentFile=-")
+        assert file_line > env_line, "EnvironmentFile must come after Environment default"
+        # The container is stamped so the in-container update path knows a
+        # self-stop will image-swap (vs. drop/reboot the old image).
+        assert "AINODE_UNIT_SWAPPABLE=1" in content
+
+    def test_unit_bakes_dropin_extras(self):
+        """The retired 97-p5 drop-in's flags are now baked into the unit."""
+        content = systemd.generate_unit_file()
+        assert "--pid=host" in content
+        assert "AINODE_HOST_HOME=" in content
+        assert "HF_HUB_ENABLE_HF_TRANSFER=1" in content
+        assert "/.docker:/root/.docker:ro" in content
 
 
 class TestIsInstalled:
@@ -71,7 +98,9 @@ class TestIsInstalled:
 class TestInstallService:
     """Test install_service writes unit file and reloads daemon."""
 
-    def test_install_writes_unit_file(self, tmp_path):
+    def test_install_writes_unit_file(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
         with (
             patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
             patch.object(systemd, "_systemctl") as mock_ctl,
@@ -85,7 +114,40 @@ class TestInstallService:
             assert "ghcr.io/getainode/ainode" in content
             mock_ctl.assert_called_once_with(["daemon-reload"], user_mode=False)
 
-    def test_install_user_mode(self, tmp_path):
+    def test_install_seeds_image_env(self, tmp_path, monkeypatch):
+        """install_service pins the current image in <AINODE_HOME>/image.env."""
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl"),
+        ):
+            systemd.install_service(user_mode=False)
+
+            image_env = home / "image.env"
+            assert image_env.exists()
+            assert image_env.read_text().startswith("AINODE_IMAGE=ghcr.io/getainode/ainode:")
+
+    def test_install_no_overwrite_without_force(self, tmp_path, monkeypatch):
+        """An existing unit is left untouched unless force=True."""
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
+        unit_path = tmp_path / "ainode.service"
+        unit_path.write_text("STALE UNIT")
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl"),
+        ):
+            systemd.install_service(user_mode=False)
+            assert unit_path.read_text() == "STALE UNIT"
+
+            systemd.install_service(user_mode=False, force=True)
+            assert unit_path.read_text() != "STALE UNIT"
+            assert "docker run" in unit_path.read_text()
+
+    def test_install_user_mode(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
         with (
             patch.object(systemd, "USER_UNIT_DIR", tmp_path),
             patch.object(systemd, "_systemctl") as mock_ctl,

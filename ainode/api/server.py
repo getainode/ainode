@@ -2,9 +2,11 @@
 
 import asyncio
 import logging
+import os
 import socket
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -1080,6 +1082,17 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
     config: NodeConfig = request.app["config"]
     session: aiohttp.ClientSession = request.app["client_session"]
 
+    # Optional target version, threaded to self and every peer so the whole
+    # cluster converges on the same image.
+    requested = None
+    try:
+        if request.can_read_body:
+            body = await request.json()
+            if isinstance(body, dict):
+                requested = body.get("version")
+    except Exception:
+        requested = None
+
     nodes = cluster.members()
     all_nodes = [{"node_id": config.node_id, "node_name": config.node_id, "host": "localhost", "port": config.web_port or 3000, "is_self": True}]
     for n in nodes:
@@ -1105,7 +1118,28 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
         "started_at": asyncio.get_event_loop().time(),
     }
 
-    image = "ghcr.io/getainode/ainode:latest"
+    # Resolve the target tag once for the whole cluster.
+    target = requested
+    if not target:
+        try:
+            target = await asyncio.get_event_loop().run_in_executor(
+                None, _fetch_latest_ghcr_tag
+            )
+        except Exception:
+            target = None
+    if not target:
+        # Mark the just-created job failed instead of leaving it stuck at
+        # "running" forever in the in-memory dict (a poll would never resolve).
+        job = _cluster_update_state.get(update_id)
+        if job is not None:
+            job["status"] = "failed"
+            for n in job["nodes"].values():
+                n["status"] = "failed"
+                n["log"] = "Could not resolve a target version from GHCR"
+        return web.json_response(
+            {"error": "Could not resolve a target version from GHCR"}, status=502
+        )
+    image = f"{AINODE_GHCR_REPO}:{target}"
 
     async def _update_node(node: dict) -> None:
         nid = node["node_id"]
@@ -1113,27 +1147,56 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
         state["status"] = "updating"
 
         if node["is_self"]:
-            # Update self: docker pull + systemctl restart
+            # Update self: docker pull → write image.env → self-stop (systemd
+            # Restart=always relaunches on the new image). systemctl does not
+            # work from inside the container.
             try:
                 loop = asyncio.get_event_loop()
-                pull = await loop.run_in_executor(
-                    None, lambda: _sp.run(
-                        ["docker", "pull", image],
-                        capture_output=True, text=True, timeout=600
+                try:
+                    pull = await loop.run_in_executor(
+                        None, lambda: _sp.run(
+                            ["docker", "pull", image],
+                            capture_output=True, text=True, timeout=600
+                        )
                     )
-                )
+                except _sp.TimeoutExpired:
+                    state["status"] = "failed"
+                    state["log"] = "docker pull timed out after 600s"
+                    return
                 if pull.returncode != 0:
                     state["status"] = "failed"
                     state["log"] = pull.stderr[:500]
                     return
-                restart = await loop.run_in_executor(
-                    None, lambda: _sp.run(
-                        ["systemctl", "restart", "ainode"],
-                        capture_output=True, text=True, timeout=30
+                try:
+                    _write_image_env(image)
+                except Exception as exc:
+                    state["status"] = "failed"
+                    state["log"] = f"image.env write failed: {exc}"[:200]
+                    return
+                # Same swappable-unit gate as handle_engine_update: never self-stop
+                # a node whose unit predates the swappable image, or we'd drop it /
+                # reboot the old image and still report "done". Report honestly.
+                if not _unit_is_swappable():
+                    state["status"] = "needs-migration"
+                    state["log"] = (
+                        "Image pulled + pinned, but this node's systemd unit "
+                        "predates the swappable unit — not restarted. Re-run the "
+                        "installer on the host to migrate."
                     )
-                )
-                state["status"] = "done" if restart.returncode == 0 else "failed"
-                state["log"] = restart.stderr[:200] if restart.returncode != 0 else "Updated and restarted"
+                    return
+                state["status"] = "done"
+                state["log"] = "Updated — restarting on new image"
+
+                async def _restart_self():
+                    await asyncio.sleep(2)
+                    await loop.run_in_executor(
+                        None, lambda: _sp.run(
+                            ["docker", "stop", "ainode"],
+                            capture_output=True, text=True, timeout=60
+                        )
+                    )
+
+                asyncio.get_event_loop().create_task(_restart_self())
             except Exception as exc:
                 state["status"] = "failed"
                 state["log"] = str(exc)[:200]
@@ -1142,7 +1205,7 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
             # Each worker runs the same AINode container with /api/engine/update.
             url = f"http://{node['host']}:{node['port']}/api/engine/update"
             try:
-                async with session.post(url, timeout=aiohttp.ClientTimeout(total=700)) as resp:
+                async with session.post(url, json={"version": target}, timeout=aiohttp.ClientTimeout(total=700)) as resp:
                     data = await resp.json()
                     if resp.status < 300:
                         state["status"] = "done"
@@ -1309,32 +1372,76 @@ async def handle_set_model(request: web.Request) -> web.Response:
     return web.json_response({"status": "restarting", "model": model})
 
 
+AINODE_GHCR_REPO = "ghcr.io/getainode/ainode"
+
+
+def _fetch_latest_ghcr_tag() -> Optional[str]:
+    """Return the highest numeric GHCR version tag, or None.
+
+    Blocking (uses urllib); call via ``run_in_executor``. Resolves anonymously
+    against the public image — no auth required.
+    """
+    import urllib.request
+    import json as _json
+
+    token_url = "https://ghcr.io/token?service=ghcr.io&scope=repository:getainode/ainode:pull"
+    with urllib.request.urlopen(token_url, timeout=5) as r:
+        token = _json.loads(r.read())["token"]
+    tags_url = "https://ghcr.io/v2/getainode/ainode/tags/list"
+    req = urllib.request.Request(tags_url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        data = _json.loads(r.read())
+    # Highest numeric version tag (ignore 'latest' and non-numeric tags).
+    versions = sorted(
+        [t for t in data.get("tags", []) if t and t != "latest" and t[0].isdigit()],
+        key=lambda v: tuple(int(x) for x in v.split(".") if x.isdigit()),
+        reverse=True,
+    )
+    return versions[0] if versions else None
+
+
+def _ainode_home_path() -> Path:
+    """Host-mounted AINode home (``~/.ainode`` bind-mounted to /root/.ainode)."""
+    return Path(os.environ.get("AINODE_HOME", str(Path.home() / ".ainode")))
+
+
+def _write_image_env(image: str) -> None:
+    """Persist the target image for the host systemd unit's EnvironmentFile.
+
+    Inside the container this writes ``$AINODE_HOME/image.env`` which is the
+    same file the host unit reads via the ``~/.ainode`` bind mount.
+
+    Written atomically (temp file + rename) so the host unit never reads a
+    half-written line if it happens to (re)load while we're mid-write.
+    """
+    home = _ainode_home_path()
+    home.mkdir(parents=True, exist_ok=True)
+    tmp = home / "image.env.tmp"
+    tmp.write_text(f"AINODE_IMAGE={image}\n")
+    tmp.replace(home / "image.env")
+
+
+def _unit_is_swappable() -> bool:
+    """True iff this container was launched by the swappable-image systemd unit.
+
+    The swappable unit (the one this deploy path relies on) stamps
+    ``AINODE_UNIT_SWAPPABLE=1`` into the container env. Its ABSENCE means the
+    host is still on a pre-swappable unit (pinned ExecStart, no EnvironmentFile),
+    where a self-``docker stop`` is destructive rather than an image swap: the
+    old unit either won't relaunch at all (Restart=on-failure + clean exit) or
+    relaunches the SAME pinned image (it never reads image.env). In that case we
+    must NOT self-stop — pull + pin image.env, and tell the operator to migrate
+    the unit on the host first.
+    """
+    return os.environ.get("AINODE_UNIT_SWAPPABLE") == "1"
+
+
 async def handle_version_check(request: web.Request) -> web.Response:
     """GET /api/version/check — compare local version against latest GHCR tag."""
     current = __version__
     try:
-        # Ask the registry for the digest of :latest, then find which
-        # version tag matches. We do this without auth (public image).
         loop = asyncio.get_event_loop()
-        def _fetch():
-            import urllib.request
-            import json as _json
-            token_url = "https://ghcr.io/token?service=ghcr.io&scope=repository:getainode/ainode:pull"
-            with urllib.request.urlopen(token_url, timeout=5) as r:
-                token = _json.loads(r.read())["token"]
-            tags_url = "https://ghcr.io/v2/getainode/ainode/tags/list"
-            req = urllib.request.Request(tags_url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                data = _json.loads(r.read())
-            # Return sorted version tags (ignore 'latest')
-            versions = sorted(
-                [t for t in data.get("tags", []) if t != "latest" and t[0].isdigit()],
-                key=lambda v: tuple(int(x) for x in v.split(".") if x.isdigit()),
-                reverse=True,
-            )
-            return versions[0] if versions else None
-
-        latest = await loop.run_in_executor(None, _fetch)
+        latest = await loop.run_in_executor(None, _fetch_latest_ghcr_tag)
     except Exception:
         latest = None
 
@@ -1355,38 +1462,106 @@ async def handle_version_check(request: web.Request) -> web.Response:
 
 
 async def handle_engine_update(request: web.Request) -> web.Response:
-    """POST /api/engine/update — trigger ainode update (docker pull + systemctl restart).
+    """POST /api/engine/update — pull a target image and swap to it.
 
-    This runs the host wrapper command from inside the container by writing
-    a trigger file that the host systemd service can detect, OR by calling
-    docker pull + systemctl directly via the mounted docker socket.
+    Body (optional): ``{"version": "X.Y.Z"}``. When omitted, targets the highest
+    numeric GHCR tag. On a successful ``docker pull`` we write ``image.env``
+    (which the host systemd unit reads via EnvironmentFile) and then, after a
+    short delay, ``docker stop ainode`` on the mounted socket — systemd's
+    ``Restart=always`` relaunches the container on the new image. ``systemctl``
+    is deliberately NOT used: it does not work from inside the container.
+
+    On pull failure we do NOT write image.env and do NOT restart — the node
+    keeps running the current image.
     """
     import subprocess as _sp
     loop = asyncio.get_event_loop()
 
-    async def _do_update():
-        # Pull the latest image using the docker CLI (mounted socket)
-        result = await loop.run_in_executor(
+    # Optional requested version from the body.
+    requested = None
+    try:
+        if request.can_read_body:
+            body = await request.json()
+            if isinstance(body, dict):
+                requested = body.get("version")
+    except Exception:
+        requested = None
+
+    target = requested
+    if not target:
+        try:
+            target = await loop.run_in_executor(None, _fetch_latest_ghcr_tag)
+        except Exception:
+            target = None
+    if not target:
+        return web.json_response(
+            {"error": "Could not resolve a target version from GHCR"}, status=502
+        )
+
+    image = f"{AINODE_GHCR_REPO}:{target}"
+
+    try:
+        pull = await loop.run_in_executor(
             None,
             lambda: _sp.run(
-                ["docker", "pull", "ghcr.io/getainode/ainode:latest"],
+                ["docker", "pull", image],
                 capture_output=True, text=True, timeout=600
             )
         )
-        if result.returncode != 0:
-            return False, result.stderr
-        # Restart the systemd service via the host socket
+    except _sp.TimeoutExpired:
+        # Same clean no-env-write failure path as a nonzero-return pull — the
+        # node keeps running the current image; nothing was pinned or restarted.
+        return web.json_response(
+            {"error": "docker pull failed", "detail": "docker pull timed out after 600s"},
+            status=502,
+        )
+    if pull.returncode != 0:
+        return web.json_response(
+            {"error": "docker pull failed", "detail": (pull.stderr or "")[-500:]},
+            status=502,
+        )
+
+    # Pull succeeded — pin the new image so the swappable unit boots it.
+    try:
+        _write_image_env(image)
+    except Exception as exc:
+        return web.json_response(
+            {"error": f"failed to write image.env: {exc}"}, status=500
+        )
+
+    # Only self-stop when THIS container was launched by the swappable unit. On a
+    # node still running a pre-swappable unit, `docker stop` is destructive (see
+    # _unit_is_swappable): the pull + pin above are harmless and ready the node,
+    # but restarting would either drop the node or reboot the SAME old image, so
+    # we refuse and point the operator at the host-side migration.
+    if not _unit_is_swappable():
+        return web.json_response({
+            "status": "pulled",
+            "restarted": False,
+            "target": target,
+            "image": image,
+            "message": (
+                "Image pulled and pinned, but this node's systemd unit predates "
+                "the swappable-image unit and will not pick it up. Migrate it on "
+                "the host (re-run the installer: curl -fsSL https://ainode.dev/"
+                "install | bash) to boot the new image."
+            ),
+        })
+
+    async def _self_restart():
+        await asyncio.sleep(2)
         await loop.run_in_executor(
             None,
             lambda: _sp.run(
-                ["systemctl", "restart", "ainode"],
-                capture_output=True, text=True, timeout=30
+                ["docker", "stop", "ainode"],
+                capture_output=True, text=True, timeout=60
             )
         )
-        return True, "Update complete — restarting"
 
-    asyncio.get_event_loop().create_task(_do_update())
-    return web.json_response({"status": "updating", "message": "Pulling latest image and restarting service"})
+    asyncio.get_event_loop().create_task(_self_restart())
+    return web.json_response(
+        {"status": "updating", "target": target, "image": image, "restarted": True}
+    )
 
 
 async def handle_patch_config(request: web.Request) -> web.Response:

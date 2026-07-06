@@ -216,3 +216,112 @@ async def test_nodes_returns_local_node_from_cluster(client):
     assert len(nodes) >= 1
     node_ids = [n["node_id"] for n in nodes]
     assert "test-node-1" in node_ids
+
+
+# ---- /api/engine/update ----------------------------------------------------
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_engine_update_pulls_numeric_tag_and_writes_env(client, tmp_path, monkeypatch):
+    """Update resolves the highest numeric GHCR tag, pulls it, writes image.env."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    # Simulate a node already on the swappable-image unit so the self-stop path runs.
+    monkeypatch.setenv("AINODE_UNIT_SWAPPABLE", "1")
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value="0.5.0"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")) as mrun,
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "updating"
+        assert data["target"] == "0.5.0"
+        assert data["image"] == "ghcr.io/getainode/ainode:0.5.0"
+
+    # image.env pinned to the numeric tag.
+    image_env = tmp_path / "image.env"
+    assert image_env.read_text().strip() == "AINODE_IMAGE=ghcr.io/getainode/ainode:0.5.0"
+
+    # docker pull targeted the numeric tag — never a floating :latest.
+    pull_cmds = [c.args[0] for c in mrun.call_args_list if c.args and "pull" in c.args[0]]
+    assert any("ghcr.io/getainode/ainode:0.5.0" in cmd for cmd in pull_cmds)
+    assert not any("ainode:latest" in " ".join(cmd) for cmd in pull_cmds)
+
+
+@pytest.mark.asyncio
+async def test_engine_update_uses_requested_version(client, tmp_path, monkeypatch):
+    """An explicit body version is used verbatim; GHCR resolution is skipped."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    monkeypatch.setenv("AINODE_UNIT_SWAPPABLE", "1")
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag") as mfetch,
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
+    ):
+        resp = await client.post("/api/engine/update", json={"version": "0.6.1"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["target"] == "0.6.1"
+        mfetch.assert_not_called()
+
+    image_env = tmp_path / "image.env"
+    assert image_env.read_text().strip() == "AINODE_IMAGE=ghcr.io/getainode/ainode:0.6.1"
+
+
+@pytest.mark.asyncio
+async def test_engine_update_pull_failure_no_env_write(client, tmp_path, monkeypatch):
+    """On docker pull failure: 502, no image.env written, no restart."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value="0.5.0"),
+        patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="manifest unknown")),
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 502
+
+    assert not (tmp_path / "image.env").exists()
+
+
+@pytest.mark.asyncio
+async def test_engine_update_unresolvable_version(client, tmp_path, monkeypatch):
+    """No requested version and GHCR resolution returns None → 502, no pull."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value=None),
+        patch("subprocess.run") as mrun,
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 502
+        mrun.assert_not_called()
+
+    assert not (tmp_path / "image.env").exists()
+
+
+@pytest.mark.asyncio
+async def test_engine_update_skips_stop_when_unit_not_swappable(client, tmp_path, monkeypatch):
+    """On a node whose unit predates the swappable image: pull + pin, but NO
+    self-stop — stopping there is destructive (old unit drops the node or reboots
+    the same image). The response says restarted=False, and `docker stop` is
+    never invoked."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    monkeypatch.delenv("AINODE_UNIT_SWAPPABLE", raising=False)
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value="0.5.0"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")) as mrun,
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "pulled"
+        assert data["restarted"] is False
+
+    # Image was still pulled + pinned (readies the node for a later migration)...
+    image_env = tmp_path / "image.env"
+    assert image_env.read_text().strip() == "AINODE_IMAGE=ghcr.io/getainode/ainode:0.5.0"
+    # ...but `docker stop ainode` was NEVER called.
+    stop_cmds = [
+        c.args[0] for c in mrun.call_args_list
+        if c.args and "stop" in c.args[0]
+    ]
+    assert stop_cmds == []
