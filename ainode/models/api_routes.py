@@ -221,6 +221,34 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         manager.remove(existing.record.instance_id)
 
     is_primary = manager.is_empty()
+
+    # Stacked-load admission control (unified-memory safety). A 2nd+ model on a
+    # busy node with the node default gpu_memory_utilization (0.5) can push total
+    # reservation past capacity and crash the whole GB10 (host death, power cycle).
+    # Reloading the primary keeps today's behavior. Reloading an existing stacked
+    # model is fine — its old reservation was already freed above (stop+remove), so
+    # it's excluded from the running total computed here.
+    if not is_primary and not replaced_primary:
+        if gmu is None:
+            return {"ok": False, "status": 400,
+                    "error": ("A stacked load (2nd+ model on this node) must specify "
+                              "gpu_memory_utilization explicitly (e.g. 0.4) — refusing "
+                              "to inherit the node default and risk overcommitting "
+                              "unified memory.")}
+        existing_total = 0.0
+        for inst in manager.instances():
+            g = getattr(getattr(inst.backend, "config", None), "gpu_memory_utilization", None)
+            if g is not None:
+                existing_total += float(g)
+        projected = existing_total + gmu
+        if projected > 0.9:
+            return {"ok": False, "status": 409,
+                    "error": (f"Refusing stacked load: this node already reserves "
+                              f"{existing_total:.2f} of GPU memory across "
+                              f"{len(manager.instances())} instance(s); the requested "
+                              f"{gmu:.2f} would total {projected:.2f} (> 0.90 cap). "
+                              f"Unload a model or lower gpu_memory_utilization.")}
+
     port = manager.allocate_port()
     name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
     instance_id = f"{config.node_id or 'head'}:{model}"

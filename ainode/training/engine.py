@@ -59,6 +59,105 @@ def _host_path(container_path: str) -> str:
     return container_path
 
 
+def _resolve_base_model_mount(base_model: str) -> Optional[str]:
+    """If ``base_model`` names a model already on disk under the models store,
+    return its CONTAINER mount path (``/ainode-models/<slug>``); else None.
+
+    The training wizard's downloaded-model cards submit the ON-DISK slug (e.g.
+    ``qwen--qwen2.5-0.5b-instruct``). Handed straight to
+    ``AutoTokenizer.from_pretrained`` that raises HFValidationError ("Cannot have
+    -- or .. in repo_id") and the job dies instantly. Rewriting it to the mounted
+    directory path makes HF load from local weights (also offline-safe — no hub
+    round-trip). Accepts both the raw slug and a canonical HF repo id
+    (``Qwen/Qwen2.5-0.5B-Instruct``) whose ``org--name`` dir exists on disk.
+    Returns None for a plain hub repo id with no local copy so it passes through
+    to load from the hub as before."""
+    if not base_model:
+        return None
+    models_root = AINODE_HOME / "models"
+    candidates = [base_model]
+    if "/" in base_model:
+        candidates.append(base_model.replace("/", "--"))
+    for slug in candidates:
+        if not slug or "/" in slug or slug.startswith("."):
+            continue
+        if (models_root / slug).is_dir():
+            return "/ainode-models/" + slug
+    return None
+
+
+def _vendor_wheel(pkg: str, job_dir: Path) -> Optional[str]:
+    """Ensure a wheel for ``pkg`` is available in ``job_dir`` (mounted at /job) so
+    the spawned container can ``pip install --no-index`` it with NO network.
+
+    Wheels are cached once under ``AINODE_HOME/wheels`` and copied into each job
+    dir. When the cache is empty we fetch it with the orchestrator's own pip
+    (``pip download --no-deps``) — best-effort, short timeout — unless
+    ``AINODE_NO_WHEEL_FETCH`` is set (air-gapped nodes pre-seed the cache).
+    Returns the wheel FILENAME (basename) if vendored, else None so the caller
+    falls back to online pip. Only sensible for pure-python packages (peft)."""
+    import glob
+    import shutil
+
+    cache = AINODE_HOME / "wheels"
+    norm = pkg.replace("-", "_")
+
+    def _find(directory: Path) -> Optional[str]:
+        for pat in (f"{norm}-*.whl", f"{pkg}-*.whl"):
+            hits = sorted(glob.glob(str(directory / pat)))
+            if hits:
+                return hits[0]
+        return None
+
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    wheel = _find(cache)
+    if wheel is None and not os.environ.get("AINODE_NO_WHEEL_FETCH"):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "download", "--no-deps",
+                 "--dest", str(cache), pkg],
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception:
+            pass
+        wheel = _find(cache)
+    if wheel is None:
+        return None
+    try:
+        dest = job_dir / Path(wheel).name
+        if not dest.exists():
+            shutil.copy2(wheel, dest)
+        return dest.name
+    except Exception:
+        return None
+
+
+def _pip_install_step(pkg: str, job_dir: Path, *, vendor: bool) -> str:
+    """One tolerant shell step that makes ``pkg`` importable in the spawned
+    container. Import-guarded (a future baked image satisfies it with no install),
+    then — for vendored pure-python deps — an offline ``--no-index`` install from
+    the mounted wheel, falling back to online pip only if the wheel is absent.
+    Joined with ``;`` (never ``&&``) so a failed install never blocks the runner;
+    the runner itself reports a clean error if the dep is truly missing."""
+    mod = pkg.replace("-", "_")
+    guard = f"python3 -c 'import {mod}' 2>/dev/null"
+    if vendor:
+        wheel = _vendor_wheel(pkg, job_dir)
+        if wheel:
+            install = (f"pip install -q --no-index --find-links /job /job/{wheel} "
+                       f"|| pip install -q --no-deps {pkg}")
+        else:
+            install = f"pip install -q --no-deps {pkg}"
+    else:
+        # Network-only best-effort (e.g. bitsandbytes has no pure-python wheel).
+        install = f"pip install -q --no-deps {pkg}"
+    return f"{guard} || {install}"
+
+
 @dataclass
 class TrainingConfig:
     """Configuration for a training/fine-tuning job."""
@@ -424,6 +523,12 @@ class TrainingJob:
         # via the /job mount) so handle_get_output/download resolve unchanged.
         container_cfg = dict(c.to_dict())
         container_cfg["output_dir"] = "/job/output"
+        # base_model may be an on-disk slug (what the GUI submits) — rewrite it to
+        # the mounted weights path so AutoTokenizer.from_pretrained loads locally
+        # instead of raising HFValidationError on the '--' in the slug.
+        base_mount = _resolve_base_model_mount(c.base_model)
+        if base_mount:
+            container_cfg["base_model"] = base_mount
         datasets_dir = str(AINODE_HOME / "datasets")
         ds = c.dataset_path or ""
         if ds.startswith(datasets_dir):
@@ -461,13 +566,17 @@ class TrainingJob:
         # ponytail: peft (and bitsandbytes for qlora) aren't baked into the train
         # image yet — pip-shim them at launch. TODO(ponytail): bake peft +
         # bitsandbytes into the next quant/train-image build and drop this shim.
-        # bitsandbytes has no aarch64 wheel on some indexes; if the install fails the
-        # container exits non-zero and the pip error lands in the job log (readable).
-        pip_pkgs = "peft" + (" bitsandbytes" if c.method == "qlora" else "")
+        # peft is pure-python → vendor a wheel (offline-safe); bitsandbytes is
+        # network-only best-effort (no aarch64 pure-python wheel). Steps are ';'
+        # separated so a failed install never blocks the runner (a fatal '&&' here
+        # killed jobs on nodes with broken DNS — the merge/train couldn't pip peft).
+        steps = [_pip_install_step("peft", self._job_dir, vendor=True)]
+        if c.method == "qlora":
+            steps.append(_pip_install_step("bitsandbytes", self._job_dir, vendor=False))
+        prep = " ; ".join(steps)
         cmd += [
             TRAIN_IMAGE, "sh", "-c",
-            f"pip install -q --no-deps {pip_pkgs} && "
-            "python3 /job/_run_training.py --config /job/config.container.json",
+            f"{prep} ; python3 /job/_run_training.py --config /job/config.container.json",
         ]
         return cmd
 
@@ -581,8 +690,10 @@ def build_merge_command(
     shutil.copy2(Path(__file__).parent / "_run_merge.py", job_dir / "_run_merge.py")
 
     token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+    # Same slug→mount rewrite as training: a downloaded base passed as its on-disk
+    # slug must load from /ainode-models/<slug>, not choke AutoTokenizer on the '--'.
     merge_cfg = {
-        "base_model": base_model,
+        "base_model": _resolve_base_model_mount(base_model) or base_model,
         "adapter_dir": "/adapter",
         "output_dir": f"/out/{merged_dir.name}",
         "hf_token": token,
@@ -602,10 +713,12 @@ def build_merge_command(
     if token:
         cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
     # ponytail: peft pip-shim — bake it into the next train-image build and drop this.
+    # Vendor the (pure-python) peft wheel so the merge runs offline; ';' not '&&'
+    # so a pip hiccup never blocks the runner (broken DNS killed a live merge here).
+    peft_step = _pip_install_step("peft", job_dir, vendor=True)
     cmd += [
         TRAIN_IMAGE, "sh", "-c",
-        "pip install -q --no-deps peft && "
-        "python3 /job/_run_merge.py --config /job/merge_config.json",
+        f"{peft_step} ; python3 /job/_run_merge.py --config /job/merge_config.json",
     ]
     return cmd
 

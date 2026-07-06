@@ -433,3 +433,64 @@ class TestModelAPI:
         data = await resp.json()
         assert data["status"] == "refreshed"
         assert "count" in data
+
+
+# ---------------------------------------------------------------------------
+# D3: stacked-load admission control (append_solo_instance)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from ainode.models.api_routes import append_solo_instance  # noqa: E402
+from ainode.engine.instance_manager import InstanceManager  # noqa: E402
+from ainode.discovery.instance import InstanceRecord  # noqa: E402
+from ainode.core.config import NodeConfig  # noqa: E402
+
+
+def _stacked_app(*insts):
+    """Build a minimal app dict with an InstanceManager pre-loaded with fake
+    instances. Each `insts` entry is (model, gmu, port)."""
+    config = NodeConfig(node_id="n1", api_port=8000, model=insts[0][0] if insts else None)
+    mgr = InstanceManager(base_port=8000)
+    for model, gmu, port in insts:
+        backend = MagicMock()
+        backend.config = SimpleNamespace(gpu_memory_utilization=gmu, distributed_mode="solo")
+        mgr.add(InstanceRecord(instance_id="n1:" + model, model=model, api_port=port), backend)
+    return {"config": config, "instances": mgr}
+
+
+class TestStackedLoadAdmission:
+    def test_stacked_load_missing_gmu_rejected_400(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        res = append_solo_instance(app, "B", None)
+        assert res["ok"] is False
+        assert res["status"] == 400
+        assert "gpu_memory_utilization" in res["error"]
+
+    def test_stacked_load_overcommit_rejected_409(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        res = append_solo_instance(app, "B", 0.5)
+        assert res["ok"] is False
+        assert res["status"] == 409
+        assert "0.50" in res["error"]   # current total
+        assert "1.00" in res["error"]   # projected total
+
+    def test_stacked_load_under_cap_admitted(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        with patch("ainode.engine.backends.get_backend") as gb:
+            backend = MagicMock()
+            backend.start.return_value = True
+            gb.return_value = backend
+            res = append_solo_instance(app, "B", 0.4, persist=False)  # 0.5 + 0.4 = 0.9 ≤ cap
+        assert res["ok"] is True
+        assert res["stacked"] is True
+
+    def test_primary_load_unaffected_by_gmu_rule(self):
+        app = _stacked_app()  # empty manager → primary/solo load
+        with patch("ainode.engine.backends.get_backend") as gb:
+            backend = MagicMock()
+            backend.start.return_value = True
+            gb.return_value = backend
+            res = append_solo_instance(app, "A", None, persist=False)  # gmu None allowed for primary
+        assert res["ok"] is True
+        assert res["stacked"] is False

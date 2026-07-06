@@ -713,17 +713,38 @@ const AINode = {
     // the federated /v1/models the chat dropdown uses. Skip the distributed one.
     var seen = {};
     (this.state.nodes || []).forEach(function (n) {
+      var host = n.hostname || n.node_id;
       var modelName = n.model;
-      if (!modelName || (distModel && modelName === distModel)) return;
-      var key = modelName + '@' + (n.node_id || n.hostname);
-      if (seen[key]) return;
-      seen[key] = true;
-      instances.push({
-        model: modelName,
-        strategy: 'single',
-        nodes: [n.hostname || n.node_id],
-        status: n.engine_ready ? 'READY' : 'STARTING',
-        badge: 'SINGLE',
+      if (modelName && !(distModel && modelName === distModel)) {
+        var key = modelName + '@' + (n.node_id || n.hostname);
+        if (!seen[key]) {
+          seen[key] = true;
+          instances.push({
+            model: modelName,
+            strategy: 'single',
+            nodes: [host],
+            status: n.engine_ready ? 'READY' : 'STARTING',
+            badge: 'SINGLE',
+          });
+        }
+      }
+      // Stacked instances (2nd+ model on this node, ports 8001+) — invisible
+      // before D5. Render a card per stacked instance (model, port, status).
+      (n.instances || []).forEach(function (inst) {
+        var im = inst.model;
+        if (!im || (distModel && im === distModel)) return;
+        // Skip the primary (already shown above): same model on the node's main port.
+        if (im === n.model && (inst.api_port == null || inst.api_port === n.api_port)) return;
+        var skey = im + '@' + (n.node_id || n.hostname) + ':' + (inst.api_port || '');
+        if (seen[skey]) return;
+        seen[skey] = true;
+        instances.push({
+          model: im,
+          strategy: 'stacked',
+          nodes: [host + (inst.api_port ? ':' + inst.api_port : '')],
+          status: (inst.status === 'serving' || n.engine_ready) ? 'READY' : 'STARTING',
+          badge: 'STACKED' + (inst.api_port ? ' · :' + inst.api_port : ''),
+        });
       });
     });
 
@@ -860,12 +881,15 @@ const AINode = {
         return '<button class="node-dot' + (isHead ? ' active head' : '') + '"'
           + ' data-node-id="' + self.esc(n.node_id) + '"'
           + (isHead ? ' data-head="1"' : '')
-          + ' title="' + self.esc(n.node_name || n.node_id) + (isHead ? ' (head — always included)' : '') + '">'
+          + ' title="' + self.esc(n.node_name || n.node_id) + (isHead ? ' (head)' : '') + '">'
           + self.esc(label) + (isHead ? ' ★' : '') + '</button>';
       }).join('');
       nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
         dot.addEventListener('click', function () {
-          if (dot.dataset.head) return; // head can't be deselected
+          // A single active node = solo load on THAT node (head or peer); 2+ =
+          // distributed. Keep at least one selected so a load always has a target.
+          if (dot.classList.contains('active') &&
+              nodeSelector.querySelectorAll('.node-dot.active').length <= 1) return;
           dot.classList.toggle('active');
           updateLaunchHint();
         });
@@ -1085,6 +1109,10 @@ const AINode = {
       });
     }
 
+    var gmuInput = document.getElementById('launch-gmu');
+    var gmu = gmuInput && gmuInput.value !== '' ? parseFloat(gmuInput.value) : null;
+    if (gmu != null && isNaN(gmu)) gmu = null;
+
     var launchBtn = document.getElementById('launch-btn');
     if (launchBtn) { launchBtn.disabled = true; launchBtn.textContent = 'LAUNCHING...'; }
 
@@ -1094,10 +1122,15 @@ const AINode = {
         // Distributed launch on the chosen nodes (head = this node + the rest).
         endpoint = '/api/sharding/launch';
         body = { model: model, strategy: strategy, node_ids: nodeIds };
+        if (gmu != null) body.gpu_memory_utilization = gmu;
       } else {
-        // Single node launch.
-        endpoint = '/api/models/load';
-        body = { model: model };
+        // Single node launch — route to the CHOSEN node via the cluster load
+        // route (node_id == this node dispatches locally), instead of always
+        // hitting the head's local engine regardless of the picked node.
+        endpoint = '/api/cluster/load';
+        var target = nodeIds[0] || (this.state.status && this.state.status.node_id);
+        body = { model: model, node_id: target };
+        if (gmu != null) body.gpu_memory_utilization = gmu;
       }
       var resp = await fetch(endpoint, {
         method: 'POST',
@@ -3528,7 +3561,13 @@ const AINode = {
     if (modelsResp && Array.isArray(modelsResp.models)) {
       modelList = modelsResp.models
         .filter(function (m) { return m.downloaded || m.is_downloaded || m.status === 'downloaded'; })
-        .map(function (m) { return { id: m.id || m.name || m.repo_id, name: m.name || m.id, size: m.size || '' }; });
+        // base_model = the canonical HF repo id (cards know it), NOT the on-disk
+        // slug — the containerized runner hands base_model to
+        // AutoTokenizer.from_pretrained, which rejects a '--' slug (HFValidationError).
+        .map(function (m) {
+          var repo = m.hf_repo || m.id || m.name || m.repo_id;
+          return { id: repo, name: m.name || repo, size: m.size || m.size_gb || '' };
+        });
     }
     if (!modelList.length) modelList = this.trainingModels.slice();
 

@@ -181,7 +181,8 @@ def test_solo_load_appends_not_replaces(monkeypatch):
            "ray_autostart_state": None}
 
     asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
-    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B"})))
+    # A stacked load must now name an explicit gpu_memory_utilization (D3).
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B", "gpu_memory_utilization": 0.3})))
 
     mgr = app["instances"]
     recs = {r.model: r for r in mgr.records()}
@@ -226,7 +227,7 @@ def test_load_appends_when_boot_engine_already_seeded(monkeypatch):
     app = {"engine": boot, "instances": mgr, "config": cfg,
            "cluster_state": ClusterState(), "ray_autostart_state": None}
 
-    asyncio.run(mr.handle_model_load(_Req(app, {"model": "new-model"})))
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "new-model", "gpu_memory_utilization": 0.3})))
 
     recs = {r.model: r.api_port for r in mgr.records()}
     assert recs == {"boot-model": 8000, "new-model": 8001}  # appended on 8001
@@ -338,9 +339,10 @@ def test_next_model_launch_config_does_not_inherit_primary_overrides(monkeypatch
         "served_model_name": "vl-alias",
         "trust_remote_code": True,
     })))
-    # Bare stacked load of a DIFFERENT model B — no overrides supplied.
+    # Stacked load of a DIFFERENT model B — only its own explicit gmu (D3), no
+    # other overrides supplied; none of A's overrides may leak onto B.
     asyncio.run(mr.handle_model_load(
-        _Req(app, {"model": "meta-llama/Llama-3.2-3B-Instruct"})))
+        _Req(app, {"model": "meta-llama/Llama-3.2-3B-Instruct", "gpu_memory_utilization": 0.3})))
 
     b_cfg = made["backends"][-1].config
     defaults = NodeConfig()
@@ -350,7 +352,7 @@ def test_next_model_launch_config_does_not_inherit_primary_overrides(monkeypatch
     assert b_cfg.quantization is None                       # NOT "awq"
     assert b_cfg.trust_remote_code is False                 # NOT True
     assert b_cfg.served_model_name is None                  # NOT ["vl-alias"]
-    assert b_cfg.gpu_memory_utilization == defaults.gpu_memory_utilization  # NOT 0.6
+    assert b_cfg.gpu_memory_utilization == 0.3              # B's own, NOT A's 0.6
 
 
 def test_reload_same_primary_keeps_live_and_persisted_in_sync(monkeypatch):
@@ -411,7 +413,7 @@ def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
     app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
-    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B"})))
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B", "gpu_memory_utilization": 0.3})))
     mgr = app["instances"]
     b_backend = mgr.by_model("model-B").backend
 
