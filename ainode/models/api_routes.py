@@ -143,7 +143,51 @@ def load_instance_manifest() -> list:
 
 
 _OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
-                  "quantization", "trust_remote_code")
+                  "kv_cache_dtype_explicit", "quantization", "trust_remote_code")
+
+
+def _resolved_overrides(gmu, overrides) -> dict:
+    """Resolve the FULL per-load override set to concrete values, defaulting
+    every field the caller did NOT supply to its NodeConfig class default.
+
+    Returned as a field→value dict covering ``gpu_memory_utilization`` and every
+    ``_OVERRIDE_KEYS`` entry. This is the single source of truth applied to BOTH
+    the per-instance launch config (``inst_config``) and the persisted primary
+    ``NodeConfig`` so the live backend and config.json can never diverge. Absent
+    fields RESET to their default rather than inheriting the previous load's
+    value — critical because ``inst_config`` is built from the SHARED, mutable
+    ``app["config"]`` (which still carries the prior primary load's overrides),
+    so without an explicit reset here, loading model B after model A would leak
+    A's kv_cache_dtype/quantization/served_model_name/etc. onto B (a bare
+    ``{"model": ...}`` load would silently inherit A's --quantization,
+    --trust-remote-code, and --served-model-name).
+    """
+    from ainode.core.config import NodeConfig
+    defaults = NodeConfig()
+    ov = overrides or {}
+    resolved = {
+        "gpu_memory_utilization":
+            gmu if gmu is not None else defaults.gpu_memory_utilization,
+    }
+    for k in _OVERRIDE_KEYS:
+        resolved[k] = ov[k] if k in ov else getattr(defaults, k)
+    return resolved
+
+
+def _persist_primary_overrides(config, gmu, overrides) -> None:
+    """Persist per-load overrides onto the SHARED NodeConfig for the primary.
+
+    The primary solo model boots from ``NodeConfig`` (config.json) after a
+    `systemctl restart` — NOT from the stacked-instance manifest — so every
+    per-load override (kv_cache_dtype, max_model_len, served_model_name,
+    trust_remote_code, quantization, gpu_memory_utilization) must be written
+    here or the boot engine serves the model with stale/default values (the
+    live VLM-came-back-on-fp8 bug). Uses the SAME resolved set as ``inst_config``
+    so the persisted config always matches the live backend just launched.
+    Caller saves config.
+    """
+    for k, v in _resolved_overrides(gmu, overrides).items():
+        setattr(config, k, v)
 
 
 def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: bool = True) -> dict:
@@ -181,15 +225,16 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
     name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
     instance_id = f"{config.node_id or 'head'}:{model}"
 
+    # Build the launch config from the RESOLVED override set. app["config"] is a
+    # SHARED, mutable object that still carries the PREVIOUS primary's per-load
+    # overrides, so `replace(config, ...)` alone would leak A's kv_cache_dtype /
+    # quantization / served_model_name / trust_remote_code onto the next model B
+    # (a bare {"model": ...} load). _resolved_overrides resets every unsupplied
+    # field to its NodeConfig default, and is the SAME set persisted below, so the
+    # live backend and config.json can never diverge.
     inst_config = replace(config, model=model, distributed_mode="solo",
-                          peer_ips=[], api_port=port)
-    if gmu is not None:
-        inst_config = replace(inst_config, gpu_memory_utilization=gmu)
-    if overrides:
-        allowed = {k: v for k, v in overrides.items()
-                   if k in _OVERRIDE_KEYS and v is not None}
-        if allowed:
-            inst_config = replace(inst_config, **allowed)
+                          peer_ips=[], api_port=port,
+                          **_resolved_overrides(gmu, overrides))
 
     def _clear():
         # routing-truth: a failed primary launch must stop the node advertising a
@@ -220,8 +265,7 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         config.model = model
         config.distributed_mode = "solo"
         config.peer_ips = []
-        if gmu is not None:
-            config.gpu_memory_utilization = gmu
+        _persist_primary_overrides(config, gmu, overrides)
         try:
             config.save()
         except Exception:
@@ -231,6 +275,7 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         # Reloaded the primary while a stack exists: keep app["engine"] on the live
         # backend (not the stopped old one) so status/proxy don't dangle.
         config.model = model
+        _persist_primary_overrides(config, gmu, overrides)
         try:
             config.save()
         except Exception:
@@ -387,6 +432,11 @@ async def handle_model_load(request: web.Request) -> web.Response:
     for k in ("kv_cache_dtype", "quantization"):
         if body.get(k) is not None:
             overrides[k] = body[k]
+    if "kv_cache_dtype" in overrides:
+        # Mark provenance so the multimodal fp8→auto safety downgrade
+        # (nvidia.py _effective_kv_cache_dtype) is skipped: an EXPLICIT fp8 KV
+        # request on a VLM is honored, giving the user a way to opt back in.
+        overrides["kv_cache_dtype_explicit"] = True
     if body.get("trust_remote_code") is not None:
         overrides["trust_remote_code"] = bool(body["trust_remote_code"])
 
