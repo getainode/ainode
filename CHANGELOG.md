@@ -8,17 +8,53 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] — 2026-07-06
+
+> Consolidates the fleet-internal 0.4.45 / 0.4.46 builds (never published to GHCR)
+> plus everything since. First release cut by the tag-triggered CI pipeline.
+
 ### Added
-- **AutoData (training utility, MVP)** — agentic Δ-filtered synthetic-data generation
+- **AutoData (training utility)** — agentic Δ-filtered synthetic-data generation
   (Meta Autodata). `ainode/training/autodata/`: a Challenger generates tasks, weak +
   strong solvers attempt each, a Judge grades both, and only `Δ = I_strong - I_weak == 1`
   examples (strong solves, weak fails — the "zone of proximal development") are kept and
   emitted as ShareGPT JSONL with a yield report. Pure HTTP over AInode-served
   OpenAI-compatible endpoints (no torch — runs in the slim orchestrator). CLI:
-  `python -m ainode.training.autodata.run --config cfg.json`. Validated live on the GB10
-  fleet (Aegis-14B challenger/strong/judge + Qwen2.5-0.5B weak): 12 tasks → 1 kept,
-  correctly bucketing too-easy/too-hard. Orchestrator meta-optimization + `lift`
-  document-ingestion are deferred (v2).
+  `python -m ainode.training.autodata.run --config cfg.json`. Includes the v2.1
+  history-aware meta-optimizer (`run --meta`), a dashboard panel, and a verify-mode
+  judge (#40, #44).
+- **Training in a spawned GPU container** (#46) — LoRA/QLoRA/full jobs and adapter
+  **merge** now run in a GPU container (quant-image based) when the orchestrator is
+  the slim shipped image: models store mounted RW, datasets RO, runner + container
+  config staged into the job dir, `peft` pip-shimmed at launch. Job cancel tears down
+  the actual container. Distributed (DDP) training remains host-mode.
+- **Training view completed** (#45) — job detail gains state-gated **Merge Adapter →
+  Full Model** and **Resume from Checkpoint** actions plus an **Artifacts** panel with
+  download links; dead legacy form + placeholder Benchmarks tab removed.
+- **Deploy pipeline** (#47) — `git tag vX.Y.Z` → CI (self-hosted Spark runner) builds
+  and pushes `ghcr.io/getainode/ainode:X.Y.Z`; `ainode update [version]`, `POST
+  /api/engine/update`, and `POST /api/cluster/update-all` now genuinely swap the
+  running image via an `image.env` EnvironmentFile read by the systemd unit
+  (`Restart=always`, self-stop relaunch), gated so un-migrated units pin but never
+  self-kill. `install.sh` resolves and pins the latest numeric tag instead of
+  trusting `:latest`.
+- **PR CI** (#45) — `tests.yml` runs ruff + pytest on every PR and main push.
+- **Launch path: served-model-name aliases + per-load overrides** (#41) —
+  `served_model_name: [aliases]`, `max_model_len`, `kv_cache_dtype`, `quantization`,
+  `trust_remote_code` accepted by `POST /api/models/load`, emitted on both local-mount
+  and remote paths, persisted in the replay manifest.
+
+### Fixed
+- Merge endpoint rejected its own sentinel config (`method="__merge__"` failed
+  validation) — merges silently 500'd (#45).
+- `__version__` is now single-sourced from package metadata (pyproject) — the banner
+  can no longer drift from the built image (#47).
+- Models page "Installed" list shows disk-only models, not just catalog entries (#42).
+- Dashboard no longer re-renders the active view on the 5s poll while the user is
+  interacting (#43).
+- Repo-wide lint debt cleared (64 ruff errors → 0) and kept at zero by CI (#45).
 
 ---
 
