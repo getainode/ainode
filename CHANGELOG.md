@@ -10,6 +10,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.2] — 2026-07-06
+
+> The two majors from the 0.5.1 live lifecycle verification. Image published to GHCR;
+> deploy via `ainode update` at the operator's discretion.
+
+### Fixed
+- **Download Cancel is real** (#56) — cancel was a backend no-op (the flag was never
+  wired into `snapshot_download`; a cancelled 15 GB download ran to completion).
+  Downloads are now per-file, cancel-checked between files, **commit-pinned** (single
+  sha for the whole snapshot — no mixed-commit directories if the repo is pushed
+  mid-download) and parallel (`AINODE_DOWNLOAD_MAX_WORKERS`, cancellable futures).
+- **Launch form respects user node picks** (#56) — auto-recommend fired on model
+  select and silently reset the node dots to the head, landing node-targeted loads
+  on the wrong machine. Manual node toggles now set an intent flag auto-recommend
+  honors.
+
+---
+
 ## [0.5.1] — 2026-07-06
 
 > Same-day follow-up to 0.5.0: every defect found while live-proving the 0.5.0 fleet
