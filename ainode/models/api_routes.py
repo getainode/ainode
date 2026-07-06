@@ -946,23 +946,32 @@ async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str,
 
     try:
         def _do_download():
-            from huggingface_hub import snapshot_download
+            # File-by-file (NOT snapshot_download) so a cancel is real: snapshot_download
+            # has no cancel hook, so the old _cancel flag was a no-op and a cancelled
+            # pull ran to completion. We list the repo and fetch each file via
+            # hf_hub_download into the SAME local_dir — snapshot_download internally
+            # does exactly this per file, so the on-disk layout is identical (load-
+            # bearing for on-disk-serve) — checking the cancel flag between files.
+            import os
+            from huggingface_hub import list_repo_files, hf_hub_download
 
-            def _progress_callback(info):
-                # Check cancel flag on every chunk callback
+            token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+
+            def _check_cancel():
                 if jobs.get(job_id, {}).get("_cancel"):
                     raise _DownloadCancelled("Download cancelled by user")
 
-            from ainode.models.registry import _download_max_workers
-            try:
-                snapshot_download(
+            _check_cancel()
+            files = list_repo_files(repo_id=hf_repo, token=token)
+            for rfilename in files:
+                _check_cancel()  # stop between files — no mid-file hook exists
+                hf_hub_download(
                     repo_id=hf_repo,
+                    filename=rfilename,
                     local_dir=str(target),
-                    tqdm_class=None,
-                    max_workers=_download_max_workers(),  # don't monopolise the uplink
+                    token=token,
                 )
-            except _DownloadCancelled:
-                raise
+            _check_cancel()  # a cancel arriving after the last file still counts
             return str(target)
 
         # Serialize downloads (one fat pull at a time) so two concurrent model
