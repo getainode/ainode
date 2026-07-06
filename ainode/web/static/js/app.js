@@ -2841,7 +2841,7 @@ const AINode = {
   },
 
   // ========================================================================
-  //  TRAINING VIEW  (overview / datasets / runs / templates / benchmarks)
+  //  TRAINING VIEW  (overview / autodata / datasets / runs / templates)
   // ========================================================================
 
   trainingModels: [
@@ -2876,7 +2876,6 @@ const AINode = {
       { id: 'datasets',   label: 'Datasets',   icon: '&#8864;' },
       { id: 'runs',       label: 'Runs',       icon: '&#9873;' },
       { id: 'templates',  label: 'Templates',  icon: '&#9641;' },
-      { id: 'benchmarks', label: 'Benchmarks', icon: '&#9775;' },
     ];
     var guides = [
       { id: 'beginners',    label: "Beginner's Guide" },
@@ -3008,7 +3007,6 @@ const AINode = {
       case 'datasets':   this.renderTrainingDatasets(container); break;
       case 'runs':       this.renderTrainingRuns(container); break;
       case 'templates':  this.renderTrainingTemplates(container); break;
-      case 'benchmarks': this.renderTrainingBenchmarks(container); break;
       default:           this.renderTrainingOverview(container);
     }
   },
@@ -3476,26 +3474,6 @@ const AINode = {
           batch_size: tpl.recommended_batch_size,
           learning_rate: tpl.recommended_lr,
         });
-      });
-    });
-  },
-
-  // ---- Benchmarks --------------------------------------------------------
-  renderTrainingBenchmarks(container) {
-    var self = this;
-    // This is a placeholder view — wires to /api/benchmarks in a future pass.
-    container.innerHTML = '<div class="training-overview">' +
-      '<div class="training-section-head"><h3>Benchmarks</h3><span class="muted">NCCL / RDMA / GPU-direct</span></div>' +
-      '<div class="benchmark-grid">' +
-        '<div class="benchmark-card"><h4>NCCL all-reduce</h4><div class="benchmark-value">—</div><div class="benchmark-meta">not yet run</div><button class="btn-nvidia btn-sm" data-bench="nccl">Run</button></div>' +
-        '<div class="benchmark-card"><h4>GPU-direct RDMA</h4><div class="benchmark-value">—</div><div class="benchmark-meta">not yet run</div><button class="btn-nvidia btn-sm" data-bench="rdma">Run</button></div>' +
-        '<div class="benchmark-card"><h4>Storage Throughput</h4><div class="benchmark-value">—</div><div class="benchmark-meta">not yet run</div><button class="btn-nvidia btn-sm" data-bench="storage">Run</button></div>' +
-      '</div>' +
-    '</div>';
-
-    container.querySelectorAll('[data-bench]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        self.toast('Benchmark runners coming in the next release', 'info');
       });
     });
   },
@@ -4166,138 +4144,6 @@ const AINode = {
     },
   },
 
-  renderTrainingForm(container) {
-    var models = this.trainingModels;
-    var optionsHtml = models.map(function (m) {
-      return '<option value="' + AINode.esc(m.id) + '">' + AINode.esc(m.name) + ' (' + m.size + ')</option>';
-    }).join('');
-
-    container.innerHTML =
-      '<div class="training-form-wrapper">' +
-      '<div class="training-form-header">' +
-      '<button class="btn-ghost" id="training-back-btn">&larr; Back to Jobs</button>' +
-      '<h2>New Training Job</h2>' +
-      '</div>' +
-      '<form id="training-form" class="training-form">' +
-      '<div class="form-section">' +
-      '<h3 class="form-section-title">Model</h3>' +
-      '<div class="form-group"><label class="form-label">Base Model</label><select id="train-model" class="form-select" required>' + optionsHtml + '</select></div>' +
-      '<div class="form-group"><label class="form-label">Custom Model ID (optional)</label><input type="text" id="train-model-custom" class="form-input" placeholder="e.g. org/my-model"></div>' +
-      '</div>' +
-      '<div class="form-section">' +
-      '<h3 class="form-section-title">Dataset</h3>' +
-      '<div class="form-group"><label class="form-label">Dataset Path</label><input type="text" id="train-dataset" class="form-input" placeholder="my-dataset.jsonl" required>' +
-      '<div class="form-hint">Place files in <code>~/.ainode/datasets/</code>. Supported: JSON, JSONL, CSV. Fields: <code>text</code>, or <code>instruction</code>+<code>output</code>, or <code>prompt</code>+<code>completion</code>.</div></div>' +
-      '</div>' +
-      '<div class="form-section">' +
-      '<h3 class="form-section-title">Training Method</h3>' +
-      '<div class="method-toggle">' +
-      '<button type="button" class="method-btn active" data-method="lora"><strong>LoRA</strong><br><small>Recommended. Trains adapter weights only.</small></button>' +
-      '<button type="button" class="method-btn" data-method="full"><strong>Full Fine-Tune</strong><br><small>Updates all model weights.</small></button>' +
-      '</div>' +
-      '<input type="hidden" id="train-method" value="lora">' +
-      '</div>' +
-      '<div class="form-section">' +
-      '<h3 class="form-section-title collapsible" id="advanced-toggle">Advanced Settings <span class="chevron">&#9662;</span></h3>' +
-      '<div class="advanced-settings collapsed" id="advanced-settings">' +
-      '<div class="form-grid">' +
-      '<div class="form-group"><label class="form-label">Epochs</label><input type="number" id="train-epochs" class="form-input" value="3" min="1" max="100"></div>' +
-      '<div class="form-group"><label class="form-label">Batch Size</label><input type="number" id="train-batch" class="form-input" value="4" min="1" max="128"></div>' +
-      '<div class="form-group"><label class="form-label">Learning Rate</label><input type="text" id="train-lr" class="form-input" value="2e-4"></div>' +
-      '<div class="form-group"><label class="form-label">Max Seq Length</label><input type="number" id="train-seq-len" class="form-input" value="2048" min="128" max="32768" step="128"></div>' +
-      '</div>' +
-      '<div class="form-grid lora-settings" id="lora-settings">' +
-      '<div class="form-group"><label class="form-label">LoRA Rank</label><input type="number" id="train-lora-rank" class="form-input" value="16" min="1" max="256"></div>' +
-      '<div class="form-group"><label class="form-label">LoRA Alpha</label><input type="number" id="train-lora-alpha" class="form-input" value="32" min="1" max="512"></div>' +
-      '</div>' +
-      '</div>' +
-      '</div>' +
-      '<div class="form-actions">' +
-      '<button type="button" class="btn-ghost" id="training-cancel-btn">Cancel</button>' +
-      '<button type="submit" class="btn-nvidia" id="training-submit-btn">Start Training</button>' +
-      '</div>' +
-      '</form>' +
-      '</div>';
-
-    this.bindTrainingForm();
-  },
-
-  bindTrainingForm() {
-    var self = this;
-    var goBack = function () { self.state.trainingView = 'list'; self.renderTraining(); };
-
-    var bb = document.getElementById('training-back-btn');
-    if (bb) bb.addEventListener('click', goBack);
-    var cb = document.getElementById('training-cancel-btn');
-    if (cb) cb.addEventListener('click', goBack);
-
-    document.querySelectorAll('.method-btn').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        document.querySelectorAll('.method-btn').forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        document.getElementById('train-method').value = btn.dataset.method;
-        var ls = document.getElementById('lora-settings');
-        if (ls) ls.style.display = btn.dataset.method === 'lora' ? '' : 'none';
-      });
-    });
-
-    var at = document.getElementById('advanced-toggle');
-    if (at) {
-      at.addEventListener('click', function () {
-        var s = document.getElementById('advanced-settings');
-        if (s) s.classList.toggle('collapsed');
-        at.classList.toggle('open');
-      });
-    }
-
-    var f = document.getElementById('training-form');
-    if (f) f.addEventListener('submit', function (e) { e.preventDefault(); self.submitTrainingJob(); });
-  },
-
-  async submitTrainingJob() {
-    var submitBtn = document.getElementById('training-submit-btn');
-    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting...'; }
-
-    var customModel = document.getElementById('train-model-custom')?.value?.trim();
-    var baseModel = customModel || document.getElementById('train-model')?.value;
-    var method = document.getElementById('train-method')?.value || 'lora';
-
-    var payload = {
-      base_model: baseModel,
-      dataset_path: document.getElementById('train-dataset')?.value?.trim(),
-      method: method,
-      num_epochs: parseInt(document.getElementById('train-epochs')?.value) || 3,
-      batch_size: parseInt(document.getElementById('train-batch')?.value) || 4,
-      learning_rate: parseFloat(document.getElementById('train-lr')?.value) || 2e-4,
-      max_seq_length: parseInt(document.getElementById('train-seq-len')?.value) || 2048,
-    };
-    if (method === 'lora') {
-      payload.lora_rank = parseInt(document.getElementById('train-lora-rank')?.value) || 16;
-      payload.lora_alpha = parseInt(document.getElementById('train-lora-alpha')?.value) || 32;
-    }
-
-    try {
-      var resp = await fetch('/api/training/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      var result = await resp.json();
-      if (!resp.ok) {
-        this.toast('Error: ' + (result.error || 'Failed to create job'), 'error');
-        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Start Training'; }
-        return;
-      }
-      this.state.trainingView = 'detail';
-      this.state.trainingDetailId = result.job_id;
-      this.state.trainingLossData = [];
-      this.renderTraining();
-    } catch (err) {
-      this.toast('Network error: ' + err.message, 'error');
-      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Start Training'; }
-    }
-  },
-
   async renderTrainingDetail(container) {
     var jobId = this.state.trainingDetailId;
     if (!jobId) { this.state.trainingView = 'list'; this.renderTraining(); return; }
@@ -4305,8 +4151,13 @@ const AINode = {
     var jobData = await this.fetchJSON('/api/training/jobs/' + jobId);
     if (!jobData) { container.innerHTML = '<div class="training-empty"><h3>Job not found</h3></div>'; return; }
 
-    var logsData = await this.fetchJSON('/api/training/jobs/' + jobId + '/logs?tail=200');
+    var extra = await Promise.all([
+      this.fetchJSON('/api/training/jobs/' + jobId + '/logs?tail=200'),
+      this.fetchJSON('/api/training/jobs/' + jobId + '/output'),
+    ]);
+    var logsData = extra[0];
     var logs = logsData?.logs || [];
+    var outputFiles = extra[1]?.files || [];
 
     // Collect loss data
     if (jobData.current_loss != null && jobData.progress > 0) {
@@ -4344,6 +4195,8 @@ const AINode = {
     var ended = jobData.end_time ? new Date(jobData.end_time * 1000).toLocaleString() : '--';
     var elapsed = jobData.elapsed_seconds ? this.formatUptime(Math.round(jobData.elapsed_seconds)) : '--';
     var isActive = jobData.status === 'running' || jobData.status === 'pending';
+    var canMerge = jobData.status === 'completed' && (cfg.method === 'lora' || cfg.method === 'qlora');
+    var canResume = jobData.status === 'failed' || jobData.status === 'cancelled';
 
     var html = '<div class="training-detail">' +
       '<div class="training-form-header">' +
@@ -4379,10 +4232,19 @@ const AINode = {
       '<tr><td>Duration</td><td>' + elapsed + '</td></tr>' +
       '</table>' +
       (isActive ? '<div style="margin-top:16px"><button class="btn-danger" id="training-cancel-job-btn">Cancel Job</button></div>' : '') +
+      (canMerge || canResume ? '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">' +
+        (canMerge ? '<button class="btn-nvidia" id="training-merge-btn">Merge Adapter &rarr; Full Model</button>' : '') +
+        (canResume ? '<button class="btn-ghost" id="training-resume-btn">Resume from Checkpoint</button>' : '') +
+        '</div>' : '') +
       '</div>' +
       '<div class="training-right-col">' +
       (this.state.trainingLossData.length > 1 ?
         '<div class="training-chart-card"><h3>Training Loss</h3><div class="loss-chart-container"><canvas id="loss-chart" width="460" height="200"></canvas></div></div>' : '') +
+      (outputFiles.length > 0 ? '<div class="training-config-card"><h3>Artifacts</h3><table class="config-table">' +
+        outputFiles.map(function (f) {
+          return '<tr><td><a class="chat-link" href="' + AINode.esc(f.download_url) + '" download>' + AINode.esc(f.name) + '</a></td><td class="mono">' + f.size_mb + ' MB</td></tr>';
+        }).join('') +
+        '</table></div>' : '') +
       '<div class="training-log-card"><h3>Logs <span class="log-line-count">' + (logsData?.total_lines || 0) + ' lines</span></h3>' +
       '<div class="training-log-viewer" id="training-log-viewer">' +
       (logs.length > 0 ? logs.map(function (l) { return '<div class="log-line">' + AINode.esc(l) + '</div>'; }).join('') : '<div class="log-empty">No logs yet</div>') +
@@ -4408,6 +4270,42 @@ const AINode = {
       else {
         var err = await resp.json().catch(function () { return {}; });
         self.toast(err.error || 'Failed to cancel job', 'error');
+      }
+    });
+
+    var mb = document.getElementById('training-merge-btn');
+    if (mb) mb.addEventListener('click', async function () {
+      if (!confirm('Merge this adapter into a full model? This can take several minutes.')) return;
+      mb.disabled = true;
+      var resp = await fetch('/api/training/jobs/' + jobId + '/merge', { method: 'POST' });
+      var result = await resp.json().catch(function () { return {}; });
+      if (resp.ok) {
+        self.toast('Merge started — output: ' + result.output_dir, 'success');
+        self.state.trainingDetailId = result.merge_job_id;
+        self.state.trainingLossData = [];
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      } else {
+        mb.disabled = false;
+        self.toast(result.error || 'Failed to start merge', 'error');
+      }
+    });
+
+    var rb = document.getElementById('training-resume-btn');
+    if (rb) rb.addEventListener('click', async function () {
+      if (!confirm('Resume training from the latest checkpoint?')) return;
+      rb.disabled = true;
+      var resp = await fetch('/api/training/jobs/' + jobId + '/resume', { method: 'POST' });
+      var result = await resp.json().catch(function () { return {}; });
+      if (resp.ok) {
+        self.toast('Resumed from checkpoint ' + result.checkpoint, 'success');
+        self.state.trainingDetailId = result.resume_job_id;
+        self.state.trainingLossData = [];
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      } else {
+        rb.disabled = false;
+        self.toast(result.error || 'Failed to resume job', 'error');
       }
     });
 

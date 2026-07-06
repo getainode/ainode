@@ -1,5 +1,7 @@
 """Tests for ainode.api.server — AINode-specific endpoints."""
 
+import socket
+
 import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
@@ -10,7 +12,13 @@ from ainode.core.config import NodeConfig
 
 @pytest.fixture
 def config():
-    return NodeConfig(node_id="test-node-1", node_name="TestNode", model="test-model")
+    # Use a port nothing listens on: the vllm proxy falls back to
+    # localhost:<api_port>, and a real service on the default 8000 (common on
+    # dev machines) would answer instead of yielding the expected 502.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+    return NodeConfig(node_id="test-node-1", node_name="TestNode", model="test-model", api_port=free_port)
 
 
 @pytest.fixture

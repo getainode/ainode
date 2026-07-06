@@ -1,8 +1,6 @@
 """Tests for ainode.training — config validation, job lifecycle, manager queue, API routes."""
 
-import asyncio
 from pathlib import Path
-import json
 import pytest
 import pytest_asyncio
 from aiohttp import web
@@ -682,7 +680,6 @@ class TestArtifactEndpoints:
     @pytest.mark.asyncio
     async def test_output_lists_files_when_dir_exists(self, training_client, tmp_path):
         """If output_dir exists and has files, they appear in the listing."""
-        from ainode.training.engine import JOBS_DIR
         resp = await training_client.post(
             "/api/training/jobs",
             json={"base_model": "m", "dataset_path": "user/d"},
@@ -717,6 +714,42 @@ class TestArtifactEndpoints:
         )
         # Should 404 (path traversal stripped by router) or 400
         assert resp2.status in (400, 404)
+
+
+class TestMergeEndpoint:
+    """Tests for /api/training/jobs/{job_id}/merge."""
+
+    @pytest.mark.asyncio
+    async def test_merge_completed_lora_job_starts(self, training_client, training_app):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "method": "lora"},
+        )
+        job_id = (await resp.json())["job_id"]
+
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(job_id)
+        job.status = JobStatus.COMPLETED
+        output_dir = Path(job.config.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "adapter_model.safetensors").write_bytes(b"x" * 16)
+
+        resp2 = await training_client.post(f"/api/training/jobs/{job_id}/merge")
+        assert resp2.status == 202
+        data = await resp2.json()
+        assert "merge_job_id" in data
+        assert data["source_job_id"] == job_id
+
+    @pytest.mark.asyncio
+    async def test_merge_rejects_non_completed_job(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "method": "lora"},
+        )
+        job_id = (await resp.json())["job_id"]
+
+        resp2 = await training_client.post(f"/api/training/jobs/{job_id}/merge")
+        assert resp2.status == 409
 
 
 class TestHFTokenPropagation:
