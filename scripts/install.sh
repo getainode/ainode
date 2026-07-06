@@ -16,8 +16,10 @@
 set -euo pipefail
 
 # -- Defaults ---------------------------------------------------------------
-AINODE_VERSION="${AINODE_VERSION:-0.4.1}"
-AINODE_IMAGE="${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
+# Version + image are resolved from the highest numeric GHCR tag below (unless
+# the caller pins them explicitly). Leaving these empty is the signal to resolve.
+AINODE_VERSION="${AINODE_VERSION:-}"
+AINODE_IMAGE="${AINODE_IMAGE:-}"
 # NVIDIA official vLLM engine image — pre-pulled so first dashboard launch
 # doesn't hit a 5–10 min download. Override with AINODE_NVIDIA_IMAGE=skip to
 # suppress, or a custom tag for testing.
@@ -58,6 +60,20 @@ log() { printf "\033[1;32m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m!!\033[0m %s\n" "$*"; }
 die() { printf "\033[1;31mXX\033[0m %s\n" "$*" >&2; exit 1; }
 
+# Resolve the highest numeric GHCR tag anonymously (public image). Echoes the
+# tag on success; returns non-zero if resolution fails (caller falls back).
+resolve_latest_tag() {
+    local token tags
+    token=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:getainode/ainode:pull" 2>/dev/null \
+        | sed -E 's/.*"token":"([^"]+)".*/\1/') || return 1
+    [ -n "$token" ] || return 1
+    tags=$(curl -fsSL -H "Authorization: Bearer $token" \
+        "https://ghcr.io/v2/getainode/ainode/tags/list" 2>/dev/null) || return 1
+    echo "$tags" | tr ',' '\n' \
+        | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' \
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+
 # -- 1. Preflight -----------------------------------------------------------
 log "Checking prerequisites"
 [ "$(uname -s)" = "Linux" ] || die "AINode requires Linux (detected $(uname -s))"
@@ -86,8 +102,29 @@ fi
 log "Preparing $AINODE_HOME"
 mkdir -p "$AINODE_HOME"/{models,logs,datasets,training}
 
+# Resolve the image to a PINNED numeric tag (never a floating :latest, which
+# has drifted to ancient builds in the past). Explicit AINODE_IMAGE wins.
+if [ -z "$AINODE_IMAGE" ]; then
+    if RESOLVED_TAG="$(resolve_latest_tag)" && [ -n "$RESOLVED_TAG" ]; then
+        AINODE_VERSION="$RESOLVED_TAG"
+        AINODE_IMAGE="ghcr.io/getainode/ainode:${RESOLVED_TAG}"
+        log "Resolved latest GHCR tag: $RESOLVED_TAG"
+    else
+        AINODE_IMAGE="ghcr.io/getainode/ainode:latest"
+        warn "Could not resolve latest GHCR tag — falling back to :latest"
+    fi
+fi
+# Derive the banner version from the pinned tag when not otherwise set.
+[ -n "$AINODE_VERSION" ] || AINODE_VERSION="${AINODE_IMAGE##*:}"
+
 log "Pulling $AINODE_IMAGE (AINode orchestrator; slim — ~500 MB)"
 docker pull "$AINODE_IMAGE"
+
+# Pin the image for the systemd unit's EnvironmentFile so `ainode update` can
+# swap it later without re-rendering the unit. Written atomically (temp+rename)
+# so the unit never reads a half-written line.
+printf 'AINODE_IMAGE=%s\n' "$AINODE_IMAGE" > "$AINODE_HOME/image.env.tmp"
+mv -f "$AINODE_HOME/image.env.tmp" "$AINODE_HOME/image.env"
 
 # -- 2a. NGC login (for nvcr.io/nvidia/vllm image pull) -------------------
 # The NVIDIA engine backend requires a pull from NGC. Non-interactive login
@@ -235,16 +272,23 @@ fi
 
 mkdir -p "$UNIT_DIR"
 
+# ExecStart references ${AINODE_IMAGE} (escaped so systemd — not this shell —
+# expands it). The pinned Environment default is overridden by image.env, so
+# `ainode update` swaps the image without re-rendering this unit.
 EXEC_START="/usr/bin/docker run --rm --name ainode \
- --network=host --gpus all --ipc=host --shm-size=64g \
+ --network=host --gpus all --ipc=host --shm-size=64g --pid=host \
  -v ${AINODE_HOME}:/root/.ainode \
  -v /var/run/docker.sock:/var/run/docker.sock \
  -v ${HOME}/.ssh:/host-ssh:ro \
+ -v ${HOME}/.docker:/root/.docker:ro \
  --mount type=bind,source=/mnt/shared-models,target=/mnt/shared-models,bind-propagation=rshared \
  -e AINODE_HOME=/root/.ainode \
+ -e AINODE_HOST_HOME=${AINODE_HOME} \
+ -e AINODE_UNIT_SWAPPABLE=1 \
+ -e HF_HUB_ENABLE_HF_TRANSFER=1 \
  -e NVIDIA_VISIBLE_DEVICES=all \
  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
- ghcr.io/getainode/ainode:latest"
+ \${AINODE_IMAGE}"
 
 cat > /tmp/ainode.service << UNIT
 [Unit]
@@ -257,9 +301,11 @@ Requires=docker.service
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/docker rm -f ainode
+Environment=AINODE_IMAGE=${AINODE_IMAGE}
+EnvironmentFile=-${AINODE_HOME}/image.env
 ExecStart=${EXEC_START}
 ExecStop=/usr/bin/docker stop -t 30 ainode
-Restart=on-failure
+Restart=always
 RestartSec=10
 TimeoutStartSec=600
 TimeoutStopSec=45
@@ -298,7 +344,21 @@ $WRAPPER_SUDO tee "$WRAPPER_PATH" >/dev/null <<WRAPPER
 # AINode host wrapper — installed by install.sh. Not user-editable.
 set -euo pipefail
 AINODE_IMAGE="\${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
+AINODE_HOME="\${AINODE_HOME:-\$HOME/.ainode}"
 AINODE_SERVICE="ainode.service"
+
+# Resolve the highest numeric GHCR tag anonymously (public image).
+resolve_latest_tag() {
+    local token tags
+    token=\$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:getainode/ainode:pull" 2>/dev/null \\
+        | sed -E 's/.*"token":"([^"]+)".*/\\1/') || return 1
+    [ -n "\$token" ] || return 1
+    tags=\$(curl -fsSL -H "Authorization: Bearer \$token" \\
+        "https://ghcr.io/v2/getainode/ainode/tags/list" 2>/dev/null) || return 1
+    echo "\$tags" | tr ',' '\\n' \\
+        | grep -oE '"[0-9]+\\.[0-9]+\\.[0-9]+"' | tr -d '"' \\
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
 
 is_user_mode() {
     systemctl --user is-enabled "\$AINODE_SERVICE" >/dev/null 2>&1
@@ -313,8 +373,25 @@ restart_service() {
 
 case "\${1:-}" in
     update)
-        echo "==> Pulling \$AINODE_IMAGE"
-        docker pull "\$AINODE_IMAGE"
+        # Optional explicit version: 'ainode update 0.5.0'. Otherwise resolve
+        # the highest numeric GHCR tag. Never pull a floating :latest here.
+        TARGET_VERSION="\${2:-}"
+        if [ -z "\$TARGET_VERSION" ]; then
+            TARGET_VERSION="\$(resolve_latest_tag || true)"
+        fi
+        if [ -n "\$TARGET_VERSION" ]; then
+            PULL_IMAGE="ghcr.io/getainode/ainode:\$TARGET_VERSION"
+        else
+            PULL_IMAGE="\$AINODE_IMAGE"
+            echo "!! Could not resolve a version — pulling \$PULL_IMAGE"
+        fi
+        echo "==> Pulling \$PULL_IMAGE"
+        docker pull "\$PULL_IMAGE"
+        # Pin it for the systemd unit's EnvironmentFile, then restart. Written
+        # atomically (temp+rename) so the unit never reads a half-written line.
+        mkdir -p "\$AINODE_HOME"
+        printf 'AINODE_IMAGE=%s\n' "\$PULL_IMAGE" > "\$AINODE_HOME/image.env.tmp"
+        mv -f "\$AINODE_HOME/image.env.tmp" "\$AINODE_HOME/image.env"
         echo "==> Restarting \$AINODE_SERVICE"
         if is_user_mode || systemctl is-active --quiet "\$AINODE_SERVICE" 2>/dev/null; then
             restart_service
@@ -323,7 +400,7 @@ case "\${1:-}" in
         fi
         echo "==> Update complete. Version:"
         docker exec ainode ainode --version 2>/dev/null || \\
-            docker run --rm --entrypoint ainode "\$AINODE_IMAGE" --version
+            docker run --rm --entrypoint ainode "\$PULL_IMAGE" --version
         ;;
     "" | -h | --help)
         cat <<HELP

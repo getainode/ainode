@@ -40,9 +40,18 @@ Requires=docker.service
 Type=simple
 # docker run in foreground so systemd tracks the container lifecycle.
 ExecStartPre=-/usr/bin/docker rm -f ainode
+# Image is swappable WITHOUT re-rendering the unit: the pinned default below is
+# overridden by {ainode_home}/image.env (written by `ainode update`) when it
+# exists. The '-' prefix makes the env file optional (back-compat: a node with
+# no image.env falls back to the pinned Environment default). The EnvironmentFile
+# line MUST come after the Environment line so the file wins on override.
+Environment=AINODE_IMAGE={image}
+EnvironmentFile=-{ainode_home}/image.env
 ExecStart={exec_start}
 ExecStop=/usr/bin/docker stop -t 30 ainode
-Restart=on-failure
+# Restart=always (not on-failure): a deliberate self-stop during `ainode update`
+# is a clean exit, and we still want systemd to relaunch on the new image.
+Restart=always
 RestartSec=10
 TimeoutStartSec=600
 TimeoutStopSec=45
@@ -61,10 +70,20 @@ WantedBy={wanted_by}
 
 DOCKER_RUN_CMD = (
     "/usr/bin/docker run --rm --name ainode"
-    " --network=host --gpus all --ipc=host --shm-size=64g"
+    " --network=host --gpus all --ipc=host --shm-size=64g --pid=host"
     " -v {ainode_home}:/root/.ainode"
     " -v /var/run/docker.sock:/var/run/docker.sock"
     " -v {home}/.ssh:/root/.ssh:ro"
+    # docker config (registry creds) + HF fast-transfer + host-home hint —
+    # baked in here so the retired 97-p5-nvidia-backend.conf drop-in is no
+    # longer needed to carry them.
+    " -v {home}/.docker:/root/.docker:ro"
+    " -e AINODE_HOST_HOME={ainode_home}"
+    # Marks the running container as launched by the swappable-image unit, so the
+    # in-container update path knows a self-`docker stop` will image-swap (systemd
+    # Restart=always + EnvironmentFile) rather than drop/rebooting the old image.
+    " -e AINODE_UNIT_SWAPPABLE=1"
+    " -e HF_HUB_ENABLE_HF_TRANSFER=1"
     # Shared cluster storage — required by DockerEngine._publish_nccl_init_script
     # to stage the per-node NCCL init shim. ``--mount type=bind`` (vs ``-v``) is
     # intentional: it fails loudly at container start if /mnt/shared-models does
@@ -120,16 +139,19 @@ def generate_unit_file(user_mode: bool = False) -> str:
     wanted_by = "default.target" if user_mode else "multi-user.target"
     ainode_home = _ainode_home()
     home = str(Path.home())
+    # ExecStart references ${AINODE_IMAGE} — systemd expands it at start time
+    # from the Environment default or the image.env override.
     exec_start = DOCKER_RUN_CMD.format(
         ainode_home=ainode_home,
         home=home,
-        image=AINODE_IMAGE,
+        image="${AINODE_IMAGE}",
     )
     return UNIT_FILE_TEMPLATE.format(
         exec_start=exec_start,
         ainode_home=ainode_home,
         home=home,
         wanted_by=wanted_by,
+        image=AINODE_IMAGE,
     )
 
 
@@ -138,19 +160,34 @@ def is_installed(user_mode: bool = False) -> bool:
     return _unit_path(user_mode).exists()
 
 
-def install_service(user_mode: bool = False, reload: bool = True) -> None:
+def install_service(
+    user_mode: bool = False, reload: bool = True, force: bool = False
+) -> None:
     """Write the unit file and optionally reload the systemd daemon.
 
     When called from inside a container (e.g. during install.sh), pass
     ``reload=False`` — the container has no systemd bus, so daemon-reload
     must be run by the host after the docker run completes.
+
+    Pass ``force=True`` to re-render an already-installed unit (e.g. after a
+    template change). Without it, an existing unit is left untouched.
+
+    Also seeds ``<AINODE_HOME>/image.env`` with the pinned image when absent so
+    the unit's ``EnvironmentFile`` has a value to read on first boot.
     """
     unit_dir = _unit_dir(user_mode)
     unit_dir.mkdir(parents=True, exist_ok=True)
 
     unit_path = _unit_path(user_mode)
-    unit_content = generate_unit_file(user_mode=user_mode)
-    unit_path.write_text(unit_content)
+    if force or not unit_path.exists():
+        unit_content = generate_unit_file(user_mode=user_mode)
+        unit_path.write_text(unit_content)
+
+    # Seed the image.env override file (pin the current image) if missing.
+    image_env = Path(_ainode_home()) / "image.env"
+    if not image_env.exists():
+        image_env.parent.mkdir(parents=True, exist_ok=True)
+        image_env.write_text(f"AINODE_IMAGE={AINODE_IMAGE}\n")
 
     if reload:
         _systemctl(["daemon-reload"], user_mode=user_mode)

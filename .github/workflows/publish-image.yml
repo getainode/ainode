@@ -1,9 +1,13 @@
 name: publish-image
 # Build + publish the AINode container image to GHCR and Docker Hub.
 #
-# Manual only (workflow_dispatch). Never runs on push — the self-hosted
-# aarch64 runner is a DGX Spark, and a ~18 GB image build is not something
-# we want firing off accidentally.
+# Two triggers:
+#   - push of a 'v*' tag (e.g. v0.5.0) → build + PUSH the release automatically.
+#     VERSION is derived from the tag (leading 'v' stripped).
+#   - workflow_dispatch → manual build; push is the operator's choice.
+#
+# The self-hosted aarch64 runner is a DGX Spark and a ~18 GB image build is
+# heavy, so non-tag pushes to branches deliberately do NOT trigger this.
 #
 # Self-hosted runner prerequisites:
 #   - labels: [self-hosted, dgx-spark, aarch64]
@@ -23,6 +27,9 @@ name: publish-image
 #   4. Emit a summary with the final image pull command.
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       push:
@@ -50,21 +57,37 @@ jobs:
       contents: read
       packages: write
     env:
-      AINODE_VERSION: ${{ inputs.ainode_version }}
       REGISTRY_GHCR: ghcr.io/getainode
       REGISTRY_DOCKERHUB: docker.io/argentos
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify pyproject version matches input
+      - name: Determine version and push mode
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag-triggered: derive version from the tag, always push.
+            ref="${{ github.ref_name }}"
+            version="${ref#v}"
+            push="true"
+          else
+            version="${{ inputs.ainode_version }}"
+            push="${{ inputs.push }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "AINODE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Resolved version=$version push=$push (event=${{ github.event_name }})"
+
+      - name: Verify pyproject version matches release version
         run: |
           pyproj_version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
           if [ "$pyproj_version" != "$AINODE_VERSION" ]; then
-            echo "::warning::pyproject.toml version ($pyproj_version) does not match workflow input ($AINODE_VERSION)."
-          else
-            echo "Version match: $pyproj_version"
+            echo "::error::pyproject.toml version ($pyproj_version) does not match release version ($AINODE_VERSION)."
+            exit 1
           fi
+          echo "Version match: $pyproj_version"
 
       - name: Build base (eugr) image
         run: |
@@ -99,7 +122,7 @@ jobs:
           docker run --rm ainode:${AINODE_VERSION} ainode --version
 
       - name: Tag for registries
-        if: inputs.push == 'true'
+        if: steps.vars.outputs.push == 'true'
         run: |
           docker tag ainode:${AINODE_VERSION} "${REGISTRY_GHCR}/ainode:${AINODE_VERSION}"
           docker tag ainode:${AINODE_VERSION} "${REGISTRY_GHCR}/ainode:latest"
@@ -107,7 +130,7 @@ jobs:
           docker tag ainode:${AINODE_VERSION} "${REGISTRY_DOCKERHUB}/ainode:latest"
 
       - name: Login to GHCR
-        if: inputs.push == 'true'
+        if: steps.vars.outputs.push == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -116,7 +139,7 @@ jobs:
 
       - name: Check Docker Hub secret presence
         id: dockerhub
-        if: inputs.push == 'true'
+        if: steps.vars.outputs.push == 'true'
         run: |
           if [ -n "${{ secrets.DOCKERHUB_USER }}" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
@@ -125,20 +148,20 @@ jobs:
           fi
 
       - name: Login to Docker Hub
-        if: inputs.push == 'true' && steps.dockerhub.outputs.present == 'true'
+        if: steps.vars.outputs.push == 'true' && steps.dockerhub.outputs.present == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Push base image
-        if: inputs.push == 'true'
+        if: steps.vars.outputs.push == 'true'
         run: |
           docker push ${REGISTRY_GHCR}/ainode-base:${{ steps.eugr.outputs.short }}
           docker push ${REGISTRY_GHCR}/ainode-base:${AINODE_VERSION}-${{ steps.eugr.outputs.short }}
 
       - name: Push ainode image
-        if: inputs.push == 'true'
+        if: steps.vars.outputs.push == 'true'
         run: |
           docker push ${REGISTRY_GHCR}/ainode:${AINODE_VERSION}
           docker push ${REGISTRY_GHCR}/ainode:latest
@@ -154,9 +177,9 @@ jobs:
             echo ""
             echo "**Version:** \`${AINODE_VERSION}\`"
             echo "**Base (eugr pin):** \`${{ steps.eugr.outputs.short }}\`"
-            echo "**Pushed:** \`${{ inputs.push }}\`"
+            echo "**Pushed:** \`${{ steps.vars.outputs.push }}\`"
             echo ""
-            if [ "${{ inputs.push }}" = "true" ]; then
+            if [ "${{ steps.vars.outputs.push }}" = "true" ]; then
               echo "### Pull"
               echo ""
               echo "\`\`\`bash"

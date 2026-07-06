@@ -565,16 +565,34 @@ def cmd_service(args):
     action = getattr(args, "service_action", None)
 
     if action == "install":
-        # When running inside the container (install.sh uses `docker run
-        # --entrypoint ainode ... service install`), there is no systemd
-        # bus available so daemon-reload must be skipped here and handled
-        # by the host after the docker run returns.
+        # The systemd unit lives on the HOST, not in this container. Inside the
+        # container there is no systemd bus, no `systemctl` binary, and no
+        # bind-mount of /etc/systemd/system — so writing the unit + enabling it
+        # here would vanish into the container overlay AND then crash on the
+        # first `systemctl` call, all while printing a false "✓ installed". The
+        # host wrapper (install.sh) renders the unit directly; there is no valid
+        # in-container install path. Refuse clearly and point at the host-side
+        # migration instead of silently succeeding then crashing.
         in_container = os.environ.get("AINODE_IN_CONTAINER") == "1"
-        if is_installed(user_mode=user_mode):
+        if in_container:
+            console.print(
+                "  [yellow]`ainode service install` must run on the host, not inside the container.[/yellow]"
+            )
+            console.print(
+                "  The systemd unit is managed on the host — there is no systemd bus here."
+            )
+            console.print("  To (re)install or migrate the unit on this node, re-run the installer:")
+            console.print("    [bold]curl -fsSL https://ainode.dev/install | bash[/bold]")
+            console.print("  (idempotent — it re-renders the unit and preserves your config.json).")
+            console.print("  Powered by argentos.ai")
+            return
+        force = getattr(args, "force", False)
+        if is_installed(user_mode=user_mode) and not force:
             console.print("  [yellow]AINode service is already installed.[/yellow]")
+            console.print("  [dim](use 'ainode service install --force' to re-render the unit)[/dim]")
         else:
             console.print("  Installing AINode service...")
-            install_service(user_mode=user_mode, reload=not in_container)
+            install_service(user_mode=user_mode, reload=not in_container, force=force)
             console.print("  [green]✓[/green] Unit file written")
         console.print("  Enabling service...")
         enable_service(user_mode=user_mode)
@@ -732,7 +750,14 @@ def main():
         "--user", action="store_true", help="Use user-level systemd (no sudo required)"
     )
     service_sub = service_parser.add_subparsers(dest="service_action")
-    service_sub.add_parser("install", help="Install, enable, and start AINode service")
+    svc_install_parser = service_sub.add_parser(
+        "install", help="Install, enable, and start AINode service"
+    )
+    svc_install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-render the unit file even if the service is already installed",
+    )
     service_sub.add_parser("uninstall", help="Stop, disable, and remove AINode service")
     service_sub.add_parser("status", help="Show AINode service status")
     svc_logs_parser = service_sub.add_parser("logs", help="Show AINode service logs")
