@@ -13,8 +13,9 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from ainode.training.autodata import core, meta
+from ainode.training.autodata import core, meta, valset
 from ainode.training.autodata.core import AutoDataConfig, Endpoint, run
+from ainode.training.autodata.valset import evaluate, valset_items, valset_lift
 from ainode.training.autodata.verify import is_correct
 from ainode.training.engine import TrainingManager
 from ainode.training.api_routes import setup_training_routes
@@ -104,6 +105,107 @@ def test_signal_shift_exact_vs_verify(capsys):
 
 def test_meta_demo():
     meta.demo()  # asserts internally: yield rises round-over-round to the harder prompt
+
+
+# --- v2.2: Evalchemy-style val-set objective -------------------------------------------
+
+def test_valset_demo():
+    valset.demo()  # asserts internally: teaching traces lift primed val-accuracy, junk doesn't
+
+
+def test_meta_valset_demo():
+    meta.demo_valset()  # asserts internally: the meta-loop optimizes held-out lift, not yield
+
+
+def _valset_cfg(**over):
+    base = dict(task_spec="x", gen_prompt="x", n_tasks=1, concurrency=1, judge_mode="verify",
+                challenger=Endpoint("u", "challenger"), weak=Endpoint("u", "weak"),
+                strong=Endpoint("u", "strong"), judge=Endpoint("u", "judge"),
+                val_set=[{"input": "L1", "reference": "1"}, {"input": "L2", "reference": "1"}],
+                val_shots=2)
+    base.update(over)
+    return AutoDataConfig(**base)
+
+
+def _fake_hint(ep, messages, json_mode):
+    """weak val solver: clears probe L{req} iff a few-shot HINT>=req is in context."""
+    last = messages[-1]["content"]
+    if last and last[0] == "L" and last[1:].isdigit():
+        req = int(last[1:])
+        hints = [int(t.split("=", 1)[1].rstrip(","))
+                 for m in messages for t in str(m.get("content", "")).split()
+                 if t.startswith("HINT=") and t.split("=", 1)[1].rstrip(",").isdigit()]
+        return "answer = 1" if (hints and max(hints) >= req) else "answer = 0"
+    return "answer = 0"
+
+
+def test_valset_evaluate_is_gt_graded():
+    """Verified accuracy uses the trusted verifier (verify-mode), not substring — the weak
+    solver clears both probes only when the teaching hint is in the few-shot context."""
+    core.call_model = _fake_hint
+    try:
+        cfg = _valset_cfg()
+        items = valset_items(cfg)
+        assert evaluate(cfg, cfg.weak, items)["acc"] == 0.0            # cold: no hint -> 0/2
+        shots = [{"conversations": [{"from": "human", "value": "K"},
+                                    {"from": "gpt", "value": "HINT=2, answer = 1"}]}] * 2
+        assert evaluate(cfg, cfg.weak, items, shots=shots)["acc"] == 1.0  # primed -> 2/2
+    finally:
+        core.call_model = core._http_chat
+
+
+def test_valset_lift_teaching_vs_junk():
+    """The objective separates a teaching batch (positive lift) from a junk batch (zero lift)."""
+    core.call_model = _fake_hint
+    try:
+        cfg = _valset_cfg()
+        teach = [{"conversations": [{"from": "human", "value": "K"},
+                                    {"from": "gpt", "value": "HINT=2, answer = 1"}]}] * 2
+        junk = [{"conversations": [{"from": "human", "value": "K"},
+                                   {"from": "gpt", "value": "HINT=0, answer = 1"}]}] * 2
+        assert valset_lift(cfg, teach)["lift"] == 1.0
+        assert valset_lift(cfg, junk)["lift"] == 0.0
+        # empty val_set -> objective degrades to a zero, never raises
+        assert valset_lift(_valset_cfg(val_set=[]), teach)["lift"] == 0.0
+    finally:
+        core.call_model = core._http_chat
+
+
+def test_meta_valset_requires_val_set():
+    """objective='valset' with no probes is a config error, surfaced clearly (not silent)."""
+    with pytest.raises(ValueError):
+        meta.meta_optimize(_valset_cfg(val_set=[], objective="valset"), max_rounds=1)
+
+
+def test_meta_yield_path_unchanged_by_v22():
+    """The v2.1 yield objective still returns its keys and optimizes yield — no regression."""
+    def fake(ep, messages, json_mode):
+        sysmsg = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        last = messages[-1]["content"]
+        if json_mode and "task-generator" in last:
+            ds = [int(x) for x in __import__("re").findall(r"DIFF=(\d+)", last)]
+            return json.dumps({"prompt": f"DIFF={(max(ds) if ds else 0) + 1}"})
+        if json_mode and "Generate" in last:
+            d = int((__import__("re").search(r"DIFF=(\d+)", sysmsg) or [0, "0"])[1])
+            return json.dumps({"tasks": [{"input": f"L{d}_{i}", "reference": None} for i in range(6)]})
+        if json_mode and "Candidate answer" in last:
+            return json.dumps({"correct": "CORRECT" in last})
+        level = int((__import__("re").search(r"L(\d+)_", last) or [0, "0"])[1])
+        ability = 0 if ep.model == "weak" else 2
+        return "CORRECT" if level <= ability else "WRONG"
+
+    core.call_model = fake
+    try:
+        cfg = AutoDataConfig(
+            task_spec="x", gen_prompt="DIFF=0", n_tasks=6, concurrency=1,
+            challenger=Endpoint("u", "challenger"), weak=Endpoint("u", "weak"),
+            strong=Endpoint("u", "strong"), judge=Endpoint("u", "judge"))
+        out = meta.meta_optimize(cfg, target_yield=30, max_rounds=4)
+        assert out["objective"] == "yield"
+        assert out["best_score"] == out["best_yield"] and out["best_lift"] is None
+        assert out["rounds"][-1]["yield_pct"] > out["rounds"][0]["yield_pct"]
+    finally:
+        core.call_model = core._http_chat
 
 
 def _fake(ep, messages, json_mode):

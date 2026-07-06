@@ -6,3 +6,4 @@ only "zone of proximal development" examples: tasks the STRONG solver gets right
 WEAK solver gets wrong (Δ = I_strong - I_weak == 1).
 """
 from .core import run, AutoDataConfig  # noqa: F401
+from .valset import valset_lift, evaluate  # noqa: F401  # v2.2 Evalchemy-style val-set objective

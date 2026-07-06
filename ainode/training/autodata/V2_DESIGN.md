@@ -45,10 +45,55 @@ Expose what they ablated, with their best-performers as defaults; the meta-opt s
   synthetically (your small-dataset → big-dataset insight). Real-world seed → synthetic scale.
 
 ## Build slices (each its own /goal, smallest-first)
-- **v2.1 — meta-optimizer** (the yield fix): the `P_t→P_{t+1}` loop + val-set objective. Biggest payoff.
-- **v2.2 — Evalchemy integration**: wire Evalchemy as the verifier/objective (served-endpoint eval).
+- **v2.1 — meta-optimizer** (the yield fix): the `P_t→P_{t+1}` loop + Δ=1-yield proxy. SHIPPED (`meta.py`).
+- **v2.2 — Evalchemy-style val-set objective** (the *real* yield fix): swap the noisy keep-rate proxy
+  for a held-out, GT-graded LIFT objective. **IMPLEMENTED** (`valset.py` + `meta.py objective="valset"`). See below.
 - **v2.3 — recipe knobs + OpenThoughts seeds**: the methodology menu + dataset bootstrapping.
 - **v2.4 — lift ingestion**: documents → structured seeds → synthetic extension.
+
+## v2.2 — the val-set objective (IMPLEMENTED)
+
+**Why (the honest finding, 2026-06-28):** live yield was noisy/low (best ~25%). Root cause is
+the **eval signal**, not the optimizer. v2.1's reward is the per-batch Δ=1 keep-rate — a
+self-graded proxy that (a) re-samples fresh tasks every round (the number wobbles for reasons
+unrelated to P) and (b) rode exact-match arithmetic, whose thin ZPD mislabels correct-but-
+reformatted answers. Optimizing that proxy chases noise.
+
+**What v2.2 optimizes instead — measured lift on a held-out val set:**
+
+    lift(P) = acc(weak | few-shot of D(P))  −  acc(weak alone)      # on a FIXED, GT-labeled val set
+
+- `D(P)` = the round's kept Δ=1 "teacher" traces (strong-solves / weak-fails).
+- The weak solver is scored on a fixed, ground-truth-labeled val set (`val_set`), **cold**
+  (baseline, computed once) and **primed** with a few-shot sample (`val_shots`) of `D(P)`.
+- Both are graded by the **same trusted verifier** the Δ-filter uses (`core.judge_correct` →
+  `verify.py` value-verify + rubric fallback) — the Evalchemy "proven verifier" role.
+- This is **in-context learning as a torch-free proxy for fine-tuning lift**: if the kept
+  traces teach, showing a few raises verified val accuracy; if the batch is junk, lift ≈ 0.
+  Because the val set is fixed and GT-graded, the reward is **stable and comparable
+  round-over-round** — the property raw keep-rate lacks. Evalchemy grades served vLLM OpenAI
+  endpoints, so this drops onto AInode-served models with no new infra (pure HTTP, stdlib-only).
+
+**Where it lives:** `valset.py` (`evaluate`, `valset_lift`, self-check `demo()`); the meta-loop
+(`meta.py meta_optimize(..., objective="valset")`) tracks `best_lift`/`best_score`, feeds the
+lift trajectory to the prompt-optimizer, and stops at `val_target`. The v2.1 `objective="yield"`
+path is the untouched default — nothing regresses. Config keys: `objective`, `val_set`,
+`val_shots`, `val_target` (see `core.AutoDataConfig`). CLI: `--meta --objective valset`.
+
+**Offline-testable:** `valset.demo()`, `meta.demo_valset()`, and pytest cases in
+`tests/test_autodata.py` run the whole objective with injected fake clients — no network. Live
+endpoints are exercised by the operator via the recipe below.
+
+## RESULTS (live fleet run — to be recorded by the operator)
+
+> Placeholder for the first live `--objective valset` run on AInode-served models. Fill in:
+>
+> | date | domain | weak / strong / judge | val_set size | baseline acc | best lift | best round P (excerpt) | rounds | notes |
+> |------|--------|-----------------------|--------------|--------------|-----------|------------------------|--------|-------|
+> | _TBD_ | _math_ | _\<weak\> / \<strong\> / \<judge\>_ | _n_ | _%_ | _Δ_ | _…_ | _k_ | _vs. v2.1 yield-proxy baseline_ |
+>
+> Compare against the v2.1 yield-proxy baseline (best ~25% keep-rate) to confirm the objective
+> swap raises measured teaching value, not just the proxy number.
 
 ## Non-goals (still)
 - Re-deriving curation research (we adopt Open Thoughts' findings).
