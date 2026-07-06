@@ -156,7 +156,7 @@ public mirror:
 ```bash
 docker pull ghcr.io/getainode/ainode:latest      # canonical (always newest)
 docker pull argentaios/ainode:latest             # Docker Hub mirror
-# pin a release instead: …/ainode:0.4.44
+# pin a release instead: …/ainode:0.5.0
 ```
 
 ### Two nodes (distributed mode)
