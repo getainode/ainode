@@ -349,8 +349,8 @@ class TestDelete:
 # ---------------------------------------------------------------------------
 
 pytest.importorskip("aiohttp")
-from aiohttp import web
-from ainode.models.api_routes import register_model_routes
+from aiohttp import web  # noqa: E402
+from ainode.models.api_routes import register_model_routes  # noqa: E402
 
 
 class TestModelAPI:

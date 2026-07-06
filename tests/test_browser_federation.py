@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import ainode.api.server as server
 import ainode.engine.backends as backends_mod
@@ -56,13 +55,16 @@ def test_load_body_sets_gpu_mem_util(monkeypatch):
     made = {}
     class _Eng:
         def __init__(self, cfg, instance_id=""):
-            self.config = cfg; self.instance_id = instance_id; made["cfg"] = cfg
+            self.config = cfg
+            self.instance_id = instance_id
+            made["cfg"] = cfg
         def is_running(self): return False
         def stop(self): pass
         def start(self): return True
     monkeypatch.setattr(backends_mod, "get_backend",
                         lambda cfg, instance_id="", on_ready=None: _Eng(cfg, instance_id))
-    cfg = NodeConfig(node_id="n"); cfg.save = lambda: None
+    cfg = NodeConfig(node_id="n")
+    cfg.save = lambda: None
     app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     asyncio.run(mr.handle_model_load(_Req(app, {"model": "m/x", "gpu_memory_utilization": 0.25})))
@@ -116,7 +118,9 @@ def test_proxy_fails_over_past_ghost(monkeypatch):
            "client_session": _Sess(), "metrics_collector": _Collector()}
 
     class _R:
-        method = "POST"; path = "/v1/completions"; headers = {}
+        method = "POST"
+        path = "/v1/completions"
+        headers = {}
         def __init__(self): self.app = app
         async def read(self): return b'{"model":"M","prompt":"hi"}'
     resp = asyncio.run(server.proxy_to_vllm(_R()))
@@ -129,7 +133,8 @@ def test_failed_load_clears_model_claim(monkeypatch):
         def is_running(self): return False
         def stop(self): pass
         def start(self): return False          # launch fails
-    cfg = NodeConfig(node_id="n", model="m/x"); cfg.save = lambda: None
+    cfg = NodeConfig(node_id="n", model="m/x")
+    cfg.save = lambda: None
     app = {"engine": _Eng(), "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     resp = asyncio.run(mr.handle_model_load(_Req(app, {"model": "m/x"})))

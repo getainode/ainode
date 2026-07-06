@@ -19,7 +19,6 @@ from ainode.engine.backends.eugr import (
     DockerEngineError,
     EugrBackend,
     EugrBackendError,
-    _local_ip_for_interface,
 )
 
 

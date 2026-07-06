@@ -23,7 +23,7 @@ USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 
 # Image tag follows the package version so a fresh install pulls the matching
 # image (env override for testing pre-release tags). Republished to GHCR per release.
-from ainode import __version__ as _AINODE_VERSION
+from ainode import __version__ as _AINODE_VERSION  # noqa: E402
 
 AINODE_IMAGE_TAG = os.environ.get("AINODE_IMAGE_TAG") or _AINODE_VERSION
 AINODE_IMAGE = f"ghcr.io/getainode/ainode:{AINODE_IMAGE_TAG}"

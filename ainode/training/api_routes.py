@@ -336,7 +336,10 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
     merge_config = TrainingConfig(
         base_model=job.config.base_model,
         dataset_path="__merge__",  # sentinel — no dataset needed
-        method="__merge__",
+        # "lora": validate() only allows lora/full/qlora/quantize, and method is
+        # never read again — the merge itself runs via _do_merge() below, not
+        # through the manager's normal _build_command() job-start path.
+        method="lora",
         output_dir=merged_dir_name,
         run_name=f"merge-{job_id}",
         description=f"LoRA merge from job {job_id}",

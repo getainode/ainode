@@ -2,7 +2,6 @@
 
 import time
 import json
-import pytest
 from unittest.mock import MagicMock
 
 from ainode.discovery.broadcast import (

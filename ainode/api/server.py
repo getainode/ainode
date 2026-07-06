@@ -771,7 +771,8 @@ def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int
         seen = set()
         # The node's primary/solo model is served on its main api_port.
         if getattr(n, "model", "") == model and node_port not in seen:
-            bucket.append((host, node_port)); seen.add(node_port)
+            bucket.append((host, node_port))
+            seen.add(node_port)
         # Each stacked instance is served on its OWN port — a co-resident 2nd
         # model on this node lives at :8001, not the node's main :8000.
         for inst in (getattr(n, "instances", []) or []):
@@ -779,7 +780,8 @@ def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int
                 continue
             iport = inst.get("api_port") or node_port
             if iport not in seen:
-                bucket.append((host, iport)); seen.add(iport)
+                bucket.append((host, iport))
+                seen.add(iport)
     return local + remote
 
 
@@ -1309,14 +1311,14 @@ async def handle_set_model(request: web.Request) -> web.Response:
 
 async def handle_version_check(request: web.Request) -> web.Response:
     """GET /api/version/check — compare local version against latest GHCR tag."""
-    import subprocess as _sp
     current = __version__
     try:
         # Ask the registry for the digest of :latest, then find which
         # version tag matches. We do this without auth (public image).
         loop = asyncio.get_event_loop()
         def _fetch():
-            import urllib.request, json as _json
+            import urllib.request
+            import json as _json
             token_url = "https://ghcr.io/token?service=ghcr.io&scope=repository:getainode/ainode:pull"
             with urllib.request.urlopen(token_url, timeout=5) as r:
                 token = _json.loads(r.read())["token"]
@@ -1374,7 +1376,7 @@ async def handle_engine_update(request: web.Request) -> web.Response:
         if result.returncode != 0:
             return False, result.stderr
         # Restart the systemd service via the host socket
-        restart = await loop.run_in_executor(
+        await loop.run_in_executor(
             None,
             lambda: _sp.run(
                 ["systemctl", "restart", "ainode"],

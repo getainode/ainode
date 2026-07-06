@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ainode.datasets.manager import Dataset, DatasetManager, DatasetSource
+from ainode.datasets.manager import DatasetManager, DatasetSource
 
 
 def setup_dataset_routes(app: web.Application, manager: DatasetManager) -> None:

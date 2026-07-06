@@ -1,6 +1,6 @@
 """Tests for ainode.core.gpu."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from ainode.core.gpu import GPUInfo, detect_gpu, gpu_summary
 
 

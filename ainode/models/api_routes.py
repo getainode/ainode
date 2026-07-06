@@ -498,7 +498,6 @@ async def handle_model_unload(request: web.Request) -> web.Response:
 
     engine = request.app.get("engine")
     config = request.app["config"]
-    stopped = False
     errors = []
 
     # Instance-aware unload: stop the ONE instance serving `model`, leaving any

@@ -213,7 +213,7 @@ def test_load_appends_when_boot_engine_already_seeded(monkeypatch):
     from ainode.discovery.instance import InstanceRecord
     from ainode.engine.instance_manager import InstanceManager
 
-    made = _patch_backend(monkeypatch)
+    _patch_backend(monkeypatch)
     cfg = NodeConfig(node_id="spark1", api_port=8000)
     cfg.model = "boot-model"
     cfg.save = lambda: None

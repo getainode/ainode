@@ -1,7 +1,6 @@
 """Tests for cluster state, leader election, model routing, and summary."""
 
 import time
-import pytest
 
 from ainode.discovery.broadcast import (
     NodeAnnouncement,
