@@ -84,16 +84,32 @@ path is the untouched default — nothing regresses. Config keys: `objective`, `
 `tests/test_autodata.py` run the whole objective with injected fake clients — no network. Live
 endpoints are exercised by the operator via the recipe below.
 
-## RESULTS (live fleet run — to be recorded by the operator)
+## RESULTS (live fleet run — 2026-07-06)
 
-> Placeholder for the first live `--objective valset` run on AInode-served models. Fill in:
->
-> | date | domain | weak / strong / judge | val_set size | baseline acc | best lift | best round P (excerpt) | rounds | notes |
-> |------|--------|-----------------------|--------------|--------------|-----------|------------------------|--------|-------|
-> | _TBD_ | _math_ | _\<weak\> / \<strong\> / \<judge\>_ | _n_ | _%_ | _Δ_ | _…_ | _k_ | _vs. v2.1 yield-proxy baseline_ |
->
-> Compare against the v2.1 yield-proxy baseline (best ~25% keep-rate) to confirm the objective
-> swap raises measured teaching value, not just the proxy number.
+First live `--objective valset` run on AInode-served models (4-node GB10 fleet, ainode 0.5.0),
+executed from the spark-1 host against fleet endpoints:
+
+| date | domain | weak / strong+judge+challenger | val_set size | baseline acc | best lift | p (exact McNemar) | rounds | notes |
+|------|--------|--------------------------------|--------------|--------------|-----------|-------------------|--------|-------|
+| 2026-07-06 | math word problems | Qwen2.5-0.5B-Instruct / Nemotron-Cascade-2-30B-A3B-NVFP4 | 24 (GT-verified) | 0.500 (12/24) | **+0.458** (0.958 primed) | **0.0005** (significant) | 1 (early stop at target) | yield 44% (7/16 kept); config `n_tasks=16`, `val_shots=3`, `val_target=0.15` |
+
+**Read-out.** The weak solver alone scored 12/24; primed with a 3-shot sample of the round's
+7 kept Δ=1 teacher traces it scored 23/24 — lift +0.458 at p=0.0005 on the paired exact test,
+clearing the 0.15 target with significance in the first round (the loop stopped early by
+design). Keep-rate was 44% vs. v2.1's noisy ~25% best — and unlike v2.1, the number now
+measures *teaching value on held-out probes*, not the keep-rate proxy. The verify-mode judge
++ val-set objective resolved the thin-ZPD problem that motivated v2.2.
+
+**Caveats (honest limits).** Single round — the prompt optimizer never had to iterate, so the
+history-aware rewriting path is exercised only by the offline demos so far; lift is
+in-context-learning lift (the torch-free proxy), not fine-tuning lift; val set is 24 probes
+(small but paired + exact-tested); judge and strong solver share one model (Nemotron). A
+multi-round run on a harder domain (or lower initial-P quality) is the natural next probe.
+
+**Ops notes.** Challenger `max_tokens` must accommodate reasoning models — the run initially
+crashed with truncated JSON at the 512-token endpoint default (fixed via config:
+challenger 6000, n_tasks 16). Filed: chunked task generation in `generate_tasks` would remove
+the monolithic-JSON truncation class entirely.
 
 ## Non-goals (still)
 - Re-deriving curation research (we adopt Open Thoughts' findings).
