@@ -38,6 +38,11 @@ class JobStatus(str, Enum):
 
 
 QUANT_IMAGE = os.environ.get("AINODE_QUANT_IMAGE") or "ainode-quant:0.17.0-t5"
+# LoRA / adapter-merge jobs run in a spawned GPU container too — the slim
+# orchestrator image has no torch/peft/datasets. Default to the quant image
+# (torch 2.10 / transformers 5.10 / datasets 5.0 / accelerate 1.13; peft is
+# pip-shimmed at launch, see _build_container_command). Override per-deploy.
+TRAIN_IMAGE = os.environ.get("AINODE_TRAIN_IMAGE") or QUANT_IMAGE
 
 
 def _host_path(container_path: str) -> str:
@@ -182,6 +187,10 @@ class TrainingJob:
         self.logs: collections.deque[str] = collections.deque(maxlen=5000)
         self._process: Optional[subprocess.Popen] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        # Explicit override for the spawned GPU container name. Set by callers
+        # whose container is spawned outside the normal start() path (merge jobs),
+        # so stop() can still `docker kill` it. None → derive from method/job_id.
+        self._container_name_override: Optional[str] = None
 
         # Set output directory
         if self.config.output_dir is None:
@@ -249,12 +258,42 @@ class TrainingJob:
                 self._process.kill()
                 self._process.wait(timeout=5)
 
+        # For container-spawn jobs (quantize always; lora/qlora/full in-container;
+        # merge) self._process above is only the local `docker run` CLIENT — a
+        # SIGKILL to it is NOT relayed to the `--gpus all` container, which would
+        # keep running and holding the GPU with no record anywhere. Explicitly
+        # remove the named container to free the device (mirrors
+        # NvidiaBackend.stop()). Best-effort — swallow all errors.
+        name = self._container_name()
+        if name:
+            for args in (["docker", "stop", name], ["docker", "rm", "-f", name]):
+                try:
+                    subprocess.run(args, capture_output=True, text=True, timeout=30)
+                except Exception:
+                    self._log(f"{' '.join(args)} failed (best-effort)")
+
         self.status = JobStatus.CANCELLED
         self.end_time = time.time()
         self._log("Job cancelled")
 
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
+
+    def _container_name(self) -> Optional[str]:
+        """Deterministic name of this job's spawned GPU container, or None for the
+        in-process host-venv path (nothing to ``docker kill``).
+
+        Quantize always runs in a container; lora/qlora/full only in
+        container-spawn mode (``AINODE_IN_CONTAINER``); merge jobs register an
+        explicit override because their container is spawned outside ``start()``.
+        """
+        if self._container_name_override:
+            return self._container_name_override
+        if self.config.method == "quantize":
+            return f"ainode-quant-{self.job_id}"
+        if os.environ.get("AINODE_IN_CONTAINER"):
+            return f"ainode-train-{self.job_id}"
+        return None
 
     def get_status(self) -> dict:
         """Return a summary of the current job state."""
@@ -290,6 +329,19 @@ class TrainingJob:
 
         nproc = max(1, int(_detect_local_gpu_count()))
         needs_ddp = c.distributed or c.num_nodes > 1 or (c.method == "full" and nproc > 1)
+
+        # In the shipped (slim) orchestrator container there is no torch/peft, so
+        # the in-process `python -m ...` path is dead on arrival. Spawn a GPU
+        # container from TRAIN_IMAGE instead — same pattern as quantize.
+        if os.environ.get("AINODE_IN_CONTAINER"):
+            if needs_ddp:
+                raise RuntimeError(
+                    "Distributed training (DDP / multi-node) is not supported in "
+                    "container-spawn mode — run AINode in host-venv mode for multi-node "
+                    f"DDP. (distributed={c.distributed}, num_nodes={c.num_nodes}, "
+                    f"method={c.method}, local_gpus={nproc})"
+                )
+            return self._build_container_command()
 
         if not needs_ddp:
             return [
@@ -339,6 +391,84 @@ class TrainingJob:
         if token:
             cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
         cmd += [QUANT_IMAGE, "python3", "/opt/ainode/run_quant.py", "--config", "/job/config.json"]
+        return cmd
+
+    def _build_container_command(self) -> list[str]:
+        """LoRA/QLoRA/full (single-GPU) training in a spawned GPU container — the
+        slim orchestrator has no torch/peft. Mirror _build_quant_command: --gpus all,
+        host-translated mounts, foreground so the existing Popen monitor streams
+        AINODE_PROGRESS and the container exit code signals completion.
+
+        The train image bakes no training runner, so we copy _run_training.py into
+        the job dir (mounted at /job) and rewrite a container-view config whose
+        output_dir + dataset_path point at the mounts below — otherwise checkpoints
+        land in the --rm layer and vanish on exit."""
+        import shutil
+
+        c = self.config
+        # Host-path prereq (contract tripwire) — same guard as quantize: without
+        # AINODE_HOST_HOME the RW mounts resolve to empty root-owned host dirs and
+        # the adapter is written into a throwaway --rm layer (lost on exit).
+        if not os.environ.get("AINODE_HOST_HOME"):
+            raise RuntimeError(
+                "container training requires AINODE_HOST_HOME (the host path mounted "
+                "at AINODE_HOME) so the output mount is host-backed — refusing to run, "
+                "the adapter/checkpoints would be lost with the --rm container."
+            )
+
+        # The train image knows nothing of the ainode package — copy the runner in.
+        shutil.copy2(Path(__file__).parent / "_run_training.py", self._job_dir / "_run_training.py")
+
+        # Container-view config: remap absolute output_dir + dataset_path onto the
+        # mounts. job.config.output_dir stays the orchestrator path (same host inode
+        # via the /job mount) so handle_get_output/download resolve unchanged.
+        container_cfg = dict(c.to_dict())
+        container_cfg["output_dir"] = "/job/output"
+        datasets_dir = str(AINODE_HOME / "datasets")
+        ds = c.dataset_path or ""
+        if ds.startswith(datasets_dir):
+            container_cfg["dataset_path"] = "/ainode-datasets/" + ds[len(datasets_dir):].lstrip("/")
+        elif ds and not ds.startswith("/") and not ds.startswith("~"):
+            # Relative dataset_path (e.g. "alpaca.jsonl" — exactly what the New Run
+            # wizard's placeholder suggests) resolves against ~/.ainode/datasets on
+            # the host. The runner's own resolver would look under AINODE_HOME=/job
+            # (the container's job dir), where the datasets aren't mounted, so remap
+            # it here onto the /ainode-datasets mount IF the file exists there.
+            # Leave it untouched otherwise, so a HF hub repo id ("tatsu-lab/alpaca")
+            # still passes through to load_dataset(). Mirrors _run_training.py's own
+            # exists()-gated resolution.
+            if (AINODE_HOME / "datasets" / ds).exists():
+                container_cfg["dataset_path"] = "/ainode-datasets/" + ds.lstrip("/")
+        (self._job_dir / "config.container.json").write_text(json.dumps(container_cfg, indent=2))
+
+        models_host = _host_path(str(AINODE_HOME / "models"))
+        datasets_host = _host_path(datasets_dir)
+        jobdir_host = _host_path(str(self._job_dir))
+        token = c.hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+
+        cmd: list[str] = [
+            "docker", "run", "--rm",
+            "--name", f"ainode-train-{self.job_id}",
+            "--gpus", "all", "--network", "host", "--ipc=host", "--shm-size", "16g",
+            "-v", f"{models_host}:/ainode-models",             # RW: HF cache + on-disk weights
+            "-v", f"{datasets_host}:/ainode-datasets:ro",      # training data
+            "-v", f"{jobdir_host}:/job",                       # runner + config + output
+            "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",      # persist HF pulls into the store
+            "-e", "AINODE_HOME=/job",                          # runner config fallback (relative datasets)
+        ]
+        if token:
+            cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
+        # ponytail: peft (and bitsandbytes for qlora) aren't baked into the train
+        # image yet — pip-shim them at launch. TODO(ponytail): bake peft +
+        # bitsandbytes into the next quant/train-image build and drop this shim.
+        # bitsandbytes has no aarch64 wheel on some indexes; if the install fails the
+        # container exits non-zero and the pip error lands in the job log (readable).
+        pip_pkgs = "peft" + (" bitsandbytes" if c.method == "qlora" else "")
+        cmd += [
+            TRAIN_IMAGE, "sh", "-c",
+            f"pip install -q --no-deps {pip_pkgs} && "
+            "python3 /job/_run_training.py --config /job/config.container.json",
+        ]
         return cmd
 
     async def _monitor(self) -> None:
@@ -418,6 +548,66 @@ class TrainingJob:
         """Append a timestamped log entry."""
         ts = time.strftime("%H:%M:%S")
         self.logs.append(f"[{ts}] {msg}")
+
+
+def build_merge_command(
+    merge_job: "TrainingJob",
+    base_model: str,
+    adapter_dir: Path,
+    merged_dir: Path,
+    hf_token: Optional[str] = None,
+) -> list[str]:
+    """Spawn a GPU container to merge a LoRA/QLoRA adapter into its base model.
+
+    The slim orchestrator has no peft/torch, so — like training and quantize —
+    the merge runs in TRAIN_IMAGE. Copies the self-contained _run_merge.py into
+    the merge job dir, mounts the adapter RO, the merged-output parent RW, and the
+    models store (HF cache), and pip-shims peft at launch. Foreground: the caller
+    streams AINODE_PROGRESS and the exit code signals completion."""
+    import shutil
+
+    # Same host-backing tripwire as training/quantize.
+    if not os.environ.get("AINODE_HOST_HOME"):
+        raise RuntimeError(
+            "container merge requires AINODE_HOST_HOME (the host path mounted at "
+            "AINODE_HOME) so the merged model is host-backed — refusing to run, it "
+            "would be lost with the --rm container."
+        )
+
+    job_dir = merge_job._job_dir
+    adapter_dir = Path(adapter_dir)
+    merged_dir = Path(merged_dir)
+    merged_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(__file__).parent / "_run_merge.py", job_dir / "_run_merge.py")
+
+    token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+    merge_cfg = {
+        "base_model": base_model,
+        "adapter_dir": "/adapter",
+        "output_dir": f"/out/{merged_dir.name}",
+        "hf_token": token,
+    }
+    (job_dir / "merge_config.json").write_text(json.dumps(merge_cfg, indent=2))
+
+    cmd: list[str] = [
+        "docker", "run", "--rm",
+        "--name", f"ainode-merge-{merge_job.job_id}",
+        "--gpus", "all", "--network", "host", "--ipc=host", "--shm-size", "16g",
+        "-v", f"{_host_path(str(job_dir))}:/job",                          # runner + config
+        "-v", f"{_host_path(str(adapter_dir))}:/adapter:ro",               # LoRA adapter
+        "-v", f"{_host_path(str(merged_dir.parent))}:/out",                # RW: merged model
+        "-v", f"{_host_path(str(AINODE_HOME / 'models'))}:/ainode-models",  # base weights / HF cache
+        "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",
+    ]
+    if token:
+        cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
+    # ponytail: peft pip-shim — bake it into the next train-image build and drop this.
+    cmd += [
+        TRAIN_IMAGE, "sh", "-c",
+        "pip install -q --no-deps peft && "
+        "python3 /job/_run_merge.py --config /job/merge_config.json",
+    ]
+    return cmd
 
 
 TRAINING_TEMPLATES: list[dict] = [
