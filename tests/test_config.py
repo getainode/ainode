@@ -1,7 +1,6 @@
 """Tests for ainode.core.config."""
 
 import json
-from pathlib import Path
 from ainode.core.config import NodeConfig
 
 

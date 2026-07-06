@@ -19,7 +19,6 @@ def fresh_config(tmp_path):
     )
     # Override save to write to tmp instead of ~/.ainode
     config_file = tmp_path / "config.json"
-    original_save = config.save
 
     def save_to_tmp():
         import json

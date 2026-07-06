@@ -8,9 +8,7 @@ import time
 import uuid
 
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -536,15 +534,15 @@ def cmd_role(args):
     # Workers don't need a model — clear it so the engine is skipped on start
     if job == "worker":
         config.model = None
-        console.print(f"\n  [bold cyan]Role set to: worker[/bold cyan]")
+        console.print("\n  [bold cyan]Role set to: worker[/bold cyan]")
         console.print("  This node will start immediately and wait for the")
         console.print("  master to assign work. No model required.\n")
     elif job == "master":
-        console.print(f"\n  [bold green]Role set to: master[/bold green]")
+        console.print("\n  [bold green]Role set to: master[/bold green]")
         console.print("  This node will manage the cluster and run the inference")
         console.print("  engine. Pick a model via the web UI at http://localhost:3000\n")
     else:
-        console.print(f"\n  [bold]Role set to: solo[/bold]")
+        console.print("\n  [bold]Role set to: solo[/bold]")
         console.print("  Standalone node — not part of a cluster.\n")
 
     config.save()

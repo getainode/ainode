@@ -88,7 +88,7 @@ def render(collector: MetricsCollector) -> str:
     # Also emit count + sum so Prometheus recording rules can compute
     # additional aggregates (avg = sum/count) if a scraper wants them.
     lines.append(f"ainode_request_latency_milliseconds_count {total}")
-    lines.append(f"ainode_request_latency_milliseconds_sum 0")  # exact sum not tracked
+    lines.append("ainode_request_latency_milliseconds_sum 0")  # exact sum not tracked
     lines.append("")
 
     # -- GPU -----------------------------------------------------------------

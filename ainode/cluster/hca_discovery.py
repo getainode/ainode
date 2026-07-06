@@ -22,7 +22,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 

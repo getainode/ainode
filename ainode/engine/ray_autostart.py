@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from ainode.discovery.cluster import ClusterState

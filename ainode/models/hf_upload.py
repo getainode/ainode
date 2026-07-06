@@ -92,13 +92,13 @@ def demo() -> None:
         def role(r):
             return {"auth": {"accessToken": {"role": r}}, "name": "me"}
     # read-only must raise
-    import types
     g = globals()
     saved = g["_whoami"]
     try:
         g["_whoami"] = lambda t: _Who.role("read")
         try:
-            assert_write_scope("x"); assert False, "read token should reject"
+            assert_write_scope("x")
+            raise AssertionError("read token should reject")
         except ValueError:
             pass
         g["_whoami"] = lambda t: _Who.role("write")

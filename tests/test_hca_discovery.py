@@ -8,9 +8,7 @@ calls.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Any, List
 from unittest import mock
 
 import pytest

@@ -10,7 +10,7 @@ from aiohttp import web
 
 from ainode.discovery.cluster import ClusterState
 from ainode.engine.sharding import ShardingPlanner, ShardingStrategy, ShardingConfig
-from ainode.engine.ray_setup import get_ray_status, start_ray_head, join_ray_cluster, stop_ray
+from ainode.engine.ray_setup import get_ray_status
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,6 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
 
     cluster: ClusterState = request.app["cluster_state"]
     config: NodeConfig = request.app["config"]
-    engine = request.app.get("engine")
 
     if min_nodes <= 1:
         # Delegate to the single-node load path so behaviour stays
@@ -122,7 +121,9 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         from ainode.models.api_routes import handle_model_load  # lazy import
         # Re-inject body so handle_model_load can read it
         class _ReqShim:
-            def __init__(self, orig, body): self._o = orig; self._b = body
+            def __init__(self, orig, body):
+                self._o = orig
+                self._b = body
             def __getattr__(self, k): return getattr(self._o, k)
             async def json(self): return self._b
         shim = _ReqShim(request, {"model": model})
@@ -138,7 +139,8 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         if getattr(n, "distributed_mode", "solo") == "member"
         and (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "member-ready", "serving")
     ]
-    fabric_of = lambda n: (getattr(n, "fabric_ip", "") or "").strip()
+    def fabric_of(n):
+        return (getattr(n, "fabric_ip", "") or "").strip()
     members_dump = [
         {"node_id": n.node_id, "node_name": n.node_name, "fabric_ip": fabric_of(n),
          "status": n.status.value if hasattr(n.status, "value") else str(n.status)}

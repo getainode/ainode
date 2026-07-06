@@ -47,7 +47,7 @@ def _download_max_workers() -> int:
     except (TypeError, ValueError):
         return 4
 
-from ainode.core.config import AINODE_HOME, MODELS_DIR
+from ainode.core.config import AINODE_HOME, MODELS_DIR  # noqa: E402
 
 
 @dataclass

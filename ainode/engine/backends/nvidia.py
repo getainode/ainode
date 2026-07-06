@@ -33,7 +33,6 @@ import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -44,7 +43,6 @@ from typing import Callable, Dict, List, Optional
 from ainode.cluster.hca_discovery import (
     build_nccl_ib_hca_whitelist,
     detect_fabric_ip,
-    list_local_hcas,
 )
 from ainode.core.config import LOGS_DIR, NodeConfig
 from ainode.engine.backends.base import EngineBackend

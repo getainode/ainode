@@ -3,7 +3,6 @@
 import json
 import os
 import stat
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -11,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from ainode.api.server import create_app
 from ainode.core.config import NodeConfig
-from ainode.secrets.manager import KNOWN_SECRETS, SecretsManager, _mask
+from ainode.secrets.manager import SecretsManager, _mask
 
 
 @pytest.fixture

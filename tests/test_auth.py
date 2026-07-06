@@ -1,15 +1,13 @@
 """Tests for ainode.auth — middleware, key management, enable/disable."""
 
-import json
 import pytest
 import pytest_asyncio
 from pathlib import Path
-from unittest.mock import patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from ainode.auth.middleware import AuthConfig, auth_middleware, AUTH_FILE
+from ainode.auth.middleware import AuthConfig, auth_middleware
 from ainode.auth.api_routes import register_auth_routes
 from ainode.core.config import NodeConfig
 
@@ -98,7 +96,7 @@ class TestAuthConfig:
         assert auth_config.validate_token(entry["key"])
 
     def test_enable_reuses_existing_key(self, auth_config):
-        first = auth_config.generate_key()
+        auth_config.generate_key()
         entry = auth_config.enable()
         assert entry["id"] == auth_config.api_keys[0]["id"]
         assert len(auth_config.api_keys) == 1

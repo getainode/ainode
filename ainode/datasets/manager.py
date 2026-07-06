@@ -18,7 +18,6 @@ URL downloads) is done lazily inside each ``add_*`` method.
 from __future__ import annotations
 
 import csv
-import io
 import json
 import shutil
 import time

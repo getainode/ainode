@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from ainode.discovery.broadcast import NodeAnnouncement, NodeStatus
 from ainode.discovery.cluster import ClusterNode, ClusterState

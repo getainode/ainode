@@ -9,7 +9,6 @@ actually invoking docker.
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from typing import Any, List
 from unittest import mock
 
@@ -24,9 +23,6 @@ from ainode.engine.backends import (
 from ainode.engine.backends.nvidia import (
     HEAD_CONTAINER_NAME,
     NVIDIA_VLLM_IMAGE,
-    RAY_CONTAINER_NAME_PREFIX,
-    RUN_CLUSTER_SCRIPT_FALLBACK,
-    RUN_CLUSTER_SCRIPT_SOURCE,
     WORKER_CONTAINER_NAME_PREFIX,
     NvidiaBackendError,
 )

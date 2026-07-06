@@ -1,11 +1,8 @@
 """Tests for ainode.service.systemd — unit file generation and service management."""
 
 import subprocess
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from ainode.service import systemd
 

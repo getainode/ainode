@@ -11,7 +11,6 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from ainode.datasets.manager import (
-    Dataset,
     DatasetFormat,
     DatasetManager,
     DatasetSource,
