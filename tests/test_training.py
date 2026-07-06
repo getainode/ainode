@@ -1,16 +1,20 @@
 """Tests for ainode.training — config validation, job lifecycle, manager queue, API routes."""
 
+import json
+import sys
 from pathlib import Path
 import pytest
 import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+import ainode.training.engine as engine
 from ainode.training.engine import (
     TrainingConfig,
     TrainingJob,
     TrainingManager,
     JobStatus,
+    build_merge_command,
 )
 from ainode.training.api_routes import setup_training_routes
 
@@ -784,3 +788,138 @@ class TestHFTokenPropagation:
         job_id = (await resp.json())["job_id"]
         resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
         assert (await resp2.json())["config"]["hf_token"] == "hf_explicit"
+
+
+# =============================================================================
+# Container-spawn command building (slim-image gap: no torch/peft in-process)
+# =============================================================================
+
+
+class TestContainerTrainingCommand:
+    """_build_command must spawn a GPU container when running in-container."""
+
+    def _job(self, tmp_path, monkeypatch, **cfg):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d", **cfg)
+        return TrainingJob(config)
+
+    def test_host_venv_path_unchanged(self, tmp_path, monkeypatch):
+        """No AINODE_IN_CONTAINER → the original in-process python path is used."""
+        monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+        job = self._job(tmp_path, monkeypatch)
+        cmd = job._build_command(job._job_dir / "config.json")
+        assert cmd[0] == sys.executable
+        assert "ainode.training._run_training" in cmd
+        assert "docker" not in cmd
+
+    def test_in_container_lora_docker_shape(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        job = self._job(tmp_path, monkeypatch, method="lora")
+        cmd = job._build_command(job._job_dir / "config.json")
+
+        assert cmd[:3] == ["docker", "run", "--rm"]
+        assert engine.TRAIN_IMAGE in cmd
+        assert "--gpus" in cmd and "all" in cmd
+        assert "--ipc=host" in cmd
+
+        # Model store + job dir mounted RW (no :ro suffix); datasets RO.
+        mounts = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-v"]
+        assert any(m.endswith(":/ainode-models") for m in mounts)
+        assert any(m.endswith(":/job") for m in mounts)
+        assert any(m.endswith(":/ainode-datasets:ro") for m in mounts)
+
+        # AINODE_HOME passed for the runner's config fallback.
+        assert "AINODE_HOME=/job" in cmd
+
+        # pip-shim installs peft (not bitsandbytes for plain lora); runner invoked.
+        shell = cmd[-1]
+        assert "pip install" in shell and "peft" in shell
+        assert "bitsandbytes" not in shell
+        assert "/job/_run_training.py" in shell
+        assert "/job/config.container.json" in shell
+
+        # Runner copied into the job dir; container-view config written + remapped.
+        assert (job._job_dir / "_run_training.py").exists()
+        ccfg = json.loads((job._job_dir / "config.container.json").read_text())
+        assert ccfg["output_dir"] == "/job/output"
+
+    def test_in_container_qlora_adds_bitsandbytes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        job = self._job(tmp_path, monkeypatch, method="qlora")
+        cmd = job._build_command(job._job_dir / "config.json")
+        shell = cmd[-1]
+        assert "peft" in shell and "bitsandbytes" in shell
+
+    def test_train_image_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.TRAIN_IMAGE", "custom/train:tag")
+        job = self._job(tmp_path, monkeypatch, method="lora")
+        cmd = job._build_command(job._job_dir / "config.json")
+        assert "custom/train:tag" in cmd
+
+    def test_in_container_requires_host_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+        job = self._job(tmp_path, monkeypatch, method="lora")
+        with pytest.raises(RuntimeError, match="AINODE_HOST_HOME"):
+            job._build_command(job._job_dir / "config.json")
+
+    def test_in_container_ddp_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        job = self._job(tmp_path, monkeypatch, method="lora", distributed=True, num_nodes=2)
+        with pytest.raises(RuntimeError, match="Distributed training"):
+            job._build_command(job._job_dir / "config.json")
+
+    def test_quantize_path_unchanged_in_container(self, tmp_path, monkeypatch):
+        """Quantize keeps its own container command (run_quant.py), not the train path."""
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", method="quantize", scheme="awq")
+        job = TrainingJob(config)
+        cmd = job._build_command(job._job_dir / "config.json")
+        assert "/opt/ainode/run_quant.py" in cmd
+        assert "/job/_run_training.py" not in " ".join(cmd)
+
+
+class TestMergeContainerCommand:
+    """build_merge_command spawns a GPU container mirroring the training pattern."""
+
+    def test_merge_docker_shape(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        merge_job = TrainingJob(TrainingConfig(base_model="m", dataset_path="__merge__"))
+        adapter_dir = tmp_path / "src" / "output"
+        adapter_dir.mkdir(parents=True)
+        merged_dir = tmp_path / "src" / "merged"
+
+        cmd = build_merge_command(merge_job, "base/model", adapter_dir, merged_dir, "hf_tok")
+
+        assert cmd[:3] == ["docker", "run", "--rm"]
+        assert engine.TRAIN_IMAGE in cmd
+        mounts = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-v"]
+        assert any(m.endswith(":/adapter:ro") for m in mounts)
+        assert any(m.endswith(":/out") for m in mounts)
+        assert any(m.endswith(":/ainode-models") for m in mounts)
+
+        shell = cmd[-1]
+        assert "pip install" in shell and "peft" in shell
+        assert "/job/_run_merge.py" in shell
+
+        # Runner copied + merge config written with remapped container paths.
+        assert (merge_job._job_dir / "_run_merge.py").exists()
+        mcfg = json.loads((merge_job._job_dir / "merge_config.json").read_text())
+        assert mcfg["adapter_dir"] == "/adapter"
+        assert mcfg["output_dir"] == "/out/merged"
+        assert mcfg["base_model"] == "base/model"
+
+    def test_merge_requires_host_home(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        merge_job = TrainingJob(TrainingConfig(base_model="m", dataset_path="__merge__"))
+        with pytest.raises(RuntimeError, match="AINODE_HOST_HOME"):
+            build_merge_command(merge_job, "base/model", tmp_path / "a", tmp_path / "b")

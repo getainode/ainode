@@ -352,30 +352,53 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
     # Run merge inline in executor (can take minutes)
     loop = asyncio.get_event_loop()
 
+    async def _merge_in_container() -> None:
+        """Slim orchestrator (no peft/torch): spawn a GPU container to merge,
+        streaming its stdout so the AINODE_PROGRESS protocol keeps working."""
+        from ainode.training.engine import build_merge_command
+        cmd = build_merge_command(merge_job, job.config.base_model, adapter_dir, merged_dir, job.config.hf_token)
+        merge_job._log("Merge command: " + " ".join(cmd))
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                merge_job._log(line)
+                merge_job._parse_progress(line)
+        rc = await proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"merge container exited with code {rc}")
+
     async def _do_merge():
+        import os
         merge_job.status = JobStatus.RUNNING
         import time
         merge_job.start_time = time.time()
         try:
-            def _merge_blocking():
-                from peft import PeftModel
-                import torch
-                from transformers import AutoModelForCausalLM, AutoTokenizer
+            if os.environ.get("AINODE_IN_CONTAINER"):
+                await _merge_in_container()
+            else:
+                def _merge_blocking():
+                    from peft import PeftModel
+                    import torch
+                    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-                base = AutoModelForCausalLM.from_pretrained(
-                    job.config.base_model,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto",
-                    trust_remote_code=True,
-                )
-                model = PeftModel.from_pretrained(base, str(adapter_dir))
-                merged = model.merge_and_unload()
-                merged_dir.mkdir(parents=True, exist_ok=True)
-                merged.save_pretrained(str(merged_dir))
-                tokenizer = AutoTokenizer.from_pretrained(job.config.base_model, trust_remote_code=True)
-                tokenizer.save_pretrained(str(merged_dir))
+                    base = AutoModelForCausalLM.from_pretrained(
+                        job.config.base_model,
+                        torch_dtype=torch.bfloat16,
+                        device_map="auto",
+                        trust_remote_code=True,
+                    )
+                    model = PeftModel.from_pretrained(base, str(adapter_dir))
+                    merged = model.merge_and_unload()
+                    merged_dir.mkdir(parents=True, exist_ok=True)
+                    merged.save_pretrained(str(merged_dir))
+                    tokenizer = AutoTokenizer.from_pretrained(job.config.base_model, trust_remote_code=True)
+                    tokenizer.save_pretrained(str(merged_dir))
 
-            await loop.run_in_executor(None, _merge_blocking)
+                await loop.run_in_executor(None, _merge_blocking)
             merge_job.status = JobStatus.COMPLETED
             merge_job.end_time = time.time()
             merge_job.progress = 100.0

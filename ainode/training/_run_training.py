@@ -52,8 +52,14 @@ def main() -> None:
     # Resolve relative dataset paths to ~/.ainode/datasets/
     ds = config.get("dataset_path", "")
     if ds and not ds.startswith("/") and not ds.startswith("~"):
-        from ainode.core.config import AINODE_HOME
-        resolved = AINODE_HOME / "datasets" / ds
+        # The ainode package isn't installed in the spawned training container —
+        # fall back to the AINODE_HOME env var (the container run sets it to /job).
+        try:
+            from ainode.core.config import AINODE_HOME as _ainode_home
+            ainode_home = Path(_ainode_home)
+        except Exception:
+            ainode_home = Path(os.environ.get("AINODE_HOME", str(Path.home() / ".ainode")))
+        resolved = ainode_home / "datasets" / ds
         if resolved.exists():
             config["dataset_path"] = str(resolved)
 
