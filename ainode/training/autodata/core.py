@@ -41,6 +41,22 @@ class AutoDataConfig:
     concurrency: int = 8
     retries: int = 2               # transient HTTP/parse retries per model call
     out: str = ""                  # JSONL output path (optional)
+    # v2.2 — Evalchemy-style val-set objective (see valset.py). Ignored unless
+    # objective == "valset" in the meta-loop; the v2.1 Δ=1-yield proxy stays the default.
+    objective: str = "yield"       # meta-loop reward: "yield" (v2.1 proxy) | "valset" (v2.2 lift)
+    val_set: list = None           # held-out labeled probes [{"input","reference"}] for the objective
+    val_shots: int = 3             # few-shot examples (from kept) used to prime the weak solver on val
+    val_target: float = 0.10       # meta stop-threshold for the valset objective (absolute lift)
+    # v2.2 significance guard — a raw lift on a small val set is mostly sampling noise, so the
+    # meta-loop only ACCEPTS (early-stops) a round when the lift also clears a paired McNemar
+    # test at `alpha` AND the val set has at least `val_min_n` probes. Below that, the objective
+    # is reported but never treated as a genuine round-over-round win.
+    alpha: float = 0.05            # significance level for the paired (McNemar) lift test
+    val_min_n: int = 12            # minimum val-set size before a lift can be accepted as real
+
+    def __post_init__(self):
+        if self.val_set is None:
+            self.val_set = []
 
     @staticmethod
     def from_dict(d: dict) -> "AutoDataConfig":
@@ -51,6 +67,9 @@ class AutoDataConfig:
             n_tasks=int(d.get("n_tasks", 50)), system_prompt=d.get("system_prompt", ""),
             judge_mode=d.get("judge_mode", "rubric"), concurrency=int(d.get("concurrency", 8)),
             retries=int(d.get("retries", 2)), out=d.get("out", ""),
+            objective=d.get("objective", "yield"), val_set=list(d.get("val_set") or []),
+            val_shots=int(d.get("val_shots", 3)), val_target=float(d.get("val_target", 0.10)),
+            alpha=float(d.get("alpha", 0.05)), val_min_n=int(d.get("val_min_n", 12)),
         )
 
 
