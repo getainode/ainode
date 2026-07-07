@@ -198,14 +198,18 @@ async def handle_server_status(request: web.Request) -> web.Response:
     web_port = getattr(config, "web_port", 3000)
     host = getattr(config, "host", "0.0.0.0")
 
-    # Collect loaded models (local + cluster members)
-    local_models = await _probe_loaded_models(session, getattr(config, "api_port", 8000))
+    # Collect loaded models (local primary + local stacked + cluster members).
+    primary_port = getattr(config, "api_port", 8000)
+    local_models = await _probe_loaded_models(session, primary_port)
     loaded_models: list[dict] = []
     for mid in local_models:
         loaded_models.append({
             "id": mid,
             "node_hostname": config.node_name or "local",
             "node_id": config.node_id or "local",
+            "port": primary_port,
+            "ready": True,
+            "ejectable": True,
             "type": "llm",
             "format": "SafeTensors",
             "quantization": None,
@@ -214,6 +218,35 @@ async def handle_server_status(request: web.Request) -> web.Response:
             "capabilities": ["chat", "completions"],
             "loaded_at": start_time,
         })
+
+    # Local STACKED instances (2nd+ model on this node, ports 8001+) live in the
+    # InstanceManager, not on the primary vLLM port the probe above hits — so
+    # they were invisible in the Server view (F2). Add a row per stacked
+    # instance. These are local, so the eject endpoint can target them.
+    manager = request.app.get("instances")
+    if manager is not None:
+        try:
+            for inst in manager.instances():
+                rec = inst.record
+                if not rec.model or rec.api_port == primary_port:
+                    continue  # primary already covered by the probe above
+                loaded_models.append({
+                    "id": rec.model,
+                    "node_hostname": config.node_name or "local",
+                    "node_id": config.node_id or "local",
+                    "port": rec.api_port,
+                    "ready": rec.status == "serving",
+                    "ejectable": True,
+                    "type": "llm",
+                    "format": "SafeTensors",
+                    "quantization": None,
+                    "size_bytes": 0,
+                    "parallel": 1,
+                    "capabilities": ["chat", "completions"],
+                    "loaded_at": start_time,
+                })
+        except Exception:
+            logger.exception("failed to list local stacked instances")
 
     # Include loaded embedding models (in-process, via EmbeddingManager)
     embedding_manager = request.app.get("embedding_manager")
@@ -226,6 +259,9 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     "id": emb["id"],
                     "node_hostname": hostname,
                     "node_id": config.node_id or "local",
+                    "port": primary_port,
+                    "ready": True,
+                    "ejectable": True,
                     "type": "embed",
                     "format": "SafeTensors",
                     "quantization": None,
@@ -247,11 +283,43 @@ async def handle_server_status(request: web.Request) -> web.Response:
             for m in members:
                 if m.node_id == config.node_id:
                     continue
+                member_port = getattr(m, "api_port", 8000) or 8000
+                # Remote instances can't be ejected from here — the eject
+                # endpoint only targets this node's local InstanceManager.
                 if m.model:
                     loaded_models.append({
                         "id": m.model,
                         "node_hostname": m.node_name,
                         "node_id": m.node_id,
+                        "port": member_port,
+                        "ready": True,  # model is only broadcast once serving
+                        "ejectable": False,
+                        "type": "llm",
+                        "format": "SafeTensors",
+                        "quantization": None,
+                        "size_bytes": 0,
+                        "parallel": 1,
+                        "capabilities": ["chat", "completions"],
+                        "loaded_at": getattr(m, "last_seen", start_time),
+                    })
+                # Remote STACKED instances (ports 8001+) carried on the peer's
+                # announcement — same source /api/nodes exposes (F2).
+                for inst in (getattr(m, "instances", []) or []):
+                    if not isinstance(inst, dict):
+                        continue
+                    im = inst.get("model")
+                    if not im:
+                        continue
+                    inst_port = inst.get("api_port") or member_port
+                    if im == m.model and inst_port == member_port:
+                        continue  # primary already added above
+                    loaded_models.append({
+                        "id": im,
+                        "node_hostname": m.node_name,
+                        "node_id": m.node_id,
+                        "port": inst_port,
+                        "ready": inst.get("status") == "serving",
+                        "ejectable": False,
                         "type": "llm",
                         "format": "SafeTensors",
                         "quantization": None,
@@ -261,7 +329,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "loaded_at": getattr(m, "last_seen", start_time),
                     })
         except Exception:
-            pass
+            logger.exception("failed to list cluster-member instances")
 
     # Request counters
     counters = request.app.get("api_log_counters") or {}

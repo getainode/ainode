@@ -372,6 +372,26 @@ async def _engine_serving(backend, loop) -> bool:
         return False
 
 
+async def _live_instance_records(manager, loop) -> list:
+    """Probe every managed instance; return the records whose engine answers.
+
+    Also flips each live record's status to ``serving`` (F3). The record is
+    stamped ``starting`` at load time and was never updated once the engine
+    came up, so the announcement advertised a phantom ``starting`` forever and
+    the dashboard kept painting a "STARTING · 8%" progress bar for an instance
+    that was actually serving traffic. The localhost /v1/models probe (via
+    ``_engine_serving``) is the truthful liveness signal, so a passing probe is
+    exactly when the status should read ``serving``.
+    """
+    live = []
+    for inst in manager.instances():
+        if await _engine_serving(inst.backend, loop):
+            if inst.record.status != "serving":
+                inst.record.status = "serving"
+            live.append(inst.record)
+    return live
+
+
 async def _cluster_sync_loop(app: web.Application) -> None:
     """Periodically sync the listener registry into ClusterState."""
     try:
@@ -433,11 +453,10 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                 manager = app.get("instances")
                 if manager is not None and not manager.is_empty():
                     # Only advertise instances whose engine actually answers — a dead
-                    # stacked instance drops out of the broadcast within one cycle.
-                    live_records = []
-                    for inst in manager.instances():
-                        if await _engine_serving(inst.backend, loop):
-                            live_records.append(inst.record)
+                    # stacked instance drops out of the broadcast within one cycle —
+                    # and flip each live record's status to `serving` so the UI stops
+                    # showing a phantom `starting` progress bar (F3).
+                    live_records = await _live_instance_records(manager, loop)
                     updates["instances"] = [r.to_dict() for r in live_records]
                 else:
                     updates["instances"] = (

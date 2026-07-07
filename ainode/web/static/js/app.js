@@ -518,16 +518,30 @@ const AINode = {
     badge.innerHTML = '⬆ Update available: v' + info.latest;
     badge.title = 'Click to update to v' + info.latest;
     badge.addEventListener('click', function () {
-      if (!confirm('Update AINode to v' + info.latest + '? The service will restart.')) return;
+      // Fleet-wide update: POST /api/cluster/update-all (resolves one target tag
+      // and threads it to every peer, master last) instead of the head-only
+      // /api/engine/update. F4.
+      var nodeCount = (self.state.nodes || []).length || 1;
+      var nodeWord = nodeCount === 1 ? 'node' : 'nodes';
+      if (!confirm('Update all ' + nodeCount + ' ' + nodeWord + ' to v' + info.latest + '? Services restart one by one.')) return;
       badge.textContent = 'Updating...';
       badge.disabled = true;
-      fetch('/api/engine/update', { method: 'POST' })
+      fetch('/api/cluster/update-all', { method: 'POST' })
         .then(function (r) { return r.json(); })
-        .then(function () {
-          self.toast('Update started — service will restart in a moment', 'success');
-          badge.textContent = 'Restarting...';
-          // Re-check version in 60 seconds
-          setTimeout(function () { self.checkVersion(); }, 60000);
+        .then(function (data) {
+          if (data && data.error) {
+            badge.textContent = '⬆ Update available: v' + info.latest;
+            badge.disabled = false;
+            self.toast('Update failed: ' + data.error, 'error');
+            return;
+          }
+          self.toast('Fleet update started — nodes restart one by one', 'success');
+          badge.textContent = 'Updating fleet...';
+          // Surface live per-node progress in the cluster panel if it's mounted.
+          if (data && data.update_id) self._pollClusterUpdate(data.update_id);
+          // Re-check version in 90 seconds (bumped from 60s — a rolling fleet
+          // restart takes longer than a single-node one).
+          setTimeout(function () { self.checkVersion(); }, 90000);
         })
         .catch(function () {
           badge.textContent = '⬆ Update available: v' + info.latest;
@@ -710,7 +724,10 @@ const AINode = {
     // the federated /v1/models the chat dropdown uses. Skip the distributed one.
     var seen = {};
     (this.state.nodes || []).forEach(function (n) {
-      var host = n.hostname || n.node_id;
+      // Show the friendly node NAME (Spark-2-DGX), not the raw node-id hex.
+      // node_name is the id→name mapping carried on every /api/nodes entry;
+      // fall back to hostname, then the id, when the name is unknown (F1).
+      var host = n.node_name || n.hostname || n.node_id;
       var modelName = n.model;
       if (modelName && !(distModel && modelName === distModel)) {
         var key = modelName + '@' + (n.node_id || n.hostname);
@@ -5278,8 +5295,15 @@ const AINode = {
   _renderLoadedCard(m, idx) {
     var id = m.id || 'unknown';
     var nodeHost = m.node_hostname || m.node_id || 'local';
+    // Stacked instances live on ports 8001+ — show the port so two models on
+    // one node are distinguishable (F2). Primary instances omit it.
+    var portStr = (m.port && m.port !== 8000) ? ' · :' + m.port : '';
     var type = m.type || 'llm';
     var isEmbed = type === 'embed';
+    var ready = m.ready !== false;
+    // Remote instances (loaded on a peer) can't be ejected from here — the eject
+    // endpoint only targets this node's local InstanceManager (F2).
+    var ejectable = m.ejectable !== false;
     var sizeStr = m.size_bytes > 0 ? this.formatBytes(m.size_bytes) : '—';
     var parallel = m.parallel || 1;
     var selected = (this._serverState.selectedModelId === id) ? ' selected' : '';
@@ -5292,10 +5316,16 @@ const AINode = {
     var primaryIconBtn = isEmbed
       ? '  <button class="server-icon-btn" data-action="show-info" data-model="' + this.esc(id) + '" title="Embedding info">ℹ</button>'
       : '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>';
+    var statusBadge = ready
+      ? '<span class="server-badge ready">READY</span>'
+      : '<span class="server-badge">STARTING</span>';
+    var ejectBtn = ejectable
+      ? '  <button class="server-eject-btn" data-action="eject" data-model="' + this.esc(id) + '">Eject</button>'
+      : '';
     return '<div class="server-loaded-card' + selected + '" data-model-id="' + this.esc(id) + '" data-idx="' + idx + '">' +
       '<div class="server-loaded-left">' +
-      '  <span class="server-badge ready">READY</span>' +
-      '  <span class="server-node-pill">' + this.esc(nodeHost) + '</span>' +
+      '  ' + statusBadge +
+      '  <span class="server-node-pill">' + this.esc(nodeHost + portStr) + '</span>' +
       '  <span class="server-type-tag"' + typeTagStyle + '>' + this.esc(type) + '</span>' +
       '  <span class="server-model-id mono" data-copy="' + this.esc(id) + '" title="Click to copy">' + this.esc(id) + '</span>' +
       '</div>' +
@@ -5306,7 +5336,7 @@ const AINode = {
       '  <button class="server-icon-btn" data-action="preview" title="Preview">👁</button>' +
       primaryIconBtn +
       '  <button class="server-icon-btn" data-action="copy-curl" data-model="' + this.esc(id) + '" data-type="' + this.esc(type) + '" title="Copy curl">⎘</button>' +
-      '  <button class="server-eject-btn" data-action="eject" data-model="' + this.esc(id) + '">Eject</button>' +
+      ejectBtn +
       '</div>' +
       '</div>';
   },
