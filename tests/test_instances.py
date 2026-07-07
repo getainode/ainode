@@ -96,3 +96,58 @@ def test_announcement_carries_instances_roundtrip():
                          unified_memory=True, model="m", status="serving",
                          api_port=8000, web_port=3000, instances=[inst])
     assert NodeAnnouncement.from_json(a.to_json()).instances == [inst]
+
+
+# ---------------------------------------------------------------------------
+# F3: instance status flips 'starting' -> 'serving' once the engine answers,
+# and the flipped status rides the announcement (via _live_instance_records).
+# ---------------------------------------------------------------------------
+
+class _FakeBackend:
+    def __init__(self, responding: bool):
+        self._responding = responding
+
+    def health_check(self) -> dict:
+        return {"api_responding": self._responding}
+
+
+def test_live_instance_records_flips_starting_to_serving():
+    from ainode.api.server import _live_instance_records
+    from ainode.engine.instance_manager import InstanceManager
+
+    manager = InstanceManager(base_port=8000)
+    # A stacked instance stamped 'starting' at load time whose engine now answers.
+    rec = InstanceRecord(instance_id="h:qwen", model="qwen", head_node_id="h",
+                         api_port=8001, status="starting")
+    manager.add(rec, _FakeBackend(responding=True))
+
+    loop = asyncio.new_event_loop()
+    try:
+        live = loop.run_until_complete(_live_instance_records(manager, loop))
+    finally:
+        loop.close()
+
+    # The record object itself is mutated (so /api/server/status + the
+    # announcement both see the truth) and it is advertised as serving.
+    assert rec.status == "serving"
+    assert [r.to_dict()["status"] for r in live] == ["serving"]
+
+
+def test_live_instance_records_drops_dead_instance():
+    from ainode.api.server import _live_instance_records
+    from ainode.engine.instance_manager import InstanceManager
+
+    manager = InstanceManager(base_port=8000)
+    rec = InstanceRecord(instance_id="h:dead", model="dead", head_node_id="h",
+                         api_port=8001, status="starting")
+    manager.add(rec, _FakeBackend(responding=False))
+
+    loop = asyncio.new_event_loop()
+    try:
+        live = loop.run_until_complete(_live_instance_records(manager, loop))
+    finally:
+        loop.close()
+
+    # A non-answering engine is neither advertised nor promoted to serving.
+    assert live == []
+    assert rec.status == "starting"
