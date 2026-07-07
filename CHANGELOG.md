@@ -10,6 +10,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.3] — 2026-07-07
+
+### Fixed
+- **Truthful instances everywhere** (#59) — every instance card shows its node
+  NAME (not a hex id); the Server view lists stacked instances with node + port
+  and its count matches reality (Eject only where it can actually target);
+  per-instance status probes both directions (`starting → serving`, and back to
+  `failed` when an engine dies — no more stale STARTING bars or false READY);
+  the top-bar update banner now updates the whole fleet
+  (`/api/cluster/update-all`) with an honest confirm, not just the head node.
+
+---
+
 ## [0.5.2] — 2026-07-06
 
 > The two majors from the 0.5.1 live lifecycle verification. Image published to GHCR;
