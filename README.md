@@ -39,7 +39,7 @@ platform, open source ChatGPT alternative.
   &nbsp;·&nbsp;
   <a href="#screenshots">Screenshots</a>
   &nbsp;·&nbsp;
-  <a href="#state-of-distributed-inference-april-2026">What Works / What Doesn't</a>
+  <a href="#state-of-distributed-inference-june-2026">What Works / What Doesn't</a>
 </p>
 
 ---
@@ -138,16 +138,22 @@ current member list with per-node role, address, and last-seen.
    ```bash
    curl -fsSL https://ainode.dev/install | bash
    ```
-   That one-liner performs:
+   That one-liner:
    ```
-   docker pull ghcr.io/getainode/ainode:latest
+   # resolves the highest numeric GHCR tag (never a floating :latest)
+   docker pull ghcr.io/getainode/ainode:<latest-release>
+   # pins it to ~/.ainode/image.env and installs a swappable systemd unit
    systemctl enable --now ainode.service
    ```
+   The unit reads the pinned image from `~/.ainode/image.env`
+   (`EnvironmentFile`, `Restart=always`), so it survives cold power
+   cycles and **replays the models you had loaded** on boot.
 3. **Open the UI** at `http://<your-ip>:3000`. First-run onboarding walks
    you through picking a model. Click a model card → click **Launch** →
    chat.
 
-Upgrade is `ainode update` (pulls the latest image and restarts).
+Upgrade is `ainode update` (resolves + pulls the newest pinned release
+and restarts) — or `ainode update 0.5.2` to pin a specific version.
 
 **Prefer to pull the image yourself?** Both registries serve identical
 images — GHCR is canonical (what the installer uses), Docker Hub is a
@@ -156,7 +162,7 @@ public mirror:
 ```bash
 docker pull ghcr.io/getainode/ainode:latest      # canonical (always newest)
 docker pull argentaios/ainode:latest             # Docker Hub mirror
-# pin a release instead: …/ainode:0.5.0
+# pin a release instead: …/ainode:0.5.2
 ```
 
 ### Two nodes (distributed mode)
@@ -187,7 +193,7 @@ across two DGX Sparks:
    }
    ```
    ```bash
-   ssh-copy-id sem@10.0.0-2 && sudo systemctl restart ainode
+   ssh-copy-id sem@10.0.0.2 && sudo systemctl restart ainode
    ```
 5. **Open the head UI** — you should see both nodes, aggregated VRAM
    ("2 nodes · 244 GB · 2 GPUs"), and the instance badged as
@@ -266,6 +272,15 @@ set the read token with `ainode config --hf-token hf_xxx`.
 | Model stacking — N concurrent models per node, persisted + replayed on boot | ✅ |
 | Serve models from on-disk weights (`~/.ainode/models/<slug>`) | ✅ |
 | fp8 KV-cache default on GB10 (long-context headroom) | ✅ |
+| Per-load overrides (`served_model_name` / `max_model_len` / `kv_cache_dtype` / `quantization` / `trust_remote_code`), persisted across restarts | ✅ v0.5.0 |
+| Node-targeted model load (`POST /api/cluster/load {node_id}`) | ✅ v0.5.1 |
+| Stacked-load admission guard — explicit `gpu_memory_utilization` required, reject > 0.9 projected total (409) | ✅ v0.5.1 |
+| VLM (vision) support — fp8 KV auto-skipped on GB10; `kv_cache_dtype=auto` per-load override | ✅ v0.5.1 |
+| LoRA / QLoRA training **and** adapter merge run in a spawned GPU container (slim orchestrator has no torch) | ✅ v0.5.0 |
+| Deploy pipeline — `git tag` → CI (self-hosted Spark runner) → GHCR → `ainode update` / cluster update-all (genuine pull + swap) | ✅ v0.5.0 |
+| Cancellable, commit-pinned, parallel model downloads | ✅ v0.5.2 |
+| Delete a downloaded model from disk (`delete-repo`, frees GB) | ✅ |
+| AutoData — Δ-filtered synthetic-data generation (v2.2 val-set lift objective) | ✅ v0.5.0 |
 
 ---
 
@@ -479,7 +494,7 @@ into the running container via `docker exec`. You never need to type
 `docker` yourself.
 
 ```bash
-ainode update                # docker pull + restart service (upgrade in place)
+ainode update [version]      # resolve/pull newest (or pinned) tag + restart (upgrade in place)
 ainode start                 # Start AINode (inference + web UI)
 ainode stop                  # Stop AINode
 ainode status                # Show cluster status
@@ -492,21 +507,31 @@ ainode logs -f               # Tail the engine log
 
 ### Updating AINode
 
-New releases ship as a new container image tag. To upgrade in place:
+Releases ship through a **tag-triggered pipeline**: `git tag vX.Y.Z` →
+CI on a self-hosted Spark runner builds and pushes
+`ghcr.io/getainode/ainode:X.Y.Z`. To upgrade a node in place:
 
 ```bash
 ainode update
 ```
 
-That runs `docker pull ghcr.io/getainode/ainode:latest` and restarts
-the systemd service. Your config (`~/.ainode/config.json`), models
+That resolves the **highest numeric GHCR tag** (never a floating
+`:latest`), pulls it, pins it to `~/.ainode/image.env`, and restarts the
+systemd service. Your config (`~/.ainode/config.json`), models
 (`~/.ainode/models/`), and fine-tune outputs are on the host — the
 container is stateless, so upgrades never touch your data.
 
-To pin a specific version instead of `:latest`:
+To pin a specific version:
 
 ```bash
-AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.1 ainode update
+ainode update 0.5.2
+```
+
+To roll every node in a cluster from the master, use the **Update all**
+button or:
+
+```bash
+curl -X POST http://<master>:8000/api/cluster/update-all   # genuine pull + swap on every node
 ```
 
 ---
@@ -607,6 +632,10 @@ scrape_configs:
 - [x] In-browser quantization (AWQ / NVFP4) + push to Hugging Face
 - [x] Federated multi-model serving (master routes `/v1/*` by model name)
 - [x] Model stacking (N models per node, persisted + replayed)
+- [x] Training + adapter-merge in a spawned GPU container (slim orchestrator)
+- [x] Deploy pipeline (tag → CI → GHCR → `ainode update` / cluster update-all)
+- [x] VLM (vision) serving with fp8-KV auto-skip on GB10
+- [x] AutoData — Δ-filtered synthetic-data generation (val-set lift objective)
 - [ ] Model marketplace (custom registries)
 - [ ] Mobile-friendly UI
 
