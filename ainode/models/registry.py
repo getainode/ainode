@@ -237,6 +237,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         engine_image="vllm/vllm-openai:v0.27.1",
         extra_vllm_args=[
             "--enable-prefix-caching",
+            # Vision models must NOT get fp8 KV on GB10 — it corrupts generation
+            # (proven 2026-07-06). The automatic fp8→auto downgrade only fires
+            # when the model is on local disk (it reads config.json), and this
+            # one serves straight from the HF cache, so state it explicitly.
+            "--kv-cache-dtype", "auto",
             "--reasoning-parser", "qwen3",
             # REQUIRED: the template emits <tool_call><function=..><parameter=..>.
             # With the hermes parser, tool calls silently never parse (0 emitted).

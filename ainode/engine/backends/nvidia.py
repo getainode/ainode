@@ -728,6 +728,45 @@ class NvidiaBackend(EngineBackend):
         side (both images coexist; docker doesn't care)."""
         return (getattr(self.config, "engine_image", "") or "").strip() or NVIDIA_VLLM_IMAGE
 
+    def _serve_argv_prefix(self, image: str) -> List[str]:
+        """Tokens to place before ``<model>`` so the container runs
+        ``vllm serve <model>`` exactly once.
+
+        Engine images disagree on ENTRYPOINT, and a per-instance image makes
+        that our problem:
+          * the pinned default is ``/opt/nvidia/nvidia_entrypoint.sh`` — a
+            passthrough shim that also sets up the CUDA env, so we must supply
+            ``vllm serve`` ourselves (and must NOT override the entrypoint);
+          * ``vllm/vllm-openai`` bakes ENTRYPOINT ``["vllm","serve"]``, so
+            passing our own ``vllm serve`` produced
+            ``vllm serve vllm serve <model>`` → "unrecognized arguments".
+
+        Unknown/unreadable images fall back to the legacy prefix, so a docker
+        hiccup can never silently change how the default image is launched.
+        """
+        ep = self._image_entrypoint(image)
+        if not ep:
+            return ["vllm", "serve"]
+        tail = [str(t) for t in ep]
+        if tail[-1] == "serve":          # e.g. ["vllm","serve"] — fully baked in
+            return []
+        if Path(tail[-1]).name == "vllm":  # entrypoint is vllm itself
+            return ["serve"]
+        return ["vllm", "serve"]           # shim/shell entrypoint
+
+    def _image_entrypoint(self, image: str) -> List[str]:
+        """The image's configured ENTRYPOINT, or [] when unknown."""
+        try:
+            out = subprocess.run(
+                ["docker", "inspect", "-f", "{{json .Config.Entrypoint}}", image],
+                capture_output=True, text=True, timeout=15,
+            )
+            if out.returncode != 0:
+                return []
+            return json.loads((out.stdout or "").strip() or "null") or []
+        except Exception:
+            return []
+
     def _is_pinned_default_image(self) -> bool:
         """True when this instance runs the pinned default engine image, i.e.
         when the 0.17-era GB10 workarounds still apply. A caller who pins a
@@ -837,7 +876,8 @@ class NvidiaBackend(EngineBackend):
         for key, value in nccl_env.items():
             cmd.extend(["-e", f"{key}={value}"])
 
-        cmd.extend([self._engine_image(), "vllm", "serve", serve_target])
+        image = self._engine_image()
+        cmd.extend([image, *self._serve_argv_prefix(image), serve_target])
         cmd.extend(self._build_vllm_serve_args(tp_size=1))
         cmd.extend(name_args)
         return cmd

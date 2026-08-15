@@ -279,6 +279,13 @@ class TestStartSolo:
             backend, "_docker_stop_and_rm_best_effort"
         ) as preclean, mock.patch.object(
             backend, "_docker_container_state", return_value="running",
+        ), mock.patch.object(
+            # 0.5.4: the launch path inspects the image ENTRYPOINT (via
+            # subprocess.run, which itself uses Popen) to decide whether to emit
+            # `vllm serve`. Stub it to the pinned default image's shim so this
+            # test keeps asserting on the docker-run argv alone.
+            backend, "_image_entrypoint",
+            return_value=["/opt/nvidia/nvidia_entrypoint.sh"],
         ):
             result = backend.start_solo()
 

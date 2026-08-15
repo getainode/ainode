@@ -165,3 +165,40 @@ class TestLaunchConfirmation:
         assert "No available memory" in caplog.text, (
             "a failed launch must surface WHY, or every failure looks like silence"
         )
+
+
+# --- entrypoint normalization across engine images ---------------------------
+
+class TestServeArgvPrefix:
+    """A per-instance image makes ENTRYPOINT differences our problem:
+    vllm/vllm-openai bakes ["vllm","serve"], so emitting our own produced
+    `vllm serve vllm serve <model>` and the engine exited with
+    "unrecognized arguments" (caught on hardware 2026-08-15).
+    """
+
+    def _b(self, entrypoint):
+        b = NvidiaBackend(NodeConfig(model="m"))
+        b._image_entrypoint = lambda image: entrypoint
+        return b
+
+    def test_baked_vllm_serve_entrypoint_adds_nothing(self):
+        assert self._b(["vllm", "serve"])._serve_argv_prefix("i") == []
+
+    def test_vllm_entrypoint_adds_only_serve(self):
+        assert self._b(["/usr/local/bin/vllm"])._serve_argv_prefix("i") == ["serve"]
+
+    def test_nvidia_shim_entrypoint_gets_full_prefix(self):
+        assert self._b(["/opt/nvidia/nvidia_entrypoint.sh"])._serve_argv_prefix("i") == ["vllm", "serve"]
+
+    def test_unknown_image_falls_back_to_legacy_prefix(self):
+        # A docker hiccup must never silently change how the default image launches.
+        assert self._b([])._serve_argv_prefix("i") == ["vllm", "serve"]
+
+
+def test_qwen38_recipe_pins_kv_cache_auto_for_vision():
+    # fp8 KV corrupts VLM generation on GB10; the automatic downgrade only fires
+    # for models on local disk, and this one serves from the HF cache.
+    a = CURATED_CLUSTER_MODELS["qwen3.8-27b-nvfp4"].extra_vllm_args
+    assert a[a.index("--kv-cache-dtype") + 1] == "auto"
+    built = args_for(extra_vllm_args=a)
+    assert built.count("--kv-cache-dtype") == 1 and "fp8" not in built
