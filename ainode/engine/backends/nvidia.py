@@ -59,6 +59,12 @@ logger = logging.getLogger(__name__)
 # to sed-repoint this source — the nvcr→scitrera drift that once broke a node.
 NVIDIA_VLLM_IMAGE = os.environ.get("NVIDIA_VLLM_IMAGE") or "scitrera/dgx-spark-vllm:0.17.0-t5"
 
+# Workarounds below (forced --enforce-eager, the NVFP4 MARLIN env) are bugs in
+# the PINNED 0.17 build, not in vLLM generally. Newer engines (0.27.1, which
+# Nemotron 3.5 Lightning and Qwen3.8 require) fix them upstream and are actively
+# harmed by --enforce-eager, which disables CUDA graphs and costs throughput.
+# So they apply only when the instance runs the pinned default image.
+
 # Agent B originally vendored ``scripts/run_cluster.sh`` into the AINode
 # install at ``/opt/ainode/run_cluster.sh``. Phase 5 Bug 2 fix (Option α)
 # removed run_cluster.sh from the hot path entirely — NvidiaBackend now
@@ -158,9 +164,10 @@ class NvidiaBackend(EngineBackend):
         env = self._build_env_for_subprocess()
 
         logger.info(
-            "Starting NVIDIA solo vLLM: docker run %s vllm serve %s",
-            NVIDIA_VLLM_IMAGE,
+            "Starting NVIDIA solo vLLM: docker run %s vllm serve %s (extra args: %s)",
+            self._engine_image(),
             self.config.model,
+            " ".join(getattr(self.config, "extra_vllm_args", None) or []) or "none",
         )
         self._process = subprocess.Popen(
             cmd,
@@ -176,7 +183,61 @@ class NvidiaBackend(EngineBackend):
             daemon=True,
         )
         self._log_thread.start()
-        return self._process.poll() is None
+        return self._confirm_container_started(container_name)
+
+    def _confirm_container_started(self, container_name: str, timeout: float = 25.0) -> bool:
+        """Return True only if the container is actually RUNNING shortly after
+        launch.
+
+        ``docker run -d`` forks and returns immediately, so the old
+        ``self._process.poll() is None`` check only proved the docker CLI had
+        spawned — an engine that rejected its flags or failed the memory
+        pre-check still reported a successful launch, and the caller registered
+        a live instance that never existed (2026-08-14 phantom rows). Here we
+        wait for the container to exist and report Running; a container that
+        exited gets its last log lines surfaced so the failure has a reason.
+
+        This is a LAUNCH check, not a readiness check — weights take minutes;
+        the engine reports ready separately via ``_stream_logs``.
+        """
+        deadline = time.time() + timeout
+        state = ""
+        while time.time() < deadline:
+            state = self._docker_container_state(container_name)
+            if state == "running":
+                return True
+            if state in ("exited", "dead"):
+                break
+            time.sleep(1.0)
+        tail = self._docker_logs_tail(container_name, lines=15)
+        logger.error(
+            "Engine container %s failed to start (state=%s). Last output:\n%s",
+            container_name, state or "missing", tail or "(no output captured)",
+        )
+        return False
+
+    def _docker_container_state(self, container_name: str) -> str:
+        """``docker inspect`` state string ('running'/'exited'/...), '' if absent."""
+        try:
+            out = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Status}}", container_name],
+                capture_output=True, text=True, timeout=10,
+            )
+            return out.stdout.strip() if out.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    def _docker_logs_tail(self, container_name: str, lines: int = 15) -> str:
+        """Last N lines of a container's output — the failure reason for a
+        crashed engine. Safe on a missing container (returns '')."""
+        try:
+            out = subprocess.run(
+                ["docker", "logs", "--tail", str(lines), container_name],
+                capture_output=True, text=True, timeout=15,
+            )
+            return ((out.stdout or "") + (out.stderr or "")).strip()
+        except Exception:
+            return ""
 
     def start_distributed(self) -> bool:
         """Launch a distributed TP/PP cluster across ``config.peer_ips``.
@@ -661,6 +722,19 @@ class NvidiaBackend(EngineBackend):
             return "auto"
         return dtype
 
+    def _engine_image(self) -> str:
+        """Container image for THIS instance — per-load override, else the
+        fleet default. Lets one node run a 0.17 model and a 0.27 model side by
+        side (both images coexist; docker doesn't care)."""
+        return (getattr(self.config, "engine_image", "") or "").strip() or NVIDIA_VLLM_IMAGE
+
+    def _is_pinned_default_image(self) -> bool:
+        """True when this instance runs the pinned default engine image, i.e.
+        when the 0.17-era GB10 workarounds still apply. A caller who pins a
+        different image is asserting they know that engine's requirements, and
+        can always re-add a workaround explicitly via ``extra_vllm_args``."""
+        return self._engine_image() == NVIDIA_VLLM_IMAGE
+
     def _is_nvfp4_model(self) -> bool:
         """Detect NVFP4 from the on-disk config.json quantization metadata (with
         the model id as a fallback) so the MARLIN serve env is applied only when
@@ -684,7 +758,7 @@ class NvidiaBackend(EngineBackend):
         --enforce-eager). Force the MARLIN backend — env-only, no image rebuild,
         and more KV-cache-memory-efficient. Applied only when serving an NVFP4
         model. See memory ainode-gb10-quant-nvfp4-serving."""
-        if not self._is_nvfp4_model():
+        if not self._is_nvfp4_model() or not self._is_pinned_default_image():
             return {}
         return {
             "VLLM_USE_FLASHINFER_MOE_FP4": "0",
@@ -736,7 +810,12 @@ class NvidiaBackend(EngineBackend):
         cmd: List[str] = [
             "docker",
             "run",
-            "--rm",
+            # NO --rm: an engine that dies during startup must leave a corpse.
+            # With --rm the container deleted itself on crash, so a failed launch
+            # left zero logs and nothing in `docker ps -a` — every startup failure
+            # looked like silence (2026-08-14: ~18 self-erased corpses on spark4,
+            # visible only as bare container-ID hashes in nvidia-vllm.log).
+            # start_solo() already stop/rm's a leftover by name, so nothing leaks.
             "-d",
             "--name",
             container_name,
@@ -758,7 +837,7 @@ class NvidiaBackend(EngineBackend):
         for key, value in nccl_env.items():
             cmd.extend(["-e", f"{key}={value}"])
 
-        cmd.extend([NVIDIA_VLLM_IMAGE, "vllm", "serve", serve_target])
+        cmd.extend([self._engine_image(), "vllm", "serve", serve_target])
         cmd.extend(self._build_vllm_serve_args(tp_size=1))
         cmd.extend(name_args)
         return cmd
@@ -831,7 +910,7 @@ class NvidiaBackend(EngineBackend):
         ]
         for key, value in nccl_env.items():
             cmd.extend(["-e", f"{key}={value}"])
-        cmd.extend([NVIDIA_VLLM_IMAGE, "-c", ray_cmd])
+        cmd.extend([self._engine_image(), "-c", ray_cmd])
         return cmd
 
     def _launch_head_container(
@@ -929,39 +1008,61 @@ class NvidiaBackend(EngineBackend):
         return False
 
     def _build_vllm_serve_args(self, tp_size: int) -> List[str]:
-        """Assemble the positional ``vllm serve`` args after ``<model>``."""
+        """Assemble the positional ``vllm serve`` args after ``<model>``.
+
+        ``config.extra_vllm_args`` is appended verbatim so a model's published
+        recipe (spec-decode, MoE/mamba backends, reasoning + tool-call parsers)
+        can be expressed without hand-rolling a container. A flag supplied there
+        SUPPRESSES the same built-in flag rather than appearing twice — vLLM
+        errors on duplicates, and the caller's explicit value is the intent.
+        """
+        extra: List[str] = [str(a) for a in (getattr(self.config, "extra_vllm_args", None) or [])]
+        # Flag names the caller supplied, in both `--flag value` and `--flag=value` forms.
+        supplied = {a.split("=", 1)[0] for a in extra if a.startswith("--")}
+
+        def wanted(flag: str) -> bool:
+            return flag not in supplied
+
         args: List[str] = [
             "--host", "0.0.0.0",
             "--port", str(self.config.api_port),
-            "--gpu-memory-utilization", str(self.config.gpu_memory_utilization),
-            # THE GB10/sm120 fix (verified 2026-06-17). FlashInfer's prefill
-            # kernel (BatchPrefillWithPagedKVCache) illegal-instructions under
-            # CUDA-graph capture on GB10 (sm120) and kills EngineCore on the
-            # first real prefill — the engine loads, reports READY, then
-            # suicides (vLLM SIGTERMs its own Ray workers). --enforce-eager
-            # disables graph capture and the same kernel runs clean (235B TP=4
-            # survived a 3,513-token prefill). Re-enabling graphs for
-            # throughput needs a working non-FlashInfer backend first.
-            "--enforce-eager",
         ]
+        if wanted("--gpu-memory-utilization"):
+            args.extend(["--gpu-memory-utilization", str(self.config.gpu_memory_utilization)])
+        args.extend(self._legacy_gb10_args(supplied))
         # fp8 KV cache — the GB10 design default (engine/AGENTS.md): required for
         # long context or vLLM OOMs sizing the cache at bf16. Config-driven so a
         # model/quant that rejects fp8 can fall back via kv_cache_dtype="".
         # _effective_kv_cache_dtype downgrades the fp8 DEFAULT to auto for
         # multimodal models (fp8 corrupts VLM generation on GB10).
-        kv_dtype = self._effective_kv_cache_dtype()
-        if kv_dtype:
-            args.extend(["--kv-cache-dtype", kv_dtype])
-        if tp_size > 1:
+        if wanted("--kv-cache-dtype"):
+            kv_dtype = self._effective_kv_cache_dtype()
+            if kv_dtype:
+                args.extend(["--kv-cache-dtype", kv_dtype])
+        if tp_size > 1 and wanted("--tensor-parallel-size"):
             args.extend(["--tensor-parallel-size", str(tp_size)])
             args.extend(["--distributed-executor-backend", "ray"])
-        if self.config.max_model_len:
+        if self.config.max_model_len and wanted("--max-model-len"):
             args.extend(["--max-model-len", str(self.config.max_model_len)])
-        if self.config.quantization:
+        if self.config.quantization and wanted("--quantization"):
             args.extend(["--quantization", self.config.quantization])
-        if self.config.trust_remote_code:
+        if self.config.trust_remote_code and wanted("--trust-remote-code"):
             args.append("--trust-remote-code")
+        args.extend(extra)
         return args
+
+    def _legacy_gb10_args(self, supplied: set) -> List[str]:
+        """The 0.17-era GB10 workaround flags — emitted ONLY for the pinned
+        default image (see module header)."""
+        if not self._is_pinned_default_image() or "--enforce-eager" in supplied:
+            return []
+        return [
+            # THE GB10/sm120 fix (verified 2026-06-17). FlashInfer's prefill
+            # kernel illegal-instructions under CUDA-graph capture on GB10 and
+            # kills EngineCore on the first real prefill. Fixed upstream by
+            # 0.27.1, where forcing eager only costs throughput.
+            "--enforce-eager",
+        ]
 
     def _build_run_cluster_cmd(
         self,

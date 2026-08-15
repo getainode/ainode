@@ -80,10 +80,21 @@ class ModelInfo:
     capabilities: list = None  # ["vision", "tool_use", "reasoning", "code", "multilingual"]
     architecture: str = ""
     format: str = ""  # "safetensors", "gguf", "awq", etc.
+    # ---- Launch recipe (proven config, applied automatically on load) --------
+    # Some models only serve correctly with a specific engine build and flag set
+    # (speculative decoding, MoE/mamba backends, reasoning + tool-call parsers).
+    # Carrying that here is what makes them a one-click catalog load instead of a
+    # hand-rolled container. A caller's explicit /api/models/load value always
+    # wins over the recipe; the recipe only fills what wasn't specified.
+    engine_image: str = ""          # "" = fleet default engine image
+    extra_vllm_args: list = None    # verbatim `vllm serve` flags
+    recommended_gmu: float = 0.0    # 0 = use node default gpu_memory_utilization
 
     def __post_init__(self):
         if self.capabilities is None:
             self.capabilities = []
+        if self.extra_vllm_args is None:
+            self.extra_vllm_args = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -171,6 +182,70 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 # them. NVFP4 is native on Blackwell; these run distributed (TP=N) across nodes.
 
 CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
+    # --- Recipe-carrying models (need a newer engine + model-specific flags) ---
+    # Both were validated end-to-end on the GB10 fleet 2026-08-13/15; the flag
+    # sets below are the vendor/community recipes verbatim. They require vLLM
+    # 0.27.1 — hence engine_image. Do NOT add --enforce-eager: it's a 0.17-era
+    # workaround and only costs throughput here (see nvidia.py module header).
+    "nemotron-3.5-lightning-nvfp4": ModelInfo(
+        id="nemotron-3.5-lightning-nvfp4",
+        name="Nemotron 3.5 Lightning 30B-A3B (NVFP4)",
+        hf_repo="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+        size_gb=21.0,
+        description=(
+            "MoE hybrid Mamba-2 (3B active/token) with DSpark speculative decoding — "
+            "104 tok/s single-stream and 504 tok/s across 16 streams on one GB10, the "
+            "fastest model on this hardware. 1M context. The sub-agent workhorse. "
+            "Text only (no vision). First launch also pulls the 1.3 GB DSpark drafter."
+        ),
+        quantization="NVFP4", min_memory_gb=30, family="nemotron", params_b=30.0,
+        proven_tp=1, verified=True, curated=True,
+        context_length=1048576, license="OpenMDW-1.1", recommended=True,
+        format="safetensors", capabilities=["tool_use", "reasoning", "code"],
+        engine_image="vllm/vllm-openai:v0.27.1",
+        extra_vllm_args=[
+            "--moe-backend", "marlin",
+            "--enable-prefix-caching",
+            "--speculative_config.model",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+            "--speculative_config.num_speculative_tokens", "3",
+            "--mamba-backend", "flashinfer",
+            "--mamba-cache-mode", "align",
+            "--reasoning-parser", "nemotron_v3",
+            "--tool-call-parser", "qwen3_coder",
+            "--enable-auto-tool-choice",
+        ],
+        recommended_gmu=0.91,
+    ),
+    "qwen3.8-27b-nvfp4": ModelInfo(
+        id="qwen3.8-27b-nvfp4",
+        name="Qwen3.8 27B (NVFP4, vision)",
+        hf_repo="unsloth/Qwen3.8-27B-NVFP4",
+        size_gb=23.4,
+        description=(
+            "Dense 27B native vision-language model (images + video) with built-in MTP "
+            "speculative decoding — 19 tok/s single-stream on one GB10 (dense is "
+            "bandwidth-bound; batching reaches 147 tok/s at 16 streams). 262K context, "
+            "excellent instruction-following and tool use. The quality-and-eyes model. "
+            "Use temperature 0 for OCR/transcription."
+        ),
+        quantization="NVFP4", min_memory_gb=32, family="qwen", params_b=27.0,
+        proven_tp=1, verified=True, curated=True,
+        context_length=262144, license="Apache 2.0", recommended=True,
+        format="safetensors",
+        capabilities=["vision", "tool_use", "reasoning", "code", "multilingual"],
+        engine_image="vllm/vllm-openai:v0.27.1",
+        extra_vllm_args=[
+            "--enable-prefix-caching",
+            "--reasoning-parser", "qwen3",
+            # REQUIRED: the template emits <tool_call><function=..><parameter=..>.
+            # With the hermes parser, tool calls silently never parse (0 emitted).
+            "--tool-call-parser", "qwen3_coder",
+            "--enable-auto-tool-choice",
+            "--speculative_config", '{"method":"qwen3_5_mtp","num_speculative_tokens":2}',
+        ],
+        recommended_gmu=0.60,
+    ),
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and
     # stack several per node. proven_tp=1 (no distribution). verified=True is set

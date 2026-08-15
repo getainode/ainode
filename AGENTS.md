@@ -14,7 +14,7 @@ State / architecture / decisions / "why": Obsidian Vault → `AINode` (cluster o
 
 ## Operational source of truth
 
-- All work on `codex/*` branches; PRs required — **never push directly to `main`**.
+- All work on `fable/*` branches (renamed from `codex/*` 2026-08-15 — the old prefix came from OpenAI Codex; no CI keys on either, so existing `codex/*` branches are fine to leave). PRs required — **never push directly to `main`**.
 - Build/test: `pip install -e ".[dev]"` → `pytest tests/` · lint `ruff check`. Base image: `scripts/build-base-image.sh`; app image: `docker build -f scripts/Dockerfile.ainode`.
 - Handoffs use the threadmaster-handoff runbook; ops state lives in `ops/` (runbooks under `ops/runbooks/`).
 - Distribution is `docker pull` only — end users never hand-edit vLLM commands; the engine emits flags (see `engine/AGENTS.md`).

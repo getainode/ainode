@@ -81,7 +81,7 @@ launcher handles SSH to peers, Ray head/worker formation, and NCCL.
 ## Working Conventions
 
 - Follow ops-approved workflow (see ops/)
-- All work on `codex/*` branches
+- All work on `fable/*` branches (was `codex/*` until 2026-08-15)
 - PRs required — never push directly to main
 - Handoffs use the threadmaster-handoff runbook
 - Test on real GPU hardware when possible

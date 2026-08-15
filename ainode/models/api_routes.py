@@ -6,6 +6,7 @@ import asyncio
 import aiohttp
 import json
 import logging
+import shlex
 import time
 import uuid
 from pathlib import Path
@@ -143,7 +144,34 @@ def load_instance_manifest() -> list:
 
 
 _OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
-                  "kv_cache_dtype_explicit", "quantization", "trust_remote_code")
+                  "kv_cache_dtype_explicit", "quantization", "trust_remote_code",
+                  "extra_vllm_args", "engine_image")
+
+
+def catalog_recipe(model: str) -> dict:
+    """Proven launch recipe for a curated model, matched on catalog id OR hf_repo.
+
+    Some models only serve correctly on a specific engine build with a specific
+    flag set (spec-decode, MoE/mamba backends, reasoning + tool-call parsers).
+    Carrying that in the catalog is what makes them a one-click load instead of a
+    hand-rolled container. Returns {} for anything not curated. Keys:
+    ``engine_image``, ``extra_vllm_args``, and ``gpu_memory_utilization``.
+    """
+    from ainode.models.registry import CURATED_CLUSTER_MODELS
+    m = (model or "").strip()
+    if not m:
+        return {}
+    for info in CURATED_CLUSTER_MODELS.values():
+        if m in (info.id, info.hf_repo):
+            recipe = {}
+            if getattr(info, "engine_image", ""):
+                recipe["engine_image"] = info.engine_image
+            if getattr(info, "extra_vllm_args", None):
+                recipe["extra_vllm_args"] = list(info.extra_vllm_args)
+            if getattr(info, "recommended_gmu", 0):
+                recipe["gpu_memory_utilization"] = info.recommended_gmu
+            return recipe
+    return {}
 
 
 def _resolved_overrides(gmu, overrides) -> dict:
@@ -479,6 +507,36 @@ async def handle_model_load(request: web.Request) -> web.Response:
         overrides["kv_cache_dtype_explicit"] = True
     if body.get("trust_remote_code") is not None:
         overrides["trust_remote_code"] = bool(body["trust_remote_code"])
+    # Recipe passthrough: extra vLLM flags + the engine image to run them on.
+    # Rejected (400) rather than silently dropped when malformed — a typo here
+    # otherwise surfaces as a container that dies with no explanation.
+    if body.get("extra_vllm_args") is not None:
+        raw = body["extra_vllm_args"]
+        if isinstance(raw, str):
+            raw = shlex.split(raw)
+        if not isinstance(raw, list) or not all(isinstance(a, (str, int, float)) for a in raw):
+            return web.json_response(
+                {"error": "extra_vllm_args must be a list of strings "
+                          "(e.g. [\"--moe-backend\", \"marlin\"]) or a shell-style string"},
+                status=400)
+        overrides["extra_vllm_args"] = [str(a) for a in raw]
+    if body.get("engine_image") is not None:
+        img = str(body["engine_image"]).strip()
+        if " " in img:
+            return web.json_response({"error": "engine_image must be a single image ref"},
+                                     status=400)
+        overrides["engine_image"] = img
+
+    # Curated models carry their proven recipe — apply it as DEFAULTS so a bare
+    # {"model": "..."} load (i.e. clicking it in the dashboard) launches with the
+    # engine image and flags it actually needs. Anything the caller stated
+    # explicitly above wins; the recipe only fills the gaps.
+    recipe = catalog_recipe(model)
+    for key in ("engine_image", "extra_vllm_args"):
+        if key in recipe and key not in overrides:
+            overrides[key] = recipe[key]
+    if gmu is None and "gpu_memory_utilization" in recipe:
+        gmu = recipe["gpu_memory_utilization"]
 
     # Decide: single-node or distributed?
     sharding_config = None
