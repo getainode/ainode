@@ -58,6 +58,21 @@ class NodeConfig:
     kv_cache_dtype_explicit: bool = False
     quantization: Optional[str] = None  # awq, gptq, fp8, None
     trust_remote_code: bool = False
+    # Extra `vllm serve` flags appended verbatim to the engine command line, e.g.
+    # ["--moe-backend", "marlin", "--reasoning-parser", "qwen3"]. Models whose
+    # published recipe needs flags AINode doesn't model (speculative decoding,
+    # mamba/MoE backends, reasoning + tool-call parsers) launch through the
+    # normal path instead of a hand-rolled container. Deliberately NOT validated
+    # here — vLLM is the authority and rejects unknown flags at startup. A flag
+    # supplied here WINS over the same built-in flag (see _build_vllm_serve_args).
+    extra_vllm_args: List[str] = field(default_factory=list)
+    # Per-instance engine container image. Empty = the backend default
+    # ($NVIDIA_VLLM_IMAGE). Required when a model needs a newer vLLM than the
+    # fleet default — e.g. Nemotron 3.5 Lightning and Qwen3.8 need
+    # `vllm/vllm-openai:v0.27.1`, while the fleet default is a 0.17 build.
+    # Setting this also disables the 0.17-era GB10 workarounds that would
+    # otherwise be forced on (see NvidiaBackend._is_pinned_default_image).
+    engine_image: str = ""
 
     # Cluster
     cluster_enabled: bool = True

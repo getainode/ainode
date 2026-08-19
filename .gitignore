@@ -54,3 +54,10 @@ ops/runbooks/*
 
 # Node (for web UI)
 node_modules/
+
+# Agent tooling scratch dirs — local session state, never product code.
+# (These were untracked and got swept in by a `git add -A`; ignoring them so a
+# stray bulk-add can't publish embedded git repos into the product repo.)
+.claude/
+.cursor/
+.omx/

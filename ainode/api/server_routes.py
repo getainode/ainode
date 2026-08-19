@@ -425,6 +425,24 @@ async def handle_server_eject(request: web.Request) -> web.Response:
             manager.remove(inst.record.instance_id)
             if request.app.get("engine") is inst.backend:
                 request.app["engine"] = None  # the primary went away
+                # routing-truth: the node must stop claiming a model it no longer
+                # serves, or the master keeps advertising a ghost.
+                config = request.app.get("config")
+                if config is not None and getattr(config, "model", None) == model_id:
+                    config.model = None
+                    try:
+                        config.save()
+                    except Exception:
+                        pass
+            # Persist the shrunken instance set. Without this the eject was
+            # memory-only: startup replay reads the manifest, so the ejected model
+            # came BACK on the next reboot (spark-4, 2026-08-13 — an ejected 0.5B
+            # reappeared and then blocked a later load via admission control).
+            try:
+                from ainode.models.api_routes import save_instance_manifest
+                save_instance_manifest(request.app)
+            except Exception:
+                logger.warning("eject: failed to persist instance manifest", exc_info=True)
             return web.json_response({"ok": True, "model_id": model_id,
                                       "message": "Instance stopped"})
 

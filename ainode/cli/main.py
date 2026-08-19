@@ -1,6 +1,7 @@
 """AINode CLI — main entry point with Rich terminal output."""
 
 import argparse
+import importlib.util
 import os
 import signal
 import sys
@@ -227,8 +228,21 @@ def cmd_start(args):
             _remove_pid()
         return
 
+    from ainode.engine.backends import get_backend
     if in_container or config.engine_strategy == "docker":
-        from ainode.engine.backends import get_backend
+        engine = get_backend(config)
+    elif importlib.util.find_spec("vllm") is None:
+        # Legacy host-venv path is dev-only and needs vLLM importable in THIS
+        # interpreter. When it isn't, VLLMEngine starts, dies with "No module
+        # named 'vllm'", and the reason lands only in ~/.ainode/logs/vllm.log —
+        # the boot banner still says "Engine starting in background", so the node
+        # looks healthy while serving nothing (observed on spark-4, 2026-08-14).
+        # A node configured for a container backend should use it rather than
+        # launch a certain failure.
+        console.print(
+            f"  [dim]vLLM not importable here — using the "
+            f"{(config.engine_backend or 'eugr')} container backend.[/dim]"
+        )
         engine = get_backend(config)
     else:
         from ainode.engine.vllm_engine import VLLMEngine
