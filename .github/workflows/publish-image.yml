@@ -89,7 +89,18 @@ jobs:
           fi
           echo "Version match: $pyproj_version"
 
+      # The AINode image is FROM python:3.12-slim and does NOT consume this base
+      # (the engine runs in its own container). The base is the eugr ENGINE image,
+      # rebuilt here as a convenience. It resolves vLLM from source at build time,
+      # so it floats to whatever nightly exists that day — on 2026-08-19 that
+      # nightly had a self-contradictory dependency set (quack-kernels pinned
+      # nvidia-cutlass-dsl==4.6.2 while vLLM wanted [cu13]==4.7.0) and blocked the
+      # 0.5.4 release for reasons unrelated to AINode. An upstream engine break
+      # must not be able to block an AINode release, so this step is advisory:
+      # it still runs (a good day refreshes the base) but no longer gates the app.
       - name: Build base (eugr) image
+        id: base
+        continue-on-error: true
         run: |
           if [ "${{ inputs.rebuild_base }}" = "true" ]; then
             # Pass --rebuild-vllm to eugr's build-and-copy.sh by exporting
@@ -101,6 +112,7 @@ jobs:
 
       - name: Resolve eugr commit short SHA
         id: eugr
+        continue-on-error: true
         run: |
           cd scripts/_eugr
           short=$(git rev-parse --short=7 HEAD)
@@ -158,11 +170,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Only push a base we actually built. Skipping it leaves the previously
+      # published base in place, which is correct: nothing about it changed.
       - name: Push base image
-        if: steps.vars.outputs.push == 'true'
+        if: steps.vars.outputs.push == 'true' && steps.base.outcome == 'success'
         run: |
           docker push ${REGISTRY_GHCR}/ainode-base:${{ steps.eugr.outputs.short }}
           docker push ${REGISTRY_GHCR}/ainode-base:${AINODE_VERSION}-${{ steps.eugr.outputs.short }}
+
+      - name: Report skipped base build
+        if: steps.base.outcome != 'success'
+        run: |
+          echo "::warning::eugr base image build FAILED or was skipped — the previously" \
+               "published base remains in place. The AINode image does not depend on it," \
+               "so this release is unaffected. Investigate separately."
 
       - name: Push ainode image
         if: steps.vars.outputs.push == 'true'
