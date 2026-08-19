@@ -375,6 +375,40 @@ async def _wait_port_ready(port: int, timeout: float = 300.0) -> bool:
     return False
 
 
+async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float = 300.0) -> bool:
+    """Wait for an engine to bind, and if it died on the way up, relaunch ONCE.
+
+    An engine can pass the launch check (its container reached Running) and then
+    die minutes later during weight load. Observed 2026-08-19 on spark-3: the
+    startup sweep killed the previous engine and the replacement launched while
+    the driver was still releasing the GPU, so the nvidia hook handed it no
+    device — `Can't initialize NVML`, `0 active driver(s) found` — and it exited
+    during load. Nothing retried, so the node came back advertising nothing and
+    the model stayed missing until a human re-loaded it.
+
+    ``relaunch`` is a zero-arg callable that re-issues the launch. The retry is
+    deliberately single: a model that fails twice has a real problem, and a retry
+    loop would just hide it.
+    """
+    if await _wait_port_ready(port, timeout=timeout):
+        return True
+    logger.warning("%s never bound on :%s — relaunching once", label, port)
+    # Give the GPU time to finish releasing before asking for it again.
+    await asyncio.sleep(30)
+    loop = asyncio.get_event_loop()
+    try:
+        ok = await loop.run_in_executor(None, relaunch)
+    except Exception:
+        logger.exception("%s relaunch raised", label)
+        return False
+    if not ok:
+        logger.error("%s relaunch failed to start", label)
+        return False
+    served = await _wait_port_ready(port, timeout=timeout)
+    logger.info("%s relaunch %s", label, "is serving" if served else "still not serving")
+    return served
+
+
 async def replay_instances_on_startup(app) -> None:
     """Always-on: after boot, re-load the persisted solo instance set so a node
     restart brings every previously-loaded model back with no manual step. The
@@ -409,7 +443,14 @@ async def replay_instances_on_startup(app) -> None:
         logger.exception("orphan container sweep failed")
 
     # Wait for the boot primary to actually serve before stacking on top of it.
-    await _wait_port_ready(config.api_port, timeout=300)
+    # Retry once if it died on the way up — otherwise the node comes back with
+    # its main model silently missing.
+    boot_engine = app.get("engine")
+    if boot_engine is not None and getattr(config, "model", None):
+        await _ensure_serving(app, config.api_port, boot_engine.start,
+                              f"boot primary {config.model}")
+    else:
+        await _wait_port_ready(config.api_port, timeout=300)
 
     manager = app.get("instances")
     have = {i.record.model for i in manager.instances()} if manager is not None else set()
@@ -427,9 +468,16 @@ async def replay_instances_on_startup(app) -> None:
                 lambda mm=m, g=e.get("gpu_memory_utilization"), ov={k: e[k] for k in _OVERRIDE_KEYS if k in e}: append_solo_instance(app, mm, g, overrides=ov, persist=False),
             )
             have.add(m)
-            # Serialize: let this model bind before launching the next one.
+            # Serialize: let this model bind before launching the next one, and
+            # retry once if it died on the way up (same GPU-release race).
             if isinstance(res, dict) and res.get("ok") and res.get("api_port"):
-                await _wait_port_ready(res["api_port"], timeout=300)
+                inst = manager.by_model(m) if manager is not None else None
+                relaunch = (inst.backend.start if inst is not None
+                            else (lambda mm=m, g=e.get("gpu_memory_utilization"),
+                                  ov={k: e[k] for k in _OVERRIDE_KEYS if k in e}:
+                                  bool(append_solo_instance(app, mm, g, overrides=ov,
+                                                            persist=False).get("ok"))))
+                await _ensure_serving(app, res["api_port"], relaunch, f"replay {m}")
         except Exception:
             logger.exception("replay load failed for %s", m)
 
