@@ -10,6 +10,52 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.4] — 2026-08-19
+
+### Added
+- **Models launch with their own engine image and flags** (#62) — per-instance
+  `extra_vllm_args` and `engine_image` on the node config, threaded through the
+  per-load override set so they persist and survive restart-replay. A model whose
+  published recipe needs flags AINode doesn't model (speculative decoding,
+  MoE/mamba backends, reasoning + tool-call parsers) now launches through the
+  normal load path instead of a hand-rolled container. A flag supplied by the
+  caller suppresses the matching built-in rather than duplicating it.
+- **Catalog recipes** for NVIDIA Nemotron 3.5 Lightning 30B-A3B (NVFP4) and
+  Qwen3.8-27B (NVFP4, native vision), each carrying its proven engine image,
+  flag set, and recommended memory fraction — applied as defaults so a bare
+  `{"model": ...}` load (what the dashboard sends) launches correctly.
+
+### Fixed
+- The 0.17-era GB10 workarounds (`--enforce-eager`, the NVFP4 MARLIN env) now
+  apply only to the pinned default engine image. They are bugs in that build;
+  on newer engines they only disable CUDA graphs and cost throughput.
+- `vllm serve` argv is normalized across engine images. `vllm/vllm-openai` bakes
+  `ENTRYPOINT ["vllm","serve"]` while the default image uses NVIDIA's passthrough
+  shim, so emitting our own prefix produced `vllm serve vllm serve <model>` and
+  the engine exited with "unrecognized arguments". The entrypoint is deliberately
+  not overridden — that would bypass CUDA setup.
+- Engine containers no longer run with `--rm`, so an engine that dies during
+  startup leaves a readable corpse instead of erasing itself. `start_solo()` now
+  confirms the container reached Running and logs the engine's last output on
+  failure, rather than reporting success as soon as the docker CLI forked.
+- Eject survives reboot. It was memory-only, so startup replay resurrected
+  ejected models; it now rewrites the instance manifest and clears the node's
+  model claim when the ejected instance was the primary.
+- The boot path no longer launches the legacy host-venv engine when vLLM isn't
+  importable — it uses the configured container backend instead of starting a
+  guaranteed "No module named 'vllm'" failure behind an "Engine starting" banner.
+- Vision models served from the HF cache now get `--kv-cache-dtype auto`
+  explicitly; the automatic fp8 downgrade only fires for models on local disk,
+  and fp8 KV corrupts VLM generation on GB10.
+
+### Changed
+- Working branches use the `fable/*` prefix (was `codex/*`).
+- The ruff rule set is pinned explicitly so lint is deterministic across ruff
+  upgrades; an unpinned `ruff>=0.1.0` had started failing every PR on rules the
+  repo never opted into.
+
+---
+
 ## [0.5.3] — 2026-07-07
 
 ### Fixed
