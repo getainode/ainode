@@ -10,6 +10,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.5] — 2026-08-19
+
+### Fixed
+- **Startup replay retries an engine that dies on the way up** (#63) — an engine
+  can pass the launch check (its container reaches Running) and then die minutes
+  later during weight load. Seen while rolling 0.5.4 onto a node: the startup
+  sweep killed the running engine and replay relaunched immediately, while the
+  driver was still releasing the GPU, so the nvidia hook handed the replacement
+  no device (`Can't initialize NVML`, `0 active driver(s) found`) and it exited
+  during load. Nothing retried, so the node came back advertising nothing and the
+  model stayed missing until someone re-loaded it by hand. `_ensure_serving()`
+  now waits for each engine to bind and, if it never does, waits for the GPU to
+  finish releasing and relaunches once — for both the boot primary and each
+  replayed stacked instance. The retry is deliberately single: a model that fails
+  twice has a real problem, and a loop would hide it.
+
+---
+
 ## [0.5.4] — 2026-08-19
 
 ### Added
