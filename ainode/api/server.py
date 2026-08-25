@@ -50,6 +50,23 @@ from ainode import __version__
 
 logger = logging.getLogger(__name__)
 
+def _client_max_bytes(config) -> int:
+    """Inbound request-body ceiling for the API server, in bytes.
+
+    NOT optional: aiohttp defaults to 1 MB, which rejects long-context prompts
+    at the proxy. A model advertising 262k context can only be fed ~190k tokens
+    through our own endpoint before the caller gets an opaque 413 that says
+    nothing about which hop refused it (found 2026-08-25 benchmarking decode
+    against context depth). A bad value falls back to the default rather than
+    producing a server that rejects every body.
+    """
+    try:
+        mb = int(getattr(config, "max_request_mb", 64))
+    except (TypeError, ValueError):
+        mb = 64
+    return max(1, mb) * 1024 * 1024
+
+
 def create_app(
     config: Optional[NodeConfig] = None,
     engine=None,
@@ -71,7 +88,10 @@ def create_app(
 
     auth_config = AuthConfig.load()
 
-    app = web.Application(middlewares=[cors_middleware, request_log_middleware, auth_middleware])
+    app = web.Application(
+        middlewares=[cors_middleware, request_log_middleware, auth_middleware],
+        client_max_size=_client_max_bytes(config),
+    )
     init_server_state(app)
     # Instantiate shared services
     collector = MetricsCollector()

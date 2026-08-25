@@ -202,3 +202,59 @@ def test_qwen38_recipe_pins_kv_cache_auto_for_vision():
     assert a[a.index("--kv-cache-dtype") + 1] == "auto"
     built = args_for(extra_vllm_args=a)
     assert built.count("--kv-cache-dtype") == 1 and "fp8" not in built
+
+
+# --- extra_env passthrough (b12x and friends are env-selected, not flag-selected) ---
+
+def _env_pairs(cmd):
+    """Extract {NAME: value} from the `-e NAME=value` pairs of a docker cmd."""
+    out = {}
+    for i, tok in enumerate(cmd):
+        if tok == "-e" and i + 1 < len(cmd) and "=" in cmd[i + 1]:
+            k, _, v = cmd[i + 1].partition("=")
+            out[k] = v
+    return out
+
+
+def test_extra_env_reaches_the_engine_container():
+    b = NvidiaBackend(NodeConfig(model="m", extra_env={
+        "VLLM_NVFP4_GEMM_BACKEND": "flashinfer-b12x",
+        "VLLM_USE_FLASHINFER_MOE_FP4": "1",
+    }))
+    env = _env_pairs(b._build_solo_docker_cmd("c"))
+    assert env["VLLM_NVFP4_GEMM_BACKEND"] == "flashinfer-b12x"
+    assert env["VLLM_USE_FLASHINFER_MOE_FP4"] == "1"
+
+
+def test_extra_env_overrides_a_computed_value():
+    # The pinned default image forces VLLM_NVFP4_GEMM_BACKEND=marlin. A recipe
+    # selecting the b12x kernel path must win, or b12x is unreachable on it.
+    b = NvidiaBackend(NodeConfig(model="some/model-NVFP4",
+                                 extra_env={"VLLM_NVFP4_GEMM_BACKEND": "flashinfer-b12x"}))
+    assert b._nvfp4_serve_env().get("VLLM_NVFP4_GEMM_BACKEND") == "marlin"
+    assert _env_pairs(b._build_solo_docker_cmd("c"))["VLLM_NVFP4_GEMM_BACKEND"] == "flashinfer-b12x"
+
+
+def test_no_extra_env_leaves_the_command_untouched():
+    base = NvidiaBackend(NodeConfig(model="m"))._build_solo_docker_cmd("c")
+    same = NvidiaBackend(NodeConfig(model="m", extra_env={}))._build_solo_docker_cmd("c")
+    assert base == same
+
+
+def test_extra_env_values_are_stringified():
+    b = NvidiaBackend(NodeConfig(model="m", extra_env={"FLASHINFER_DISABLE_VERSION_CHECK": 1}))
+    assert _env_pairs(b._build_solo_docker_cmd("c"))["FLASHINFER_DISABLE_VERSION_CHECK"] == "1"
+
+
+def test_catalog_recipe_surfaces_extra_env_when_a_model_carries_it():
+    from ainode.models.registry import ModelInfo
+    import ainode.models.registry as reg
+    probe = ModelInfo(id="probe-b12x", name="probe", hf_repo="org/probe-b12x",
+                      size_gb=1.0, description="d",
+                      extra_env={"VLLM_NVFP4_GEMM_BACKEND": "flashinfer-b12x"})
+    reg.CURATED_CLUSTER_MODELS["probe-b12x"] = probe
+    try:
+        assert catalog_recipe("org/probe-b12x")["extra_env"] == {
+            "VLLM_NVFP4_GEMM_BACKEND": "flashinfer-b12x"}
+    finally:
+        del reg.CURATED_CLUSTER_MODELS["probe-b12x"]

@@ -129,3 +129,61 @@ class TestBootEngineSelection:
         assert body.index('importlib.util.find_spec("vllm")') < body.index(
             "from ainode.engine.vllm_engine import VLLMEngine"
         ), "the viability check must come BEFORE falling back to the legacy engine"
+
+
+# --- a per-model engine_image the node has never seen must be pulled, not fail ---
+
+def test_ensure_image_is_a_noop_when_present(monkeypatch):
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends.nvidia import NvidiaBackend
+    b = NvidiaBackend(NodeConfig(model="m"))
+    monkeypatch.setattr(b, "_image_present", lambda img: True)
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: calls.append(a) or None)
+    assert b.ensure_image("some/image:1") is True
+    assert not calls, "must not pull an image that is already here"
+
+
+def test_ensure_image_pulls_when_missing(monkeypatch):
+    import subprocess
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends.nvidia import NvidiaBackend
+    b = NvidiaBackend(NodeConfig(model="m"))
+    monkeypatch.setattr(b, "_image_present", lambda img: False)
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert b.ensure_image("some/image:1") is True
+    assert seen["cmd"][:2] == ["docker", "pull"]
+    assert seen["cmd"][2] == "some/image:1"
+
+
+def test_ensure_image_reports_failure_instead_of_launching_blind(monkeypatch):
+    import subprocess
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends.nvidia import NvidiaBackend
+    b = NvidiaBackend(NodeConfig(model="m"))
+    monkeypatch.setattr(b, "_image_present", lambda img: False)
+    monkeypatch.setattr("subprocess.run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "no such image"))
+    assert b.ensure_image("bogus/nope:1") is False
+
+
+def test_start_solo_refuses_when_the_image_cannot_be_had(monkeypatch):
+    # Previously this launched anyway: docker began an implicit pull, the launch
+    # confirmation timed out under it, and the caller saw a bare failure with no
+    # mention of an image.
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends.nvidia import NvidiaBackend
+    b = NvidiaBackend(NodeConfig(model="m"))
+    monkeypatch.setattr(b, "is_running", lambda: False)
+    monkeypatch.setattr(b, "_docker_stop_and_rm_best_effort", lambda name: None)
+    monkeypatch.setattr(b, "ensure_image", lambda img, **kw: False)
+    launched = []
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: launched.append(a))
+    assert b.start_solo() is False
+    assert not launched, "must not run the container when the image is unavailable"

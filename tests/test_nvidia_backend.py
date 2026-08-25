@@ -113,6 +113,10 @@ class TestFactoryDispatch:
             # reporting success (0.5.4) — there is no real docker here, so stub
             # the state probe. See TestLaunchConfirmation for that contract.
             NvidiaBackend, "_docker_container_state", return_value="running",
+        ), mock.patch.object(
+            # Same reason as above: no real docker, so the engine-image probe
+            # would refuse the launch. Covered by test_launch_robustness.py.
+            NvidiaBackend, "ensure_image", return_value=True,
         ):
             result = backend.start()
         assert result is True
@@ -286,6 +290,12 @@ class TestStartSolo:
             # test keeps asserting on the docker-run argv alone.
             backend, "_image_entrypoint",
             return_value=["/opt/nvidia/nvidia_entrypoint.sh"],
+        ), mock.patch.object(
+            # start_solo() now pulls a missing engine image before launching.
+            # There is no docker here, so the probe would report it absent and
+            # refuse. Image handling has its own tests in
+            # test_launch_robustness.py; this one is about the argv.
+            backend, "ensure_image", return_value=True,
         ):
             result = backend.start_solo()
 

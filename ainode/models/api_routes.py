@@ -145,7 +145,7 @@ def load_instance_manifest() -> list:
 
 _OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
                   "kv_cache_dtype_explicit", "quantization", "trust_remote_code",
-                  "extra_vllm_args", "engine_image")
+                  "extra_vllm_args", "engine_image", "extra_env")
 
 
 def catalog_recipe(model: str) -> dict:
@@ -155,7 +155,8 @@ def catalog_recipe(model: str) -> dict:
     flag set (spec-decode, MoE/mamba backends, reasoning + tool-call parsers).
     Carrying that in the catalog is what makes them a one-click load instead of a
     hand-rolled container. Returns {} for anything not curated. Keys:
-    ``engine_image``, ``extra_vllm_args``, and ``gpu_memory_utilization``.
+    ``engine_image``, ``extra_vllm_args``, ``extra_env``, and
+    ``gpu_memory_utilization``.
     """
     from ainode.models.registry import CURATED_CLUSTER_MODELS
     m = (model or "").strip()
@@ -168,6 +169,8 @@ def catalog_recipe(model: str) -> dict:
                 recipe["engine_image"] = info.engine_image
             if getattr(info, "extra_vllm_args", None):
                 recipe["extra_vllm_args"] = list(info.extra_vllm_args)
+            if getattr(info, "extra_env", None):
+                recipe["extra_env"] = dict(info.extra_env)
             if getattr(info, "recommended_gmu", 0):
                 recipe["gpu_memory_utilization"] = info.recommended_gmu
             return recipe
@@ -568,6 +571,16 @@ async def handle_model_load(request: web.Request) -> web.Response:
                           "(e.g. [\"--moe-backend\", \"marlin\"]) or a shell-style string"},
                 status=400)
         overrides["extra_vllm_args"] = [str(a) for a in raw]
+    if body.get("extra_env") is not None:
+        raw = body["extra_env"]
+        if not isinstance(raw, dict) or not all(
+                isinstance(k, str) and k and isinstance(v, (str, int, float, bool))
+                for k, v in raw.items()):
+            return web.json_response(
+                {"error": "extra_env must be an object of NAME -> value "
+                          "(e.g. {\"VLLM_NVFP4_GEMM_BACKEND\": \"flashinfer-b12x\"})"},
+                status=400)
+        overrides["extra_env"] = {k: str(v) for k, v in raw.items()}
     if body.get("engine_image") is not None:
         img = str(body["engine_image"]).strip()
         if " " in img:
@@ -580,7 +593,7 @@ async def handle_model_load(request: web.Request) -> web.Response:
     # engine image and flags it actually needs. Anything the caller stated
     # explicitly above wins; the recipe only fills the gaps.
     recipe = catalog_recipe(model)
-    for key in ("engine_image", "extra_vllm_args"):
+    for key in ("engine_image", "extra_vllm_args", "extra_env"):
         if key in recipe and key not in overrides:
             overrides[key] = recipe[key]
     if gmu is None and "gpu_memory_utilization" in recipe:

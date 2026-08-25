@@ -93,6 +93,9 @@ HEAD_CONTAINER_READY_TIMEOUT = 60
 
 # NCCL tuning from Phase 1 floor verification — see
 # ops/slices/nvidia-vllm-engine/runbooks/01-nccl-floor-verification.md.
+# A cold engine image is ~20 GB; a first pull on a slow link needs real room.
+IMAGE_PULL_TIMEOUT = 3600
+
 NCCL_IB_GID_INDEX = "3"
 MASTER_PORT = "29501"
 
@@ -160,6 +163,12 @@ class NvidiaBackend(EngineBackend):
         # Conflict. The head path already does this (see _launch_head_container);
         # solo needs it too.
         self._docker_stop_and_rm_best_effort(container_name)
+        # Before _build_solo_docker_cmd, because the argv prefix is derived from
+        # the image's ENTRYPOINT and inspecting a missing image yields nothing.
+        if not self.ensure_image(self._engine_image()):
+            logger.error("Engine image %s unavailable; not launching %s",
+                         self._engine_image(), self.config.model)
+            return False
         cmd = self._build_solo_docker_cmd(container_name)
         env = self._build_env_for_subprocess()
 
@@ -722,6 +731,20 @@ class NvidiaBackend(EngineBackend):
             return "auto"
         return dtype
 
+    def _engine_env(self, nccl_env: Dict[str, str]) -> Dict[str, str]:
+        """Env for the engine container: computed NCCL env + per-instance extras.
+
+        ``extra_env`` is applied LAST so a recipe wins over an autodetected
+        value. Some engine features have no CLI flag at all (the b12x FP4 path
+        is selected purely by VLLM_NVFP4_GEMM_BACKEND and friends), so without
+        this they can only be reached by hand-rolling a container — which is
+        exactly what the launch path exists to avoid.
+        """
+        env = dict(nccl_env or {})
+        for key, value in (getattr(self.config, "extra_env", None) or {}).items():
+            env[str(key)] = str(value)
+        return env
+
     def _engine_image(self) -> str:
         """Container image for THIS instance — per-load override, else the
         fleet default. Lets one node run a 0.17 model and a 0.27 model side by
@@ -753,6 +776,46 @@ class NvidiaBackend(EngineBackend):
         if Path(tail[-1]).name == "vllm":  # entrypoint is vllm itself
             return ["serve"]
         return ["vllm", "serve"]           # shim/shell entrypoint
+
+    def _image_present(self, image: str) -> bool:
+        """True if the image is already on this host."""
+        try:
+            out = subprocess.run(["docker", "image", "inspect", image],
+                                 capture_output=True, text=True, timeout=20)
+            return out.returncode == 0
+        except Exception:
+            return False
+
+    def ensure_image(self, image: str, timeout: float = IMAGE_PULL_TIMEOUT) -> bool:
+        """Make sure ``image`` is on this host, pulling it if it isn't.
+
+        Per-model ``engine_image`` means a node can be asked for an image it has
+        never run. Without this the launch just fails: docker starts an implicit
+        pull, the launch confirmation times out underneath it, and the caller
+        gets a bare "Failed to launch engine" with no mention of an image. The
+        entrypoint probe degrades too, since ``docker inspect`` on a missing
+        image returns nothing and we silently fall back to a default prefix.
+        Observed 2026-08-25 loading a recipe model onto a fresh node.
+        """
+        if self._image_present(image):
+            return True
+        logger.info("Engine image %s not present; pulling (this can take several "
+                    "minutes for a ~20 GB image)", image)
+        try:
+            out = subprocess.run(["docker", "pull", image],
+                                 capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.error("Timed out pulling engine image %s after %ss", image, timeout)
+            return False
+        except Exception as exc:
+            logger.error("Could not pull engine image %s: %s", image, exc)
+            return False
+        if out.returncode != 0:
+            logger.error("Failed to pull engine image %s: %s", image,
+                         (out.stderr or out.stdout or "").strip()[-400:])
+            return False
+        logger.info("Pulled engine image %s", image)
+        return True
 
     def _image_entrypoint(self, image: str) -> List[str]:
         """The image's configured ENTRYPOINT, or [] when unknown."""
@@ -873,7 +936,7 @@ class NvidiaBackend(EngineBackend):
             "-v",
             f"{models_src}:{self.MODELS_MOUNT}:ro",
         ]
-        for key, value in nccl_env.items():
+        for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
 
         image = self._engine_image()
@@ -948,7 +1011,7 @@ class NvidiaBackend(EngineBackend):
             # peer's home-dir cache, which isn't under AINODE_HOME.
             "-v", f"{self._host_path(hf_cache_dir)}:/root/.cache/huggingface",
         ]
-        for key, value in nccl_env.items():
+        for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
         cmd.extend([self._engine_image(), "-c", ray_cmd])
         return cmd
@@ -1134,7 +1197,7 @@ class NvidiaBackend(EngineBackend):
             f"--{role}",
             hf_cache_dir,
         ]
-        for key, value in nccl_env.items():
+        for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
         return cmd
 
