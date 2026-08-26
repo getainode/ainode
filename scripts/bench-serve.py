@@ -23,7 +23,12 @@ never our estimate, so a bad chars-per-token guess shifts nothing.
 
 # ponytail: stdlib urllib + threads; no httpx/asyncio dep for a lab bench.
 """
-import argparse, json, time, urllib.request, statistics, uuid
+import argparse
+import json
+import statistics
+import time
+import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 PROMPTS = {
@@ -161,7 +166,8 @@ def depth_sweep(url, model, depths, reps, max_tokens, no_think=False):
             if ttft is None or n < 2:
                 print(f"  {d:>8}  no usable tokens (n={n}); raise --max-tokens or use --no-think")
                 break
-            decodes.append(dec); ttfts.append(ttft)
+            decodes.append(dec)
+            ttfts.append(ttft)
             ntoks.append(n)
             if ptok:
                 actuals.append(ptok)
