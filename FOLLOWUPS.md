@@ -18,6 +18,49 @@
 - **Next action:** replay should not fire the instant the sweep completes. Either wait for the GPU to report free before relaunching, or retry a failed replay launch once after ~30s (the launch already returns False correctly now, so a retry hook is cheap). Prefer the retry — it also covers other transient launch failures.
 - **Proof of closure:** kill a running engine container and restart the orchestrator in a loop; the model returns every time without manual intervention.
 
+## [ainode] BUG: `served_model_name` breaks federated routing (phantom menu entry)
+- **Filed:** 2026-08-26, hit live on spark-3 while benchmarking.
+- **Symptom:** a model loaded with `served_model_name` is advertised fleet-wide under its
+  REPO ID, but the engine only answers to the alias. Every request for the advertised name
+  404s at the engine. The menu is confidently wrong.
+- **Repro (verbatim):**
+  ```
+  POST /api/models/load {"model":"unsloth/Qwen3.8-27B-NVFP4","served_model_name":["qwen38-ctl"], ...}
+  GET  proxy /v1/models            -> lists "unsloth/Qwen3.8-27B-NVFP4"
+  GET  engine :8000 /v1/models     -> lists "qwen38-ctl"
+  POST proxy   model=unsloth/Qwen3.8-27B-NVFP4 -> 404 "The model `...` does not exist."
+  POST engine  model=qwen38-ctl                -> 200
+  ```
+- **Why it matters:** this is the phantom-menu class again, but reachable through a
+  documented API field rather than a crash. The other phantoms need a dead engine; this one
+  needs a healthy engine and a supported request. It also makes `served_model_name` unusable
+  for its actual purpose (addressing a model by a short name) since the short name is exactly
+  what the router cannot resolve.
+- **Next action:** the announcement should carry the served name(s), not just the repo id.
+  Either announce every alias so `_routing_table` / `_routing_candidates` resolve them, or
+  have the proxy rewrite `model` to the instance's served name on the way out. Prefer the
+  first: it makes the fleet menu truthful, which is the invariant we keep breaking.
+- **Proof of closure:** load with `served_model_name`, then a request for BOTH the alias and
+  the repo id succeeds through the master proxy, and `/v1/models` lists what actually answers.
+
+## [ainode] BUG: loading a model that's already loaded silently REPLACES the live instance
+- **Filed:** 2026-08-26, spark-3. Cost ~7 min of Qwen3.8 downtime.
+- **Symptom:** `POST /api/models/load` for a model already serving on that node does not
+  stack and does not refuse. It reuses the same `instance_id`, tears down the running engine,
+  and rebuilds it with the new config. The response looks routine:
+  `{"status":"launching","instance_id":"cefba42c:unsloth/Qwen3.8-27B-NVFP4","api_port":8000,"stacked":false}`
+  Nothing in it says an in-flight instance was just stopped, and the model leaves the fleet
+  menu for the duration of the reload.
+- **Why it's easy to hit:** stacking is keyed on model, so "load the same model with different
+  flags" (exactly what config A/B testing looks like) reads as a stack request and behaves as
+  a destructive reload. I assumed stacked semantics from the docs and took a serving model
+  down.
+- **Next action:** make the destructive case explicit. Return `"replacing": true` (and ideally
+  the previous config) in the response, or require `{"replace": true}` in the body and 409
+  without it. Either is fine; silently replacing is not.
+- **Proof of closure:** loading an already-loaded model either 409s without an explicit
+  replace flag, or the response states plainly that it is replacing a running instance.
+
 ## [ainode] BUG: eject doesn't survive reboot + phantom rows (2 of 5 FIXED 2026-08-15)
 - **FIXED on `fable/0.5.4-native-engines`:** (a) engine containers no longer launch with `--rm`, so a crashed engine leaves a readable corpse (validated live: the entrypoint-collision crash left its "unrecognized arguments" error intact instead of self-erasing); (b) `start_solo()` now confirms the container reached Running and logs the engine's last output on failure, instead of returning True as soon as the docker CLI forked.
 - **ALSO FIXED 2026-08-15:** (c) eject now rewrites the instance manifest (it was memory-only, so replay resurrected ejected models on reboot) and clears `config.model` when the primary is ejected; (d) the boot path no longer launches the legacy host-venv engine when vLLM isn't importable — it uses the configured container backend instead of starting a guaranteed "No module named 'vllm'" failure behind an "Engine starting" banner.
