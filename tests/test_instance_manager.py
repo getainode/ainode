@@ -127,3 +127,31 @@ def test_eject_stops_one_instance():
     assert b.stopped is True
     assert mgr.by_model("A") is None
     assert app["engine"] is None                         # primary cleared
+
+
+# --- port allocation must respect the whole host, not just our own instances ---
+
+def test_allocate_port_skips_a_port_held_by_another_process():
+    # The engine container shares the host network, so a port owned by an
+    # unrelated service collides. Before this, allocate_port() handed it out
+    # anyway and the engine died with EADDRINUSE deep in startup, surfacing to
+    # the caller as a generic "Failed to launch engine".
+    import socket
+    from ainode.engine.instance_manager import InstanceManager
+
+    squatter = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    squatter.bind(("0.0.0.0", 0))
+    squatter.listen(1)
+    taken = squatter.getsockname()[1]
+    try:
+        mgr = InstanceManager(base_port=taken)
+        assert mgr.allocate_port() != taken
+    finally:
+        squatter.close()
+
+
+def test_allocate_port_probe_can_be_disabled():
+    from ainode.engine.instance_manager import InstanceManager
+    mgr = InstanceManager(base_port=8000)
+    assert mgr.allocate_port(probe=False) == 8000

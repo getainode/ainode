@@ -4,7 +4,7 @@ import os
 import json
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 AINODE_HOME = Path(os.environ.get("AINODE_HOME", Path.home() / ".ainode"))
 CONFIG_FILE = AINODE_HOME / "config.json"
@@ -73,6 +73,20 @@ class NodeConfig:
     # Setting this also disables the 0.17-era GB10 workarounds that would
     # otherwise be forced on (see NvidiaBackend._is_pinned_default_image).
     engine_image: str = ""
+    # Per-instance environment for the engine container. Some engine features
+    # are selected by env var, not by a `vllm serve` flag — the b12x FP4 kernel
+    # path is VLLM_NVFP4_GEMM_BACKEND + friends, with no CLI equivalent. Merged
+    # OVER the computed NCCL env at launch, so a recipe can also correct an
+    # autodetected NCCL value when a model needs it. Deliberately unvalidated,
+    # same as extra_vllm_args: the engine is the authority on what it accepts.
+    extra_env: Dict[str, str] = field(default_factory=dict)
+    # Max inbound request body for the API server, in MB. aiohttp defaults to
+    # 1 MB, which silently caps a 262k-context model at roughly 190k tokens of
+    # prompt: the proxy 413s the request before the engine ever sees it, and the
+    # caller gets "Request Entity Too Large" with nothing pointing at us. Sized
+    # for a 1M-token context (~5 MB of text) plus base64 image/video parts on
+    # the multimodal models, with headroom.
+    max_request_mb: int = 64
 
     # Cluster
     cluster_enabled: bool = True

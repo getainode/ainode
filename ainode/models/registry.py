@@ -88,6 +88,7 @@ class ModelInfo:
     # wins over the recipe; the recipe only fills what wasn't specified.
     engine_image: str = ""          # "" = fleet default engine image
     extra_vllm_args: list = None    # verbatim `vllm serve` flags
+    extra_env: dict = None          # engine-container env (e.g. b12x kernel selection)
     recommended_gmu: float = 0.0    # 0 = use node default gpu_memory_utilization
 
     def __post_init__(self):
@@ -95,6 +96,8 @@ class ModelInfo:
             self.capabilities = []
         if self.extra_vllm_args is None:
             self.extra_vllm_args = []
+        if self.extra_env is None:
+            self.extra_env = {}
 
     def to_dict(self) -> dict:
         return asdict(self)

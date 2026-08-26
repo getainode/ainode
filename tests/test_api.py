@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
-from ainode.api.server import create_app, _build_announcement
+from ainode.api.server import create_app, _build_announcement, _client_max_bytes
 from ainode.core.config import NodeConfig
 
 
@@ -385,3 +385,40 @@ async def test_nodes_include_stacked_instances(client, app):
     n2 = next(n for n in data["nodes"] if n["node_id"] == "n2")
     assert "instances" in n2
     assert any(i["model"] == "stacked-model" and i["api_port"] == 8001 for i in n2["instances"])
+
+
+# --- request body ceiling -------------------------------------------------
+# aiohttp defaults client_max_size to 1 MB. That silently caps long-context
+# models: a 262k-context model can only be fed ~190k tokens of prompt through
+# our endpoint before the proxy 413s it, and nothing in the error says the
+# proxy (not the engine) refused. Found 2026-08-25 while benchmarking decode
+# vs context depth — a 200k-token prompt is ~1.01 MB and died on the default.
+#
+# These assert on _client_max_bytes directly rather than building extra apps:
+# create_app() outside a running loop binds module-level asyncio primitives
+# (the download semaphore) to the wrong loop and made an unrelated download
+# test flaky.
+
+def test_request_ceiling_clears_the_1mb_default():
+    from ainode.api.server import _client_max_bytes
+    one_mb = 1024 * 1024
+    assert _client_max_bytes(NodeConfig()) > one_mb
+    # A 1M-token context is roughly 5 MB of text; leave room for that plus
+    # base64 image/video parts on the multimodal models.
+    assert _client_max_bytes(NodeConfig()) >= 32 * one_mb
+
+
+def test_request_ceiling_is_configurable():
+    from ainode.api.server import _client_max_bytes
+    assert _client_max_bytes(NodeConfig(max_request_mb=8)) == 8 * 1024 * 1024
+
+
+def test_request_ceiling_never_collapses_to_zero():
+    from ainode.api.server import _client_max_bytes
+    assert _client_max_bytes(NodeConfig(max_request_mb=0)) >= 1024 * 1024
+    assert _client_max_bytes(NodeConfig(max_request_mb="nonsense")) >= 1024 * 1024
+
+
+def test_app_is_actually_wired_to_the_ceiling(app):
+    # Uses the existing fixture app rather than constructing another one.
+    assert app._client_max_size == _client_max_bytes(app["config"])
