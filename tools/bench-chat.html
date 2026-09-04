@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bench Chat</title>
+<style>
+:root{
+  --ground:#10131a; --surface:#171b23; --sunk:#1d222b; --raise:#232936;
+  --ink:#e9edf3; --ink2:#a5aeba; --ink3:#737c89;
+  --rule:#262c36; --rule2:#39414d;
+  --blue:#3987e5; --orange:#d95926; --green:#199e70; --red:#e66767;
+  --think:#8d95a1;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--ground);color:var(--ink);
+  font family:ui-sans-serif;
+  font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;font-size:15px;line-height:1.55;
+  display:flex;flex-direction:column}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* ---------- top bar ---------- */
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 14px;
+  background:var(--surface);border-bottom:1px solid var(--rule)}
+header .brand{font-weight:700;letter-spacing:-.02em;margin-right:6px}
+header .brand span{color:var(--blue)}
+select,input[type=text],input[type=number],textarea,button{
+  background:var(--sunk);color:var(--ink);border:1px solid var(--rule2);
+  border-radius:7px;padding:7px 10px;font:inherit}
+select:focus,input:focus,textarea:focus{outline:2px solid var(--blue);outline-offset:1px}
+header input#endpoint{width:290px}
+header select#model{max-width:300px}
+button{cursor:pointer}
+button:hover{background:var(--raise)}
+button.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
+button.primary:hover{filter:brightness(1.1)}
+button.danger{color:var(--red);border-color:var(--red)}
+.toggle{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--ink2);
+  padding:7px 10px;border:1px solid var(--rule2);border-radius:7px;background:var(--sunk);
+  cursor:pointer;user-select:none}
+.toggle input{accent-color:var(--blue)}
+.mini{font-size:12px;color:var(--ink3)}
+#status{font-size:12px;color:var(--ink3);margin-left:auto}
+#status.ok{color:var(--green)} #status.err{color:var(--red)}
+
+/* ---------- layout ---------- */
+main{flex:1;display:flex;min-height:0}
+#chat{flex:1;overflow-y:auto;padding:22px 0 30px;scroll-behavior:smooth}
+.inner{max-width:880px;margin:0 auto;padding:0 20px}
+
+/* ---------- model card (left rail) ---------- */
+aside#card{width:272px;flex:0 0 272px;overflow-y:auto;padding:18px 16px 30px;
+  background:var(--surface);border-right:1px solid var(--rule);font-size:13px}
+aside#card h2{margin:0 0 2px;font-size:14px;font-weight:600;letter-spacing:-.01em;
+  line-height:1.35;word-break:break-word}
+aside#card .sub{color:var(--ink3);font-size:11px;margin-bottom:14px}
+aside#card .grp{border-top:1px solid var(--rule);padding:11px 0 3px}
+aside#card .grp:first-of-type{border-top:0}
+aside#card .lbl{font-family:"IBM Plex Mono",monospace;font-size:9.5px;font-weight:600;
+  letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);margin-bottom:6px}
+aside#card dl{display:grid;grid-template-columns:auto 1fr;gap:5px 10px;margin:0}
+aside#card dt{color:var(--ink2);font-size:12px}
+aside#card dd{margin:0;text-align:right;font-size:12px;word-break:break-word;
+  font-variant-numeric:tabular-nums}
+aside#card a.hf{display:block;margin:2px 0 12px;padding:7px 9px;border-radius:7px;
+  background:var(--sunk);border:1px solid var(--rule2);color:var(--blue);
+  text-decoration:none;font-size:12px;word-break:break-all}
+aside#card a.hf:hover{background:var(--raise)}
+aside#card .tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;
+  background:var(--sunk);border:1px solid var(--rule2);color:var(--ink2)}
+aside#card .tag.ai{color:var(--green);border-color:var(--green)}
+aside#card .tag.raw{color:var(--orange);border-color:var(--orange)}
+@media (max-width:900px){aside#card{display:none}}
+
+aside#card #cardstats{margin-top:20px;border-top:2px solid var(--rule2);padding-top:14px}
+aside#card #cardstats:empty{margin:0;border-top:0;padding:0}
+aside#card table.st{width:100%;border-collapse:collapse;font-size:12px}
+aside#card table.st th{font-family:"IBM Plex Mono",monospace;font-size:9.5px;font-weight:600;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);text-align:right;
+  padding:0 0 6px;font-weight:600}
+aside#card table.st th:first-child{text-align:left}
+aside#card table.st td{padding:4px 0;text-align:right;font-variant-numeric:tabular-nums}
+aside#card table.st td:first-child{text-align:left;color:var(--ink2)}
+aside#card table.st td.now{color:var(--ink);font-weight:600}
+aside#card .hint2{color:var(--ink3);font-size:11px;margin-top:9px;line-height:1.4}
+
+aside#card .caps{display:flex;flex-wrap:wrap;gap:5px;margin-top:2px}
+aside#card .cap{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:5px;
+  font-size:10.5px;border:1px solid var(--rule2);background:var(--sunk);color:var(--ink3)}
+aside#card .cap.on{color:var(--green);border-color:var(--green)}
+aside#card .cap.off{color:var(--ink3);opacity:.75}
+aside#card .cap.off b{font-weight:400;text-decoration:line-through}
+aside#card .cap.wait{color:var(--ink3);font-style:italic}
+aside#card .capnote{color:var(--orange);font-size:11px;line-height:1.4;margin-top:8px}
+
+/* ---------- messages ---------- */
+.msg{margin:0 auto 18px;max-width:880px;padding:0 20px}
+.msg .role{font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--ink3);margin-bottom:5px}
+.msg.user .role{color:var(--blue)}
+.msg .bubble{background:var(--surface);border:1px solid var(--rule);border-radius:10px;
+  padding:12px 15px;white-space:pre-wrap;word-wrap:break-word}
+.msg.user .bubble{background:var(--sunk);border-color:var(--rule2)}
+.msg .bubble pre{background:var(--ground);border:1px solid var(--rule);border-radius:7px;
+  padding:10px 12px;overflow-x:auto;white-space:pre;margin:8px 0;
+  font-family:"IBM Plex Mono",monospace;font-size:13px}
+.attach-strip{display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.attach-strip img,.attach-strip video{max-height:120px;max-width:200px;border-radius:8px;
+  border:1px solid var(--rule2)}
+.think{border-left:3px solid var(--rule2);margin:0 0 10px;padding:8px 12px;
+  color:var(--think);font-size:13.5px;white-space:pre-wrap;background:var(--ground);
+  border-radius:0 7px 7px 0;max-height:280px;overflow-y:auto}
+.think-label{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink3);margin-bottom:4px;cursor:pointer;user-select:none}
+.think.collapsed{display:none}
+
+/* ---------- stats chips ---------- */
+.stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{font-family:"IBM Plex Mono",monospace;font-size:11.5px;padding:3px 9px;
+  border-radius:20px;border:1px solid var(--rule2);color:var(--ink2);background:var(--sunk);
+  font-variant-numeric:tabular-nums}
+.chip b{color:var(--ink);font-weight:600}
+.chip.hot b{color:var(--blue)}
+.chip.think-chip b{color:var(--think)}
+.chip.err{color:var(--red);border-color:var(--red)}
+
+/* ---------- composer ---------- */
+footer{background:var(--surface);border-top:1px solid var(--rule);padding:12px 14px 14px}
+.composer{max-width:880px;margin:0 auto}
+.pending-attach{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.pending-attach .pa{position:relative}
+.pending-attach img,.pending-attach video{max-height:80px;border-radius:7px;border:1px solid var(--rule2)}
+.pending-attach .rm{position:absolute;top:-7px;right:-7px;background:var(--red);color:#fff;
+  border:none;border-radius:50%;width:20px;height:20px;font-size:12px;line-height:1;padding:0}
+.row{display:flex;gap:9px;align-items:flex-end}
+#prompt{flex:1;resize:none;min-height:44px;max-height:200px}
+.row .stack{display:flex;flex-direction:column;gap:6px}
+.hint{font-size:11px;color:var(--ink3);margin-top:7px;display:flex;gap:14px;flex-wrap:wrap}
+.drag body,.drag #chat{outline:3px dashed var(--blue);outline-offset:-3px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Bench<span>Chat</span> <span class="mini" title="client build">v1.3</span></div>
+  <select id="preset" title="Endpoint presets">
+    <option value="http://100.72.9.84:8001/v1">spark-4 Nemotron :8001 (fast)</option>
+    <option value="http://100.72.9.84:8000/v1">spark-4 VL-7B :8000 (vision)</option>
+    <option value="http://100.80.240.119:8000/v1">spark-3 Qwen3.8 :8000</option>
+    <option value="http://100.81.184.19:8020/v1">GLM-5.3-Flash TP=4 · 1M ctx :8020</option>
+    <option value="http://100.122.26.9:3000/v1">Master proxy :3000 (needs served page)</option>
+    <option value="custom">custom…</option>
+  </select>
+  <input type="text" id="endpoint" value="http://100.72.9.84:8001/v1" spellcheck="false">
+  <select id="model"><option>— refresh models —</option></select>
+  <button id="refresh" title="Fetch /v1/models">↻</button>
+  <label class="toggle" title="chat_template_kwargs.enable_thinking"><input type="checkbox" id="thinking" checked> thinking</label>
+  <input type="number" id="maxtok" value="4096" min="1" step="128" style="width:86px" title="max_tokens">
+  <input type="number" id="temp" value="0.7" min="0" max="2" step="0.1" style="width:70px" title="temperature">
+  <span id="status">idle</span>
+</header>
+
+<main>
+<aside id="card">
+  <div id="cardmodel"><div class="sub">select an endpoint</div></div>
+  <div id="cardstats"></div>
+</aside>
+<div id="chat"><div class="inner mini" id="empty">
+  Endpoint → pick a model (↻) → say something. Attach images/video with 📎, drag-drop, or paste.
+  Stats appear under every reply. All numbers are measured client-side except token counts,
+  which come from the server's usage block.
+</div></div></main>
+
+<footer><div class="composer">
+  <div class="pending-attach" id="pending"></div>
+  <div class="row">
+    <button id="attach" title="Attach image or video">📎</button>
+    <textarea id="prompt" placeholder="Message the model…"></textarea>
+    <div class="stack">
+      <button class="primary" id="send">Send</button>
+      <button id="stop" class="danger" disabled>Stop</button>
+    </div>
+  </div>
+  <div class="hint">
+    <span><b>Enter</b> send · <b>Shift+Enter</b> newline</span>
+    <span id="sysbtn" style="cursor:pointer;text-decoration:underline">system prompt</span>
+    <span id="clearbtn" style="cursor:pointer;text-decoration:underline">clear chat</span>
+    <span id="logbtn" style="cursor:pointer;text-decoration:underline">copy bench log</span>
+    <span id="benchcount"></span>
+  </div>
+  <textarea id="system" placeholder="System prompt (optional)" style="display:none;width:100%;margin-top:8px;min-height:60px"></textarea>
+  <input type="file" id="file" accept="image/*,video/*" multiple style="display:none">
+</div></footer>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const chat = $("chat"), promptEl = $("prompt"), statusEl = $("status");
+let messages = [];          // OpenAI-format history
+let pendingAtt = [];        // {kind:'image'|'video', dataUrl, name}
+let benchLog = [];          // one record per assistant reply
+let aborter = null;
+
+/* ---------- endpoint / models ---------- */
+async function loadFleet() {
+  try {
+    const r = await fetch("/api/fleet"); if (!r.ok) return;
+    const { endpoints } = await r.json(); if (!endpoints || !endpoints.length) return;
+    const sel = $("preset"), prev = $("endpoint").value;
+    sel.innerHTML = "";
+    fleetMeta.clear();
+    for (const e of endpoints) {
+      if (e.meta) fleetMeta.set(e.url, e.meta);
+      const o = document.createElement("option");
+      o.value = e.url; o.textContent = e.label;
+      sel.appendChild(o);
+    }
+    const c = document.createElement("option"); c.value = "custom"; c.textContent = "custom…";
+    sel.appendChild(c);
+    const hit = [...sel.options].find(o => o.value === prev);
+    if (hit) { sel.value = prev; } else { sel.selectedIndex = 0; $("endpoint").value = sel.value; }
+    loadModels();
+  } catch (_) { /* fleet API down: keep hardcoded fallback options */ }
+}
+loadFleet();
+$("preset").onchange = () => {
+  if ($("preset").value !== "custom") { $("endpoint").value = $("preset").value; loadModels(); }
+};
+$("endpoint").onchange = loadModels;
+$("model").onchange = renderStats;   // stats are per model, not per endpoint
+$("refresh").onclick = () => { capsCache.delete(statKey()); reProbe = true; loadModels(); };
+let reProbe = false;
+
+async function loadModels() {
+  const base = $("endpoint").value.replace(/\/$/, "");
+  setStatus("fetching models…");
+  try {
+    const r = await fetch(base + "/models");
+    const d = await r.json();
+    const sel = $("model");
+    sel.innerHTML = "";
+    (d.data || []).forEach(m => {
+      const o = document.createElement("option");
+      o.value = o.textContent = m.id;
+      sel.appendChild(o);
+    });
+    liveModel = (d.data || [])[0] || null;
+    renderCard();
+    renderStats();
+    setStatus(`${(d.data||[]).length} model(s)`, "ok");
+  } catch (e) {
+    liveModel = null;
+    renderCard();
+    renderStats();
+    setStatus("models fetch failed: " + e.message, "err");
+  }
+}
+function setStatus(t, cls) { statusEl.textContent = t; statusEl.className = cls || ""; }
+
+/* ---------- model card ---------- */
+const fleetMeta = new Map();   // endpoint url -> meta from /api/fleet
+let liveModel = null;          // last /v1/models entry for the selected endpoint
+
+const esc = t => String(t).replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function ago(ts) {
+  if (!ts) return null;
+  const s = Date.now() / 1000 - ts;
+  if (s < 90) return Math.round(s) + "s ago";
+  if (s < 5400) return Math.round(s / 60) + "m ago";
+  if (s < 172800) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+
+function renderCard() {
+  const el = $("cardmodel");
+  const m = fleetMeta.get($("endpoint").value);
+  if (!m) { el.innerHTML = '<div class="sub">no card for this endpoint</div>'; return; }
+
+  const name = (m.repo || m.model_id || "").split("/").pop() || "model";
+  const nodes = m.nodes || [];
+  const cards = (m.gpus_per_node || 1) * nodes.length;
+  const rows = g => g.filter(r => r[1] !== null && r[1] !== undefined && r[1] !== "")
+    .map(r => `<dt>${esc(r[0])}</dt><dd>${r[1]}</dd>`).join("");
+
+  const where = rows([
+    ["Nodes", nodes.length ? esc(nodes.join(", ")) : null],
+    ["GPUs", m.gpu ? `${cards} x ${esc(m.gpu)}` : null],
+    ["VRAM", m.vram_gb ? `${m.vram_gb} GB${cards > 1 ? " ea" : ""}` : null],
+    ["Interconnect", m.link ? esc(m.link) : null],
+  ]);
+  const how = rows([
+    ["Tensor par.", m.tp ? "TP " + m.tp : null],
+    ["Quant", m.quant ? esc(m.quant) : null],
+    ["Format", m.format ? esc(m.format) : null],
+    ["Engine", m.engine ? esc(m.engine) : null],
+    ["Speculative", m.spec ? esc(m.spec) : null],
+    ["Context", liveModel && liveModel.max_model_len
+      ? liveModel.max_model_len.toLocaleString() + " tok" : null],
+    ["Port", m.port],
+    ["Loaded", ago(m.loaded_at)],
+  ]);
+  const caps = capBadges(m);
+  const managed = m.managed === "AINode"
+    ? '<span class="tag ai">AINode</span>'
+    : `<span class="tag raw">${esc(m.managed || "unmanaged")}</span>`;
+
+  el.innerHTML =
+    `<h2>${esc(name)}</h2>` +
+    `<div class="sub">${managed}</div>` +
+    (m.hf ? `<a class="hf" href="${esc(m.hf)}" target="_blank" rel="noopener">` +
+            `&#8599; ${esc(m.repo)}</a>` : "") +
+    (where ? `<div class="grp"><div class="lbl">Where it runs</div><dl>${where}</dl></div>` : "") +
+    (how ? `<div class="grp"><div class="lbl">How it is served</div><dl>${how}</dl></div>` : "") +
+    (caps ? `<div class="grp"><div class="lbl">Capabilities</div>${caps}</div>` : "");
+  if (!capsCache.has(statKey()) || reProbe) { const f = reProbe; reProbe = false; loadCaps(m, f); }
+}
+
+/* ---------- capability badges ---------- */
+// vision/tools come from the server probing the engine (structural: it either
+// accepts an image and a tools array or rejects them). reasoning is marked from
+// turns actually seen, because a model choosing not to think on one prompt is
+// not the same as being unable to.
+const capsCache = new Map();     // endpoint|model -> probe result
+const reasonSeen = new Set();    // endpoint|model that has produced reasoning
+
+function capBadges(m) {
+  const c = capsCache.get(statKey());
+  const declared = (m.capabilities || [])
+    .map(x => `<span class="cap on">${esc(x)}</span>`).join("");
+  if (!c) return `<div class="caps">${declared}` +
+                 `<span class="cap wait">probing…</span></div>`;
+
+  const one = (name, val, why) =>
+    val === true ? `<span class="cap on">${name}</span>`
+    : val === false ? `<span class="cap off" title="${esc(why || "")}"><b>${name}</b>` +
+                      (why ? ` ${esc(why)}` : "") + `</span>`
+    : "";
+  const reasoning = reasonSeen.has(statKey())
+    ? `<span class="cap on">reasoning</span>` : "";
+
+  const note = (c.model_vision && c.vision === false)
+    ? `<div class="capnote">Weights are ${esc(c.pipeline_tag)} — vision exists ` +
+      `in this model but is off as served.</div>` : "";
+
+  return `<div class="caps">${declared}${one("vision", c.vision, c.vision_why)}` +
+         `${one("tools", c.tools, c.tools_why)}${reasoning}</div>${note}`;
+}
+
+async function loadCaps(m, fresh) {
+  const key = statKey();
+  if (capsCache.has(key) && !fresh) { renderCard(); return; }
+  const ep = $("endpoint").value.replace(/^\/proxy\//, "").replace(/\/v1\/?$/, "");
+  try {
+    const q = new URLSearchParams({ ep, model: $("model").value, repo: m.repo || "",
+                                   ...(fresh ? { fresh: "1" } : {}) });
+    const r = await fetch("/api/caps?" + q);
+    if (r.ok) capsCache.set(key, await r.json());
+  } catch (_) { /* probe failed: badges stay at declared-only */ }
+  renderCard();
+}
+
+/* ---------- rolling stats card ---------- */
+// Per model+endpoint, so switching models shows that model's own history
+// instead of an average smeared across different hardware.
+const statsByKey = new Map();
+const statKey = () => $("endpoint").value + "|" + $("model").value;
+
+function mean(xs) { return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; }
+
+function renderStats() {
+  const el = $("cardstats");
+  const runs = (statsByKey.get(statKey()) || []).filter(r => !r.error);
+  if (!runs.length) { el.innerHTML = ""; return; }
+
+  const last = runs[runs.length - 1];
+  const n = runs.length;
+  const avg = f => mean(runs.map(r => r[f]).filter(v => typeof v === "number"));
+  const num = (v, d) => (typeof v === "number" ? v.toFixed(d) : "—");
+
+  const row = (label, f, d, suffix) =>
+    `<tr><td>${label}</td><td class="now">${num(last[f], d)}${suffix}</td>` +
+    `<td>${n > 1 ? num(avg(f), d) + suffix : ""}</td></tr>`;
+
+  el.innerHTML =
+    `<div class="lbl">This session</div>` +
+    `<table class="st"><tr><th>&nbsp;</th><th>last</th>` +
+    `<th>${n > 1 ? "avg " + n : ""}</th></tr>` +
+    row("Decode", "decode_tps", 1, " t/s") +
+    row("TTFT", "ttft_s", 2, "s") +
+    row("Total", "total_s", 1, "s") +
+    row("In", "prompt_tokens", 0, "") +
+    row("Out", "completion_tokens", 0, "") +
+    `</table>` +
+    (n === 1 ? `<div class="hint2">Averages appear from the second turn.</div>` : "");
+}
+
+function recordTurn(rec) {
+  const k = rec.endpoint + "|" + rec.model;
+  if (!statsByKey.has(k)) statsByKey.set(k, []);
+  statsByKey.get(k).push(rec);
+  renderStats();
+}
+
+/* ---------- attachments ---------- */
+$("attach").onclick = () => $("file").click();
+$("file").onchange = e => [...e.target.files].forEach(addFile);
+document.addEventListener("paste", e => {
+  [...(e.clipboardData?.files || [])].forEach(addFile);
+});
+document.addEventListener("dragover", e => { e.preventDefault(); document.body.classList.add("drag"); });
+document.addEventListener("dragleave", () => document.body.classList.remove("drag"));
+document.addEventListener("drop", e => {
+  e.preventDefault(); document.body.classList.remove("drag");
+  [...(e.dataTransfer?.files || [])].forEach(addFile);
+});
+function addFile(f) {
+  const kind = f.type.startsWith("video") ? "video" : f.type.startsWith("image") ? "image" : null;
+  if (!kind) { setStatus("unsupported type: " + f.type, "err"); return; }
+  const capMB = kind === "video" ? 60 : 25;
+  if (f.size > capMB * 1024 * 1024) { setStatus(`${f.name} > ${capMB}MB — too big`, "err"); return; }
+  const rd = new FileReader();
+  rd.onload = () => {
+    if (kind === "image") {
+      // Downscale client-side: big photos wedge older engines' preprocessors.
+      const img = new Image();
+      img.onload = () => {
+        const MAXE = 1280;
+        const scale = Math.min(1, MAXE / Math.max(img.width, img.height));
+        let dataUrl = rd.result;
+        if (scale < 1 || f.size > 2 * 1024 * 1024) {
+          const c = document.createElement("canvas");
+          c.width = Math.round(img.width * scale);
+          c.height = Math.round(img.height * scale);
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          dataUrl = c.toDataURL("image/jpeg", 0.88);
+        }
+        pendingAtt.push({ kind, dataUrl, name: f.name,
+          mb: (dataUrl.length * 0.75 / 1048576).toFixed(1) });
+        renderPending();
+        setStatus(`image ready (${Math.round(img.width*scale)}×${Math.round(img.height*scale)})`, "ok");
+      };
+      img.src = rd.result;
+    } else {
+      pendingAtt.push({ kind, dataUrl: rd.result, name: f.name, mb: (f.size/1048576).toFixed(1) });
+      renderPending();
+    }
+  };
+  rd.readAsDataURL(f);
+}
+function renderPending() {
+  const p = $("pending"); p.innerHTML = "";
+  pendingAtt.forEach((a, i) => {
+    const d = document.createElement("div"); d.className = "pa";
+    d.innerHTML = (a.kind === "image"
+      ? `<img src="${a.dataUrl}" title="${a.name}">`
+      : `<video src="${a.dataUrl}" muted loop title="${a.name}"></video>`)
+      + `<button class="rm" data-i="${i}">×</button>`;
+    d.querySelector(".rm").onclick = () => { pendingAtt.splice(i, 1); renderPending(); };
+    p.appendChild(d);
+  });
+}
+
+/* ---------- rendering ---------- */
+function addMsg(role) {
+  $("empty")?.remove();
+  const m = document.createElement("div"); m.className = "msg " + role;
+  m.innerHTML = `<div class="role">${role}</div>`;
+  chat.appendChild(m);
+  return m;
+}
+function fmtBody(el, text) {
+  // minimal fence rendering: split on ``` blocks
+  el.innerHTML = "";
+  const parts = text.split(/```/);
+  parts.forEach((p, i) => {
+    if (i % 2 === 1) {
+      const pre = document.createElement("pre");
+      pre.textContent = p.replace(/^[a-zA-Z0-9_+-]*\n/, "");
+      el.appendChild(pre);
+    } else if (p) {
+      el.appendChild(document.createTextNode(p));
+    }
+  });
+}
+function chip(label, val, cls) {
+  return `<span class="chip ${cls||""}">${label} <b>${val}</b></span>`;
+}
+function fmt(n, d=1) { return n == null ? "—" : (+n).toFixed(d); }
+
+/* ---------- send ---------- */
+$("send").onclick = send;
+$("stop").onclick = () => aborter?.abort();
+promptEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("sysbtn").onclick = () => { const s = $("system"); s.style.display = s.style.display === "none" ? "block" : "none"; };
+$("clearbtn").onclick = () => { messages = []; chat.innerHTML = ""; setStatus("cleared"); };
+$("logbtn").onclick = () => {
+  navigator.clipboard.writeText(JSON.stringify(benchLog, null, 2));
+  setStatus(`copied ${benchLog.length} bench record(s)`, "ok");
+};
+
+async function send() {
+  const text = promptEl.value.trim();
+  if (!text && !pendingAtt.length) return;
+  const base = $("endpoint").value.replace(/\/$/, "");
+  const model = $("model").value;
+  if (!model || model.startsWith("—")) { setStatus("pick a model first (↻)", "err"); return; }
+
+  // build user content (parts if attachments)
+  let content;
+  const atts = pendingAtt.splice(0);
+  renderPending();
+  if (atts.length) {
+    content = [];
+    atts.forEach(a => content.push(a.kind === "image"
+      ? { type: "image_url", image_url: { url: a.dataUrl } }
+      : { type: "video_url", video_url: { url: a.dataUrl } }));
+    if (text) content.push({ type: "text", text });
+  } else content = text;
+
+  messages.push({ role: "user", content });
+
+  // render user msg
+  const um = addMsg("user");
+  if (atts.length) {
+    const strip = document.createElement("div"); strip.className = "attach-strip";
+    atts.forEach(a => strip.innerHTML += a.kind === "image"
+      ? `<img src="${a.dataUrl}">` : `<video src="${a.dataUrl}" controls muted></video>`);
+    um.appendChild(strip);
+  }
+  const ub = document.createElement("div"); ub.className = "bubble"; ub.textContent = text || "(media only)";
+  um.appendChild(ub);
+
+  // assistant scaffold
+  const am = addMsg("assistant");
+  const thinkLabel = document.createElement("div"); thinkLabel.className = "think-label"; thinkLabel.style.display = "none";
+  const thinkEl = document.createElement("div"); thinkEl.className = "think"; thinkEl.style.display = "none";
+  thinkLabel.onclick = () => thinkEl.classList.toggle("collapsed");
+  const ab = document.createElement("div"); ab.className = "bubble"; ab.textContent = "";
+  const statsEl = document.createElement("div"); statsEl.className = "stats";
+  am.append(thinkLabel, thinkEl, ab, statsEl);
+  chat.scrollTop = chat.scrollHeight;
+
+  promptEl.value = "";
+  $("send").disabled = true; $("stop").disabled = false;
+  setStatus("sending…");
+
+  const sysTxt = $("system").value.trim();
+  const body = {
+    model, stream: true,
+    max_tokens: +$("maxtok").value || 1024,
+    temperature: +$("temp").value,
+    stream_options: { include_usage: true },
+    chat_template_kwargs: { enable_thinking: $("thinking").checked },
+    messages: sysTxt ? [{ role: "system", content: sysTxt }, ...messages] : messages,
+  };
+  // GLM-5.x ignores enable_thinking; its knob is top-level reasoning_effort (low/high).
+  if (/glm/i.test(model)) {
+    body.reasoning_effort = $("thinking").checked ? "high" : "low";
+    delete body.chat_template_kwargs;
+  }
+
+  // ---- timers (the whole point) ----
+  const T = { send: performance.now(), firstAny: null, firstThink: null, firstContent: null, last: null };
+  let reasoning = "", answer = "", chunks = 0, usage = null, finish = null, err = null;
+
+  aborter = new AbortController();
+  try {
+    const resp = await fetch(base + "/chat/completions", {
+      method: "POST", signal: aborter.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status + " " + (await resp.text()).slice(0, 300));
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let j; try { j = JSON.parse(data); } catch { continue; }
+        if (j.usage) usage = j.usage;
+        const ch = (j.choices || [])[0];
+        if (!ch) continue;
+        if (ch.finish_reason) finish = ch.finish_reason;
+        const d = ch.delta || {};
+        const think = d.reasoning ?? d.reasoning_content;
+        const now = performance.now();
+        if (think) {
+          if (T.firstAny === null) T.firstAny = now;
+          if (T.firstThink === null) T.firstThink = now;
+          T.last = now; chunks++;
+          reasoning += think;
+          thinkLabel.style.display = "block";
+          thinkEl.style.display = "block";
+          thinkLabel.textContent = "thinking ▾";
+          thinkEl.textContent = reasoning;
+        }
+        if (d.content) {
+          if (T.firstAny === null) T.firstAny = now;
+          if (T.firstContent === null) T.firstContent = now;
+          T.last = now; chunks++;
+          answer += d.content;
+          fmtBody(ab, answer);
+        }
+        setStatus(`streaming… ${((now - T.send)/1000).toFixed(1)}s`);
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+  } catch (e) {
+    err = e.name === "AbortError" ? "stopped" : e.message;
+  }
+  aborter = null;
+  $("send").disabled = false; $("stop").disabled = true;
+
+  const end = performance.now();
+  // ---- compute stats ----
+  const ttft = T.firstAny != null ? (T.firstAny - T.send) / 1000 : null;           // prefill + net
+  const thinkDur = (T.firstThink != null && T.firstContent != null)
+      ? (T.firstContent - T.firstThink) / 1000
+      : (T.firstThink != null && T.firstContent == null && T.last != null)
+      ? (T.last - T.firstThink) / 1000 : null;
+  const genDur = (T.firstAny != null && T.last != null) ? (T.last - T.firstAny) / 1000 : null;
+  const total = (end - T.send) / 1000;
+  const ctok = usage?.completion_tokens;
+  const decodeTps = (ctok > 1 && genDur > 0) ? (ctok - 1) / genDur : null;
+
+  const rec = {
+    ts: new Date().toISOString(), model, endpoint: base,
+    thinking: $("thinking").checked,
+    attachments: atts.map(a => ({ kind: a.kind, name: a.name, mb: a.mb })),
+    prompt_chars: (text || "").length,
+    ttft_s: ttft != null ? +ttft.toFixed(3) : null,
+    think_s: thinkDur != null ? +thinkDur.toFixed(3) : null,
+    total_s: +total.toFixed(3),
+    prompt_tokens: usage?.prompt_tokens ?? null,
+    completion_tokens: ctok ?? null,
+    decode_tps: decodeTps != null ? +decodeTps.toFixed(2) : null,
+    chunks, finish_reason: finish, error: err,
+    reasoning_chars: reasoning.length, answer_chars: answer.length,
+  };
+  benchLog.push(rec);
+  recordTurn(rec);
+  if (rec.reasoning_chars > 0 && !reasonSeen.has(statKey())) {
+    reasonSeen.add(statKey());
+    renderCard();
+  }
+  $("benchcount").textContent = `· ${benchLog.length} run(s) logged`;
+
+  statsEl.innerHTML =
+    (err ? chip("ERROR", err.slice(0, 60), "err") : "") +
+    chip("TTFT", fmt(ttft, 2) + "s", "hot") +
+    (thinkDur != null ? chip("think", fmt(thinkDur, 1) + "s", "think-chip") : "") +
+    chip("decode", (decodeTps != null ? fmt(decodeTps, 1) : "—") + " t/s", "hot") +
+    chip("total", fmt(total, 1) + "s") +
+    chip("in", usage?.prompt_tokens ?? "—") +
+    chip("out", ctok ?? "—") +
+    (finish ? chip("stop", finish) : "");
+  thinkLabel.textContent = reasoning ? `thinking · ${reasoning.length} chars · click to fold` : "";
+
+  if (!err && (answer || reasoning)) {
+    messages.push({ role: "assistant", content: answer || "(reasoning only)" });
+    setStatus("done — " + fmt(total,1) + "s", "ok");
+  } else if (err) {
+    setStatus(err, "err");
+    messages.pop(); // drop failed user turn so retry is clean
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
+loadModels();
+</script>
+</body>
+</html>
