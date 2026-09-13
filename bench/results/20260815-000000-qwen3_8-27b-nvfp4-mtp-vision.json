@@ -1,0 +1,72 @@
+{
+ "schema": 1,
+ "stamp": "20260815-000000",
+ "label": "mtp-vision",
+ "model": {
+  "id": "unsloth/Qwen3.8-27B-NVFP4",
+  "name": "Qwen3.8 27B",
+  "params_b": 27,
+  "active_b": 27,
+  "arch": "dense",
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "Apache 2.0",
+  "vision": true
+ },
+ "placement": {
+  "node": "Spark-3-DGX",
+  "gpu": "NVIDIA GB10",
+  "gpus": 1,
+  "tp": 1,
+  "engine": "vllm",
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "ainode": "0.5.4",
+  "flags": [
+   "--enable-prefix-caching",
+   "--kv-cache-dtype",
+   "auto",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--speculative_config",
+   "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":2}"
+  ],
+  "stacked_with": [],
+  "gpu_memory_utilization": 0.6
+ },
+ "settings": {
+  "thinking": true
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 19.0
+  },
+  "sustained": {
+   "decode_tok_s": 18.4
+  },
+  "concurrency": [
+   {
+    "streams": 4,
+    "per_stream_tok_s": 11.0
+   },
+   {
+    "streams": 16,
+    "aggregate_tok_s": 147.0,
+    "per_stream_tok_s": 9.2
+   }
+  ]
+ },
+ "rubric": {
+  "pass": 23,
+  "total": 23,
+  "notes": "20/23 before parser and temperature fixes; needle at 6K/48K/150K; vision 3/4"
+ },
+ "notes": [
+  "Dense: bandwidth-bound, 11.8 tok/s without MTP.",
+  "OCR needs temperature 0.",
+  "No fp8 KV on GB10 for vision models."
+ ],
+ "source": "manual: session rubric 2026-08-15"
+}

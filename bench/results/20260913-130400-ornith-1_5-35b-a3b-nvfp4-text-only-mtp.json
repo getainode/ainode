@@ -1,0 +1,129 @@
+{
+ "schema": 1,
+ "stamp": "20260913-130400",
+ "label": "text-only-mtp",
+ "model": {
+  "id": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "name": "Ornith 1.5 35B-A3B",
+  "params_b": 35,
+  "active_b": 3,
+  "arch": "moe",
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "MIT",
+  "vision": false
+ },
+ "placement": {
+  "node": "Spark-1-DGX",
+  "gpu": "NVIDIA GB10",
+  "gpus": 1,
+  "tp": 1,
+  "engine": "vllm",
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "ainode": "0.5.6",
+  "flags": [
+   "--enable-prefix-caching",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--limit-mm-per-prompt",
+   "{\"image\":0,\"video\":0}",
+   "--speculative_config",
+   "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":2}"
+  ],
+  "stacked_with": [
+   "unsloth/Qwen3.8-27B-NVFP4"
+  ],
+  "gpu_memory_utilization": 0.26,
+  "max_model_len": 131072
+ },
+ "settings": {
+  "thinking": false,
+  "max_tokens": 200
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 40.0,
+   "ttft_ms": 194,
+   "prompt_tokens": 24,
+   "gen_tokens": 200
+  },
+  "prefill": [
+   {
+    "prompt_tokens": 4013,
+    "ttft_ms": 1752,
+    "decode_tok_s": 40.0
+   },
+   {
+    "prompt_tokens": 15982,
+    "ttft_ms": 7757,
+    "decode_tok_s": 39.7
+   },
+   {
+    "prompt_tokens": 31897,
+    "ttft_ms": 18409,
+    "decode_tok_s": 37.4
+   },
+   {
+    "prompt_tokens": 63797,
+    "ttft_ms": 49688,
+    "decode_tok_s": 36.1
+   },
+   {
+    "prompt_tokens": 119643,
+    "ttft_ms": 136216,
+    "decode_tok_s": 34.4
+   }
+  ],
+  "concurrency": [
+   {
+    "streams": 1,
+    "aggregate_tok_s": 40.1,
+    "per_stream_tok_s": 41.7,
+    "median_ttft_ms": 194
+   },
+   {
+    "streams": 2,
+    "aggregate_tok_s": 60.9,
+    "per_stream_tok_s": 32.4,
+    "median_ttft_ms": 290
+   },
+   {
+    "streams": 4,
+    "aggregate_tok_s": 101.5,
+    "per_stream_tok_s": 27.3,
+    "median_ttft_ms": 321
+   },
+   {
+    "streams": 8,
+    "aggregate_tok_s": 186.4,
+    "per_stream_tok_s": 25.6,
+    "median_ttft_ms": 391
+   },
+   {
+    "streams": 16,
+    "aggregate_tok_s": 269.2,
+    "per_stream_tok_s": 18.7,
+    "median_ttft_ms": 679
+   }
+  ],
+  "telemetry": {
+   "gpu_mem_used_gb": 88.5,
+   "gpu_mem_total_gb": 121.7,
+   "temp_c": 37
+  }
+ },
+ "rubric": {
+  "pass": 19,
+  "total": 19,
+  "notes": "18/19 raw; the miss was the harness taking the last code block, re-verified 2/2"
+ },
+ "notes": [
+  "Prefill ~880 tok/s at 120K: spec decode caps max_num_batched_tokens at 2048.",
+  "Self-identifies as Claude by Anthropic.",
+  "Vision untested: multimodal warmup OOM-killed the engine when stacked with ~35 GB free."
+ ],
+ "source": "manual: scripts/bench-serve.py + session rubric 2026-09-13"
+}
