@@ -46,6 +46,15 @@
       <!-- Chat sidebar (default) -->
       <div class="left-panel-chat" id="left-panel-chat">
         <button class="btn-nvidia" id="new-chat">+ NEW CHAT</button>
+        <!-- Model card: what is actually behind the selected model. Filled by
+             app.js from /api/models/card + /api/models/caps. -->
+        <div class="model-card" id="model-card">
+          <button class="model-card-head" id="model-card-toggle" title="Collapse the model card">
+            <span class="model-card-head-label">MODEL CARD</span>
+            <span class="model-card-chevron" id="model-card-chevron">&#9662;</span>
+          </button>
+          <div class="model-card-body" id="model-card-body"></div>
+        </div>
         <input class="search-input" placeholder="Search conversations..." id="chat-search">
         <div class="conversation-list" id="conversation-list">
           <!-- Filled by JS -->
@@ -75,6 +84,20 @@
       </div>
       <!-- Chat view -->
       <div id="view-chat" class="view" style="display:none">
+        <div class="chat-toolbar" id="chat-toolbar">
+          <button class="chat-tool-toggle active" id="chat-thinking"
+                  title="Off sends chat_template_kwargs.enable_thinking=false">THINKING</button>
+          <label class="chat-tool">TEMP
+            <input class="chat-tool-input" id="chat-temp" type="number" min="0" max="2" step="0.1" value="0.7">
+          </label>
+          <label class="chat-tool">MAX TOKENS
+            <input class="chat-tool-input wide" id="chat-maxtok" type="number" min="1" step="128" value="2048">
+          </label>
+          <button class="chat-tool-btn" id="chat-system-btn" title="Sent as the first message on every turn">SYSTEM PROMPT</button>
+          <span class="chat-tool-status" id="chat-engine-status"></span>
+        </div>
+        <textarea class="chat-system" id="chat-system" style="display:none"
+                  placeholder="System prompt, sent as the first message of every turn"></textarea>
         <div id="chat-view-empty" class="chat-empty-state">
           <div class="chat-empty-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
@@ -174,6 +197,7 @@
       <div class="chat-input-wrapper">
         <textarea id="chat-input" class="chat-input" placeholder="Ask anything..." rows="1"></textarea>
         <button id="chat-send" class="btn-send">SEND</button>
+        <button id="chat-stop" class="btn-stop" style="display:none" title="Abort the in-flight request">STOP</button>
       </div>
     </footer>
 
