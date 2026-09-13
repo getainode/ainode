@@ -1,16 +1,30 @@
 # AINode bench
 
 What an AINode-served model actually does on the hardware in front of us, as
-opposed to what a model card says. Two stdlib-only scripts and a directory of
-JSON:
+opposed to what a model card says. Two ways to run it, one measurement:
 
 | Path | What it is |
 |------|-----------|
-| `scripts/ainode-bench.py` | Runs the benchmark, writes one JSON per run |
+| `ainode/bench/` | The benchmark, as a package. The measurement lives here |
+| `scripts/ainode-bench.py` | CLI shim over the package. Writes one JSON per run |
 | `bench/results/*.json` | The runs, schema 1, one file per model/placement/day |
 | `bench/SCHEMA.md` | The record format. Authoritative |
-| `bench/report.py` | Reads every result, writes `bench/report.html` |
+| `bench/report.py` | CLI shim over `ainode/bench/report.py`; writes `bench/report.html` |
 | `bench/report.html` | Generated. One self-contained page, no CDN, no JS |
+
+The product runs the same code from the browser: the **Bench** view posts to
+`/api/bench/runs`, which points a run at one already-loaded instance, writes
+schema-1 JSON into `~/.ainode/bench/results/`, and serves the rendered report at
+`/api/bench/report`. A run started from the browser and a run started from the
+terminal are the same measurement with the same honesty rules, because they are
+the same module (`ainode/bench/measure.py`); only where the file lands differs.
+`bench/results/` in the repo is the curated set that the site and the README
+table are generated from, so a run worth keeping gets copied there by hand.
+
+The package is still stdlib-only and still runs on a bare `python3` with no pip
+step, which is why the measurement is blocking urllib rather than aiohttp; the
+in-product runner drives it through `asyncio.to_thread` so it never blocks the
+API server's event loop.
 
 ## Run it
 
@@ -114,9 +128,12 @@ generated from it:
   tax, telemetry and notes. Self-contained: inline CSS tokens and inline SVG, no
   CDN, no JavaScript, dark and light via `prefers-color-scheme`. Open it from
   disk, publish it as an artifact, or serve it from the marketing site as is.
-- The page is regenerated, never edited. Fix `bench/report.py` or the JSON.
+- The page is regenerated, never edited. Fix `ainode/bench/report.py` or the JSON.
 - `--results` and `--out` point the renderer somewhere else, which is how you
   preview a single run without touching the committed page.
+- `/api/bench/report` renders the same page from `~/.ainode/bench/results/` on
+  every request, which is what the Bench view shows in its iframe. Same renderer,
+  different directory.
 
 Adding a run measured by hand is fine: write a schema-1 JSON into
 `bench/results/` with `"source": "manual: ..."` saying where the numbers came

@@ -346,6 +346,12 @@ const AINode = {
       case 'training':
         this.renderTraining();
         break;
+      case 'bench':
+        // The Bench view owns its own markup, polling and cancel (bench.js); this
+        // arm just hands it the poll tick so it can keep the fleet picker and the
+        // results table current.
+        if (window.AINodeBench) window.AINodeBench.render(this);
+        break;
       case 'config':
         this.renderConfig();
         break;

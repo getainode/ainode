@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/bench.css">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/img/favicon-32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/static/img/favicon-16.png">
   <link rel="icon" type="image/png" sizes="48x48" href="/static/img/favicon-48.png">
@@ -32,6 +33,7 @@
         <button class="nav-pill" data-view="server">Server</button>
         <button class="nav-pill" data-view="downloads">Models</button>
         <button class="nav-pill" data-view="training">Training</button>
+        <button class="nav-pill" data-view="bench">Bench</button>
         <button class="nav-pill" data-view="config">Config</button>
       </nav>
       <div class="top-bar-status">
@@ -104,6 +106,10 @@
           <h2>Training</h2>
         </div>
         <div id="training-content"></div>
+      </div>
+      <!-- Bench view (markup + behaviour in static/js/bench.js) -->
+      <div id="view-bench" class="view" style="display:none">
+        <div id="bench-content"></div>
       </div>
       <!-- Config view -->
       <div id="view-config" class="view" style="display:none">
@@ -199,6 +205,7 @@
   </div>
 
   <script src="/static/js/topology.js"></script>
+  <script src="/static/js/bench.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>
