@@ -317,6 +317,7 @@ it, and we would rather say so than publish a number we did not take.
 
 | Model | Params / active | Quant | Placement | Single-stream tok/s | 16 streams tok/s | Rubric | Date | Run |
 |---|---|---|---|---|---|---|---|---|
+| Nemotron 3.5 Lightning 30B-A3B | 30B / 3B active | NVFP4 | Spark-4-GX10, 1× GB10, TP=1 (stacked) | 52.6 | not measured | not run | 2026-09-13 | [smoke](https://github.com/getainode/ainode/blob/main/bench/results/20260913-141115-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-smoke.json) |
 | Ornith 1.5 35B-A3B | 35B / 3B active | NVFP4 | Spark-1-DGX, 1× GB10, TP=1 (stacked) | 40.0 | 269.2 | 19/19 | 2026-09-13 | [text-only-mtp](https://github.com/getainode/ainode/blob/main/bench/results/20260913-130400-ornith-1_5-35b-a3b-nvfp4-text-only-mtp.json) |
 | Qwen3.8 27B | 27B dense | NVFP4 | Spark-3-DGX, 1× GB10, TP=1 | 19.0 | 147.0 | 23/23 | 2026-08-15 | [mtp-vision](https://github.com/getainode/ainode/blob/main/bench/results/20260815-000000-qwen3_8-27b-nvfp4-mtp-vision.json) |
 | Nemotron 3.5 Lightning 30B-A3B | 30B / 3B active | NVFP4 | Spark-4-GX10, 1× GB10, TP=1 | 104.5 | 504.3 | 19/19 | 2026-08-13 | [dspark-recipe](https://github.com/getainode/ainode/blob/main/bench/results/20260813-000000-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-dspark-recipe.json) |
