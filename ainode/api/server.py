@@ -46,6 +46,7 @@ from ainode.api.server_routes import (
     init_server_state,
 )
 from ainode.api.chat_routes import register_chat_routes
+from ainode.bench.api_routes import register_bench_routes
 
 from ainode import __version__
 
@@ -198,6 +199,9 @@ def create_app(
 
     # --- Server view routes --------------------------------------------------
     register_server_routes(app)
+
+    # --- Bench routes --------------------------------------------------------
+    register_bench_routes(app)
 
     app.router.add_static("/static", get_static_path(), name="static")
 

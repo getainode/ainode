@@ -1,0 +1,321 @@
+/* AINode Bench view.
+ *
+ * A separate sheet rather than another block appended to style.css: the Bench
+ * view was built alongside a rewrite of the chat view, and one file each keeps
+ * the two out of the same merge. Everything here uses the design tokens from
+ * style.css (:root) and leans on its existing .card / .table / .badge /
+ * .form-input / .pill / .progress-* classes; these rules only cover layout that
+ * is genuinely specific to this view.
+ */
+
+#view-bench {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+#bench-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* style.css puts the shared button geometry on `.btn` and only the colours on
+   `.btn-nvidia` / `.btn-ghost` / `.btn-danger`, so a bare colour class renders as
+   naked text. Every other view gets its geometry from a scoped rule of its own
+   (.left-panel .btn-nvidia, .btn-full); this is the Bench view's. */
+#view-bench .btn-nvidia,
+#view-bench .btn-ghost,
+#view-bench .btn-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  border: 1px solid transparent;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+#view-bench .btn-ghost {
+  padding: 7px 13px;
+  font-size: 12px;
+}
+
+/* The form packs three pill groups into three narrow grid columns, so the pills
+   have to wrap inside their cell instead of overrunning the next one. */
+#view-bench .pill-group {
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+#view-bench .pill {
+  padding: 7px 14px;
+  font-size: 12px;
+}
+
+.bench-header h2 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+.bench-header p {
+  margin-top: 4px;
+  max-width: 76ch;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* --- form ---------------------------------------------------------------- */
+
+.bench-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px 16px;
+}
+
+.bench-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bench-field-wide { grid-column: span 2; }
+.bench-field-full { grid-column: 1 / -1; }
+
+.bench-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bench-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.bench-check:hover { border-color: var(--border-hover); }
+
+.bench-check input { accent-color: var(--nvidia-green); cursor: pointer; }
+
+.bench-check:has(input:checked) {
+  border-color: var(--nvidia-green-dim);
+  color: var(--text-primary);
+}
+
+.bench-presets { margin-bottom: 2px; }
+
+.bench-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.bench-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.bench-form-actions .bench-hint { color: var(--amber); }
+
+.bench-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bench-target-node {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* --- live run ------------------------------------------------------------ */
+
+.bench-run-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.bench-run-model {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.bench-run-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.bench-log {
+  margin-top: 12px;
+  max-height: 260px;
+}
+
+.bench-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.bench-error,
+.bench-warnings {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.bench-error {
+  border: 1px solid rgba(255, 51, 51, 0.35);
+  background: var(--red-glow);
+  color: #ff8a8a;
+  font-family: var(--font-mono);
+}
+
+.bench-warnings {
+  border: 1px solid rgba(255, 184, 0, 0.3);
+  background: var(--amber-glow);
+  color: var(--amber);
+}
+
+/* --- results table ------------------------------------------------------- */
+
+.bench-table-wrap { overflow-x: auto; }
+
+.bench-table { min-width: 520px; }
+
+.bench-table th:first-child,
+.bench-table td:first-child { min-width: 110px; }
+
+.bench-table th,
+.bench-table td { padding: 10px 6px; }
+
+.bench-cell-model {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.bench-cell-dim {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.bench-cell-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.bench-cell-when { white-space: nowrap; }
+
+/* The unit is context, not a number. Keeping it small is what lets six columns
+   fit the centre pane at 1280 without a sideways scroll. */
+.bench-unit {
+  margin-left: 4px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* The label says what made a run distinct, so it belongs with the model rather
+   than in a column of its own that the narrow centre pane cannot afford. */
+.bench-cell-label {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.bench-cell-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.bench-cell-actions .btn-ghost { margin-left: 6px; }
+
+#view-bench .bench-cell-actions .btn-ghost {
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+.bench-del:hover { color: var(--red); border-color: rgba(255, 51, 51, 0.4); }
+
+/* "Not measured" has to read as an absence, never as a zero. bench/SCHEMA.md
+   forbids filling a gap with an estimate, and the table has to show that. */
+.bench-na {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.bench-empty {
+  text-align: center;
+  padding: 28px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* The results directory is a long absolute path; it belongs in the header as a
+   fact, not as a second line of text wrapping over the title. */
+#bench-results-dir {
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: right;
+}
+
+/* --- embedded report ----------------------------------------------------- */
+
+.bench-report-card { padding-bottom: 14px; }
+
+.bench-report-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.bench-report-frame {
+  width: 100%;
+  height: 70vh;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+@media (max-width: 1100px) {
+  .bench-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bench-field-wide { grid-column: 1 / -1; }
+}
+
+@media (max-width: 720px) {
+  .bench-form-grid { grid-template-columns: minmax(0, 1fr); }
+}
