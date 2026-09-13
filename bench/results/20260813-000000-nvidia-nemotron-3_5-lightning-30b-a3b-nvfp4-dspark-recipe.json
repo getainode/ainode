@@ -1,0 +1,91 @@
+{
+ "schema": 1,
+ "stamp": "20260813-000000",
+ "label": "dspark-recipe",
+ "model": {
+  "id": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "name": "Nemotron 3.5 Lightning 30B-A3B",
+  "params_b": 30,
+  "active_b": 3,
+  "arch": "moe",
+  "quant": "NVFP4",
+  "context": 1048576,
+  "license": "OpenMDW-1.1",
+  "vision": false
+ },
+ "placement": {
+  "node": "Spark-4-GX10",
+  "gpu": "NVIDIA GB10",
+  "gpus": 1,
+  "tp": 1,
+  "engine": "vllm",
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "ainode": "0.5.4",
+  "flags": [
+   "--moe-backend",
+   "marlin",
+   "--enable-prefix-caching",
+   "--speculative_config.model",
+   "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+   "--speculative_config.num_speculative_tokens",
+   "3",
+   "--mamba-backend",
+   "flashinfer",
+   "--mamba-cache-mode",
+   "align",
+   "--reasoning-parser",
+   "nemotron_v3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice"
+  ],
+  "stacked_with": [],
+  "gpu_memory_utilization": 0.91
+ },
+ "settings": {
+  "thinking": true,
+  "max_tokens": 600
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 104.5,
+   "gen_tokens": 600
+  },
+  "sustained": {
+   "decode_tok_s": 100.9,
+   "gen_tokens": 2000
+  },
+  "prefill": [
+   {
+    "prompt_tokens": 157000,
+    "ttft_ms": 36000
+   }
+  ],
+  "concurrency": [
+   {
+    "streams": 4,
+    "aggregate_tok_s": 167.5
+   },
+   {
+    "streams": 8,
+    "aggregate_tok_s": 357.5,
+    "per_stream_tok_s": 44.7
+   },
+   {
+    "streams": 16,
+    "aggregate_tok_s": 504.3
+   }
+  ]
+ },
+ "rubric": {
+  "pass": 19,
+  "total": 19,
+  "notes": "fresh-agent rubric at temperature 1.0; needle at 8K/64K/200K"
+ },
+ "notes": [
+  "DSpark acceptance 55-61%.",
+  "Reproduces NVIDIA's 500+ tok/s with 16 streams claim.",
+  "Thinking off answers in 0.1 s: use it for plumbing calls."
+ ],
+ "source": "manual: session rubric + bench 2026-08-13"
+}

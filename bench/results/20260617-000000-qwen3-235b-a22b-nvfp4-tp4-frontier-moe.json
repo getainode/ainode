@@ -1,0 +1,48 @@
+{
+ "schema": 1,
+ "stamp": "20260617-000000",
+ "label": "tp4-frontier-moe",
+ "model": {
+  "id": "nvidia/Qwen3-235B-A22B-NVFP4",
+  "name": "Qwen3 235B-A22B",
+  "params_b": 235,
+  "active_b": 22,
+  "arch": "moe",
+  "quant": "NVFP4",
+  "context": 32768,
+  "license": "Apache 2.0",
+  "vision": false
+ },
+ "placement": {
+  "node": "Spark-1..4",
+  "gpu": "NVIDIA GB10",
+  "gpus": 4,
+  "tp": 4,
+  "engine": "vllm",
+  "engine_image": "scitrera/dgx-spark-vllm:0.17.0-t5",
+  "ainode": "0.4.x",
+  "flags": [
+   "--enforce-eager",
+   "--kv-cache-dtype",
+   "fp8"
+  ],
+  "stacked_with": []
+ },
+ "settings": {
+  "thinking": true
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 16.5
+  },
+  "prefill": [
+   {
+    "prompt_tokens": 3513
+   }
+  ]
+ },
+ "notes": [
+  "Four-node tensor parallel over the RoCE fabric; --enforce-eager required on GB10 sm120."
+ ],
+ "source": "manual: README State of Distributed Inference"
+}
