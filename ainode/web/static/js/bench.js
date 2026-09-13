@@ -1,4 +1,4 @@
-/* AINode Bench view — run the benchmark against whatever is loaded on the fleet.
+/* AINode Bench view - run the benchmark against whatever is loaded on the fleet.
  *
  * Self-contained on purpose. app.js owns one nav pill and one case arm; every
  * other line of the Bench view lives here, so this file and the chat view can be
@@ -7,7 +7,7 @@
  * The model picker is fleet truth: it is built from /api/server/status's
  * loaded_models, the same source the Server view and the proxy's routing agree
  * on, so the list only ever offers instances that are actually serving. Nothing
- * in this view loads, unloads or restarts anything — a bench is inference only.
+ * in this view loads, unloads or restarts anything: a bench is inference only.
  */
 
 const AINodeBench = {
@@ -109,7 +109,7 @@ const AINodeBench = {
           '<div class="bench-field bench-field-wide">' +
             '<label class="form-label" for="bench-model">Loaded instance</label>' +
             '<select id="bench-model" class="form-select">' +
-              '<option value="">— loading fleet —</option></select>' +
+              '<option value="">loading fleet...</option></select>' +
           '</div>' +
           '<div class="bench-field">' +
             '<label class="form-label" for="bench-label">Label</label>' +
@@ -265,7 +265,7 @@ const AINodeBench = {
     if (!select) return;
     var previous = select.value;
     if (!usable.length) {
-      select.innerHTML = '<option value="">— no model is loaded on the fleet —</option>';
+      select.innerHTML = '<option value="">no model is loaded on the fleet</option>';
       this.paintTarget();
       return;
     }
@@ -422,7 +422,7 @@ const AINodeBench = {
         '<span class="progress-epoch">' +
           (p.section_label ? this.esc(p.section_label) : 'starting') +
           (p.section_total ? ' (' + (p.section_index + 1) + '/' + p.section_total + ')' : '') +
-          (step ? ' — ' + step : '') +
+          (step ? ' - ' + step : '') +
         '</span>' +
         '<span class="progress-pct">' + (p.percent || 0) + '%</span>' +
       '</div>' +
@@ -508,7 +508,7 @@ const AINodeBench = {
   rowHtml(r) {
     var s = r.summary || {};
     var running = r.status === 'running' || r.status === 'pending';
-    var placement = [s.node || r.node || '—'];
+    var placement = [s.node || r.node || '-'];
     if (s.tp && s.tp > 1) placement.push('TP=' + s.tp);
     if ((s.stacked_with || []).length) placement.push('+' + s.stacked_with.length + ' stacked');
     var single = s.single_tok_s
@@ -526,7 +526,7 @@ const AINodeBench = {
               ? '<span class="badge badge-muted">CANCELLED</span>' : ''));
     var label = r.label || s.label || '';
     return '<tr>' +
-      '<td><div class="bench-cell-model">' + this.esc(s.model || r.model || '—') +
+      '<td><div class="bench-cell-model">' + this.esc(s.model || r.model || '-') +
         '</div>' + (label ? '<div class="bench-cell-label">' + this.esc(label) +
         '</div>' : '') +
         (statusBadge ? '<div>' + statusBadge + '</div>' : '') + '</td>' +

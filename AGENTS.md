@@ -17,7 +17,7 @@ State / architecture / decisions / "why": Obsidian Vault → `AINode` (cluster o
 - All work on `fable/*` branches (renamed from `codex/*` 2026-08-15 — the old prefix came from OpenAI Codex; no CI keys on either, so existing `codex/*` branches are fine to leave). PRs required — **never push directly to `main`**.
 - Build/test: `pip install -e ".[dev]"` → `pytest tests/` · lint `ruff check`. Base image: `scripts/build-base-image.sh`; app image: `docker build -f scripts/Dockerfile.ainode`.
 - Measured numbers live **only** in `bench/results/*.json` (format: `bench/SCHEMA.md`; never fill a missing measurement with an estimate). The README's "Models tested on AINode" table is generated: add a result file, then `python3 scripts/render-bench-table.py`. Never hand-edit between the `bench-table` markers; `tests/test_bench_table.py` fails on drift.
-- The benchmark itself is `ainode/bench/` (stdlib-only measurement + the `/api/bench` routes + the report renderer). `scripts/ainode-bench.py` and `bench/report.py` are thin CLI shims over it — change the package, not the shims. In-product runs land in `~/.ainode/bench/results/`; copy one into `bench/results/` by hand to publish it.
+- The benchmark itself is `ainode/bench/` (stdlib-only measurement + the `/api/bench` routes + the report renderer). `scripts/ainode-bench.py` and `bench/report.py` are thin CLI shims over it: change the package, not the shims. In-product runs land in `~/.ainode/bench/results/`; copy one into `bench/results/` by hand to publish it.
 - Handoffs use the threadmaster-handoff runbook; ops state lives in `ops/` (runbooks under `ops/runbooks/`).
 - Distribution is `docker pull` only — end users never hand-edit vLLM commands; the engine emits flags (see `engine/AGENTS.md`).
 
