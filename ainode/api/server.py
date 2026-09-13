@@ -45,6 +45,7 @@ from ainode.api.server_routes import (
     request_log_middleware,
     init_server_state,
 )
+from ainode.api.chat_routes import register_chat_routes
 from ainode.bench.api_routes import register_bench_routes
 
 from ainode import __version__
@@ -166,6 +167,11 @@ def create_app(
     app.router.add_get("/v1/models", handle_v1_models)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
+
+    # Chat view: the per-instance model card + the capability probe. Registered
+    # BEFORE the model routes because aiohttp resolves in registration order and
+    # /api/models/{model_id} would otherwise swallow /api/models/card|caps.
+    register_chat_routes(app)
 
     register_model_routes(app)
 

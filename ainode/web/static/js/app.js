@@ -37,6 +37,17 @@ const AINode = {
       config: null,
     },
     configRevealed: {},
+    // --- Chat: fleet-true picker, model card, per-turn stats --------------
+    chatFleet: [],            // every instance the cluster is actually serving
+    chatFleetError: null,     // set when this node's own API cannot be reached
+    chatInstance: null,       // {model, node_id, node_name, port} being chatted to
+    chatPreferred: null,      // the user's last pick, re-applied after a refresh
+    chatCards: {},            // instance key -> /api/models/card payload
+    chatCaps: {},             // instance key -> /api/models/caps payload
+    chatStats: {},            // instance key -> [per-turn records]
+    chatReasoningSeen: {},    // instance key -> reasoning OBSERVED (never probed)
+    chatSettings: { system: '', temperature: 0.7, maxTokens: 2048, thinking: true },
+    chatCardCollapsed: false,
   },
 
   // ========================================================================
@@ -44,7 +55,11 @@ const AINode = {
   // ========================================================================
 
   init() {
+    this.loadChatSettings();
     this.loadConversations();
+    // Per-turn stats ride along with each conversation, so the per-instance
+    // averages survive a page reload.
+    this.rebuildChatStatsFromHistory();
     this.bindNav();
     this.bindChat();
     this.bindLaunchForm();
@@ -52,6 +67,8 @@ const AINode = {
     this.initClusterUpdateBtn();
     this.startPolling();
     this.renderConversationList();
+    this.applyChatSettingsToUI();
+    this.refreshChatFleet(true);
     // Restore any in-flight downloads from before page refresh
     this.loadActiveDownloads();
     // Also ask the server if there are active jobs we missed
@@ -114,7 +131,10 @@ const AINode = {
   newConversation() {
     var id = 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
     var sel = document.getElementById('chat-model');
-    var conv = { id: id, title: 'New Chat', messages: [], created_at: Date.now(), model: sel ? sel.value : '' };
+    var inst = this.state.chatInstance;
+    var conv = { id: id, title: 'New Chat', messages: [], created_at: Date.now(),
+                 model: inst ? inst.model : (sel ? sel.value : ''),
+                 instance: inst || null };
     this.state.conversations.unshift(conv);
     this.state.currentConversation = id;
     this.state.messages = [];
@@ -128,11 +148,10 @@ const AINode = {
     if (!conv) return;
     this.state.currentConversation = id;
     this.state.messages = conv.messages.slice();
-    var select = document.getElementById('chat-model');
-    if (select && conv.model) {
-      for (var i = 0; i < select.options.length; i++) {
-        if (select.options[i].value === conv.model) { select.value = conv.model; break; }
-      }
+    // Re-point at the exact instance this conversation was talking to when it
+    // is still serving; otherwise fall back to the same model elsewhere.
+    if (conv.instance || conv.model) {
+      this.selectChatInstance(conv.instance || { model: conv.model });
     }
     this.renderConversationList();
     this.renderChatMessages();
@@ -154,8 +173,8 @@ const AINode = {
     var conv = this.getCurrentConversation();
     if (!conv) return;
     conv.messages = this.state.messages.slice();
-    var sel = document.getElementById('chat-model');
-    if (sel) conv.model = sel.value || conv.model;
+    var inst = this.state.chatInstance;
+    if (inst) { conv.model = inst.model; conv.instance = inst; }
     var firstUser = conv.messages.find(function (m) { return m.role === 'user'; });
     if (firstUser) conv.title = firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '');
     this.saveConversations();
@@ -1263,6 +1282,81 @@ const AINode = {
         }
       });
     }
+
+    // Fleet-true model picker: the selection is an INSTANCE (model + node +
+    // port), and the value stays the model id the proxy routes on.
+    var modelSelect = document.getElementById('chat-model');
+    if (modelSelect) {
+      modelSelect.addEventListener('change', function () { self.syncChatInstance(); });
+    }
+
+    var stopBtn = document.getElementById('chat-stop');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', function () { self.stopGeneration(); });
+    }
+
+    // Thinking toggle. OFF sends chat_template_kwargs.enable_thinking=false;
+    // ON sends nothing, leaving the model's own template default alone.
+    var thinkBtn = document.getElementById('chat-thinking');
+    if (thinkBtn) {
+      thinkBtn.addEventListener('click', function () {
+        self.state.chatSettings.thinking = !self.state.chatSettings.thinking;
+        thinkBtn.classList.toggle('active', self.state.chatSettings.thinking);
+        self.saveChatSettings();
+      });
+    }
+
+    var tempInput = document.getElementById('chat-temp');
+    if (tempInput) {
+      tempInput.addEventListener('change', function () {
+        var v = parseFloat(tempInput.value);
+        if (isNaN(v) || v < 0) v = 0;
+        if (v > 2) v = 2;
+        tempInput.value = v;
+        self.state.chatSettings.temperature = v;
+        self.saveChatSettings();
+      });
+    }
+
+    var maxTokInput = document.getElementById('chat-maxtok');
+    if (maxTokInput) {
+      maxTokInput.addEventListener('change', function () {
+        var v = parseInt(maxTokInput.value, 10);
+        if (isNaN(v) || v < 1) v = 1;
+        maxTokInput.value = v;
+        self.state.chatSettings.maxTokens = v;
+        self.saveChatSettings();
+      });
+    }
+
+    var sysBtn = document.getElementById('chat-system-btn');
+    var sysBox = document.getElementById('chat-system');
+    if (sysBtn && sysBox) {
+      sysBtn.addEventListener('click', function () {
+        var open = sysBox.style.display === 'none' || !sysBox.style.display;
+        sysBox.style.display = open ? 'block' : 'none';
+        sysBtn.classList.toggle('active', open);
+        if (open) sysBox.focus();
+      });
+      sysBox.addEventListener('input', function () {
+        self.state.chatSettings.system = sysBox.value;
+        self.saveChatSettings();
+      });
+    }
+
+    var cardToggle = document.getElementById('model-card-toggle');
+    if (cardToggle) {
+      cardToggle.addEventListener('click', function () {
+        self.state.chatCardCollapsed = !self.state.chatCardCollapsed;
+        try {
+          localStorage.setItem('ainode_chat_card_collapsed',
+            self.state.chatCardCollapsed ? '1' : '0');
+        } catch (e) { /* storage blocked: collapse is per-page only */ }
+        var chev = document.getElementById('model-card-chevron');
+        if (chev) chev.innerHTML = self.state.chatCardCollapsed ? '&#9656;' : '&#9662;';
+        self.renderModelCard();
+      });
+    }
   },
 
   attachImages(files) {
@@ -1322,8 +1416,10 @@ const AINode = {
   },
 
   handleSendClick() {
-    if (this.state.streaming) this.stopGeneration();
-    else this.sendMessage();
+    // While a turn is in flight the explicit Stop button is the way out, so
+    // Enter cannot accidentally kill a generation mid-sentence.
+    if (this.state.streaming) return;
+    this.sendMessage();
   },
 
   stopGeneration() {
@@ -1331,133 +1427,695 @@ const AINode = {
       this.state.abortController.abort();
       this.state.abortController = null;
     }
-    this.state.streaming = false;
-    var sendBtn = document.getElementById('chat-send');
-    if (sendBtn) { sendBtn.textContent = 'SEND'; sendBtn.classList.remove('streaming'); }
+    this.setChatBusy(false);
     this.toast('Generation stopped', 'info');
   },
 
   // ========================================================================
-  //  CHAT — MODEL SELECT (Bottom Bar)
+  //  CHAT: FLEET-TRUE MODEL PICKER
   // ========================================================================
 
+  // One instance = one (model, node, port). The same model id can be serving on
+  // two nodes at once, and their numbers must never be averaged together, so
+  // every per-model thing below is keyed on this, not on the model id.
+  chatInstKey(inst) {
+    if (!inst || !inst.model) return '';
+    return inst.model + '@' + (inst.node_id || '?') + ':' + (inst.port || '?');
+  },
+
+  // /api/server/status is what the cluster is ACTUALLY serving: the same source
+  // the Server view reads. Polling it (rather than listing catalog models) is
+  // what stops the picker offering something the proxy cannot route to.
+  async refreshChatFleet(force) {
+    var now = Date.now();
+    if (!force && this._chatFleetAt && now - this._chatFleetAt < 7000) return;
+    this._chatFleetAt = now;
+    var data = await this.fetchJSON('/api/server/status');
+    if (!data) {
+      this.state.chatFleetError = 'cluster status unavailable';
+      this.state.chatFleet = [];
+    } else {
+      this.state.chatFleetError = null;
+      this.state.chatFleet = (data.loaded_models || [])
+        .filter(function (m) { return m.id && m.type !== 'embed'; })
+        .map(function (m) {
+          return {
+            model: m.id,
+            node_id: m.node_id || '',
+            node_name: m.node_hostname || m.node_id || 'unknown node',
+            port: m.port,
+            ready: m.ready !== false,
+          };
+        });
+    }
+    this.renderChatModelOptions();
+    this.updateChatEngineStatus();
+  },
+
+  // Kept as the name the 5s refresh already calls.
   updateChatModelSelect() {
+    this.refreshChatFleet(false);
+  },
+
+  renderChatModelOptions() {
     var select = document.getElementById('chat-model');
     if (!select) return;
-    var s = this.state.status;
-    if (!s) return;
-    // Prefer the fleet-wide union (every node's model) over local models_loaded.
-    var models = (this.state.fleetModels && this.state.fleetModels.length)
-      ? this.state.fleetModels : (s.models_loaded || []);
-    var cv = select.value;
-    if (models.length === 0) {
-      select.innerHTML = '<option>No models loaded</option>';
-    } else {
-      var self = this;
-      select.innerHTML = models.map(function (m) {
-        return '<option value="' + self.esc(m) + '">' + self.esc(m) + '</option>';
-      }).join('');
-      if (cv) {
-        for (var i = 0; i < select.options.length; i++) {
-          if (select.options[i].value === cv) { select.value = cv; break; }
-        }
+    var self = this;
+    var fleet = this.state.chatFleet || [];
+    // Only rebuild when the fleet actually changed: a 5s innerHTML rewrite
+    // closes an open dropdown under the user's cursor.
+    var sig = JSON.stringify(fleet.map(function (i) {
+      return [i.model, i.node_id, i.port, i.ready];
+    })) + '|' + (this.state.chatFleetError || '');
+    if (sig === this._chatFleetSig) return;
+    this._chatFleetSig = sig;
+
+    if (!fleet.length) {
+      // Honest empty state: say which of the two it is.
+      select.innerHTML = '<option value="">' +
+        (this.state.chatFleetError ? 'Cluster status unavailable' : 'No model loaded on any node') +
+        '</option>';
+      select.disabled = true;
+      this.state.chatInstance = null;
+      this.renderModelCard();
+      return;
+    }
+    select.disabled = false;
+
+    var byNode = {}, order = [];
+    fleet.forEach(function (i) {
+      if (!byNode[i.node_name]) { byNode[i.node_name] = []; order.push(i.node_name); }
+      byNode[i.node_name].push(i);
+    });
+    select.innerHTML = order.map(function (node) {
+      var opts = byNode[node].sort(function (a, b) { return (a.port || 0) - (b.port || 0); })
+        .map(function (i) {
+          var label = i.model.split('/').pop() + ' @ ' + node + ' :' + i.port +
+            (i.ready ? '' : ' (not ready)');
+          return '<option value="' + self.esc(i.model) + '"' +
+            ' data-node-id="' + self.esc(i.node_id) + '"' +
+            ' data-node-name="' + self.esc(node) + '"' +
+            ' data-port="' + self.esc(String(i.port)) + '"' +
+            (i.ready ? '' : ' disabled') + '>' + self.esc(label) + '</option>';
+        }).join('');
+      return '<optgroup label="' + self.esc(node) + '">' + opts + '</optgroup>';
+    }).join('');
+
+    this.selectChatInstance(this.state.chatInstance || this.state.chatPreferred);
+  },
+
+  // Re-pick after a rebuild: same model on the same node+port if it is still
+  // there, else the same model anywhere, else the first instance that is ready.
+  selectChatInstance(want) {
+    var select = document.getElementById('chat-model');
+    if (!select) return null;
+    var opts = Array.prototype.slice.call(select.options);
+    var hit = null;
+    if (want && want.model) {
+      hit = opts.filter(function (o) {
+        return o.value === want.model && !o.disabled &&
+          o.dataset.nodeId === (want.node_id || '') &&
+          String(o.dataset.port) === String(want.port);
+      })[0] || opts.filter(function (o) {
+        return o.value === want.model && !o.disabled;
+      })[0];
+    }
+    if (!hit) hit = opts.filter(function (o) { return o.value && !o.disabled; })[0];
+    if (hit) select.selectedIndex = hit.index;
+    return this.syncChatInstance();
+  },
+
+  selectedChatInstance() {
+    var select = document.getElementById('chat-model');
+    var opt = select && select.selectedOptions ? select.selectedOptions[0] : null;
+    if (!opt || !opt.value) return null;
+    return {
+      model: opt.value,
+      node_id: opt.dataset.nodeId || '',
+      node_name: opt.dataset.nodeName || '',
+      port: opt.dataset.port ? parseInt(opt.dataset.port, 10) : null,
+    };
+  },
+
+  syncChatInstance() {
+    var inst = this.selectedChatInstance();
+    var prevKey = this.chatInstKey(this.state.chatInstance);
+    this.state.chatInstance = inst;
+    if (inst) this.state.chatPreferred = inst;
+    this.updateChatEngineStatus();
+    if (this.chatInstKey(inst) !== prevKey) {
+      this.renderModelCard();
+      if (inst) {
+        this.loadModelCard(inst);
+        this.loadModelCaps(inst, false);
       }
     }
+    return inst;
+  },
+
+  updateChatEngineStatus() {
+    var el = document.getElementById('chat-engine-status');
+    if (!el) return;
+    var inst = this.state.chatInstance;
+    if (!inst) {
+      el.textContent = this.state.chatFleetError
+        ? 'cluster status unavailable'
+        : 'no engine serving';
+      el.className = 'chat-tool-status warn';
+      return;
+    }
+    var n = (this.state.chatFleet || []).length;
+    el.textContent = n + (n === 1 ? ' instance' : ' instances') + ' serving · routing to ' +
+      inst.node_name + ':' + inst.port;
+    el.className = 'chat-tool-status';
+  },
+
+  // ========================================================================
+  //  CHAT: MODEL CARD (left rail)
+  // ========================================================================
+
+  async loadModelCard(inst) {
+    var key = this.chatInstKey(inst);
+    var data = await this.fetchJSON('/api/models/card' + this.chatInstQuery(inst));
+    this.state.chatCards[key] = data || { unavailable: true };
+    if (this.chatInstKey(this.state.chatInstance) === key) this.renderModelCard();
+  },
+
+  async loadModelCaps(inst, fresh) {
+    var key = this.chatInstKey(inst);
+    if (!fresh && this.state.chatCaps[key]) return;
+    this.state.chatCaps[key] = { probing: true };
+    this.renderModelCard();
+    var data = await this.fetchJSON('/api/models/caps' + this.chatInstQuery(inst) +
+      (fresh ? '&fresh=1' : ''));
+    this.state.chatCaps[key] = data || { unavailable: true };
+    if (this.chatInstKey(this.state.chatInstance) === key) this.renderModelCard();
+  },
+
+  chatInstQuery(inst) {
+    return '?model=' + encodeURIComponent(inst.model) +
+      '&node_id=' + encodeURIComponent(inst.node_id || '') +
+      '&port=' + encodeURIComponent(inst.port || '');
+  },
+
+  renderModelCard() {
+    var body = document.getElementById('model-card-body');
+    var wrap = document.getElementById('model-card');
+    if (!body || !wrap) return;
+    var self = this;
+    wrap.classList.toggle('collapsed', !!this.state.chatCardCollapsed);
+
+    var inst = this.state.chatInstance;
+    if (!inst) {
+      body.innerHTML = '<div class="mc-empty">' +
+        (this.state.chatFleetError
+          ? 'Cannot reach the node API, so the fleet is unknown.'
+          : 'No engine is serving on this cluster. Launch a model to chat.') +
+        '</div>';
+      return;
+    }
+    var key = this.chatInstKey(inst);
+    var card = this.state.chatCards[key];
+    if (!card) {
+      body.innerHTML = '<div class="mc-model">' + this.esc(inst.model) + '</div>' +
+        '<div class="mc-empty">reading the instance…</div>';
+      return;
+    }
+    if (card.unavailable || card.error) {
+      body.innerHTML = '<div class="mc-model">' + this.esc(inst.model) + '</div>' +
+        '<div class="mc-empty">' + this.esc((card.error && card.error.message) ||
+          'Card unavailable for this instance.') + '</div>';
+      return;
+    }
+
+    var hw = card.hardware || {}, sv = card.serving || {}, ci = card.instance || {};
+    var cat = card.catalog;
+
+    var rows = function (pairs) {
+      var out = pairs.filter(function (p) {
+        return p[1] !== null && p[1] !== undefined && p[1] !== '';
+      }).map(function (p) {
+        var note = p[2] ? ' <span class="mc-src">' + self.esc(p[2]) + '</span>' : '';
+        return '<dt>' + self.esc(p[0]) + '</dt><dd>' + p[1] + note + '</dd>';
+      }).join('');
+      return out ? '<dl class="mc-dl">' + out + '</dl>' : '';
+    };
+    var num = function (v, d) {
+      return (typeof v === 'number') ? v.toFixed(d) : null;
+    };
+
+    var nodeLabel = (ci.nodes && ci.nodes.length > 1)
+      ? ci.nodes.length + ' nodes: ' + this.esc(ci.nodes.join(', '))
+      : this.esc(ci.node_name || inst.node_name || 'unknown');
+    var where = rows([
+      ['Node', nodeLabel],
+      ['GPU', hw.gpu_name ? ((hw.gpu_count && hw.gpu_count > 1 ? hw.gpu_count + ' x ' : '') +
+        this.esc(hw.gpu_name)) : null],
+      ['VRAM', hw.gpu_memory_gb ? num(hw.gpu_memory_gb, 1) + ' GB' +
+        (hw.unified_memory ? ' unified' : '') + (hw.gpu_count > 1 ? ' ea' : '') : null],
+      ['Port', ci.port],
+    ]);
+
+    var ctx = sv.max_model_len
+      ? '<b>' + sv.max_model_len.toLocaleString() + '</b> tok'
+      : null;
+    var served = rows([
+      ['Context', ctx, sv.max_model_len ? 'engine' : null],
+      ['Tensor par.', sv.tensor_parallel_size ? 'TP ' + sv.tensor_parallel_size : null],
+      ['Quantization', sv.quantization ? this.esc(sv.quantization) : null,
+        sv.quantization_source === 'model_id' ? 'from id' :
+          (sv.quantization_source === 'catalog' ? 'catalog' : null)],
+      ['KV cache', sv.kv_cache_dtype ? this.esc(sv.kv_cache_dtype) : null],
+      ['GPU mem frac', num(sv.gpu_memory_utilization, 2)],
+      ['Engine image', sv.engine_image
+        ? '<span class="mc-mono">' + this.esc(sv.engine_image) + '</span>' : null],
+      ['Speculative', this.specLabel(sv)],
+    ]);
+    // Engine flags come from a per-instance config snapshot. A peer that does
+    // not publish one leaves them unknown, and unknown is shown as absent here
+    // rather than filled in from the catalog recipe (which is what a launch
+    // WOULD use, not what this engine IS running).
+    var flagNote = sv.config_source ? '' :
+      '<div class="mc-note">Engine flags are not published by this node, so the ' +
+      'image and flag rows are omitted rather than guessed.</div>';
+
+    var html = '<div class="mc-model" title="' + this.esc(inst.model) + '">' +
+      this.esc(inst.model) + '</div>' +
+      '<div class="mc-badges">' +
+      '<span class="mc-tag' + (ci.local ? ' local' : '') + '">' +
+      this.esc(ci.node_name || inst.node_name) + '</span>' +
+      (cat && cat.verified ? '<span class="mc-tag ok">catalog verified</span>' : '') +
+      '</div>';
+    if (card.hf_url) {
+      html += '<a class="mc-hf" href="' + this.esc(card.hf_url) + '" target="_blank" rel="noopener">' +
+        '&#8599; ' + this.esc(card.hf_repo) + '</a>';
+    }
+    if (where) html += '<div class="mc-grp"><div class="mc-lbl">Where it runs</div>' + where + '</div>';
+    // Probed badges and this instance's own numbers come before the launch
+    // flags: they are what a chat user acts on, and the rail is short.
+    html += '<div class="mc-grp"><div class="mc-lbl">Capabilities</div>' +
+      this.renderCapBadges(key) + '</div>';
+    html += this.renderCardStats(key);
+    if (served || flagNote) {
+      html += '<div class="mc-grp"><div class="mc-lbl">How it is served</div>' +
+        served + flagNote + '</div>';
+    }
+    if (cat && cat.description) {
+      html += '<div class="mc-grp"><div class="mc-lbl">Catalog</div>' +
+        '<div class="mc-desc">' + this.esc(cat.description) + '</div></div>';
+    }
+    body.innerHTML = html;
+
+    var reprobe = document.getElementById('mc-reprobe');
+    if (reprobe) {
+      reprobe.addEventListener('click', function () {
+        self.loadModelCaps(self.state.chatInstance, true);
+      });
+    }
+  },
+
+  // Speculative decoding reads as a wall of flags in a 250px rail, so show the
+  // draft model and the token count and keep the exact flags in the tooltip.
+  specLabel(sv) {
+    if (!sv.speculative) return null;
+    var args = sv.extra_vllm_args || [];
+    var draft = null, ntok = null;
+    for (var i = 0; i < args.length; i++) {
+      var a = String(args[i]);
+      var val = a.indexOf('=') > -1 ? a.split('=').slice(1).join('=') : args[i + 1];
+      if (/speculative[_-]?(config\.)?model/i.test(a) && val) draft = String(val);
+      if (/num[_-]speculative[_-]tokens/i.test(a) && val) ntok = String(val);
+    }
+    var label = draft ? draft.split('/').pop() : 'on';
+    if (ntok) label += ' · ' + ntok + ' tok';
+    return '<span class="mc-mono" title="' + this.esc(sv.speculative) + '">' +
+      this.esc(label) + '</span>';
+  },
+
+  // Probed, never guessed. vision/tools come from the server sending the engine
+  // a real image and a real tools array; reasoning is marked only from turns
+  // that actually carried reasoning, because a model choosing not to think on
+  // one prompt is not a model that cannot think.
+  renderCapBadges(key) {
+    var caps = this.state.chatCaps[key];
+    var reasoned = !!this.state.chatReasoningSeen[key];
+    var reasonBadge = reasoned
+      ? '<span class="mc-cap on" title="observed in a reply on this instance">reasoning</span>'
+      : '<span class="mc-cap wait" title="marked from turns actually observed, never probed">reasoning?</span>';
+    if (!caps || caps.probing) {
+      return '<div class="mc-caps"><span class="mc-cap wait">probing…</span>' +
+        reasonBadge + '</div>';
+    }
+    if (caps.unavailable) {
+      return '<div class="mc-caps"><span class="mc-cap wait">probe unavailable</span>' +
+        reasonBadge + '</div>';
+    }
+    var one = function (onLabel, offLabel, val, why) {
+      if (val === true) return '<span class="mc-cap on">' + onLabel + '</span>';
+      if (val === false) {
+        return '<span class="mc-cap off" title="' + AINode.esc(why || 'refused by the engine') +
+          '">' + offLabel + '</span>';
+      }
+      return '<span class="mc-cap wait" title="' + AINode.esc(why || 'engine did not answer') +
+        '">' + onLabel + '?</span>';
+    };
+    var out = '<div class="mc-caps">' +
+      one('vision', 'text only', caps.vision, caps.vision_error) +
+      one('tools', 'no tools', caps.tools, caps.tools_error) +
+      reasonBadge +
+      '<span class="mc-reprobe" id="mc-reprobe" title="Probe this engine again">re-probe</span>' +
+      '</div>';
+    var why = caps.vision === false ? caps.vision_error : null;
+    if (why) out += '<div class="mc-note">' + this.esc(why) + '</div>';
+    return out;
+  },
+
+  // ========================================================================
+  //  CHAT: PER-TURN STATS (kept per instance, never averaged across nodes)
+  // ========================================================================
+
+  chatStatsFor(key) {
+    return (this.state.chatStats[key] || []).filter(function (r) { return !r.error; });
+  },
+
+  recordChatTurn(key, rec) {
+    if (!this.state.chatStats[key]) this.state.chatStats[key] = [];
+    this.state.chatStats[key].push(rec);
+  },
+
+  // Averages survive a page reload because the stats ride along with the
+  // conversation in localStorage.
+  rebuildChatStatsFromHistory() {
+    var self = this;
+    this.state.chatStats = {};
+    this.state.chatReasoningSeen = {};
+    (this.state.conversations || []).forEach(function (conv) {
+      (conv.messages || []).forEach(function (msg) {
+        if (!msg || !msg.stats || !msg.instance) return;
+        var key = self.chatInstKey(msg.instance);
+        if (!key) return;
+        self.recordChatTurn(key, msg.stats);
+        if (msg.stats.reasoning_chars > 0) self.state.chatReasoningSeen[key] = true;
+      });
+    });
+  },
+
+  renderCardStats(key) {
+    var runs = this.chatStatsFor(key);
+    if (!runs.length) return '';
+    var n = runs.length;
+    var last = runs[n - 1];
+    var mean = function (field) {
+      var vals = runs.map(function (r) { return r[field]; })
+        .filter(function (v) { return typeof v === 'number'; });
+      if (!vals.length) return null;
+      return vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+    };
+    var fmt = function (v, d) { return (typeof v === 'number') ? v.toFixed(d) : 'n/a'; };
+    var row = function (label, field, d, suffix) {
+      return '<tr><td>' + label + '</td>' +
+        '<td class="now">' + fmt(last[field], d) + suffix + '</td>' +
+        '<td>' + (n > 1 ? fmt(mean(field), d) + suffix : '') + '</td></tr>';
+    };
+    return '<div class="mc-grp mc-stats"><div class="mc-lbl">This instance</div>' +
+      '<table class="mc-st"><tr><th></th><th>last</th><th>' +
+      (n > 1 ? 'avg ' + n : '') + '</th></tr>' +
+      row('Decode', 'decode_tps', 1, ' t/s') +
+      row('TTFT', 'ttft_s', 2, 's') +
+      row('Total', 'total_s', 1, 's') +
+      row('In', 'prompt_tokens', 0, '') +
+      row('Out', 'completion_tokens', 0, '') +
+      '</table>' +
+      (n === 1 ? '<div class="mc-note">Averages appear from the second turn.</div>' : '') +
+      '</div>';
+  },
+
+  // ========================================================================
+  //  CHAT: CONTROLS (system prompt, temperature, max tokens, thinking)
+  // ========================================================================
+
+  loadChatSettings() {
+    var defaults = { system: '', temperature: 0.7, maxTokens: 2048, thinking: true };
+    try {
+      var saved = JSON.parse(localStorage.getItem('ainode_chat_settings') || '{}');
+      this.state.chatSettings = Object.assign(defaults, saved || {});
+    } catch (e) {
+      this.state.chatSettings = defaults;
+    }
+    try {
+      this.state.chatCardCollapsed = localStorage.getItem('ainode_chat_card_collapsed') === '1';
+    } catch (e) { /* private mode: default to expanded */ }
+  },
+
+  saveChatSettings() {
+    try {
+      localStorage.setItem('ainode_chat_settings', JSON.stringify(this.state.chatSettings));
+    } catch (e) { /* storage full or blocked: settings stay for this page only */ }
+  },
+
+  applyChatSettingsToUI() {
+    var s = this.state.chatSettings;
+    var temp = document.getElementById('chat-temp');
+    var maxtok = document.getElementById('chat-maxtok');
+    var think = document.getElementById('chat-thinking');
+    var sys = document.getElementById('chat-system');
+    if (temp) temp.value = s.temperature;
+    if (maxtok) maxtok.value = s.maxTokens;
+    if (think) think.classList.toggle('active', !!s.thinking);
+    if (sys) {
+      sys.value = s.system || '';
+      sys.style.display = s.system ? 'block' : 'none';
+    }
+    var sysBtn = document.getElementById('chat-system-btn');
+    if (sysBtn) sysBtn.classList.toggle('active', !!s.system);
   },
 
   // ========================================================================
   //  CHAT — SEND / STREAM
   // ========================================================================
 
+  setChatBusy(busy) {
+    this.state.streaming = busy;
+    var send = document.getElementById('chat-send');
+    var stop = document.getElementById('chat-stop');
+    if (send) {
+      send.disabled = busy;
+      send.textContent = busy ? 'SENDING' : 'SEND';
+    }
+    if (stop) stop.style.display = busy ? '' : 'none';
+  },
+
+  // The wire form of the conversation. Attachments are stored as data URLs on
+  // the message and turned into image parts here, so localStorage keeps a plain
+  // string content (which is what the titles and search read).
+  chatApiMessages() {
+    return this.state.messages.filter(function (m) {
+      return m.content || (m.images && m.images.length);
+    }).map(function (m) {
+      if (m.role === 'user' && m.images && m.images.length) {
+        var parts = m.images.map(function (url) {
+          return { type: 'image_url', image_url: { url: url } };
+        });
+        if (m.content) parts.push({ type: 'text', text: m.content });
+        return { role: 'user', content: parts };
+      }
+      return { role: m.role, content: m.content };
+    });
+  },
+
   async sendMessage() {
     var input = document.getElementById('chat-input');
-    var content = input ? input.value.trim() : '';
-    if (!content || this.state.streaming) return;
-    input.value = '';
-    input.style.height = 'auto';
+    var text = input ? input.value.trim() : '';
+    var atts = (this.state.pendingAttachments || []).slice();
+    if ((!text && !atts.length) || this.state.streaming) return;
 
-    // Auto-create conversation if needed
+    var inst = this.state.chatInstance || this.selectedChatInstance();
+    if (!inst || !inst.model) {
+      this.toast('No model is loaded on any node', 'error');
+      return;
+    }
+    var key = this.chatInstKey(inst);
+
+    if (input) { input.value = ''; input.style.height = 'auto'; }
+    this.state.pendingAttachments = [];
+    this.renderAttachmentPreview();
+
     if (!this.state.currentConversation) this.newConversation();
 
-    this.state.messages.push({ role: 'user', content: content });
+    var userMsg = { role: 'user', content: text };
+    if (atts.length) {
+      userMsg.images = atts.map(function (a) { return a.dataUrl; });
+    }
+    this.state.messages.push(userMsg);
 
-    // Auto-navigate to chat view when sending
     this.navigate('chat');
     this.renderChatMessages();
     this.showChatOverlay();
 
-    var select = document.getElementById('chat-model');
-    var model = select ? select.value : '';
+    var settings = this.state.chatSettings;
+    var wire = this.chatApiMessages();
+    if (settings.system) wire.unshift({ role: 'system', content: settings.system });
 
-    this.state.streaming = true;
-    var sendBtn = document.getElementById('chat-send');
-    if (sendBtn) { sendBtn.textContent = 'STOP'; sendBtn.classList.add('streaming'); }
+    var body = {
+      model: inst.model,
+      messages: wire,
+      stream: true,
+      // Token counts must come from the server. Under speculative decoding one
+      // SSE chunk can carry several accepted tokens, so counting chunks
+      // understates the rate. Usage is the only honest source.
+      stream_options: { include_usage: true },
+      temperature: settings.temperature,
+      max_tokens: settings.maxTokens,
+    };
+    // Only sent when thinking is OFF: leaving it out keeps the model's own chat
+    // template default, which is what the engine was launched to do.
+    if (!settings.thinking) body.chat_template_kwargs = { enable_thinking: false };
 
+    var assistantMsg = { role: 'assistant', content: '', reasoning: '', instance: inst };
+    this.state.messages.push(assistantMsg);
+    this.renderChatMessages();
+
+    this.setChatBusy(true);
+    this.state.abortController = new AbortController();
     this.state.streamMetrics = { ttft: null, tps: 0, tokens: 0, startTime: performance.now(), firstTokenTime: 0 };
     this.updateStreamMetrics();
 
-    var assistantMsg = { role: 'assistant', content: '' };
-    this.state.messages.push(assistantMsg);
-    this.state.abortController = new AbortController();
+    var t = { send: performance.now(), firstAny: null, firstContent: null, firstThink: null, last: null };
+    var chunks = 0, usage = null, finish = null, err = null, aborted = false;
 
     try {
       var resp = await fetch('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: model,
-          messages: this.state.messages.slice(0, -1).map(function (m) { return { role: m.role, content: m.content }; }),
-          stream: true,
-        }),
+        body: JSON.stringify(body),
         signal: this.state.abortController.signal,
       });
-
+      if (!resp.ok) {
+        var detail = '';
+        try { detail = (await resp.text()).slice(0, 300); } catch (e) { detail = ''; }
+        throw new Error('HTTP ' + resp.status + (detail ? ' ' + detail : ''));
+      }
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
       var buffer = '';
-
       while (true) {
         var chunk = await reader.read();
         if (chunk.done) break;
         buffer += decoder.decode(chunk.value, { stream: true });
         var lines = buffer.split('\n');
         buffer = lines.pop();
-
         for (var li = 0; li < lines.length; li++) {
-          var line = lines[li];
-          if (!line.startsWith('data: ')) continue;
-          var data = line.slice(6);
-          if (data === '[DONE]') break;
-          try {
-            var json = JSON.parse(data);
-            var delta = json.choices && json.choices[0] && json.choices[0].delta && json.choices[0].delta.content;
-            if (delta) {
-              if (this.state.streamMetrics.tokens === 0) {
-                this.state.streamMetrics.firstTokenTime = performance.now();
-                this.state.streamMetrics.ttft = Math.round(this.state.streamMetrics.firstTokenTime - this.state.streamMetrics.startTime);
-              }
-              this.state.streamMetrics.tokens++;
-              var elapsed = (performance.now() - this.state.streamMetrics.firstTokenTime) / 1000;
-              if (elapsed > 0) this.state.streamMetrics.tps = this.state.streamMetrics.tokens / elapsed;
-              assistantMsg.content += delta;
-              this.updateStreamingMessage(assistantMsg);
-              this.updateStreamMetrics();
+          var line = lines[li].trim();
+          // Anything that is not a data: line is an SSE comment (the proxy
+          // trickles them during a long prefill), skip it.
+          if (!line.startsWith('data:')) continue;
+          var data = line.slice(5).trim();
+          if (data === '[DONE]') continue;
+          var json;
+          try { json = JSON.parse(data); } catch (e) { continue; }
+          // vLLM sends a final chunk with choices: [] carrying usage, which is
+          // why this cannot assume choices[0].
+          if (json.usage) usage = json.usage;
+          var choice = (json.choices || [])[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finish = choice.finish_reason;
+          var delta = choice.delta || {};
+          var now = performance.now();
+          var think = delta.reasoning != null ? delta.reasoning : delta.reasoning_content;
+          if (think) {
+            if (t.firstAny === null) t.firstAny = now;
+            if (t.firstThink === null) t.firstThink = now;
+            t.last = now; chunks++;
+            assistantMsg.reasoning += think;
+          }
+          if (delta.content) {
+            if (t.firstAny === null) t.firstAny = now;
+            if (t.firstContent === null) {
+              t.firstContent = now;
+              this.state.streamMetrics.firstTokenTime = now;
+              this.state.streamMetrics.ttft = Math.round(now - t.send);
             }
-          } catch (e) { /* skip parse errors */ }
+            t.last = now; chunks++;
+            assistantMsg.content += delta.content;
+          }
+          if (think || delta.content) {
+            this.state.streamMetrics.tokens = chunks;
+            var elapsed = (now - (this.state.streamMetrics.firstTokenTime || t.firstAny)) / 1000;
+            if (elapsed > 0) this.state.streamMetrics.tps = chunks / elapsed;
+            this.updateStreamingMessage(assistantMsg);
+            this.updateStreamMetrics();
+          }
         }
       }
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        if (!assistantMsg.content) this.state.messages.pop();
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        aborted = true;
+        err = 'stopped';
       } else {
-        assistantMsg.content = 'Error: ' + err.message + '. Is the engine running?';
-        this.toast('Engine not responding', 'error');
+        err = e.message;
+        this.toast('Engine not responding: ' + e.message, 'error');
       }
     }
 
-    this.state.streaming = false;
     this.state.abortController = null;
-    if (sendBtn) { sendBtn.textContent = 'SEND'; sendBtn.classList.remove('streaming'); }
+    this.setChatBusy(false);
+
+    // ---- per-turn stats ---------------------------------------------------
+    var end = performance.now();
+    // TTFT is time to the first CONTENT delta. A reasoning model's first
+    // reasoning delta is reported separately so a thinking turn does not read
+    // as a fast one.
+    var ttft = t.firstContent != null ? (t.firstContent - t.send) / 1000 : null;
+    var ttfr = t.firstThink != null ? (t.firstThink - t.send) / 1000 : null;
+    var genDur = (t.firstAny != null && t.last != null) ? (t.last - t.firstAny) / 1000 : null;
+    var ctok = usage && typeof usage.completion_tokens === 'number' ? usage.completion_tokens : null;
+    var decodeSource = null, decodeTps = null;
+    if (ctok != null && ctok > 1 && genDur > 0) {
+      decodeTps = (ctok - 1) / genDur;
+      decodeSource = 'usage';
+    } else if (chunks > 1 && genDur > 0) {
+      // No usage block from this engine: chunk-counted, which undercounts under
+      // speculative decoding. Labelled so the number is never read as exact.
+      decodeTps = (chunks - 1) / genDur;
+      decodeSource = 'chunks';
+    }
+    var details = (usage && usage.completion_tokens_details) || null;
+    var stats = {
+      ts: new Date().toISOString(),
+      model: inst.model, node_id: inst.node_id, node_name: inst.node_name, port: inst.port,
+      thinking: !!settings.thinking,
+      temperature: settings.temperature,
+      max_tokens: settings.maxTokens,
+      ttft_s: ttft != null ? +ttft.toFixed(3) : null,
+      ttfr_s: ttfr != null ? +ttfr.toFixed(3) : null,
+      total_s: +((end - t.send) / 1000).toFixed(3),
+      decode_tps: decodeTps != null ? +decodeTps.toFixed(2) : null,
+      decode_source: decodeSource,
+      prompt_tokens: usage ? (usage.prompt_tokens != null ? usage.prompt_tokens : null) : null,
+      completion_tokens: ctok,
+      reasoning_tokens: details && details.reasoning_tokens != null ? details.reasoning_tokens : null,
+      reasoning_chars: assistantMsg.reasoning.length,
+      chunks: chunks,
+      finish_reason: finish,
+      images: (userMsg.images || []).length,
+      error: err,
+    };
+    assistantMsg.stats = stats;
+    this.recordChatTurn(key, stats);
+    if (stats.reasoning_chars > 0 && !this.state.chatReasoningSeen[key]) {
+      this.state.chatReasoningSeen[key] = true;
+    }
+
+    if (err && !assistantMsg.content && !assistantMsg.reasoning) {
+      // Nothing arrived: drop the empty assistant turn so a retry is clean.
+      this.state.messages.pop();
+      if (!aborted) {
+        this.state.messages.push({
+          role: 'assistant', content: 'Error: ' + err, instance: inst, stats: stats,
+        });
+      }
+    }
+    this.renderModelCard();
     this.renderChatMessages();
     this.saveCurrentConversation();
   },
@@ -1477,12 +2135,11 @@ const AINode = {
       overlay.innerHTML = '<div class="chat-metrics-bar" id="chat-metrics-bar">' +
         '<span id="chat-metric-ttft">TTFT: --</span>' +
         '<span id="chat-metric-tps">-- tok/s</span>' +
-        '<span id="chat-metric-tokens">0 tokens</span>' +
+        '<span id="chat-metric-tokens">0 deltas</span>' +
         '</div>' +
         '<div class="chat-messages" id="chat-messages"></div>';
       mount.appendChild(overlay);
     }
-    // Hide the empty state when we have messages
     var empty = document.getElementById('chat-view-empty');
     if (empty) empty.style.display = this.state.messages.length > 0 ? 'none' : '';
     overlay.style.display = this.state.messages.length > 0 ? '' : 'none';
@@ -1501,8 +2158,8 @@ const AINode = {
     var t2 = document.getElementById('chat-metric-tps');
     var t3 = document.getElementById('chat-metric-tokens');
     if (t1) t1.textContent = m.ttft != null ? 'TTFT: ' + m.ttft + 'ms' : 'TTFT: --';
-    if (t2) t2.textContent = m.tps > 0 ? m.tps.toFixed(1) + ' tok/s' : '-- tok/s';
-    if (t3) t3.textContent = m.tokens + ' tokens';
+    if (t2) t2.textContent = m.tps > 0 ? m.tps.toFixed(1) + ' deltas/s' : '-- deltas/s';
+    if (t3) t3.textContent = m.tokens + ' deltas';
   },
 
   // Targeted update for streaming — only rewrites the current assistant message
@@ -1511,20 +2168,75 @@ const AINode = {
     if (!container) { this.renderChatMessages(); return; }
     var last = container.lastElementChild;
     if (!last || !last.classList.contains('assistant')) {
-      // Not yet rendered — full render once
       this.renderChatMessages();
       return;
     }
     var contentEl = last.querySelector('.chat-msg-content');
     if (!contentEl) { this.renderChatMessages(); return; }
+    var thinkEl = last.querySelector('.chat-think-body');
+    if (assistantMsg.reasoning) {
+      if (!thinkEl) {
+        this.renderChatMessages();
+        return;
+      }
+      thinkEl.textContent = assistantMsg.reasoning;
+      var head = last.querySelector('.chat-think-head');
+      if (head) head.textContent = 'THINKING · ' + assistantMsg.reasoning.length + ' chars';
+    }
     contentEl.innerHTML = this.formatMarkdown(assistantMsg.content);
-    // Auto-scroll to bottom only if user hasn't scrolled up
     var atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
     if (atBottom) container.scrollTop = container.scrollHeight;
   },
 
+  chatStatChips(stats) {
+    if (!stats) return '';
+    var chip = function (label, value, cls, title) {
+      return '<span class="chat-chip ' + (cls || '') + '"' +
+        (title ? ' title="' + AINode.esc(title) + '"' : '') + '>' +
+        label + ' <b>' + value + '</b></span>';
+    };
+    var fmt = function (v, d, suffix) {
+      return (typeof v === 'number') ? v.toFixed(d) + (suffix || '') : 'n/a';
+    };
+    var out = '';
+    if (stats.error) out += chip('ERROR', this.esc(String(stats.error).slice(0, 80)), 'err');
+    out += chip('TTFT', fmt(stats.ttft_s, 2, 's'), 'hot', 'time to the first content delta');
+    if (stats.ttfr_s != null && stats.reasoning_chars > 0) {
+      out += chip('first think', fmt(stats.ttfr_s, 2, 's'), 'think',
+        'time to the first reasoning delta');
+    }
+    out += chip('decode',
+      (stats.decode_tps != null ? fmt(stats.decode_tps, 1, '') : 'n/a') + ' t/s',
+      'hot',
+      stats.decode_source === 'usage'
+        ? 'server-reported usage tokens over generation time'
+        : (stats.decode_source === 'chunks'
+          ? 'no usage block from this engine: counted from SSE deltas, which undercounts under speculative decoding'
+          : 'not measurable for this turn'));
+    if (stats.decode_source === 'chunks') {
+      out += chip('source', 'chunks', 'warn',
+        'the engine sent no usage block, so this rate is chunk-counted');
+    }
+    out += chip('total', fmt(stats.total_s, 1, 's'), '');
+    out += chip('in', stats.prompt_tokens != null ? stats.prompt_tokens : 'n/a', '',
+      'prompt tokens, server-reported');
+    out += chip('out', stats.completion_tokens != null ? stats.completion_tokens : 'n/a', '',
+      'completion tokens, server-reported');
+    if (stats.reasoning_tokens != null) {
+      out += chip('reasoning', stats.reasoning_tokens, 'think', 'server-reported reasoning tokens');
+    } else if (stats.reasoning_chars > 0) {
+      out += chip('reasoning', stats.reasoning_chars + ' ch', 'think',
+        'this engine reports no reasoning token count, so this is characters received');
+    }
+    if (stats.node_name) {
+      out += chip('on', this.esc(stats.node_name) + ':' + stats.port, '',
+        'the instance that served this turn');
+    }
+    if (stats.finish_reason) out += chip('stop', this.esc(stats.finish_reason), '');
+    return '<div class="chat-chips">' + out + '</div>';
+  },
+
   renderChatMessages() {
-    // Ensure overlay exists
     this.showChatOverlay();
     var container = document.getElementById('chat-messages');
     if (!container) return;
@@ -1537,8 +2249,29 @@ const AINode = {
 
     container.innerHTML = this.state.messages.map(function (msg, i) {
       var cls = msg.role === 'user' ? 'chat-msg user' : 'chat-msg assistant';
-      var html = '<div class="' + cls + '">' +
-        '<div class="chat-msg-content">' + self.formatMarkdown(msg.content) + '</div>';
+      var html = '<div class="' + cls + '">';
+      var inner = '';
+      if (msg.role === 'user' && msg.images && msg.images.length) {
+        inner += '<div class="chat-msg-images">' + msg.images.map(function (url) {
+          return '<img src="' + url + '" alt="attached image">';
+        }).join('') + '</div>';
+      }
+      if (msg.role === 'assistant' && msg.reasoning) {
+        inner += '<div class="chat-think" data-think-index="' + i + '">' +
+          '<div class="chat-think-head">THINKING · ' + msg.reasoning.length + ' chars</div>' +
+          '<div class="chat-think-body">' + self.esc(msg.reasoning) + '</div></div>';
+      }
+      // A reasoning-only reply (the token budget ran out while thinking) has no
+      // content: render no empty bubble for it. The in-flight turn always keeps
+      // its bubble so the streaming updater has somewhere to write.
+      var live = self.state.streaming && i === self.state.messages.length - 1;
+      if (msg.content || !msg.reasoning || live) {
+        inner += '<div class="chat-msg-content">' + self.formatMarkdown(msg.content) + '</div>';
+      }
+      if (msg.role === 'assistant' && msg.stats) {
+        inner += self.chatStatChips(msg.stats);
+      }
+      html += '<div class="chat-msg-stack">' + inner + '</div>';
       if (msg.role === 'assistant' && msg.content) {
         html += '<button class="chat-copy-btn" data-msg-index="' + i + '" title="Copy">' +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">' +
@@ -1551,6 +2284,13 @@ const AINode = {
     }).join('');
 
     container.scrollTop = container.scrollHeight;
+
+    container.querySelectorAll('.chat-think-head').forEach(function (head) {
+      head.addEventListener('click', function () {
+        var block = head.closest('.chat-think');
+        if (block) block.classList.toggle('folded');
+      });
+    });
 
     container.querySelectorAll('.chat-copy-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -1587,7 +2327,8 @@ const AINode = {
       });
     });
 
-    // Show metrics bar during streaming
+    // Live metrics bar is only meaningful while a turn is in flight; the
+    // per-turn chips carry the numbers afterwards.
     var metricsBar = document.getElementById('chat-metrics-bar');
     if (metricsBar) metricsBar.style.display = this.state.streaming ? '' : 'none';
   },
@@ -2447,12 +3188,7 @@ const AINode = {
         self.state.messages = [];
         self.state.currentConversation = null;
         self.navigate('chat');
-        var sel = document.getElementById('chat-model');
-        if (sel) {
-          for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === repo) { sel.value = repo; break; }
-          }
-        }
+        self.selectChatInstance({ model: repo });
         close();
       });
     }
@@ -5449,8 +6185,8 @@ const AINode = {
         var model = btn.dataset.model;
         if (action === 'eject') self._serverEjectModel(model);
         else if (action === 'open-chat') {
-          self.state.chatModel = model;
           self.navigate('chat');
+          self.selectChatInstance({ model: model });
         }
         else if (action === 'show-info') self._serverShowEmbedInfo(model);
         else if (action === 'copy-curl') self._serverShowCurl(model, btn.dataset.type || 'llm');
