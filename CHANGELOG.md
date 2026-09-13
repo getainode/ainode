@@ -10,6 +10,32 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.7] — 2026-09-13
+
+### Added
+- **Fleet-aware chat** (#73) — the picker lists every ready instance across the
+  cluster; a model card shows node, GPU, VRAM, TP, quant, engine image,
+  speculative decoding and the engine's live context length; capabilities are
+  probed with a real request (16 px image, dummy tool) rather than guessed;
+  every turn carries measured TTFT, decode tok/s from server usage, reasoning
+  tokens and the serving instance, with averages kept per instance. System
+  prompt, temperature, max tokens, thinking toggle and stop.
+- **Bench view** (#75) — run the benchmark suite from the browser against any
+  loaded instance: single stream, prefill scaling, sustained generation,
+  concurrency, reasoning tax. Live progress and cancel, results table with
+  JSON download in the public `bench/SCHEMA.md` shape, and the report
+  rendered in-app. One run per node; refuses a not-ready instance; warns on
+  a busy node. `scripts/ainode-bench.py` and `bench/report.py` are now thin
+  shims over `ainode/bench/`.
+- **Ornith 1.5 35B-A3B (NVFP4)** in the curated catalog (#68), and
+  `bench/results/` with the measured runs behind the README table (#69, #70, #72).
+
+### Fixed
+- **Download job progress race** (#74) — the progress poller's last disk read
+  could land after completion and overwrite 100% with a stale partial.
+
+---
+
 ## [0.5.5] — 2026-08-19
 
 ### Fixed
