@@ -1132,6 +1132,14 @@ async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str,
         # downloads can't gang up on the link — what stacked Nemotron+MiniMax did.
         async with _download_gate():
             await loop.run_in_executor(None, _do_download)
+        # Stop the poller BEFORE writing the final numbers. Its last directory
+        # read can still be in flight in the executor, and on a slow box it lands
+        # after this block and overwrites 100% with a stale partial (CI saw 0.15%).
+        poll_stop.set()
+        try:
+            await poll_task
+        except Exception:
+            pass
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["finished_at"] = time.time()
         jobs[job_id]["progress"] = 100.0
