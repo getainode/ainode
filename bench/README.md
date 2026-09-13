@@ -1,0 +1,123 @@
+# AINode bench
+
+What an AINode-served model actually does on the hardware in front of us, as
+opposed to what a model card says. Two stdlib-only scripts and a directory of
+JSON:
+
+| Path | What it is |
+|------|-----------|
+| `scripts/ainode-bench.py` | Runs the benchmark, writes one JSON per run |
+| `bench/results/*.json` | The runs, schema 1, one file per model/placement/day |
+| `bench/SCHEMA.md` | The record format. Authoritative |
+| `bench/report.py` | Reads every result, writes `bench/report.html` |
+| `bench/report.html` | Generated. One self-contained page, no CDN, no JS |
+
+## Run it
+
+```bash
+python3 scripts/ainode-bench.py \
+  --url http://100.72.9.84:8000 \
+  --model nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --ainode http://100.72.9.84:3000 \
+  --label dspark-recipe --no-think
+
+python3 bench/report.py          # -> bench/report.html
+```
+
+`--url` is the engine or the AINode proxy (anything OpenAI-compatible).
+`--ainode` is optional and only ever read from: it supplies GPU telemetry and
+the placement block, so a result file records the node, GPU, engine image, vLLM
+flags, KV dtype and what else was stacked on the node instead of relying on
+someone's memory. `--label` is required and says what made the run distinct.
+
+Useful flags:
+
+- `--only prefill,concurrency` - sections are `single`, `prefill`, `sustained`,
+  `concurrency`, `reasoning`; all five run by default.
+- `--depths 4000,16000,32000,64000,120000` - prefill sweep, prompt tokens.
+- `--streams 1,2,4,8,16` - concurrency sweep.
+- `--no-think` - sends `chat_template_kwargs.enable_thinking=false` for every
+  section **except** `reasoning`, which always measures both states because the
+  comparison is the entire point of that section.
+- `--max-tokens` / `--sustained-tokens` / `--reasoning-tokens` - generation
+  budgets. Lower them for a slow model; a dense 405B at ~1 tok/s will sit on the
+  default 1500-token sustained run for 25 minutes.
+- `--show bench/results/<file>.json` - pretty-print a saved run.
+
+The script is **inference only**. It never loads, unloads, restarts or deletes
+anything, so it is safe to point at a node someone else is using. It will add
+load, so do not run the wide sweeps against a node serving live traffic.
+
+## What each section measures
+
+- **single** - TTFT and decode on a short prompt. What one user feels.
+- **prefill** - TTFT and decode against prompt length. Decode gets quoted at 4k
+  and used at 120k; those are different numbers.
+- **sustained** - one long unbroken generation. Does the rate hold as the KV
+  cache grows and the node heats.
+- **concurrency** - aggregate and per-stream throughput at each stream count.
+  On GB10 this is several times the single-stream number and it is the number
+  that matters for agents and multi-user serving.
+- **reasoning** - the same prompt with thinking on and off, in wall clock.
+
+## Rules the numbers depend on
+
+These are why the results are worth keeping, so do not relax them casually:
+
+1. **Nothing is loaded or unloaded.** Pure inference against whatever is already
+   serving.
+2. **Token counts come from the server.** Prompt sizes are the engine's
+   `usage.prompt_tokens` via `stream_options.include_usage`, never a
+   chars-per-token estimate. Generated counts are `usage.completion_tokens`,
+   never a count of SSE chunks: under speculative decoding (DSpark, MTP) one
+   chunk can carry several accepted tokens and chunk-counting halves the rate.
+3. **A unique nonce leads every prompt**, so `--enable-prefix-caching` cannot
+   serve a cached prefill and make a deep prompt look free.
+4. **Decode excludes prefill.** The clock starts at the first content delta.
+   Reasoning-parser output counts as generated tokens, because it costs decode
+   time like any other token.
+5. **`prefill_tok_s` is a floor.** It is `prompt_tokens / TTFT`, and TTFT
+   includes queueing; the OpenAI-compatible API exposes no internal prefill
+   timing.
+6. **Missing is missing.** A section that did not run is absent from the JSON
+   and renders as "Not measured". Never fill a gap with an estimate or a number
+   carried over from a similar model.
+
+## Reading the result files
+
+The format is `bench/SCHEMA.md`; that file wins over this one. Notes on the
+fields the script fills automatically:
+
+- `placement.flags_source` says where the flags came from: `live node config
+  (/api/config)` when AINode's config still describes the benched model, else
+  the curated catalog recipe, which is the intended launch command rather than a
+  read of the running container.
+- `model.arch` / `model.active_b` are derived from the model id: the `A3B` in
+  `30B-A3B` is the vendor's own active-parameter count. No `A<n>B` marker means
+  the row is recorded as dense.
+- `results.telemetry` holds **peaks** observed over the run, sampled from
+  `/api/nodes`. On GB10, AINode reports `0` for GPU utilisation (pynvml cannot
+  read a unified-memory GPU), so the script writes a note saying to read that as
+  unread rather than idle. Memory and temperature are real.
+- `rubric` is never written by the script. It is the hand-scored quality pass,
+  added by whoever ran it.
+- A model that is not in the AINode catalog gets a warning and an incomplete
+  `model` block; fill `params_b`, `license` and `context` in by hand.
+
+## How the site consumes them
+
+`bench/results/*.json` is the source of truth, and everything downstream is
+generated from it:
+
+- `python3 bench/report.py` writes `bench/report.html` - leaderboard on top,
+  then one block per run with the prefill curve, concurrency bars, reasoning
+  tax, telemetry and notes. Self-contained: inline CSS tokens and inline SVG, no
+  CDN, no JavaScript, dark and light via `prefers-color-scheme`. Open it from
+  disk, publish it as an artifact, or serve it from the marketing site as is.
+- The page is regenerated, never edited. Fix `bench/report.py` or the JSON.
+- `--results` and `--out` point the renderer somewhere else, which is how you
+  preview a single run without touching the committed page.
+
+Adding a run measured by hand is fine: write a schema-1 JSON into
+`bench/results/` with `"source": "manual: ..."` saying where the numbers came
+from, and re-run the renderer.

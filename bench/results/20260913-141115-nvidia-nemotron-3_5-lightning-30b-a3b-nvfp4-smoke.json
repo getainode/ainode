@@ -1,0 +1,140 @@
+{
+ "schema": 1,
+ "stamp": "20260913-141115",
+ "label": "smoke",
+ "model": {
+  "id": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "name": "Nemotron 3.5 Lightning 30B-A3B",
+  "params_b": 30.0,
+  "quant": "NVFP4",
+  "context": 1048576,
+  "license": "OpenMDW-1.1",
+  "vision": false,
+  "arch": "moe",
+  "active_b": 3
+ },
+ "placement": {
+  "engine": "vllm",
+  "max_model_len": 1048576,
+  "node": "Spark-4-GX10",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.6",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [
+   "Qwen/Qwen2.5-VL-7B-Instruct"
+  ],
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "flags": [
+   "--moe-backend",
+   "marlin",
+   "--enable-prefix-caching",
+   "--speculative_config.model",
+   "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+   "--speculative_config.num_speculative_tokens",
+   "3",
+   "--mamba-backend",
+   "flashinfer",
+   "--mamba-cache-mode",
+   "align",
+   "--reasoning-parser",
+   "nemotron_v3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice"
+  ],
+  "gpu_memory_utilization": 0.91,
+  "kv_cache_dtype": "fp8",
+  "distributed_mode": "solo",
+  "flags_source": "live node config (/api/config)"
+ },
+ "settings": {
+  "thinking": false,
+  "max_tokens": 200,
+  "temperature": null,
+  "sustained_tokens": 1500,
+  "reasoning_tokens": 600,
+  "depths_requested": [
+   4000,
+   16000
+  ],
+  "streams_requested": [
+   1,
+   4
+  ],
+  "chars_per_token_probe": 5.38
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 52.56,
+   "gen_tokens": 200,
+   "ttft_ms": 171,
+   "prompt_tokens": 81
+  },
+  "prefill": [
+   {
+    "ttft_ms": 1702,
+    "prompt_tokens": 3963,
+    "prefill_tok_s": 2328.7,
+    "decode_tok_s": 53.59
+   },
+   {
+    "ttft_ms": 6535,
+    "prompt_tokens": 15773,
+    "prefill_tok_s": 2413.7,
+    "decode_tok_s": 61.12
+   }
+  ],
+  "sustained": {
+   "decode_tok_s": 71.31,
+   "gen_tokens": 1500,
+   "wall_s": 21.201,
+   "ttft_ms": 180
+  },
+  "concurrency": [
+   {
+    "streams": 1,
+    "aggregate_tok_s": 51.1,
+    "ok": 1,
+    "failed": 0,
+    "wall_s": 3.91,
+    "per_stream_tok_s": 53.2,
+    "median_ttft_ms": 173
+   },
+   {
+    "streams": 4,
+    "aggregate_tok_s": 119.3,
+    "ok": 4,
+    "failed": 0,
+    "wall_s": 6.5,
+    "per_stream_tok_s": 32.7,
+    "median_ttft_ms": 330
+   }
+  ],
+  "reasoning_tax": {
+   "thinking_off_wall_s": 3.298,
+   "thinking_off_tokens": 303,
+   "thinking_on_wall_s": 6.452,
+   "thinking_on_tokens": 600,
+   "tax_x": 1.96
+  },
+  "telemetry": {
+   "gpu_mem_used_gb": 57.2,
+   "gpu_mem_total_gb": 121.6,
+   "gpu_util_pct": 0,
+   "temp_c": 41,
+   "samples": 30,
+   "reading": "peak observed over the run; sampled from /api/nodes",
+   "gpu_util_pct_at_start": 0,
+   "temp_c_at_start": 41
+  }
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py in 61s; nothing loaded, unloaded or restarted.",
+  "prefill_tok_s is prompt_tokens/TTFT, a floor: TTFT includes queueing, and the OpenAI API exposes no internal prefill timing.",
+  "Sections other than reasoning_tax ran with enable_thinking=false.",
+  "Thinking-on hit the 600-token cap, so the reasoning tax is a floor: the answer had not finished.",
+  "GPU utilisation read 0% on every sample: AINode reports no utilisation for a GB10 unified-memory GPU, so read it as unread rather than idle. Memory and temperature are real reads."
+ ],
+ "source": "scripts/ainode-bench.py"
+}
