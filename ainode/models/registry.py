@@ -190,6 +190,46 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
     # sets below are the vendor/community recipes verbatim. They require vLLM
     # 0.27.1 — hence engine_image. Do NOT add --enforce-eager: it's a 0.17-era
     # workaround and only costs throughput here (see nvidia.py module header).
+    "ornith-1.5-35b-a3b-nvfp4": ModelInfo(
+        id="ornith-1.5-35b-a3b-nvfp4",
+        name="Ornith 1.5 35B-A3B (NVFP4)",
+        hf_repo="ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+        size_gb=23.5,
+        description=(
+            "Qwen3.5-MoE coding/agentic reasoner (3B active/token) with built-in MTP "
+            "speculative decoding — 40 tok/s single-stream and 269 tok/s across 16 "
+            "streams on one GB10, decode holding 34 tok/s at 120K context. 19/19 on the "
+            "fresh-agent rubric (tools, parallel tool calls, executed code, needle at "
+            "100K). 262K context, MIT. Launched text-only: the vision tower's warmup "
+            "OOM-kills the engine on a node without ~40 GB free."
+        ),
+        quantization="NVFP4", min_memory_gb=32, family="ornith", params_b=35.0,
+        proven_tp=1, verified=True, curated=True,
+        context_length=262144, license="MIT", recommended=True,
+        format="safetensors",
+        capabilities=["tool_use", "reasoning", "code"],
+        engine_image="vllm/vllm-openai:v0.27.1",
+        extra_vllm_args=[
+            "--enable-prefix-caching",
+            # Qwen3.5 arch carries a vision tower; the checkpoint bakes calibrated fp8
+            # KV scales, which vLLM applies regardless — stated explicitly so the
+            # served-from-HF-cache path never guesses.
+            "--kv-cache-dtype", "auto",
+            "--reasoning-parser", "qwen3",
+            # Template emits <tool_call><function=..><parameter=..> — qwen3_coder on
+            # 0.27.1 (the card's qwen3_xml is the newer name for the same syntax).
+            "--tool-call-parser", "qwen3_coder",
+            "--enable-auto-tool-choice",
+            # Text-only: skips the multimodal warmup that OOM-killed the EngineCore
+            # when stacked beside Qwen3.8 on Spark-1 (2026-09-13). Drop these two
+            # args to serve vision on a node with headroom.
+            "--limit-mm-per-prompt", '{"image":0,"video":0}',
+            "--speculative_config", '{"method":"qwen3_5_mtp","num_speculative_tokens":2}',
+        ],
+        # 23.5 GB weights + a 600K-token KV cache fit in 0.26 when stacked; 0.35
+        # leaves room to stack it beside a second model on a 122 GB node.
+        recommended_gmu=0.35,
+    ),
     "nemotron-3.5-lightning-nvfp4": ModelInfo(
         id="nemotron-3.5-lightning-nvfp4",
         name="Nemotron 3.5 Lightning 30B-A3B (NVFP4)",
