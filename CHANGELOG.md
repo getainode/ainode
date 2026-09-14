@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.9] - 2026-09-14
+
+Distributed launch without Ray, interface autodetect, and the DeepSeek V4 Flash recipe.
+
 ### Added
 - **A distributed launch that needs no Ray in the engine image: the vLLM `mp`
   multi-node shape** (#84). The distributed path could only do one shape, a
