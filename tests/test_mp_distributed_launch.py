@@ -548,7 +548,6 @@ def test_deepseek_catalog_entry_is_complete():
     assert info.proven_tp == 2
     assert info.verified is True        # proven live on Spark-2 + Spark-3, 2026-09-14 (#91)
     assert info.recommended is True
-    assert info.recommended is False
     assert info.curated is True
     assert info.distributed_executor == "mp"
     assert info.engine_image == DSPARK_IMAGE
