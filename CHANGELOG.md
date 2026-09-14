@@ -8,7 +8,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.5.8] — 2026-09-14
+
 ### Fixed
+- **Static assets can no longer go stale across an update** (#77) — every
+  `/static` URL in the served HTML carries `?v=<version>` and `/static`
+  responses are `Cache-Control: no-cache`. After the 0.5.7 roll a browser kept
+  the 0.5.6 stylesheet on heuristic freshness and rendered the new chat
+  unstyled.
+- **The model card only renders on the Chat view** (#77); it was showing on
+  Cluster, Server, Models and Bench.
 - **Startup replay no longer kills slow-but-healthy engines.** The bind wait had
   a fixed 300s window. On `vllm/vllm-openai:v0.27.1` a GB10 node spends minutes
   in FlashInfer fp4_gemm autotune and CUDA graph capture before the server
@@ -21,6 +32,11 @@ Versions follow [Semantic Versioning](https://semver.org/).
   `engine_bind_ceiling_seconds` reached (default 1800). An engine that dies on
   the way up still gets exactly one relaunch (0.5.5), and the ainode log now
   carries the reason and how long the wait lasted.
+
+### Changed
+- **"Made in Texas"** replaces "Powered by argentos.ai" in the web and
+  onboarding footers, the CLI banner and status output, the bench report and
+  the status API (`powered_by: ainode.dev`) (#77).
 
 ---
 
