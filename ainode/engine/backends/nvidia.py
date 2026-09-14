@@ -636,19 +636,8 @@ class NvidiaBackend(EngineBackend):
             # future image bakes hf_transfer in, flip this to "1".
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
             "HF_TOKEN": self.config.hf_token or "",
-            # Attention backend. NOTE (verified 2026-06-17): this
-            # scitrera/vLLM 0.17.1 build does NOT honor "TRITON_ATTN" — every
-            # rank still logs "Using FLASHINFER attention", so this pin is
-            # currently a NO-OP. The actual GB10/sm120 crash fix is
-            # --enforce-eager (see _build_vllm_serve_args); FlashInfer's
-            # prefill kernel is fine in eager, it only crashes under CUDA-graph
-            # capture. Pin retained as an env-overridable hedge: if a future
-            # build honors it, the correct value is likely "TRITON_ATTN_VLLM_V1"
-            # — set VLLM_ATTENTION_BACKEND in the systemd unit to override.
-            "VLLM_ATTENTION_BACKEND": os.environ.get(
-                "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
-            ),
         }
+        env.update(self._attention_backend_env())
         env.update(self._nvfp4_serve_env())
         if hca:
             env["NCCL_IB_HCA"] = hca
@@ -987,6 +976,31 @@ class NvidiaBackend(EngineBackend):
             return "nvfp4" in blob or "fp4" in blob
         except Exception:
             return False
+
+    def _attention_backend_env(self) -> Dict[str, str]:
+        """``VLLM_ATTENTION_BACKEND`` for the PINNED default image only.
+
+        Same gate as :meth:`_legacy_gb10_args`, for the same reason. On the 0.17
+        build the pin is a NO-OP (verified 2026-06-17: every rank still logs
+        "Using FLASHINFER attention"; the real GB10/sm120 crash fix is
+        ``--enforce-eager``), kept as an env-overridable hedge in case a later
+        0.17-line build honors it, in which case the right value is probably
+        "TRITON_ATTN_VLLM_V1".
+
+        Newer and custom images must NOT inherit it. vLLM 0.27/0.28 log it as an
+        unknown variable, but the 0.21-based GB10 fork the DeepSeek V4 recipe
+        runs does honor it, and forcing a dense attention backend onto that
+        model's sparse MLA path is how a serve produces confident nonsense. A
+        caller who wants an override on a custom image states it in the recipe's
+        ``extra_env``, which is applied over this (see :meth:`_engine_env`).
+        """
+        if not self._is_pinned_default_image():
+            return {}
+        return {
+            "VLLM_ATTENTION_BACKEND": os.environ.get(
+                "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
+            ),
+        }
 
     def _nvfp4_serve_env(self) -> Dict[str, str]:
         """GB10/sm121 NVFP4 serve fix: the default FlashInfer CUTLASS FP4 GEMM

@@ -623,8 +623,11 @@ def test_rendered_deepseek_commands_carry_the_whole_proven_recipe():
         assert "--tokenizer-mode deepseek_v4" in joined
         assert f"--node-rank {rank}" in joined
         assert "-e HF_HOME=/root/.cache/huggingface" in joined
-        # 0.17-era GB10 workarounds must not ride along on a custom image.
+        # 0.17-era GB10 workarounds must not ride along on a custom image, and
+        # that includes the attention-backend pin: this fork HONORS it, and a
+        # dense backend on V4's sparse MLA path is how a serve talks nonsense.
         assert "--enforce-eager" not in joined
+        assert "VLLM_ATTENTION_BACKEND" not in joined
     assert "--headless" not in " ".join(head)
     assert " ".join(peer).endswith("--headless")
 

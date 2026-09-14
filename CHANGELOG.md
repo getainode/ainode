@@ -60,6 +60,16 @@ Versions follow [Semantic Versioning](https://semver.org/).
   follow-up.
 
 ### Fixed
+- **`VLLM_ATTENTION_BACKEND=TRITON_ATTN` is no longer forced onto a custom or
+  newer engine image** (#84). It was injected into every engine container. On the
+  pinned 0.17 default it is a documented no-op hedge, and vLLM 0.27/0.28 merely
+  log it as an unknown variable, but the 0.21-based GB10 fork that serves
+  DeepSeek V4 Flash does honor it, and pinning a dense attention backend over
+  that model's sparse MLA path is exactly the kind of override that makes a serve
+  produce confident nonsense. The pin now sits behind the same gate as the other
+  0.17-era workarounds (`_is_pinned_default_image`), so behaviour on the default
+  image is byte-identical, including the systemd env override, and every other
+  image gets no attention override unless its recipe's `extra_env` states one.
 - **The cluster interface is auto-detected instead of guessed** (#34, #61). The
   installer wrote the DGX Spark NIC name `enP2p1s0f1np1` into every new
   `config.json` and `NodeConfig.cluster_interface` defaulted to `eno1`, so on an
