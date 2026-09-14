@@ -11,12 +11,20 @@ very different from eugr:
   is populated from :mod:`ainode.cluster.hca_discovery` so NCCL sees the
   correct HCA + fabric IP without manual tuning.
 
-* **Distributed (head) mode** — launches the head container via
-  ``scripts/run_cluster.sh --head`` (vendored by Agent B), SSHes to each
-  peer to run ``run_cluster.sh --worker``, then ``docker exec``s into
-  the local head container to start ``vllm serve`` with
-  ``--tensor-parallel-size N``. This mirrors runbook 02 § Steps 4-7
-  exactly.
+* **Distributed (head) mode**: two shapes, picked per instance by
+  ``NodeConfig.distributed_executor`` (see ``engine/AGENTS.md``):
+
+  * ``"ray"`` (default): a ``ray start --head`` container here, an
+    SSH-launched ``ray start`` worker container on each peer, then a
+    ``docker exec`` into the local head to run ``vllm serve
+    --distributed-executor-backend ray --tensor-parallel-size N``. Mirrors
+    runbook 02 § Steps 4-7. REQUIRES the ``ray`` CLI in the engine image.
+  * ``"mp"``: one ``vllm serve`` container per node using vLLM's own
+    multi-node executor: rank 0 here, ``--node-rank k --headless`` on each
+    peer, all rendezvousing on ``--master-addr``/``--master-port``. No Ray
+    container, no ``docker exec``, nothing needed in the image beyond vLLM.
+    the shape for a custom engine build (the GB10 DeepSeek V4 image and
+    stock ``vllm/vllm-openai`` both ship no ray).
 
 AINode's own process continues to run outside the vLLM container; the
 backend only orchestrates docker + ssh + docker-exec. All env vars come
@@ -49,7 +57,7 @@ from ainode.cluster.netdev import (
     interface_candidates_hint,
     resolve_cluster_interface,
 )
-from ainode.core.config import LOGS_DIR, NodeConfig
+from ainode.core.config import HF_CACHE_MOUNT, LOGS_DIR, NodeConfig
 from ainode.engine.backends.base import EngineBackend
 
 logger = logging.getLogger(__name__)
@@ -103,6 +111,20 @@ IMAGE_PULL_TIMEOUT = 3600
 
 NCCL_IB_GID_INDEX = "3"
 MASTER_PORT = "29501"
+
+# Host device tree the RDMA verbs libraries open. Mapped into the engine
+# container when it exists, so NCCL can use IB/RoCE verbs instead of falling
+# back to sockets. A node without it (no RDMA NIC, or a non-Spark host) simply
+# does not get the mapping. A missing path is never a launch failure.
+INFINIBAND_DEVICE = "/dev/infiniband"
+
+# Shared-memory + ulimits for the mp multi-node shape. vLLM's own multi-node
+# executor puts every rank's NCCL/torch buffers in /dev/shm and pins them, so
+# the 10.24g the Ray shape uses is not enough and an unlimited memlock is
+# required for IB registration. These are the values the proven GB10 recipe ran.
+MP_SHM_SIZE = "64g"
+MP_ULIMIT_MEMLOCK = "memlock=-1"
+MP_ULIMIT_STACK = "stack=67108864"
 
 
 class NvidiaBackendError(RuntimeError):
@@ -320,6 +342,15 @@ class NvidiaBackend(EngineBackend):
 
         hf_cache = self._head_hf_cache()
 
+        # Two distributed shapes, chosen per instance (see NodeConfig.
+        # distributed_executor and engine/AGENTS.md). "mp" needs no ray in the
+        # image, so it is the shape for a custom engine build; everything below
+        # this branch is the Ray shape.
+        if self._distributed_executor() == "mp":
+            return self._start_distributed_mp(
+                fabric_ip=fabric_ip, hf_cache_dir=hf_cache,
+            )
+
         # Step 2 — head Ray container. Non-blocking: ``docker run -d``
         # returns as soon as the container is created.
         self._launch_head_container(
@@ -397,7 +428,12 @@ class NvidiaBackend(EngineBackend):
         return self.start_distributed()
 
     def stop(self) -> None:
-        """Stop the vllm serve process + fan out to peers to kill their Ray containers.
+        """Stop the local engine + fan out to peers to kill their containers.
+
+        Shape-agnostic: the local process is either the ``docker exec``'d
+        ``vllm serve`` (Ray shape) or the ``docker logs -f`` follower (mp
+        shape); the local container is the head in both; and peer containers
+        carry the same name in both, so one teardown covers them.
 
         Teardown is best-effort for every remote call — an unreachable
         peer should not block shutdown of the head. The local head
@@ -456,7 +492,15 @@ class NvidiaBackend(EngineBackend):
         return False
 
     def is_running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        if self._process is not None and self._process.poll() is None:
+            return True
+        # In the mp shape the head CONTAINER is the server; ``_process`` is only
+        # the ``docker logs -f`` follower, so a dead follower (log stream closed,
+        # AINode restarted) must not read as a dead engine. The Ray and solo
+        # shapes keep the process-only answer and never pay for a docker call.
+        if self._is_mp_distributed():
+            return self._docker_container_state(self._head_container_name()) == "running"
+        return False
 
     def health_check(self) -> dict:
         """Mirrors EugrBackend.health_check for dashboard parity."""
@@ -592,19 +636,8 @@ class NvidiaBackend(EngineBackend):
             # future image bakes hf_transfer in, flip this to "1".
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
             "HF_TOKEN": self.config.hf_token or "",
-            # Attention backend. NOTE (verified 2026-06-17): this
-            # scitrera/vLLM 0.17.1 build does NOT honor "TRITON_ATTN" — every
-            # rank still logs "Using FLASHINFER attention", so this pin is
-            # currently a NO-OP. The actual GB10/sm120 crash fix is
-            # --enforce-eager (see _build_vllm_serve_args); FlashInfer's
-            # prefill kernel is fine in eager, it only crashes under CUDA-graph
-            # capture. Pin retained as an env-overridable hedge: if a future
-            # build honors it, the correct value is likely "TRITON_ATTN_VLLM_V1"
-            # — set VLLM_ATTENTION_BACKEND in the systemd unit to override.
-            "VLLM_ATTENTION_BACKEND": os.environ.get(
-                "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
-            ),
         }
+        env.update(self._attention_backend_env())
         env.update(self._nvfp4_serve_env())
         if hca:
             env["NCCL_IB_HCA"] = hca
@@ -693,6 +726,69 @@ class NvidiaBackend(EngineBackend):
         if container_path == home or container_path.startswith(home + os.sep):
             return host_home.rstrip("/") + container_path[len(home):]
         return container_path
+
+    def _volume_args(self) -> List[str]:
+        """``-v`` pairs for ``config.extra_volumes`` ("host:container[:ro]").
+
+        The host side goes through :meth:`_host_path` for the same reason every
+        other mount does: when AINode itself runs in a container, a SOURCE it
+        can see is not necessarily the path the host daemon would resolve. A
+        malformed entry (no container side) is skipped with a warning rather
+        than failing the launch: a bad recipe should not cost the whole serve.
+        """
+        args: List[str] = []
+        for raw in (getattr(self.config, "extra_volumes", None) or []):
+            spec = str(raw).strip()
+            if not spec:
+                continue
+            host, sep, rest = spec.partition(":")
+            if not sep or not rest:
+                logger.warning("Ignoring malformed extra_volumes entry %r "
+                               "(expected host:container[:ro])", spec)
+                continue
+            args.extend(["-v", f"{self._host_path(host)}:{rest}"])
+        return args
+
+    def _infiniband_present(self) -> bool:
+        """True when the host exposes the RDMA device tree.
+
+        Its own method so the launch builders have one seam to check (and tests
+        one place to fake). Never raises: a host without RDMA just misses the
+        mapping, which is not an error.
+        """
+        try:
+            return Path(self._host_path(INFINIBAND_DEVICE)).exists()
+        except OSError:  # pragma: no cover - defensive
+            return False
+
+    def _infiniband_device_args(self) -> List[str]:
+        """``--device /dev/infiniband:/dev/infiniband`` when the host has it."""
+        if not self._infiniband_present():
+            return []
+        return ["--device", f"{INFINIBAND_DEVICE}:{INFINIBAND_DEVICE}"]
+
+    def _distributed_executor(self) -> str:
+        """Which distributed shape this instance launches: "ray" or "mp".
+
+        An unrecognised value is not silently reinterpreted: a typo in a recipe
+        would otherwise launch a shape the image cannot run and fail deep inside
+        a container. ``stop()`` and ``is_running()`` must never raise on it,
+        which is why they route through :meth:`_is_mp_distributed` instead.
+        """
+        value = (getattr(self.config, "distributed_executor", "") or "ray").strip().lower()
+        if value not in ("ray", "mp"):
+            raise NvidiaBackendError(
+                f"Unknown distributed_executor={value!r}; expected 'ray' "
+                "(ray containers + docker exec) or 'mp' (one vllm serve "
+                "container per node, vLLM's own multi-node executor)."
+            )
+        return value
+
+    def _is_mp_distributed(self) -> bool:
+        """True for a head instance running the mp shape. Never raises."""
+        if self.config.distributed_mode != "head":
+            return False
+        return (getattr(self.config, "distributed_executor", "") or "ray").strip().lower() == "mp"
 
     def _local_model_dir(self) -> Optional[str]:
         """This model's on-disk weight dir (flat ``org--name`` layout written by
@@ -881,6 +977,31 @@ class NvidiaBackend(EngineBackend):
         except Exception:
             return False
 
+    def _attention_backend_env(self) -> Dict[str, str]:
+        """``VLLM_ATTENTION_BACKEND`` for the PINNED default image only.
+
+        Same gate as :meth:`_legacy_gb10_args`, for the same reason. On the 0.17
+        build the pin is a NO-OP (verified 2026-06-17: every rank still logs
+        "Using FLASHINFER attention"; the real GB10/sm120 crash fix is
+        ``--enforce-eager``), kept as an env-overridable hedge in case a later
+        0.17-line build honors it, in which case the right value is probably
+        "TRITON_ATTN_VLLM_V1".
+
+        Newer and custom images must NOT inherit it. vLLM 0.27/0.28 log it as an
+        unknown variable, but the 0.21-based GB10 fork the DeepSeek V4 recipe
+        runs does honor it, and forcing a dense attention backend onto that
+        model's sparse MLA path is how a serve produces confident nonsense. A
+        caller who wants an override on a custom image states it in the recipe's
+        ``extra_env``, which is applied over this (see :meth:`_engine_env`).
+        """
+        if not self._is_pinned_default_image():
+            return {}
+        return {
+            "VLLM_ATTENTION_BACKEND": os.environ.get(
+                "VLLM_ATTENTION_BACKEND", "TRITON_ATTN"
+            ),
+        }
+
     def _nvfp4_serve_env(self) -> Dict[str, str]:
         """GB10/sm121 NVFP4 serve fix: the default FlashInfer CUTLASS FP4 GEMM
         emits `cvt .e2m1x2` PTX that ptxas rejects on sm_121 (fatal even with
@@ -957,12 +1078,15 @@ class NvidiaBackend(EngineBackend):
             "--shm-size",
             "10.24g",
             "-v",
-            f"{hf_cache}:/root/.cache/huggingface",
+            f"{hf_cache}:{HF_CACHE_MOUNT}",
             # Mount the on-disk model store read-only so an already-downloaded
             # model serves straight from disk (no re-download).
             "-v",
             f"{models_src}:{self.MODELS_MOUNT}:ro",
         ]
+        # Operator/recipe mounts (e.g. a writable JIT cache the image compiles
+        # kernels into). Last, so they can never displace the two above.
+        cmd.extend(self._volume_args())
         for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
 
@@ -1036,12 +1160,192 @@ class NvidiaBackend(EngineBackend):
             # host-path the SOURCE so the host docker daemon mounts the real
             # dir, not a stray root-owned path (see _host_path). A no-op for the
             # peer's home-dir cache, which isn't under AINODE_HOME.
-            "-v", f"{self._host_path(hf_cache_dir)}:/root/.cache/huggingface",
+            "-v", f"{self._host_path(hf_cache_dir)}:{HF_CACHE_MOUNT}",
         ]
+        cmd.extend(self._volume_args())
         for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
         cmd.extend([self._engine_image(), "-c", ray_cmd])
         return cmd
+
+    def _build_mp_docker_cmd(
+        self,
+        *,
+        container_name: str,
+        node_rank: int,
+        nnodes: int,
+        master_addr: str,
+        hf_cache_dir: str,
+        node_ip: str,
+    ) -> List[str]:
+        """Build the ``docker run -d ... vllm serve ...`` command for ONE node of
+        the mp multi-node shape.
+
+        Every node runs the same command in its own container, differing only in
+        ``--node-rank`` and the ``--headless`` that rank >= 1 carries (rank 0 is
+        the one that serves the OpenAI API). There is no Ray container and no
+        ``docker exec``: this container IS the engine, which is what makes the
+        shape work on an image that ships no ``ray`` (the GB10 DeepSeek build,
+        and stock ``vllm/vllm-openai``).
+
+        Serves the repo-id rather than the local mount path, exactly like the
+        Ray shape's ``docker exec``: the model identifier has to resolve
+        identically on every rank, and only the HF cache is mounted on a peer
+        (``_ensure_peer_has_model`` fills it over the fabric).
+        """
+        is_head = node_rank == 0
+        nccl_env = self._build_nccl_env(
+            is_head=is_head,
+            head_fabric_ip=master_addr,
+            peer_fabric_ip=(None if is_head else node_ip),
+        )
+
+        cmd: List[str] = [
+            "docker", "run", "-d",
+            "--name", container_name,
+            "--gpus", "all",
+            "--network", "host",
+            "--ipc", "host",
+            "--shm-size", MP_SHM_SIZE,
+            "--ulimit", MP_ULIMIT_MEMLOCK,
+            "--ulimit", MP_ULIMIT_STACK,
+        ]
+        cmd.extend(self._infiniband_device_args())
+        cmd.extend(["-v", f"{self._host_path(hf_cache_dir)}:{HF_CACHE_MOUNT}"])
+        cmd.extend(self._volume_args())
+        for key, value in self._engine_env(nccl_env).items():
+            cmd.extend(["-e", f"{key}={value}"])
+
+        image = self._engine_image()
+        cmd.extend([image, *self._serve_argv_prefix(image), self.config.model])
+        cmd.extend(self._build_vllm_serve_args(tp_size=nnodes, executor_backend="mp"))
+        cmd.extend(self._mp_rendezvous_args(
+            node_rank=node_rank, nnodes=nnodes, master_addr=master_addr,
+        ))
+        return cmd
+
+    def _mp_rendezvous_args(self, *, node_rank: int, nnodes: int,
+                            master_addr: str) -> List[str]:
+        """The ``--nnodes/--node-rank/--master-addr/--master-port`` set (plus
+        ``--headless`` on rank >= 1) that joins one container to the mp cluster.
+
+        Honours the same duplicate-suppression rule as the serve args: a recipe
+        that states one of these itself keeps its value and we stay quiet.
+        """
+        supplied = self._supplied_flags()
+        args: List[str] = []
+        if "--nnodes" not in supplied:
+            args.extend(["--nnodes", str(nnodes)])
+        if "--node-rank" not in supplied:
+            args.extend(["--node-rank", str(node_rank)])
+        if "--master-addr" not in supplied:
+            args.extend(["--master-addr", master_addr])
+        if "--master-port" not in supplied:
+            args.extend(["--master-port", self._master_port()])
+        # Rank 0 serves the API; every other rank is a worker with no HTTP server.
+        if node_rank > 0 and "--headless" not in supplied:
+            args.append("--headless")
+        return args
+
+    def _start_distributed_mp(self, *, fabric_ip: str, hf_cache_dir: str) -> bool:
+        """Launch the mp multi-node shape: one ``vllm serve`` container per node.
+
+        PEERS FIRST, then the head. vLLM's mp rendezvous is a torch
+        ``init_process_group`` on ``--master-addr:--master-port``: rank 0 binds
+        it and blocks until all ``--nnodes`` ranks have dialled in, so a peer
+        launched afterwards is fine but a peer launched first costs nothing and
+        removes the window where rank 0 is up with nobody to talk to. There is
+        deliberately no wait on the head reaching Running before the peers go
+        out (the Ray shape needs that because a worker cannot connect to an
+        unbound :6379; here the rendezvous does the waiting).
+        """
+        nnodes = self._tp_size()
+        image = self._engine_image()
+        if not self.ensure_image(image):
+            logger.error("Engine image %s unavailable on the head; not launching %s",
+                         image, self.config.model)
+            return False
+
+        for rank, peer_ip in enumerate(self.config.peer_ips, start=1):
+            self._ssh_launch_mp_worker(
+                peer_ip=peer_ip, head_ip=fabric_ip, node_rank=rank, nnodes=nnodes,
+            )
+
+        head_name = self._head_container_name()
+        self._docker_stop_and_rm_best_effort(head_name)
+        cmd = self._build_mp_docker_cmd(
+            container_name=head_name,
+            node_rank=0,
+            nnodes=nnodes,
+            master_addr=fabric_ip,
+            hf_cache_dir=hf_cache_dir,
+            node_ip=fabric_ip,
+        )
+        logger.info(
+            "Launching mp head container (rank 0 of %d, master %s:%s): %s",
+            nnodes, fabric_ip, self._master_port(), " ".join(cmd),
+        )
+        try:
+            result = subprocess.run(
+                cmd, env=self._build_env_for_subprocess(),
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self._teardown_mp_peers()
+            raise NvidiaBackendError(
+                f"docker run -d for mp head container {head_name!r} timed out "
+                f"after {exc.timeout}s; the local docker daemon may be unresponsive."
+            ) from exc
+        if result.returncode != 0:
+            self._teardown_mp_peers()
+            raise NvidiaBackendError(
+                f"docker run -d for mp head container {head_name!r} failed "
+                f"(rc={result.returncode}): {(result.stderr or '').strip()}"
+            )
+
+        # The head container is the engine, so its stdout is the engine log, so
+        # follow it so readiness, load phase and last_log_activity all keep
+        # working for a shape with no docker-exec'd process to watch.
+        self._follow_container_logs(head_name)
+
+        if not self._confirm_container_started(head_name):
+            # A rank-0 container that died on its flags (or a missing vllm in the
+            # image) leaves the peers waiting on a rendezvous that will never
+            # happen; take them down with it.
+            self._teardown_mp_peers()
+            return False
+        return True
+
+    def _follow_container_logs(self, container_name: str) -> None:
+        """Stream ``docker logs -f <container>`` into the distributed log file.
+
+        The resulting Popen becomes ``self._process``, which is what
+        ``is_running`` / ``wait_ready`` / ``stop`` already watch, and feeds
+        ``_stream_logs`` so ``last_log_activity`` (the adaptive bind wait's
+        liveness signal) comes from the engine's own stdout.
+        """
+        self._process = subprocess.Popen(
+            ["docker", "logs", "-f", container_name],
+            env=self._build_env_for_subprocess(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            universal_newlines=True,
+        )
+        self._log_thread = threading.Thread(
+            target=self._stream_logs,
+            args=(self._process, self._distributed_log),
+            daemon=True,
+        )
+        self._log_thread.start()
+
+    def _teardown_mp_peers(self) -> None:
+        """Best-effort removal of every peer container (failed head launch)."""
+        for peer_ip in self.config.peer_ips:
+            try:
+                self._ssh_stop_peer_container(peer_ip)
+            except Exception:  # pragma: no cover - best-effort teardown
+                logger.exception("failed to tear down mp peer %s", peer_ip)
 
     def _launch_head_container(
         self,
@@ -1137,7 +1441,22 @@ class NvidiaBackend(EngineBackend):
         )
         return False
 
-    def _build_vllm_serve_args(self, tp_size: int) -> List[str]:
+    def _extra_vllm_args(self) -> List[str]:
+        """``config.extra_vllm_args`` as a list of strings (never None)."""
+        return [str(a) for a in (getattr(self.config, "extra_vllm_args", None) or [])]
+
+    def _supplied_flags(self) -> set:
+        """Flag names the caller supplied in ``extra_vllm_args``, in both the
+        ``--flag value`` and ``--flag=value`` forms.
+
+        Anything in here SUPPRESSES the same built-in flag rather than appearing
+        twice: vLLM errors on duplicates, and the caller's explicit value is the
+        intent. Shared by the serve-arg builder and the mp rendezvous args.
+        """
+        return {a.split("=", 1)[0] for a in self._extra_vllm_args() if a.startswith("--")}
+
+    def _build_vllm_serve_args(self, tp_size: int,
+                               executor_backend: str = "ray") -> List[str]:
         """Assemble the positional ``vllm serve`` args after ``<model>``.
 
         ``config.extra_vllm_args`` is appended verbatim so a model's published
@@ -1145,10 +1464,13 @@ class NvidiaBackend(EngineBackend):
         can be expressed without hand-rolling a container. A flag supplied there
         SUPPRESSES the same built-in flag rather than appearing twice — vLLM
         errors on duplicates, and the caller's explicit value is the intent.
+
+        ``executor_backend`` is the value emitted for
+        ``--distributed-executor-backend`` when TP > 1: "ray" for the Ray
+        container shape, "mp" for vLLM's own multi-node executor.
         """
-        extra: List[str] = [str(a) for a in (getattr(self.config, "extra_vllm_args", None) or [])]
-        # Flag names the caller supplied, in both `--flag value` and `--flag=value` forms.
-        supplied = {a.split("=", 1)[0] for a in extra if a.startswith("--")}
+        extra: List[str] = self._extra_vllm_args()
+        supplied = self._supplied_flags()
 
         def wanted(flag: str) -> bool:
             return flag not in supplied
@@ -1171,7 +1493,8 @@ class NvidiaBackend(EngineBackend):
                 args.extend(["--kv-cache-dtype", kv_dtype])
         if tp_size > 1 and wanted("--tensor-parallel-size"):
             args.extend(["--tensor-parallel-size", str(tp_size)])
-            args.extend(["--distributed-executor-backend", "ray"])
+            if wanted("--distributed-executor-backend"):
+                args.extend(["--distributed-executor-backend", executor_backend])
         if self.config.max_model_len and wanted("--max-model-len"):
             args.extend(["--max-model-len", str(self.config.max_model_len)])
         if self.config.quantization and wanted("--quantization"):
@@ -1266,11 +1589,7 @@ class NvidiaBackend(EngineBackend):
         peer, and that the NVIDIA vLLM image is pre-pulled on the peer
         (the deploy pipeline distributes it via ``docker load`` from NFS).
         """
-        # Reasonable per-peer HF cache path. Workers can't always write
-        # to NFS (runbook 02 § Observations / gotcha 2), so default to a
-        # home-directory path under the ssh_user's home. We can't use /root
-        # because we SSH in as the non-root ssh_user on the peer.
-        peer_hf_cache = f"/home/{self.config.ssh_user}/ainode-nvidia-cache"
+        peer_hf_cache = self._peer_hf_cache()
 
         # Phase 3a: ensure the peer actually has the model weights before its
         # worker starts — distribute from the head over the fabric if missing.
@@ -1287,7 +1606,50 @@ class NvidiaBackend(EngineBackend):
             node_ip=peer_ip,
             hf_cache_dir=peer_hf_cache,
         )
+        self._ssh_run_worker_container(
+            peer_ip=peer_ip, worker_name=worker_name,
+            peer_hf_cache=peer_hf_cache, docker_cmd=docker_cmd,
+        )
 
+    def _peer_hf_cache(self) -> str:
+        """HF cache path on a peer, mounted into its container at HF_CACHE_MOUNT.
+
+        Workers can't always write to NFS (runbook 02 § Observations / gotcha 2),
+        so default to a home-directory path under the ssh_user's home. We can't
+        use /root because we SSH in as the non-root ssh_user on the peer.
+        """
+        return f"/home/{self.config.ssh_user}/ainode-nvidia-cache"
+
+    def _ssh_launch_mp_worker(self, peer_ip: str, head_ip: str,
+                              node_rank: int, nnodes: int) -> None:
+        """SSH to ``peer_ip`` and launch its ``--headless`` mp rank.
+
+        Same plumbing as :meth:`_ssh_launch_worker`: same ssh target, same
+        stale-container removal, same container name, same weight distribution
+        but the container runs ``vllm serve ... --node-rank <k> --headless``
+        instead of ``ray start``.
+        """
+        peer_hf_cache = self._peer_hf_cache()
+        self._ensure_peer_has_model(peer_ip, peer_hf_cache)
+        worker_name = self._worker_container_name(peer_ip)
+        docker_cmd = self._build_mp_docker_cmd(
+            container_name=worker_name,
+            node_rank=node_rank,
+            nnodes=nnodes,
+            master_addr=head_ip,
+            hf_cache_dir=peer_hf_cache,
+            node_ip=peer_ip,
+        )
+        logger.info("SSH-launching mp rank %d on %s", node_rank, peer_ip)
+        self._ssh_run_worker_container(
+            peer_ip=peer_ip, worker_name=worker_name,
+            peer_hf_cache=peer_hf_cache, docker_cmd=docker_cmd,
+        )
+
+    def _ssh_run_worker_container(self, *, peer_ip: str, worker_name: str,
+                                  peer_hf_cache: str,
+                                  docker_cmd: List[str]) -> None:
+        """Run ``docker_cmd`` on a peer over SSH (shared by both shapes)."""
         # Remote shell command: clean up any stale worker container from
         # a prior run (stable name means we can always find it), make
         # the cache dir, then docker run -d. Chained with && so a failed

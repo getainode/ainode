@@ -8,7 +8,68 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **A distributed launch that needs no Ray in the engine image: the vLLM `mp`
+  multi-node shape** (#84). The distributed path could only do one shape, a
+  `ray start --head` container plus SSH-launched `ray start` workers plus a
+  `docker exec` of `vllm serve --distributed-executor-backend ray` inside the
+  head, so it required the `ray` CLI in the engine image. Two engine images we
+  actually need do not have it: stock `vllm/vllm-openai:v0.27.1` (the head
+  container exits 127, "ray: command not found") and the custom GB10 build that
+  is the only thing serving DeepSeek V4 Flash correctly on sm121. `NodeConfig`
+  gains `distributed_executor` (`ray` by default, or `mp`), and the `mp` shape
+  runs one `vllm serve` container per node: rank 0 on the head, `--node-rank k
+  --headless` on each peer over SSH, all rendezvousing on
+  `--master-addr`/`--master-port` with vLLM's own multi-node executor. Peers go
+  out before the head because the rendezvous, not a Ray port, is what waits.
+  Container shape is the proven one: `--network host --ipc host --shm-size 64g
+  --ulimit memlock=-1 --ulimit stack=67108864 --gpus all`, plus
+  `--device /dev/infiniband` when the host has it. Serve args come from the same
+  builder as every other launch, so a recipe flag still suppresses the built-in
+  rather than duplicating it. Readiness, `last_log_activity`, the adaptive bind
+  wait and `stop()` all work with no `docker exec`'d process: the head container
+  is the server, its `docker logs -f` is the engine log, and teardown removes the
+  head plus every peer container. `NodeConfig.extra_volumes` is new alongside it
+  (extra `host:container[:ro]` mounts, applied to the solo and distributed
+  commands) for an engine image that wants a writable cache outside the HF cache.
+- **The distributed launch is recipe-aware** (#84). `POST /api/sharding/launch`
+  built its per-instance config from the shared `NodeConfig` and ignored the
+  catalog, so a curated model launched across nodes on the fleet default image
+  with none of its proven flags, while the same model loaded on one node got its
+  whole recipe. It now resolves the catalog recipe (engine image, extra vLLM
+  args, env, volumes, distributed shape, KV-cache dtype, context length,
+  trust-remote-code, recommended GPU fraction) and applies it as defaults, with
+  the same per-launch body keys the solo load accepts overriding it, plus
+  `distributed_executor` for the shape. Body parsing is now one shared
+  validator, so both paths reject a malformed recipe with the same 400 instead of
+  silently dropping it. The instance record carries `distributed_executor` and a
+  primary launch persists the shape to `config.json`, so a restart replays the
+  same shape rather than falling back to Ray on the default image.
+- **Catalog entry: DeepSeek V4 Flash (DSpark, FP8)** (#84), id
+  `deepseek-v4-flash-dspark`, `fraserprice/DeepSeek-V4-Flash-DSpark`. Frontier
+  MoE, 284B total with 13B active per token, 1M context, MIT, `proven_tp=2`. It
+  carries the full two-node recipe: `distributed_executor="mp"`, the GB10 engine
+  image, `nvfp4_ds_mla` KV cache, DSpark speculative decoding, the deepseek_v4
+  tokenizer/tool-call/reasoning parsers, and the engine env the image needs
+  (its ENTRYPOINT is empty, `HOME` is `/tmp` and vllm lives at
+  `/opt/env/bin/vllm`, so `PATH`, the CUDA paths, `HF_HOME` and the JIT cache
+  dirs are all stated, the last pointed inside the HF cache mount so compiled
+  kernels persist per node without a fleet-specific path). `verified=False`
+  until the two-node serve is proven live, and it needs that GB10 vLLM build
+  present on every node: it is a local image today, a registry publish is a
+  follow-up.
+
 ### Fixed
+- **`VLLM_ATTENTION_BACKEND=TRITON_ATTN` is no longer forced onto a custom or
+  newer engine image** (#84). It was injected into every engine container. On the
+  pinned 0.17 default it is a documented no-op hedge, and vLLM 0.27/0.28 merely
+  log it as an unknown variable, but the 0.21-based GB10 fork that serves
+  DeepSeek V4 Flash does honor it, and pinning a dense attention backend over
+  that model's sparse MLA path is exactly the kind of override that makes a serve
+  produce confident nonsense. The pin now sits behind the same gate as the other
+  0.17-era workarounds (`_is_pinned_default_image`), so behaviour on the default
+  image is byte-identical, including the systemd env override, and every other
+  image gets no attention override unless its recipe's `extra_env` states one.
 - **The cluster interface is auto-detected instead of guessed** (#34, #61). The
   installer wrote the DGX Spark NIC name `enP2p1s0f1np1` into every new
   `config.json` and `NodeConfig.cluster_interface` defaulted to `eno1`, so on an

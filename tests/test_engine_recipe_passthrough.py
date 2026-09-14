@@ -75,6 +75,40 @@ def test_pinned_default_image_keeps_nvfp4_marlin_env():
     assert b._nvfp4_serve_env().get("VLLM_NVFP4_GEMM_BACKEND") == "marlin"
 
 
+def test_pinned_default_image_keeps_the_attention_backend_pin():
+    # A no-op on this build, but kept byte-identical: it is the 0.17-line hedge.
+    b = NvidiaBackend(NodeConfig(model="m"))
+    assert b._attention_backend_env() == {"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"}
+    assert "VLLM_ATTENTION_BACKEND=TRITON_ATTN" in b._build_solo_docker_cmd("c")
+
+
+def test_pinned_default_image_attention_pin_stays_env_overridable(monkeypatch):
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+    b = NvidiaBackend(NodeConfig(model="m"))
+    assert b._attention_backend_env() == {
+        "VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"}
+
+
+@pytest.mark.parametrize("image", ["vllm/vllm-openai:v0.27.1",
+                                   "vllm-dspark-runtime:dspark-nvfp4-stage-c"])
+def test_custom_image_gets_no_attention_backend_override(image):
+    # 0.27/0.28 log it as an unknown variable, but the 0.21-based GB10 fork
+    # HONORS it, and forcing a dense attention backend onto DeepSeek V4's sparse
+    # MLA path is how a serve produces confident nonsense. A recipe that wants
+    # one states it in extra_env.
+    b = NvidiaBackend(NodeConfig(model="m", engine_image=image))
+    assert b._attention_backend_env() == {}
+    assert not any(str(a).startswith("VLLM_ATTENTION_BACKEND")
+                   for a in b._build_solo_docker_cmd("c"))
+
+
+def test_a_recipe_can_still_set_the_attention_backend_on_a_custom_image():
+    b = NvidiaBackend(NodeConfig(
+        model="m", engine_image="ghcr.io/x/y:1",
+        extra_env={"VLLM_ATTENTION_BACKEND": "FLASHINFER"}))
+    assert b._engine_env({})["VLLM_ATTENTION_BACKEND"] == "FLASHINFER"
+
+
 def test_engine_image_override_is_used_for_the_container():
     b = NvidiaBackend(NodeConfig(model="m", engine_image="ghcr.io/x/y:1"))
     assert b._engine_image() == "ghcr.io/x/y:1"

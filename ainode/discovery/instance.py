@@ -26,6 +26,11 @@ class InstanceRecord:
     api_port: int = 8000
     tensor_parallel_size: int = 1
     status: str = "serving"  # starting | distributing | serving | failed
+    # Which distributed shape launched it: "ray" (ray containers + docker exec)
+    # or "mp" (one vllm serve container per node, vLLM's own multi-node
+    # executor). Carried so a replay relaunches the SAME shape. An image that
+    # ships no ray cannot be brought back by the Ray path.
+    distributed_executor: str = "ray"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -36,5 +41,6 @@ class InstanceRecord:
         fields = (
             "instance_id", "model", "head_node_id", "member_node_ids",
             "peer_ips", "api_port", "tensor_parallel_size", "status",
+            "distributed_executor",
         )
         return cls(**{k: d[k] for k in fields if k in d})

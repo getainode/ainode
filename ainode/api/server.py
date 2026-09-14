@@ -237,6 +237,7 @@ def _head_instances(config) -> list:
         api_port=config.api_port,
         tensor_parallel_size=1 + len(peer_ips),
         status="serving",
+        distributed_executor=(getattr(config, "distributed_executor", "ray") or "ray"),
     ).to_dict()]
 
 
