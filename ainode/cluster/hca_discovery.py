@@ -18,6 +18,7 @@ for the empirical grounding of the GID-index-3 + IPv4 RoCEv2 choice.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import subprocess
@@ -98,9 +99,42 @@ def hca_has_ipv4_rocev2_gid(hca: str, gid_index: int = 3) -> bool:
     return bool(_IPV4_MAPPED_RE.match(value))
 
 
+def hca_ipv4_from_gid(hca: str, gid_index: int = 3) -> Optional[str]:
+    """The IPv4 address carried by ``hca``'s RoCEv2 GID at ``gid_index``.
+
+    An IPv4-mapped GID is ``::ffff:a.b.c.d`` written as hextets, so the
+    address is right there in sysfs; no ``ip`` call and no netdev lookup.
+    None when the slot is missing, empty, or not IPv4-mapped.
+    """
+    gid_path = SYS_INFINIBAND / hca / "ports" / "1" / "gids" / str(gid_index)
+    try:
+        value = gid_path.read_text().strip()
+    except OSError:
+        return None
+    if not _IPV4_MAPPED_RE.match(value):
+        return None
+    hi, lo = value.split(":")[-2:]
+    packed = int(hi, 16) << 16 | int(lo, 16)
+    return str(ipaddress.IPv4Address(packed))
+
+
+def hca_port_active(hca: str) -> bool:
+    """True when port 1 of ``hca`` reports ACTIVE.
+
+    Unreadable state is treated as active so a sysfs quirk never hides a
+    working port; a port that plainly says DOWN is excluded.
+    """
+    state_path = SYS_INFINIBAND / hca / "ports" / "1" / "state"
+    try:
+        return "ACTIVE" in state_path.read_text().upper()
+    except OSError:
+        return True
+
+
 def build_nccl_ib_hca_whitelist(
     remote_hca_lists: Optional[List[List[str]]] = None,
     gid_index: int = 3,
+    fabric_ip: Optional[str] = None,
 ) -> str:
     """Return the ``NCCL_IB_HCA`` env-var value for the cluster.
 
@@ -113,6 +147,12 @@ def build_nccl_ib_hca_whitelist(
        presence from here; the caller is expected to have done that.
     3. Deduplicates and sorts for determinism (so restarts produce stable
        values).
+    4. When ``fabric_ip`` (this node's address on the cluster interface,
+       from :func:`detect_fabric_ip`) is given, keeps only the local HCA
+       whose GID address IS that address and whose port is ACTIVE: the port
+       that backs the cluster interface, which is what the proven recipes
+       pin by hand. This drops direct-connect and link-local ports on a node
+       with more than one RoCE NIC without any extra shell call.
 
     The NCCL-side semantics: listing an HCA name that doesn't exist on a
     particular rank is harmless — NCCL uses whichever names match its
@@ -127,8 +167,21 @@ def build_nccl_ib_hca_whitelist(
     """
     hcas: set[str] = set()
     for hca in list_local_hcas():
-        if hca_has_ipv4_rocev2_gid(hca, gid_index=gid_index):
-            hcas.add(hca)
+        if not hca_has_ipv4_rocev2_gid(hca, gid_index=gid_index):
+            continue
+        if fabric_ip:
+            # Only the port that can actually reach the peers: the one whose
+            # GID address is the cluster interface's address, and ACTIVE. A
+            # live direct-connect port on another subnet, or a link-local
+            # autoconf address, passes the GID check but has no route to the
+            # other rank; NCCL pairs HCAs by list position across ranks and
+            # times out in ibv_modify_qp (observed 2026-09-14 on the
+            # Spark-2/Spark-3 pair: rocep1s0f0 on 10.0.0.x was listed).
+            if hca_ipv4_from_gid(hca, gid_index=gid_index) != fabric_ip:
+                continue
+            if not hca_port_active(hca):
+                continue
+        hcas.add(hca)
 
     if remote_hca_lists:
         for remote in remote_hca_lists:

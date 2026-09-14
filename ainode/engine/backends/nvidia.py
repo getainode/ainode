@@ -604,7 +604,9 @@ class NvidiaBackend(EngineBackend):
         """
         iface = resolve_cluster_interface(self.config)
         local_fabric_ip = detect_fabric_ip(iface) or "127.0.0.1"
-        hca = build_nccl_ib_hca_whitelist()
+        hca = build_nccl_ib_hca_whitelist(
+            fabric_ip=(local_fabric_ip if local_fabric_ip != "127.0.0.1" else None)
+        )
 
         # For the head, VLLM_HOST_IP is this node's fabric IP. For a worker,
         # it must be THE WORKER's fabric IP (we pass `peer_fabric_ip` when
