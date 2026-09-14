@@ -328,8 +328,8 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "that image ships no ray."
         ),
         quantization="FP8", min_memory_gb=175, family="deepseek", params_b=284.0,
-        proven_tp=2, verified=False,
-        context_length=1048576, license="MIT", recommended=False, curated=True,
+        proven_tp=2, verified=True,
+        context_length=1048576, license="MIT", recommended=True, curated=True,
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],
         # One vllm serve container per node. This image has no ray CLI.

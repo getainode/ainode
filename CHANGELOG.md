@@ -8,7 +8,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **DeepSeek V4 Flash (DSpark, FP8) is marked verified and recommended** (#84). Launched from the catalog on AINode 0.5.11 across Spark-2 + Spark-3 (mp shape, TP=2): ready in 10 minutes, greedy answers correct, 36.7 tok/s single-stream with DSpark speculative decoding, 78.5 tok/s aggregate at 4 streams, tool calls parsed, routed fleet-wide by the master.
 
 ---
 
