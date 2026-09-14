@@ -5874,7 +5874,7 @@ const AINode = {
     var gpu = status && status.gpu;
     var html = '';
     html += '<h2 class="config-section-title">About</h2>';
-    html += '<p class="config-section-desc">AINode — local AI platform powered by argentos.ai.</p>';
+    html += '<p class="config-section-desc">AINode, a local AI platform. Made in Texas.</p>';
     html += '<div class="config-card"><div class="config-form-grid">';
     html += '<div><div class="config-field-label">AINode version</div><div>' + this.esc((status && status.version) || 'n/a') + '</div></div>';
     html += '<div><div class="config-field-label">Node ID</div><div class="mono" style="font-family:var(--font-mono);font-size:12px">' + this.esc((status && status.node_id) || 'n/a') + '</div></div>';
@@ -5887,8 +5887,8 @@ const AINode = {
     html += '  <h3 class="config-card-title">Links</h3>';
     html += '  <p><a href="https://ainode.dev" target="_blank" rel="noopener" style="color:var(--nvidia-green)">ainode.dev</a> · ';
     html += '  <a href="https://github.com/getainode/ainode" target="_blank" rel="noopener" style="color:var(--nvidia-green)">GitHub</a> · ';
-    html += '  <a href="https://docs.argentos.ai" target="_blank" rel="noopener" style="color:var(--nvidia-green)">Docs</a></p>';
-    html += '  <p class="config-card-desc" style="margin-top:10px">Licensed under Apache 2.0. Powered by argentos.ai.</p>';
+    html += '  <a href="https://docs.ainode.dev" target="_blank" rel="noopener" style="color:var(--nvidia-green)">Docs</a></p>';
+    html += '  <p class="config-card-desc" style="margin-top:10px">Licensed under Apache 2.0. Made in Texas.</p>';
     html += '</div>';
     mount.innerHTML = html;
   },

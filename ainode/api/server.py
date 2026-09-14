@@ -675,7 +675,7 @@ async def handle_status(request: web.Request) -> web.Response:
         "load_phase": ("ready" if engine_ready else (getattr(engine, "load_phase", "idle") if engine is not None else "idle")),
         "uptime": round(time.time() - start_time, 1),
         "version": __version__,
-        "powered_by": "argentos.ai",
+        "powered_by": "ainode.dev",
         "models_loaded": models_loaded,
         "api_port": config.api_port,
         "cluster_role": effective_role,

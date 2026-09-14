@@ -120,5 +120,5 @@ RoCE/RDMA NCCL env per-node (see `scripts/nccl-env-init.sh`).
 
 ## Brand
 
-- "Powered by argentos.ai" in all CLI output and web UI footer
+- "Made in Texas" (with the small Texas mark) in all CLI output and the web UI footer; "Powered by argentos.ai" was retired 2026-09-13 at Jason's direction
 - Product name: AINode (capital A, capital I, capital N)

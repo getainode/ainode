@@ -15,7 +15,7 @@ def test_static_dir_exists():
 def test_get_index_html():
     html = get_index_html()
     assert "AINode" in html
-    assert "argentos.ai" in html
+    assert "Made in Texas" in html
     assert "dashboard" in html
     assert "chat" in html
     assert "models" in html
