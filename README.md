@@ -317,7 +317,7 @@ it, and we would rather say so than publish a number we did not take.
 
 | Model | Params / active | Quant | Placement | Single-stream tok/s | 16 streams tok/s | Rubric | Date | Run |
 |---|---|---|---|---|---|---|---|---|
-| DeepSeek V4 Flash (DSpark, FP8) | 284B dense | not measured | Spark-2-DGX, 2× GB10, TP=2 | 37.5 | not measured | not run | 2026-09-14 | [AINode 0.5.11, TP=2 Spark-2+Spark-3, mp shape](https://github.com/getainode/ainode/blob/main/bench/results/20260914-231752-deepseek-v4-flash-dspark-fp8-tp2-mp.json) |
+| DeepSeek V4 Flash (DSpark, FP8) | 284B / 13B active | FP8 (FP4 experts) | Spark-2-DGX, 2× GB10, TP=2 | 37.5 | not measured | not run | 2026-09-14 | [AINode 0.5.11, TP=2 Spark-2+Spark-3, mp shape](https://github.com/getainode/ainode/blob/main/bench/results/20260914-231752-deepseek-v4-flash-dspark-fp8-tp2-mp.json) |
 | Nemotron 3.5 Lightning 30B-A3B | 30B / 3B active | NVFP4 | Spark-4-GX10, 1× GB10, TP=1 (stacked) | 52.6 | not measured | not run | 2026-09-13 | [smoke](https://github.com/getainode/ainode/blob/main/bench/results/20260913-141115-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-smoke.json) |
 | Ornith 1.5 35B-A3B | 35B / 3B active | NVFP4 | Spark-1-DGX, 1× GB10, TP=1 (stacked) | 40.0 | 269.2 | 19/19 | 2026-09-13 | [text-only-mtp](https://github.com/getainode/ainode/blob/main/bench/results/20260913-130400-ornith-1_5-35b-a3b-nvfp4-text-only-mtp.json) |
 | Qwen3.8 27B | 27B dense | NVFP4 | Spark-3-DGX, 1× GB10, TP=1 | 19.0 | 147.0 | 23/23 | 2026-08-15 | [mtp-vision](https://github.com/getainode/ainode/blob/main/bench/results/20260815-000000-qwen3_8-27b-nvfp4-mtp-vision.json) |
@@ -363,10 +363,12 @@ it, and we would rather say so than publish a number we did not take.
   config only. No model has been launched on it through AINode: its raw vLLM
   container is still outside the launch path, and AINode's node announcement
   still reports 1 of its 4 GPUs.
-- **GLM-5.3-Flash at TP=2.** The Spark-2/Spark-3 pair runs raw, outside AINode,
-  so there is no AINode-launched measurement for it.
-- **DeepSeek V4 and V4.1 Flash.** Neither has been launched through AINode or
-  benchmarked.
+- **GLM-5.3-Flash at TP=2.** It ran raw on the Spark-2/Spark-3 pair, outside
+  AINode, and was stopped on 2026-09-14 when the pair moved to DeepSeek V4 Flash
+  through AINode. No AINode-launched measurement exists for it.
+- **DeepSeek V4.1 Flash.** Not launched through AINode: no vLLM build serves its
+  architecture on GB10 yet. V4 Flash is in the table above, launched by AINode
+  across two nodes with the mp shape; its 16-stream point has not been run.
 - **Anything else.** Training throughput, embeddings and quantization jobs have
   no bench records yet.
 
