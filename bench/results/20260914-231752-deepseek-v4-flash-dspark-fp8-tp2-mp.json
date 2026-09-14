@@ -4,11 +4,15 @@
   "label": "AINode 0.5.11, TP=2 Spark-2+Spark-3, mp shape",
   "model": {
     "id": "fraserprice/DeepSeek-V4-Flash-DSpark",
-    "catalog_id": "deepseek-v4-flash-dspark",
     "name": "DeepSeek V4 Flash (DSpark, FP8)",
-    "params_b": 284.0,
-    "active_params_b": 13.0,
-    "license": "MIT"
+    "params_b": 284,
+    "license": "MIT",
+    "active_b": 13,
+    "arch": "moe",
+    "quant": "FP8 (FP4 experts)",
+    "context": 1048576,
+    "vision": false,
+    "catalog_id": "deepseek-v4-flash-dspark"
   },
   "placement": {
     "engine": "vllm",
