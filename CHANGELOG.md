@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.10] - 2026-09-14
+
+The mp distributed launch maps RDMA devices on a real node.
+
 ### Fixed
 - **The mp distributed launch maps `/dev/infiniband` into the engine containers on a real node** (#84). The presence check looked for `/dev/infiniband` from inside the AINode container, which sees sysfs but has no device node, so the head and worker were rendered with no `--device` and NCCL's IB plugin failed to initialise (`NCCL_NET=IB`, "Failed to initialize any NET plugin"). Presence is now judged from `/sys/class/infiniband` having entries, with the device path as the host-side fallback.
 
