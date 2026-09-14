@@ -40,7 +40,7 @@ def _banner():
     return Panel(
         body,
         title=title_text,
-        subtitle="[dim italic]Powered by argentos.ai[/dim italic]",
+        subtitle="[dim italic]Made in Texas[/dim italic]",
         border_style="cyan",
         padding=(1, 4),
     )
@@ -598,7 +598,7 @@ def cmd_service(args):
             console.print("  To (re)install or migrate the unit on this node, re-run the installer:")
             console.print("    [bold]curl -fsSL https://ainode.dev/install | bash[/bold]")
             console.print("  (idempotent — it re-renders the unit and preserves your config.json).")
-            console.print("  Powered by argentos.ai")
+            console.print("  Made in Texas")
             return
         force = getattr(args, "force", False)
         if is_installed(user_mode=user_mode) and not force:
@@ -616,7 +616,7 @@ def cmd_service(args):
         console.print("  [green]✓[/green] Service started")
         console.print()
         console.print("  AINode will now start automatically on boot.")
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     elif action == "uninstall":
         if not is_installed(user_mode=user_mode):
@@ -625,7 +625,7 @@ def cmd_service(args):
         console.print("  Stopping and removing AINode service...")
         uninstall_service(user_mode=user_mode)
         console.print("  [green]✓[/green] Service removed")
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     elif action == "status":
         if not is_installed(user_mode=user_mode):
@@ -642,7 +642,7 @@ def cmd_service(args):
             for line in info["journal_lines"][-10:]:
                 console.print(f"    {line}")
         console.print()
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     elif action == "logs":
         lines = getattr(args, "lines", 50)
@@ -671,25 +671,25 @@ def cmd_auth(args):
         console.print(f"  Key ID:  {entry['id']}")
         console.print()
         console.print("  Use: Authorization: Bearer <key>")
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     elif action == "disable":
         auth_cfg.disable()
         console.print("  [yellow]Auth disabled.[/yellow] All requests allowed.")
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     elif action == "status":
         state = "[green]enabled[/green]" if auth_cfg.enabled else "[dim]disabled[/dim]"
         console.print(f"  Auth: {state}")
         console.print(f"  Keys: {len(auth_cfg.api_keys)}")
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     elif action == "new-key":
         entry = auth_cfg.generate_key()
         console.print("  [green]New API key generated.[/green]")
         console.print(f"  API key: {entry['key']}")
         console.print(f"  Key ID:  {entry['id']}")
-        console.print("  Powered by argentos.ai")
+        console.print("  Made in Texas")
 
     else:
         console.print("  Usage: ainode auth {enable|disable|status|new-key}")

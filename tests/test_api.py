@@ -54,7 +54,7 @@ async def test_status_fields(client):
     assert data["model"] == "test-model"
     from ainode import __version__
     assert data["version"] == __version__
-    assert data["powered_by"] == "argentos.ai"
+    assert data["powered_by"] == "ainode.dev"
     assert data["engine_ready"] is False
     assert isinstance(data["uptime"], (int, float))
     assert isinstance(data["models_loaded"], list)

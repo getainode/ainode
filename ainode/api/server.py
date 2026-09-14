@@ -205,6 +205,14 @@ def create_app(
 
     app.router.add_static("/static", get_static_path(), name="static")
 
+    # Static assets revalidate on every load. aiohttp's static handler answers a
+    # conditional request with 304 via Last-Modified/ETag, so "no-cache" costs a
+    # round trip per asset and never serves a stale stylesheet after an update.
+    async def _static_no_cache(request, response):
+        if request.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+    app.on_response_prepare.append(_static_no_cache)
+
     return app
 
 
@@ -667,7 +675,7 @@ async def handle_status(request: web.Request) -> web.Response:
         "load_phase": ("ready" if engine_ready else (getattr(engine, "load_phase", "idle") if engine is not None else "idle")),
         "uptime": round(time.time() - start_time, 1),
         "version": __version__,
-        "powered_by": "argentos.ai",
+        "powered_by": "ainode.dev",
         "models_loaded": models_loaded,
         "api_port": config.api_port,
         "cluster_role": effective_role,
