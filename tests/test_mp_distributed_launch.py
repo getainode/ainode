@@ -225,8 +225,26 @@ def test_infiniband_absent_is_not_a_failure():
     assert "--device" not in argv
 
 
-def test_infiniband_probe_reads_the_host_path_seam(tmp_path):
+def test_infiniband_probe_prefers_sysfs_over_the_device_node(tmp_path, monkeypatch):
+    """AINode runs in a container that sees /sys/class/infiniband but has no
+    /dev/infiniband node, so sysfs with entries must be enough on its own."""
+    import ainode.engine.backends.nvidia as nv
     b = NvidiaBackend(_mp_config())
+    sysfs = tmp_path / "sys-infiniband"
+    monkeypatch.setattr(nv, "INFINIBAND_SYSFS", str(sysfs))
+    with mock.patch.object(NvidiaBackend, "_host_path",
+                           lambda self, p: str(tmp_path / "missing")):
+        assert b._infiniband_present() is False
+        sysfs.mkdir()
+        assert b._infiniband_present() is False, "an empty class tree is no RDMA"
+        (sysfs / "roceP2p1s0f1").mkdir()
+        assert b._infiniband_present() is True
+
+
+def test_infiniband_probe_falls_back_to_the_device_node(tmp_path, monkeypatch):
+    import ainode.engine.backends.nvidia as nv
+    b = NvidiaBackend(_mp_config())
+    monkeypatch.setattr(nv, "INFINIBAND_SYSFS", str(tmp_path / "no-sysfs"))
     with mock.patch.object(NvidiaBackend, "_host_path",
                            lambda self, p: str(tmp_path / "missing")):
         assert b._infiniband_present() is False
