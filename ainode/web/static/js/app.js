@@ -298,6 +298,11 @@ const AINode = {
     } else {
       trainSide.style.display = 'none';
       chatSide.style.display = '';
+      // The model card describes the instance the chat is routing to; it has no
+      // meaning on the cluster, server, models or bench views, so it only shows
+      // on chat. The conversation list stays, as it always has.
+      var card = document.getElementById('model-card');
+      if (card) card.style.display = (view === 'chat') ? '' : 'none';
     }
   },
 
