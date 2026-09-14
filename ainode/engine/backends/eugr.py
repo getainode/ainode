@@ -34,6 +34,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from ainode.cluster.netdev import resolve_cluster_interface
 from ainode.core.config import LOGS_DIR, NodeConfig
 from ainode.core.gpu import detect_gpu
 from ainode.engine.backends.base import EngineBackend
@@ -58,6 +59,23 @@ NCCL_INIT_SHARED_DIR = Path("/mnt/shared-models/.ainode")
 NCCL_INIT_SHARED_PATH = NCCL_INIT_SHARED_DIR / "nccl-env-init.sh"
 # In-container path used by ``--entrypoint`` AND by the head's exec-script source hook.
 NCCL_INIT_CONTAINER_PATH = "/mnt/shared-models/.ainode/nccl-env-init.sh"
+
+
+# Guidance for the one failure mode a user hits by installing AINode the
+# wrong way: `pip install ainode` on a bare host, then `ainode start`. This
+# backend shells out to `vllm serve`, so with no vLLM on PATH there is
+# nothing to launch. Single source of truth: the CLI's pre-flight guard
+# prints the same text (issue #61).
+NO_VLLM_MESSAGE = (
+    "AINode runs as a container image, and this host has no vLLM install.\n"
+    "  `ainode start` outside the container has nothing to launch the engine with.\n"
+    "\n"
+    "  Install the container-native way:\n"
+    "      curl -fsSL https://ainode.dev/install | bash\n"
+    "\n"
+    "  Or, to run the engine in Docker from this host checkout, set\n"
+    '  "engine_backend": "nvidia" in ~/.ainode/config.json and start again.'
+)
 
 
 class EugrBackendError(RuntimeError):
@@ -120,14 +138,20 @@ class EugrBackend(EngineBackend):
         env = self._build_env()
 
         logger.info("Starting solo vLLM: %s", " ".join(cmd))
-        self._process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=1,
-            universal_newlines=True,
-        )
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                universal_newlines=True,
+            )
+        except FileNotFoundError as exc:
+            # No `vllm` on PATH. This backend is the in-container path; a
+            # pip-installed ainode on a bare host reaches here and used to
+            # die with a raw FileNotFoundError traceback (issue #61).
+            raise EugrBackendError(NO_VLLM_MESSAGE) from exc
         self._log_thread = threading.Thread(
             target=self._stream_logs, args=(self._process, self._log_file), daemon=True
         )
@@ -392,7 +416,7 @@ class EugrBackend(EngineBackend):
             env["HUGGING_FACE_HUB_TOKEN"] = self.config.hf_token
             env["HF_TOKEN"] = self.config.hf_token
 
-        iface = self.config.cluster_interface
+        iface = resolve_cluster_interface(self.config)
         if iface:
             env["NCCL_SOCKET_IFNAME"] = iface
             env["GLOO_SOCKET_IFNAME"] = iface
@@ -423,7 +447,7 @@ class EugrBackend(EngineBackend):
         return direct-connect devices that don't exist on all cluster nodes,
         hanging NCCL ring init.
         """
-        iface = self.config.cluster_interface
+        iface = resolve_cluster_interface(self.config)
         if not iface:
             return None
         try:
@@ -598,7 +622,7 @@ class EugrBackend(EngineBackend):
 
     def _write_eugr_env(self) -> None:
         """Populate ``/opt/spark-vllm-docker/.env`` for the launcher."""
-        iface = self.config.cluster_interface
+        iface = resolve_cluster_interface(self.config)
         head_ip = _local_ip_for_interface(iface)
         cluster_nodes = ",".join([head_ip] + self.config.peer_ips)
         subnet = self._cluster_subnet()

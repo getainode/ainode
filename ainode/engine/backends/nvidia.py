@@ -45,6 +45,10 @@ from ainode.cluster.hca_discovery import (
     build_nccl_ib_hca_whitelist,
     detect_fabric_ip,
 )
+from ainode.cluster.netdev import (
+    interface_candidates_hint,
+    resolve_cluster_interface,
+)
 from ainode.core.config import LOGS_DIR, NodeConfig
 from ainode.engine.backends.base import EngineBackend
 
@@ -303,9 +307,15 @@ class NvidiaBackend(EngineBackend):
 
         fabric_ip = self._head_fabric_ip()
         if fabric_ip is None:
+            # Name the interfaces that DO have an address so the user can fix
+            # cluster_interface from this message alone. Issue #34's reporter
+            # had to go find `ip -br addr` to discover the real NIC name.
             raise NvidiaBackendError(
                 f"Could not detect fabric IP on interface "
-                f"{self.config.cluster_interface!r}. Is the NIC up?"
+                f"{resolve_cluster_interface(self.config)!r}. Is the NIC up? "
+                f"Interfaces with an IPv4 address on this host: "
+                f"{interface_candidates_hint()}. Set cluster_interface in "
+                f"~/.ainode/config.json to one of those."
             )
 
         hf_cache = self._head_hf_cache()
@@ -532,9 +542,10 @@ class NvidiaBackend(EngineBackend):
 
         * ``VLLM_HOST_IP``, ``MASTER_ADDR`` — fabric IP of *this* node
           (for head) or the head (for peers). Never hardcoded.
-        * Ray / UCX / Gloo / Torch socket iface — all set to
-          ``config.cluster_interface`` so no process falls back to the
-          default route.
+        * Ray / UCX / Gloo / Torch socket iface: all set to the resolved
+          cluster interface (``config.cluster_interface`` when that device
+          exists on this host, otherwise autodetected) so no process falls
+          back to the default route.
         * ``NCCL_IB_HCA`` — whitelist built dynamically from local sysfs.
           Remote HCA lists are NOT threaded here yet; distributed mode
           uses the local view (it's what every peer also uses for their
@@ -543,7 +554,7 @@ class NvidiaBackend(EngineBackend):
           every DGX Spark + GX10 we've tested uses the same slot.
         * ``HF_HUB_ENABLE_HF_TRANSFER=1`` — always on, per install-UX spec.
         """
-        iface = self.config.cluster_interface or ""
+        iface = resolve_cluster_interface(self.config)
         local_fabric_ip = detect_fabric_ip(iface) or "127.0.0.1"
         hca = build_nccl_ib_hca_whitelist()
 
@@ -1484,7 +1495,7 @@ class NvidiaBackend(EngineBackend):
         return 1 + len(self.config.peer_ips)
 
     def _head_fabric_ip(self) -> Optional[str]:
-        return detect_fabric_ip(self.config.cluster_interface or "")
+        return detect_fabric_ip(resolve_cluster_interface(self.config))
 
     def _head_hf_cache(self) -> str:
         """Path mounted into the container at /root/.cache/huggingface.

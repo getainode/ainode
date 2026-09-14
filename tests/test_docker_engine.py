@@ -105,6 +105,36 @@ def test_build_env_sets_nccl_interface_from_config():
     assert env["UCX_NET_DEVICES"] == "enp1s0f0np0"
 
 
+def test_build_env_autodetects_when_the_configured_interface_is_absent(monkeypatch, tmp_path):
+    """Issue #34/#61: config names a NIC this host doesn't have.
+
+    The env must carry the interface that actually exists, not the
+    hardware-specific name the installer guessed.
+    """
+    from ainode.cluster import netdev
+
+    sysfs = tmp_path / "net"
+    (sysfs / "enp1s0f0np0" / "device" / "infiniband").mkdir(parents=True)
+    (sysfs / "enp1s0f0np0" / "operstate").write_text("up\n")
+
+    def fake_ip(argv):
+        if "addr" in list(argv):
+            return "5: enp1s0f0np0    inet 192.168.6.162/24 scope global enp1s0f0np0\n"
+        return ""
+
+    monkeypatch.setattr(netdev, "SYS_CLASS_NET", sysfs)
+    monkeypatch.setattr(netdev, "_run_command", fake_ip)
+    netdev.reset_cache()
+
+    cfg = _cfg(cluster_interface="enP2p1s0f1np1")  # the DGX Spark name
+    with patch("ainode.engine.backends.eugr.shutil.which", return_value=None):
+        env = de.DockerEngine(cfg)._build_env()
+
+    assert env["NCCL_SOCKET_IFNAME"] == "enp1s0f0np0"
+    assert env["GLOO_SOCKET_IFNAME"] == "enp1s0f0np0"
+    assert env["UCX_NET_DEVICES"] == "enp1s0f0np0"
+
+
 def test_build_env_defaults_nccl_ib_disable_zero():
     with patch("ainode.engine.backends.eugr.shutil.which", return_value=None):
         env = de.DockerEngine(_cfg())._build_env()
