@@ -47,7 +47,7 @@ def _download_max_workers() -> int:
     except (TypeError, ValueError):
         return 4
 
-from ainode.core.config import AINODE_HOME, MODELS_DIR  # noqa: E402
+from ainode.core.config import AINODE_HOME, HF_CACHE_MOUNT, MODELS_DIR  # noqa: E402
 
 
 @dataclass
@@ -89,7 +89,19 @@ class ModelInfo:
     engine_image: str = ""          # "" = fleet default engine image
     extra_vllm_args: list = None    # verbatim `vllm serve` flags
     extra_env: dict = None          # engine-container env (e.g. b12x kernel selection)
+    extra_volumes: list = None      # extra docker mounts, "host:container[:ro]"
     recommended_gmu: float = 0.0    # 0 = use node default gpu_memory_utilization
+    # Distributed shape this model's engine image can actually run:
+    #   "ray": the default; needs the `ray` CLI inside the image.
+    #   "mp":  one `vllm serve` container per node (vLLM's own multi-node
+    #           executor). The only option for an image without ray.
+    distributed_executor: str = "ray"
+    # Serve values that are part of the proven recipe rather than a user
+    # preference. Empty / 0 / False mean "not stated by the recipe", in which
+    # case the node default applies. A caller's explicit load value still wins.
+    kv_cache_dtype: str = ""
+    max_model_len: int = 0
+    trust_remote_code: bool = False
 
     def __post_init__(self):
         if self.capabilities is None:
@@ -98,6 +110,8 @@ class ModelInfo:
             self.extra_vllm_args = []
         if self.extra_env is None:
             self.extra_env = {}
+        if self.extra_volumes is None:
+            self.extra_volumes = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -183,6 +197,11 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 # appeared once already on disk. These curated entries are ALWAYS merged into
 # the catalog (see ModelManager.get_catalog) so an operator can find + download
 # them. NVFP4 is native on Blackwell; these run distributed (TP=N) across nodes.
+
+# Compiled-kernel cache root for recipes whose engine image JITs kernels on first
+# launch. Inside the mounted HF cache on purpose: it is the one directory AINode
+# already mounts on every node, so nothing here depends on a host path.
+_DSPARK_JIT_ROOT = f"{HF_CACHE_MOUNT}/.vllm-jit"
 
 CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
     # --- Recipe-carrying models (need a newer engine + model-specific flags) ---
@@ -293,6 +312,123 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "--speculative_config", '{"method":"qwen3_5_mtp","num_speculative_tokens":2}',
         ],
         recommended_gmu=0.60,
+    ),
+    "deepseek-v4-flash-dspark": ModelInfo(
+        id="deepseek-v4-flash-dspark",
+        name="DeepSeek V4 Flash (DSpark, FP8)",
+        hf_repo="fraserprice/DeepSeek-V4-Flash-DSpark",
+        size_gb=159.0,
+        description=(
+            "Frontier MoE (284B total, 13B active/token) with DSpark speculative "
+            "decoding and a 1M-token context, served across TWO GB10 nodes. Needs the "
+            "GB10 build of vLLM present on every node: the image below is a local "
+            "build with sm121 kernels (a registry publish is a follow-up), and stock "
+            "vLLM produces nonsense for this model on this hardware. Launches with "
+            "vLLM's own multi-node executor (distributed_executor \"mp\"), not Ray: "
+            "that image ships no ray."
+        ),
+        quantization="FP8", min_memory_gb=175, family="deepseek", params_b=284.0,
+        proven_tp=2, verified=False,
+        context_length=1048576, license="MIT", recommended=False, curated=True,
+        format="safetensors",
+        capabilities=["tool_use", "reasoning", "code"],
+        # One vllm serve container per node. This image has no ray CLI.
+        distributed_executor="mp",
+        engine_image="vllm-dspark-runtime:dspark-nvfp4-stage-c",
+        kv_cache_dtype="nvfp4_ds_mla",
+        max_model_len=1048576,
+        trust_remote_code=True,
+        recommended_gmu=0.80,
+        # Everything the proven two-node command carries beyond what the backend
+        # emits itself (host/port, TP, the mp rendezvous flags, kv-cache dtype,
+        # max-model-len, gpu-memory-utilization, trust-remote-code).
+        extra_vllm_args=[
+            "--block-size", "256",
+            "--max-num-seqs", "6",
+            "--max-num-batched-tokens", "8192",
+            "--enable-prefix-caching",
+            "--async-scheduling",
+            "--enable-chunked-prefill",
+            "--speculative-config",
+            '{"method":"dspark","num_speculative_tokens":5,'
+            '"draft_sample_method":"probabilistic"}',
+            "--tokenizer-mode", "deepseek_v4",
+            "--tool-call-parser", "deepseek_v4",
+            "--enable-auto-tool-choice",
+            "--reasoning-parser", "deepseek_v4",
+            "--reasoning-config",
+            '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"<think>",'
+            '"reasoning_end_str":"</think>"}',
+            "--default-chat-template-kwargs", '{"thinking":false}',
+            "--generation-config", "vllm",
+            "--enable-flashinfer-autotune",
+        ],
+        # This image is not a vllm/vllm-openai image: its ENTRYPOINT is empty, its
+        # WORKDIR and HOME are /tmp, and the vllm binary lives at /opt/env/bin/vllm,
+        # so PATH and the CUDA locations have to be stated, and HF_HOME has to be
+        # pointed at the mounted cache or HF would write to /tmp/.cache/huggingface
+        # and re-download 159 GB. The NCCL socket/HCA/host-IP vars are deliberately
+        # absent: AINode derives those per node (_build_nccl_env).
+        extra_env={
+            "PATH": ("/opt/env/bin:/opt/env/nvvm/bin:"
+                     "/opt/env/targets/sbsa-linux/nvvm/bin:"
+                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+            "CUDA_HOME": "/opt/env/targets/sbsa-linux",
+            "CUDA_PATH": "/opt/env/targets/sbsa-linux",
+            "CUDAToolkit_ROOT": "/opt/env/targets/sbsa-linux",
+            "LD_LIBRARY_PATH": "/opt/env/lib:/opt/env/targets/sbsa-linux/lib",
+            "HF_HOME": HF_CACHE_MOUNT,
+            "HF_HUB_OFFLINE": "1",
+            "HF_HUB_DISABLE_XET": "1",
+            # Compiled-kernel caches. The raw recipe parked these on a /vllm-cache
+            # volume; a catalog entry cannot know a host path, so they live inside
+            # the HF cache AINode already mounts on every node. Kernels then
+            # persist per node across launches with no fleet-specific mount.
+            "VLLM_CACHE_ROOT": _DSPARK_JIT_ROOT,
+            "DG_JIT_CACHE_DIR": f"{_DSPARK_JIT_ROOT}/deepgemm",
+            "FLASHINFER_WORKSPACE_BASE": f"{_DSPARK_JIT_ROOT}/flashinfer",
+            "TILELANG_CACHE_DIR": f"{_DSPARK_JIT_ROOT}/tilelang",
+            "TORCHINDUCTOR_CACHE_DIR": f"{_DSPARK_JIT_ROOT}/torchinductor",
+            "TRITON_CACHE_DIR": f"{_DSPARK_JIT_ROOT}/triton",
+            "TORCH_EXTENSIONS_DIR": f"{_DSPARK_JIT_ROOT}/torch_extensions",
+            "VLLM_ENGINE_READY_TIMEOUT_S": "3600",
+            "DSPARK_SLOT_CLAMP": "1",
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+            "VLLM_TRITON_MLA_SPARSE": "1",
+            "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": "256",
+            "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": "0",
+            "VLLM_SKIP_INIT_MEMORY_CHECK": "1",
+            "VLLM_USE_FLASHINFER_SAMPLER": "1",
+            "VLLM_USE_B12X_MOE": "1",
+            "VLLM_USE_B12X_WO_PROJECTION": "1",
+            "VLLM_B12X_W4A16_FORCE_BLOCKS_PER_SM": "0",
+            "VLLM_B12X_W4A16_FORCE_BLOCKS_MAX_M": "16",
+            "B12X_W4A16_TC_DECODE": "0",
+            "VLLM_DSPARK_CONFIDENCE_THRESHOLD": "0.0",
+            "VLLM_DSPARK_CONFIDENCE_SCHEDULER": "off",
+            "VLLM_DSPARK_LOCAL_ARGMAX": "1",
+            "VLLM_DSPARK_REPLICATE_MARKOV_W1": "1",
+            "VLLM_DSPARK_FUSED_MARKOV_ARGMAX": "0",
+            "VLLM_DSPARK_GPU_REJECTED_CONTEXT_MASK": "1",
+            "VLLM_DSPARK_REFERENCE_KV_QUANT_DEQUANT": "0",
+            "VLLM_DSPARK_HARDWARE_SCHEDULER_EARLY_STOP": "1",
+            "VLLM_DSV4_B12X_COMPRESSED_MLA": "0",
+            "VLLM_DSV4_DSPARK_DEFER_TARGET_CAPTURE": "0",
+            "VLLM_DSV4_DSPARK_DEFER_TARGET_CAPTURE_EXACT": "0",
+            "TORCH_CUDA_ARCH_LIST": "12.1a",
+            "FLASHINFER_CUDA_ARCH_LIST": "12.1a",
+            "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+            "TILELANG_CLEANUP_TEMP_FILES": "1",
+            "DG_JIT_USE_NVRTC": "0",
+            "DG_JIT_NVCC_COMPILER": "/opt/env/bin/nvcc",
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "NCCL_NET": "IB",
+            "NCCL_IB_DISABLE": "0",
+            "NCCL_IB_MERGE_NICS": "0",
+            "NCCL_IB_GID_INDEX": "3",
+            "NCCL_CROSS_NIC": "0",
+            "NCCL_IB_ROCE_VERSION_NUM": "2",
+        },
     ),
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and
