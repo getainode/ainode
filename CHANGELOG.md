@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.11] - 2026-09-14
+
+NCCL_IB_HCA names only the port behind the cluster interface.
+
 ### Fixed
 - **`NCCL_IB_HCA` names only the RoCE port behind the cluster interface** (#84). The whitelist accepted every HCA with an IPv4 GID, so on a node with more than one RoCE NIC it also listed a live direct-connect port (Spark-2's `rocep1s0f0` on 10.0.0.x) and a link-local autoconf port. NCCL pairs HCAs by list position across ranks, tried that port against the peer, and died in `ibv_modify_qp` with a connection timeout. The list is now filtered to the ACTIVE port whose GID address is the node's fabric IP, read straight from sysfs with no extra shell call, which is the port the proven recipes pin by hand.
 
