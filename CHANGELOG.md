@@ -8,6 +8,20 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Startup replay no longer kills slow-but-healthy engines.** The bind wait had
+  a fixed 300s window. On `vllm/vllm-openai:v0.27.1` a GB10 node spends minutes
+  in FlashInfer fp4_gemm autotune and CUDA graph capture before the server
+  listens, so on Spark-1 (2026-09-13) the window expired at 5 minutes on a 27B
+  NVFP4 primary that bound at ~12 and a 35B-A3B stacked instance that bound at
+  ~6. Both were relaunched from scratch, turning a 14-minute boot into 28. The
+  wait now treats an engine as alive while its container is up and its log is
+  still advancing, and relaunches only on evidence: container exited, log silent
+  past `engine_bind_log_silence_seconds` (default 120), or
+  `engine_bind_ceiling_seconds` reached (default 1800). An engine that dies on
+  the way up still gets exactly one relaunch (0.5.5), and the ainode log now
+  carries the reason and how long the wait lasted.
+
 ---
 
 ## [0.5.7] — 2026-09-13

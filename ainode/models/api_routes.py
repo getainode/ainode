@@ -359,8 +359,19 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
             "api_port": port, "stacked": not is_primary}
 
 
-async def _wait_port_ready(port: int, timeout: float = 300.0) -> bool:
-    """Poll http://localhost:<port>/v1/models until it serves (200) or times out."""
+# One poll of a bind wait. 3s matches the cadence the fixed window used.
+_BIND_POLL_SECONDS = 3.0
+# Pause before re-asking for the GPU on a relaunch: the previous engine's device
+# release is what the failed attempt lost to (0.5.5).
+_GPU_RELEASE_SECONDS = 30.0
+# Used when no NodeConfig is reachable (a config written by an older release, or
+# a caller that passes a bare dict). Mirrors the NodeConfig defaults.
+_DEFAULT_BIND_LOG_SILENCE_SECONDS = 120.0
+_DEFAULT_BIND_CEILING_SECONDS = 1800.0
+
+
+async def _port_serving(port: int) -> bool:
+    """One probe of http://localhost:<port>/v1/models, True on HTTP 200."""
     import urllib.request
     loop = asyncio.get_event_loop()
 
@@ -371,14 +382,124 @@ async def _wait_port_ready(port: int, timeout: float = 300.0) -> bool:
         except Exception:
             return False
 
-    for _ in range(max(1, int(timeout // 3))):
-        if await loop.run_in_executor(None, _probe):
+    return await loop.run_in_executor(None, _probe)
+
+
+async def _wait_port_ready(port: int, timeout: float = 300.0) -> bool:
+    """Poll a port until it serves or a FIXED window expires.
+
+    Only for waits with no engine handle to watch, i.e. a port whose engine
+    this process did not launch. When we do hold the handle, ``_wait_for_bind``
+    watches the engine instead of a clock.
+    """
+    step = _BIND_POLL_SECONDS
+    for _ in range(max(1, int(timeout // step))):
+        if await _port_serving(port):
             return True
-        await asyncio.sleep(3)
+        await asyncio.sleep(step)
     return False
 
 
-async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float = 300.0) -> bool:
+def _engine_exited(backend) -> bool:
+    """True only on positive evidence that the engine we launched is gone.
+
+    ``docker run`` runs attached, so the launch subprocess exits when the
+    container does. Absence of a handle is NOT evidence of death: a backend that
+    never owned a subprocess (an engine that outlived a previous orchestrator)
+    must not read as a crash and earn an instant relaunch.
+    """
+    proc = getattr(backend, "process", None)
+    if proc is None:
+        return False
+    try:
+        return proc.poll() is not None
+    except Exception:
+        return False
+
+
+def _engine_log_mark(backend):
+    """The engine's last-log-line stamp, or None if it publishes none.
+
+    See ``EngineBackend.last_log_activity``. None means "no progress signal
+    available": the wait then leans on container exit and the ceiling only,
+    never on silence, or a backend that simply does not report would be
+    relaunched for saying nothing.
+    """
+    ts = getattr(backend, "last_log_activity", None)
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return ts
+
+
+def _bind_limits(app):
+    """(log-silence seconds, ceiling seconds) from NodeConfig, with fallbacks."""
+    config = app.get("config") if hasattr(app, "get") else None
+
+    def _num(name: str, fallback: float) -> float:
+        try:
+            v = float(getattr(config, name, None) or 0)
+        except (TypeError, ValueError):
+            return fallback
+        return v if v > 0 else fallback
+
+    return (_num("engine_bind_log_silence_seconds", _DEFAULT_BIND_LOG_SILENCE_SECONDS),
+            _num("engine_bind_ceiling_seconds", _DEFAULT_BIND_CEILING_SECONDS))
+
+
+async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
+    """Wait for ``port`` to serve. Returns (bound, reason, seconds_waited).
+
+    Time-to-bind is not ours to predict. On vllm/vllm-openai:v0.27.1 a GB10 node
+    spends minutes in FlashInfer fp4_gemm autotune and CUDA graph capture before
+    the server listens: measured 2026-09-13 on spark-1, about 12 minutes for a
+    27B NVFP4 model and 6 for a 35B-A3B. A fixed window shorter than that is a
+    kill switch on healthy starts. That run's replay relaunched both engines,
+    doubling a 14-minute boot to 28.
+
+    So when we hold the engine's handle, wait on the ENGINE, not on a clock: it
+    is alive while its container is up and its log is still advancing. Give up
+    only on evidence: the container exited, the log went quiet past the silence
+    budget, or the absolute ceiling hit (a wedged-but-chatty engine must not hold
+    boot open forever). With no handle to watch, or a handle that reports nothing
+    watchable, fall back to the fixed window.
+    """
+    if backend is None:
+        began = time.monotonic()
+        ok = await _wait_port_ready(port, timeout=timeout)
+        waited = time.monotonic() - began
+        return ok, ("bound" if ok else f"fixed {timeout:.0f}s window expired"), waited
+
+    # A handle that publishes neither a launch process nor a log stamp gives us
+    # nothing to be adaptive about, so don't hold the port open for the whole
+    # ceiling on it: that is the fixed-window case.
+    if _engine_log_mark(backend) is None and getattr(backend, "process", None) is None:
+        return await _wait_for_bind(app, port, None, timeout)
+
+    silence, ceiling = _bind_limits(app)
+    began = time.monotonic()
+    mark = _engine_log_mark(backend)
+    progress_at = began
+    while True:
+        if await _port_serving(port):
+            return True, "bound", time.monotonic() - began
+        now = time.monotonic()
+        waited = now - began
+        if waited >= ceiling:
+            return False, f"ceiling of {ceiling:.0f}s reached", waited
+        if _engine_exited(backend):
+            return False, "container exited", waited
+        latest = _engine_log_mark(backend)
+        if latest is not None and (mark is None or latest > mark):
+            mark = latest
+            progress_at = now
+        silent_for = now - progress_at
+        if mark is not None and silent_for >= silence:
+            return False, f"log silent for {silent_for:.0f}s", waited
+        await asyncio.sleep(_BIND_POLL_SECONDS)
+
+
+async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float = 300.0,
+                          backend=None) -> bool:
     """Wait for an engine to bind, and if it died on the way up, relaunch ONCE.
 
     An engine can pass the launch check (its container reached Running) and then
@@ -392,12 +513,19 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     ``relaunch`` is a zero-arg callable that re-issues the launch. The retry is
     deliberately single: a model that fails twice has a real problem, and a retry
     loop would just hide it.
+
+    ``backend`` is the engine handle whose liveness the wait watches (see
+    ``_wait_for_bind``). Without it the wait is the old fixed ``timeout``, which
+    relaunches a slow start that was never in trouble.
     """
-    if await _wait_port_ready(port, timeout=timeout):
+    bound, reason, waited = await _wait_for_bind(app, port, backend, timeout)
+    if bound:
+        logger.info("%s bound on :%s after %.0fs", label, port, waited)
         return True
-    logger.warning("%s never bound on :%s — relaunching once", label, port)
+    logger.warning("%s never bound on :%s after %.0fs (%s); relaunching once",
+                   label, port, waited, reason)
     # Give the GPU time to finish releasing before asking for it again.
-    await asyncio.sleep(30)
+    await asyncio.sleep(_GPU_RELEASE_SECONDS)
     loop = asyncio.get_event_loop()
     try:
         ok = await loop.run_in_executor(None, relaunch)
@@ -407,8 +535,10 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     if not ok:
         logger.error("%s relaunch failed to start", label)
         return False
-    served = await _wait_port_ready(port, timeout=timeout)
-    logger.info("%s relaunch %s", label, "is serving" if served else "still not serving")
+    served, reason, waited = await _wait_for_bind(app, port, backend, timeout)
+    logger.info("%s relaunch %s after %.0fs%s", label,
+                "is serving" if served else "still not serving", waited,
+                "" if served else f" ({reason})")
     return served
 
 
@@ -450,8 +580,10 @@ async def replay_instances_on_startup(app) -> None:
     # its main model silently missing.
     boot_engine = app.get("engine")
     if boot_engine is not None and getattr(config, "model", None):
+        # Pass the engine handle so the wait tracks ITS liveness (container up,
+        # log advancing) instead of a fixed window a slow bind would blow past.
         await _ensure_serving(app, config.api_port, boot_engine.start,
-                              f"boot primary {config.model}")
+                              f"boot primary {config.model}", backend=boot_engine)
     else:
         await _wait_port_ready(config.api_port, timeout=300)
 
@@ -480,7 +612,8 @@ async def replay_instances_on_startup(app) -> None:
                                   ov={k: e[k] for k in _OVERRIDE_KEYS if k in e}:
                                   bool(append_solo_instance(app, mm, g, overrides=ov,
                                                             persist=False).get("ok"))))
-                await _ensure_serving(app, res["api_port"], relaunch, f"replay {m}")
+                await _ensure_serving(app, res["api_port"], relaunch, f"replay {m}",
+                                      backend=inst.backend if inst is not None else None)
         except Exception:
             logger.exception("replay load failed for %s", m)
 

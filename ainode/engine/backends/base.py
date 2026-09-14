@@ -84,3 +84,26 @@ class EngineBackend(abc.ABC):
     @abc.abstractmethod
     def process(self) -> Optional[subprocess.Popen]:
         """Return the primary subprocess handle, or None if not running."""
+
+    # ------------------------------------------------------------------
+    # Startup-bind liveness (optional; consumed by the startup replay)
+    # ------------------------------------------------------------------
+
+    @property
+    def last_log_activity(self) -> Optional[float]:
+        """Epoch seconds when this backend last saw a line from its engine.
+
+        The startup replay waits for a port to bind and must tell "still
+        loading" from "wedged". A starting vLLM is chatty (weight shards,
+        autotune, graph capture), so an advancing value here is proof of life
+        that an unbound port is not.
+
+        Per-backend-instance on purpose: the value must come from THIS engine's
+        own output stream, not from a log file (stacked instances on a node
+        share one log file, so file mtime would let a busy primary vouch for a
+        wedged stacked engine).
+
+        Returns None when the backend does not track it or has seen nothing
+        yet; the replay then falls back to its absolute ceiling.
+        """
+        return None
