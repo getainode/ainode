@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import aiohttp
 import json
 import logging
@@ -542,6 +543,71 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     return served
 
 
+# Bound on waiting for the daemon to finish removing swept engine containers
+# before replay reuses their names (see the sweep below).
+_ORPHAN_CLEAR_TIMEOUT_S = 90.0
+_ORPHAN_CLEAR_POLL_S = 1.0
+
+
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def _orphan_engine_ids() -> list:
+    """Ids of stacked engine containers the daemon still knows about.
+
+    Separate seam from the sweep's own ``subprocess.run`` calls so tests that
+    fake ``run`` positionally are not shifted by the poll, and only real-looking
+    ids count so a generic fake answer cannot read as "still present".
+    """
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
+            text=True, timeout=20, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    return [line.strip() for line in out.splitlines() if _CONTAINER_ID_RE.match(line.strip())]
+
+
+async def _sweep_orphan_engine_containers() -> None:
+    """Remove stacked engine containers left over from a previous orchestrator.
+
+    Stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive the
+    orchestrator restart, but the in-memory manager does not, so a surviving
+    suffixed container is an orphan the replay is about to relaunch. Remove
+    them first or the relaunch's `--name` collides (Conflict). The primary
+    `ainode-vllm-node-solo` (no suffix) is owned/pre-cleaned by the boot engine.
+    """
+    # Orphan sweep: stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive
+    # the orchestrator restart, but the in-memory manager does not — so a surviving
+    # suffixed container is an orphan the replay is about to relaunch. Remove them
+    # first or the relaunch's `--name` collides (Conflict). The primary
+    # `ainode-vllm-node-solo` (no suffix) is owned/pre-cleaned by the boot engine.
+    try:
+        import subprocess
+        ps = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
+            capture_output=True, text=True, timeout=20)
+        ids = [i for i in ps.stdout.split() if i]
+        if ids:
+            subprocess.run(["docker", "rm", "-f", *ids],
+                           capture_output=True, text=True, timeout=60)
+            # `--rm` containers are removed asynchronously: `rm -f` returns while
+            # the daemon is still deleting, and a relaunch that reuses the name
+            # in that gap fails with Conflict (every engine on the 0.5.8 roll).
+            # Poll until the filter comes back empty, bounded so a stuck daemon
+            # cannot hold boot; the relaunch then fails loudly on its own.
+            for _ in range(int(_ORPHAN_CLEAR_TIMEOUT_S / _ORPHAN_CLEAR_POLL_S)):
+                if not _orphan_engine_ids():
+                    break
+                await asyncio.sleep(_ORPHAN_CLEAR_POLL_S)
+            else:
+                logger.warning("orphan engine containers still present after %.0fs; "
+                               "replay continues", _ORPHAN_CLEAR_TIMEOUT_S)
+    except Exception:
+        logger.exception("orphan container sweep failed")
+
+
 async def replay_instances_on_startup(app) -> None:
     """Always-on: after boot, re-load the persisted solo instance set so a node
     restart brings every previously-loaded model back with no manual step. The
@@ -558,22 +624,7 @@ async def replay_instances_on_startup(app) -> None:
         return
     await asyncio.sleep(10)
 
-    # Orphan sweep: stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive
-    # the orchestrator restart, but the in-memory manager does not — so a surviving
-    # suffixed container is an orphan the replay is about to relaunch. Remove them
-    # first or the relaunch's `--name` collides (Conflict). The primary
-    # `ainode-vllm-node-solo` (no suffix) is owned/pre-cleaned by the boot engine.
-    try:
-        import subprocess
-        ps = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
-            capture_output=True, text=True, timeout=20)
-        ids = [i for i in ps.stdout.split() if i]
-        if ids:
-            subprocess.run(["docker", "rm", "-f", *ids],
-                           capture_output=True, text=True, timeout=60)
-    except Exception:
-        logger.exception("orphan container sweep failed")
+    await _sweep_orphan_engine_containers()
 
     # Wait for the boot primary to actually serve before stacking on top of it.
     # Retry once if it died on the way up — otherwise the node comes back with

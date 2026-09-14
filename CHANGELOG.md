@@ -8,6 +8,15 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Replay no longer launches every engine twice** (#80). Engines run with
+  `--rm`, so after `docker stop` the daemon removes them asynchronously and
+  `docker rm -f` returns first; a `docker run --name` in that gap failed with
+  "Conflict. The container name ... is already in use". On the 0.5.8 roll every
+  engine's first launch died that way at 0 s and the adaptive wait relaunched
+  it. The pre-launch cleanup and the replay's orphan sweep now poll until the
+  name is actually gone (bounded at 90 s, logged if it never clears).
+
 ---
 
 ## [0.5.8] — 2026-09-14

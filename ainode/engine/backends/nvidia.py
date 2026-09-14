@@ -32,6 +32,7 @@ import os
 import shlex
 import shutil
 import signal
+import re
 import subprocess
 import threading
 import time
@@ -102,6 +103,9 @@ MASTER_PORT = "29501"
 
 class NvidiaBackendError(RuntimeError):
     """Raised when the backend cannot be driven (missing image, bad config)."""
+
+
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
 
 
 class NvidiaBackend(EngineBackend):
@@ -1419,6 +1423,52 @@ class NvidiaBackend(EngineBackend):
                 )
             except Exception:  # pragma: no cover - best-effort teardown
                 logger.exception("%s failed", " ".join(args))
+        self._wait_for_container_name_to_clear(container_name)
+
+    # How long to wait for the daemon to finish removing a container whose name
+    # we are about to reuse. Engines run with ``--rm``, so after ``docker stop``
+    # the daemon removes them asynchronously; ``docker rm -f`` returns while that
+    # removal is still in flight, and a ``docker run --name`` issued in that gap
+    # fails with "Conflict. The container name ... is already in use". Seen on
+    # every engine of the 0.5.8 roll (2026-09-14): the first launch died at 0 s
+    # and replay burned a second launch per engine. A 27B engine takes seconds
+    # to tear down; 90 s is generous without hiding a truly stuck daemon.
+    NAME_CLEAR_TIMEOUT_S = 90.0
+    NAME_CLEAR_POLL_S = 1.0
+
+    def _container_name_in_use(self, container_name: str) -> bool:
+        """True while the daemon still knows a container by this exact name.
+
+        Uses ``check_output`` rather than ``run`` on purpose: the launch tests
+        fake ``subprocess.run`` and count its calls positionally (stop, rm, run),
+        and a poll routed through the same seam would shift those counts. Only a
+        line that looks like a container id counts; anything else, or any
+        failure to ask the daemon, reads as "not in use" so nothing spins.
+        """
+        try:
+            out = subprocess.check_output(
+                ["docker", "ps", "-aq", "--filter", f"name=^/{container_name}$"],
+                text=True, timeout=15, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return False
+        return any(_CONTAINER_ID_RE.match(line.strip()) for line in out.splitlines())
+
+    def _wait_for_container_name_to_clear(self, container_name: str) -> bool:
+        """Block until no container carries ``container_name``; False on timeout."""
+        deadline = time.monotonic() + self.NAME_CLEAR_TIMEOUT_S
+        waited = 0.0
+        while self._container_name_in_use(container_name):
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "container name %s still in use after %.0fs; launching anyway",
+                    container_name, self.NAME_CLEAR_TIMEOUT_S)
+                return False
+            time.sleep(self.NAME_CLEAR_POLL_S)
+            waited += self.NAME_CLEAR_POLL_S
+        if waited:
+            logger.info("container name %s cleared after %.0fs", container_name, waited)
+        return True
 
     # Back-compat alias — older tests (and any outside caller) might
     # import the historical name. Kept so imports don't break.
