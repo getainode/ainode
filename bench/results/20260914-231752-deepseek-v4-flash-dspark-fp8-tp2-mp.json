@@ -1,0 +1,233 @@
+{
+  "schema": 1,
+  "stamp": "20260914-231752",
+  "label": "AINode 0.5.11, TP=2 Spark-2+Spark-3, mp shape",
+  "model": {
+    "id": "fraserprice/DeepSeek-V4-Flash-DSpark",
+    "catalog_id": "deepseek-v4-flash-dspark",
+    "name": "DeepSeek V4 Flash (DSpark, FP8)",
+    "params_b": 284.0,
+    "active_params_b": 13.0,
+    "license": "MIT"
+  },
+  "placement": {
+    "engine": "vllm",
+    "max_model_len": 1048576,
+    "node": "Spark-2-DGX",
+    "gpu": "NVIDIA GB10",
+    "distributed_mode": "head",
+    "tp": 2,
+    "gpus": 2,
+    "stacked_with": [],
+    "ainode": "0.5.11",
+    "engine_image": "vllm-dspark-runtime:dspark-nvfp4-stage-c",
+    "flags": [
+      "--block-size",
+      "256",
+      "--max-num-seqs",
+      "6",
+      "--max-num-batched-tokens",
+      "8192",
+      "--enable-prefix-caching",
+      "--async-scheduling",
+      "--enable-chunked-prefill",
+      "--speculative-config",
+      "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\"}",
+      "--tokenizer-mode",
+      "deepseek_v4",
+      "--tool-call-parser",
+      "deepseek_v4",
+      "--enable-auto-tool-choice",
+      "--reasoning-parser",
+      "deepseek_v4",
+      "--reasoning-config",
+      "{\"reasoning_parser\":\"deepseek_v4\",\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}",
+      "--default-chat-template-kwargs",
+      "{\"thinking\":false}",
+      "--generation-config",
+      "vllm",
+      "--enable-flashinfer-autotune"
+    ],
+    "gpu_memory_utilization": 0.8,
+    "kv_cache_dtype": "nvfp4_ds_mla",
+    "flags_source": "live node config (/api/config)",
+    "extra_env": {
+      "PATH": "/opt/env/bin:/opt/env/nvvm/bin:/opt/env/targets/sbsa-linux/nvvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "CUDA_HOME": "/opt/env/targets/sbsa-linux",
+      "CUDA_PATH": "/opt/env/targets/sbsa-linux",
+      "CUDAToolkit_ROOT": "/opt/env/targets/sbsa-linux",
+      "LD_LIBRARY_PATH": "/opt/env/lib:/opt/env/targets/sbsa-linux/lib",
+      "HF_HOME": "/root/.cache/huggingface",
+      "HF_HUB_OFFLINE": "1",
+      "HF_HUB_DISABLE_XET": "1",
+      "VLLM_CACHE_ROOT": "/root/.cache/huggingface/.vllm-jit",
+      "DG_JIT_CACHE_DIR": "/root/.cache/huggingface/.vllm-jit/deepgemm",
+      "FLASHINFER_WORKSPACE_BASE": "/root/.cache/huggingface/.vllm-jit/flashinfer",
+      "TILELANG_CACHE_DIR": "/root/.cache/huggingface/.vllm-jit/tilelang",
+      "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/huggingface/.vllm-jit/torchinductor",
+      "TRITON_CACHE_DIR": "/root/.cache/huggingface/.vllm-jit/triton",
+      "TORCH_EXTENSIONS_DIR": "/root/.cache/huggingface/.vllm-jit/torch_extensions",
+      "VLLM_ENGINE_READY_TIMEOUT_S": "3600",
+      "DSPARK_SLOT_CLAMP": "1",
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+      "VLLM_TRITON_MLA_SPARSE": "1",
+      "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": "256",
+      "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": "0",
+      "VLLM_SKIP_INIT_MEMORY_CHECK": "1",
+      "VLLM_USE_FLASHINFER_SAMPLER": "1",
+      "VLLM_USE_B12X_MOE": "1",
+      "VLLM_USE_B12X_WO_PROJECTION": "1",
+      "VLLM_B12X_W4A16_FORCE_BLOCKS_PER_SM": "0",
+      "VLLM_B12X_W4A16_FORCE_BLOCKS_MAX_M": "16",
+      "B12X_W4A16_TC_DECODE": "0",
+      "VLLM_DSPARK_CONFIDENCE_THRESHOLD": "0.0",
+      "VLLM_DSPARK_CONFIDENCE_SCHEDULER": "off",
+      "VLLM_DSPARK_LOCAL_ARGMAX": "1",
+      "VLLM_DSPARK_REPLICATE_MARKOV_W1": "1",
+      "VLLM_DSPARK_FUSED_MARKOV_ARGMAX": "0",
+      "VLLM_DSPARK_GPU_REJECTED_CONTEXT_MASK": "1",
+      "VLLM_DSPARK_REFERENCE_KV_QUANT_DEQUANT": "0",
+      "VLLM_DSPARK_HARDWARE_SCHEDULER_EARLY_STOP": "1",
+      "VLLM_DSV4_B12X_COMPRESSED_MLA": "0",
+      "VLLM_DSV4_DSPARK_DEFER_TARGET_CAPTURE": "0",
+      "VLLM_DSV4_DSPARK_DEFER_TARGET_CAPTURE_EXACT": "0",
+      "TORCH_CUDA_ARCH_LIST": "12.1a",
+      "FLASHINFER_CUDA_ARCH_LIST": "12.1a",
+      "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+      "TILELANG_CLEANUP_TEMP_FILES": "1",
+      "DG_JIT_USE_NVRTC": "0",
+      "DG_JIT_NVCC_COMPILER": "/opt/env/bin/nvcc",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+      "NCCL_NET": "IB",
+      "NCCL_IB_DISABLE": "0",
+      "NCCL_IB_MERGE_NICS": "0",
+      "NCCL_IB_GID_INDEX": "3",
+      "NCCL_CROSS_NIC": "0",
+      "NCCL_IB_ROCE_VERSION_NUM": "2"
+    }
+  },
+  "settings": {
+    "thinking": false,
+    "max_tokens": 200,
+    "temperature": null,
+    "sustained_tokens": 1500,
+    "reasoning_tokens": 600,
+    "depths_requested": [
+      4000,
+      16000,
+      32000,
+      64000
+    ],
+    "streams_requested": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "chars_per_token_probe": 5.5
+  },
+  "results": {
+    "single_stream": {
+      "decode_tok_s": 37.55,
+      "gen_tokens": 200,
+      "ttft_ms": 239,
+      "prompt_tokens": 56
+    },
+    "prefill": [
+      {
+        "ttft_ms": 2189,
+        "prompt_tokens": 3956,
+        "prefill_tok_s": 1807.5,
+        "decode_tok_s": 37.83
+      },
+      {
+        "ttft_ms": 8686,
+        "prompt_tokens": 15884,
+        "prefill_tok_s": 1828.7,
+        "decode_tok_s": 33.33
+      },
+      {
+        "ttft_ms": 16244,
+        "prompt_tokens": 31788,
+        "prefill_tok_s": 1957.0,
+        "decode_tok_s": 38.77
+      },
+      {
+        "ttft_ms": 33294,
+        "prompt_tokens": 63593,
+        "prefill_tok_s": 1910.1,
+        "decode_tok_s": 33.57
+      }
+    ],
+    "sustained": {
+      "decode_tok_s": 41.37,
+      "gen_tokens": 1500,
+      "wall_s": 36.529,
+      "ttft_ms": 297
+    },
+    "concurrency": [
+      {
+        "streams": 1,
+        "aggregate_tok_s": 34.6,
+        "ok": 1,
+        "failed": 0,
+        "wall_s": 5.77,
+        "per_stream_tok_s": 36.3,
+        "median_ttft_ms": 287
+      },
+      {
+        "streams": 2,
+        "aggregate_tok_s": 49.5,
+        "ok": 2,
+        "failed": 0,
+        "wall_s": 8.07,
+        "per_stream_tok_s": 26.0,
+        "median_ttft_ms": 336
+      },
+      {
+        "streams": 4,
+        "aggregate_tok_s": 49.0,
+        "ok": 4,
+        "failed": 0,
+        "wall_s": 16.34,
+        "per_stream_tok_s": 21.9,
+        "median_ttft_ms": 6433
+      },
+      {
+        "streams": 8,
+        "aggregate_tok_s": 84.1,
+        "ok": 8,
+        "failed": 0,
+        "wall_s": 19.04,
+        "per_stream_tok_s": 18.9,
+        "median_ttft_ms": 1195
+      }
+    ],
+    "reasoning_tax": {
+      "thinking_off_wall_s": 3.073,
+      "thinking_off_tokens": 142,
+      "thinking_on_wall_s": 5.706,
+      "thinking_on_tokens": 309,
+      "tax_x": 1.86
+    },
+    "telemetry": {
+      "gpu_mem_used_gb": 112.0,
+      "gpu_mem_total_gb": 121.7,
+      "gpu_util_pct": 96,
+      "temp_c": 74,
+      "samples": 94,
+      "reading": "peak observed over the run; sampled from /api/nodes",
+      "gpu_util_pct_at_start": 0,
+      "temp_c_at_start": 42
+    }
+  },
+  "notes": [
+    "Measured by ainode /api/bench (ainode.bench) in 183s; nothing loaded, unloaded or restarted.",
+    "prefill_tok_s is prompt_tokens/TTFT, a floor: TTFT includes queueing, and the OpenAI API exposes no internal prefill timing.",
+    "Sections other than reasoning_tax ran with enable_thinking=false.",
+    "Spark-2-DGX served 24 request(s) in the last minute; a busy node measures the queue as well as the engine",
+    "Catalog metadata filled by hand: the master ran 0.5.8, which predates the deepseek-v4-flash-dspark entry (0.5.9+).",
+    "Two-node tensor parallel across Spark-2 (head) and Spark-3 over RoCE, launched by AINode's mp shape; DSpark speculative decoding on; thinking off except the reasoning section."
+  ],
+  "source": "ainode /api/bench (ainode.bench)"
+}
