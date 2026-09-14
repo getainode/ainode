@@ -13,6 +13,12 @@ LOGS_DIR = AINODE_HOME / "logs"
 DATASETS_DIR = AINODE_HOME / "datasets"
 TRAINING_DIR = AINODE_HOME / "training"
 
+# Container path the engine's Hugging Face cache is mounted at. One home for the
+# value: every engine backend mounts ``hf_cache_dir`` here, and a catalog recipe
+# that has to point a tool at that cache (HF_HOME, a JIT/kernel cache dir) reads
+# it from here instead of spelling the path a second time.
+HF_CACHE_MOUNT = "/root/.cache/huggingface"
+
 
 @dataclass
 class NodeConfig:
@@ -80,6 +86,27 @@ class NodeConfig:
     # autodetected NCCL value when a model needs it. Deliberately unvalidated,
     # same as extra_vllm_args: the engine is the authority on what it accepts.
     extra_env: Dict[str, str] = field(default_factory=dict)
+    # Extra docker volume mounts for the engine container, each
+    # "host:container" or "host:container:ro". Applied to the solo AND the
+    # distributed launch. A recipe needs this when the engine wants a writable
+    # directory that is not the HF cache: a JIT/kernel cache an image compiles
+    # into on first launch, for instance. Host paths are fleet-specific, so a
+    # catalog entry should prefer a path under the HF cache mount (which AINode
+    # already mounts on every node) and leave this for an operator override.
+    extra_volumes: List[str] = field(default_factory=list)
+    # Which multi-node executor a distributed (head) launch uses:
+    #   "ray": a `ray start --head` container here, `ray start` worker
+    #           containers on each peer over SSH, then `vllm serve
+    #           --distributed-executor-backend ray` via docker exec in the head.
+    #           REQUIRES the `ray` CLI inside the engine image.
+    #   "mp":  one `vllm serve` container per node (rank 0 here, `--headless`
+    #           rank k on each peer) rendezvousing on --master-addr/--master-port
+    #           with vLLM's own multi-node executor. Needs nothing but vLLM, so
+    #           it is the shape for a custom engine image: the GB10 build that
+    #           serves DeepSeek V4 Flash ships no ray, and neither does stock
+    #           vllm/vllm-openai.
+    # Per-model, so a catalog recipe can pin the shape its image supports.
+    distributed_executor: str = "ray"  # "ray" | "mp"
     # Max inbound request body for the API server, in MB. aiohttp defaults to
     # 1 MB, which silently caps a 262k-context model at roughly 190k tokens of
     # prompt: the proxy 413s the request before the engine ever sees it, and the

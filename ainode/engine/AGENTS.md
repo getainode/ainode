@@ -9,6 +9,50 @@ Parent: `../../AGENTS.md` · State / "why" / history: Obsidian Vault → `Titani
 - **Never read `config.cluster_interface` directly. Call `ainode.cluster.netdev.resolve_cluster_interface(config)`.** The configured name is hardware-specific (`enP2p1s0f1np1` on a Spark, `enp1s0f0np0` on a GX10) and the default is now empty, meaning autodetect; a direct read binds NCCL/Ray/Gloo/UCX to a device that may not exist on this host and fails opaquely (#34, #61). Same for any new code that needs the fabric netdev. When an interface has no IPv4, surface `netdev.interface_candidates_hint()` in the error so the user can fix `config.json` without a second tool.
 - **vLLM flags are emitted by the backend, not hand-edited per run.** Change them in `backends/`, not by asking a user to edit a command.
 
+## Two distributed shapes: pick by what the engine image ships
+
+`NodeConfig.distributed_executor` selects the shape per instance (a catalog
+recipe or a `/api/sharding/launch` body can set it). Both live in
+`backends/nvidia.py::start_distributed`; both use the same fabric-IP detection,
+the same `_build_vllm_serve_args`, the same peer container names and the same
+`stop()`.
+
+- **`"ray"` (default).** `ray start --head` container here, an SSH-launched
+  `ray start` worker container per peer, then `docker exec` into the head to run
+  `vllm serve --distributed-executor-backend ray`. **Only usable when the engine
+  image ships the `ray` CLI.** Stock `vllm/vllm-openai` does not: the head
+  container exits 127. The head must reach Running before the peers are
+  SSH-launched, or workers race an unbound `:6379`.
+- **`"mp"`.** One `vllm serve` container per node, rank 0 here and
+  `--node-rank k --headless` on each peer, all rendezvousing on
+  `--master-addr`/`--master-port` via vLLM's own multi-node executor. Needs
+  nothing in the image beyond vLLM, so **this is the shape for a custom engine
+  image** (pin it in the catalog entry next to `engine_image`).
+  - **Launch peers BEFORE the head, and do not wait on the head reaching
+    Running first.** The rendezvous does the waiting; the Ray ordering rule does
+    not apply here.
+  - The head container **is** the server: there is no `docker exec`'d process.
+    `is_running` falls back to the head container's docker state, and the engine
+    log comes from `docker logs -f` of that container (same
+    `nvidia-distributed.log`, so `last_log_activity` still feeds the adaptive
+    bind wait). Never swap that for the log file's mtime.
+  - Container flags are `--network host --ipc host --shm-size 64g --ulimit
+    memlock=-1 --ulimit stack=67108864 --gpus all`, plus
+    `--device /dev/infiniband:/dev/infiniband` **only when the host has that
+    path** (`_infiniband_present`). A host without it must still launch.
+  - Every rank serves the model by REPO-ID from the mounted HF cache, never a
+    local mount path: the identifier has to resolve identically on all ranks,
+    and a peer only gets its HF cache (filled by `_ensure_peer_has_model`).
+  - A recipe that states `--nnodes`, `--node-rank`, `--master-addr`,
+    `--master-port` or `--headless` itself suppresses ours, same rule as every
+    other serve flag.
+
+An engine image that is not a `vllm/vllm-openai` image may need `PATH`, the CUDA
+paths and `HF_HOME` set through `extra_env`: HF defaults its cache to `$HOME`,
+which is not where AINode mounts it. Point a recipe's writable caches inside the
+HF cache mount (`ainode.core.config.HF_CACHE_MOUNT`) rather than inventing a
+host path; `NodeConfig.extra_volumes` exists for an operator who needs one.
+
 ## vLLM flag invariants (GB10 / Blackwell ARM)
 
 - **Keep `--enforce-eager` — this is the GB10/sm120 fix, not a perf knob.** FlashInfer (vLLM's auto-pick on Blackwell) crashes its prefill kernel (`BatchPrefillWithPagedKVCache`, `illegal instruction`) **under CUDA-graph capture** on GB10 (sm120), killing EngineCore on the **first real prefill**. The engine loads + reports READY, then suicides (vLLM SIGTERMs its own Ray workers) — `/v1/models` 200 is NOT proof of a working engine; verify with a **long-prompt generation**, not the readiness endpoint. `--enforce-eager` disables graph capture and the same kernel runs clean. Re-enabling graphs (for throughput) needs a working non-FlashInfer backend first.
