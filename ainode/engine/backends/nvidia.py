@@ -117,6 +117,10 @@ MASTER_PORT = "29501"
 # back to sockets. A node without it (no RDMA NIC, or a non-Spark host) simply
 # does not get the mapping. A missing path is never a launch failure.
 INFINIBAND_DEVICE = "/dev/infiniband"
+# The RDMA class tree. sysfs is visible inside the AINode orchestrator container
+# (that is how the NCCL HCA whitelist is built), while /dev/infiniband is NOT
+# mapped into it, so presence has to be judged from sysfs first.
+INFINIBAND_SYSFS = "/sys/class/infiniband"
 
 # Shared-memory + ulimits for the mp multi-node shape. vLLM's own multi-node
 # executor puts every rank's NCCL/torch buffers in /dev/shm and pins them, so
@@ -750,13 +754,20 @@ class NvidiaBackend(EngineBackend):
         return args
 
     def _infiniband_present(self) -> bool:
-        """True when the host exposes the RDMA device tree.
+        """True when the host has RDMA devices to map into the engine container.
 
-        Its own method so the launch builders have one seam to check (and tests
-        one place to fake). Never raises: a host without RDMA just misses the
+        Judged from ``/sys/class/infiniband`` having at least one entry, because
+        AINode itself runs in a container that sees sysfs but has no
+        ``/dev/infiniband`` node (observed 2026-09-14: the mp head and worker
+        were rendered with no ``--device`` at all and NCCL's IB plugin failed to
+        initialise with ``NCCL_NET=IB``). Falls back to the device path for a
+        host-side run. Never raises: a host without RDMA just misses the
         mapping, which is not an error.
         """
         try:
+            sysfs = Path(INFINIBAND_SYSFS)
+            if sysfs.is_dir() and any(sysfs.iterdir()):
+                return True
             return Path(self._host_path(INFINIBAND_DEVICE)).exists()
         except OSError:  # pragma: no cover - defensive
             return False
