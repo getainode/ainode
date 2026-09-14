@@ -146,18 +146,21 @@ def load_instance_manifest() -> list:
 
 _OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
                   "kv_cache_dtype_explicit", "quantization", "trust_remote_code",
-                  "extra_vllm_args", "engine_image", "extra_env")
+                  "extra_vllm_args", "engine_image", "extra_env", "extra_volumes")
 
 
 def catalog_recipe(model: str) -> dict:
     """Proven launch recipe for a curated model, matched on catalog id OR hf_repo.
 
     Some models only serve correctly on a specific engine build with a specific
-    flag set (spec-decode, MoE/mamba backends, reasoning + tool-call parsers).
-    Carrying that in the catalog is what makes them a one-click load instead of a
-    hand-rolled container. Returns {} for anything not curated. Keys:
-    ``engine_image``, ``extra_vllm_args``, ``extra_env``, and
-    ``gpu_memory_utilization``.
+    flag set (spec-decode, MoE/mamba backends, reasoning + tool-call parsers),
+    and some only on a specific distributed shape (an image with no ``ray`` can
+    only do the mp one). Carrying that in the catalog is what makes them a
+    one-click load instead of a hand-rolled container. Returns {} for anything
+    not curated. Keys: ``engine_image``, ``extra_vllm_args``, ``extra_env``,
+    ``extra_volumes``, ``distributed_executor``, ``kv_cache_dtype``,
+    ``max_model_len``, ``trust_remote_code``, ``gpu_memory_utilization``:
+    each present only when the entry actually states it.
     """
     from ainode.models.registry import CURATED_CLUSTER_MODELS
     m = (model or "").strip()
@@ -172,10 +175,106 @@ def catalog_recipe(model: str) -> dict:
                 recipe["extra_vllm_args"] = list(info.extra_vllm_args)
             if getattr(info, "extra_env", None):
                 recipe["extra_env"] = dict(info.extra_env)
+            if getattr(info, "extra_volumes", None):
+                recipe["extra_volumes"] = list(info.extra_volumes)
+            executor = (getattr(info, "distributed_executor", "") or "").strip()
+            if executor and executor != "ray":
+                recipe["distributed_executor"] = executor
+            if getattr(info, "kv_cache_dtype", ""):
+                recipe["kv_cache_dtype"] = info.kv_cache_dtype
+                # A recipe dtype is a stated value, not the node default, so the
+                # multimodal fp8→auto downgrade must not second-guess it.
+                recipe["kv_cache_dtype_explicit"] = True
+            if getattr(info, "max_model_len", 0):
+                recipe["max_model_len"] = int(info.max_model_len)
+            if getattr(info, "trust_remote_code", False):
+                recipe["trust_remote_code"] = True
             if getattr(info, "recommended_gmu", 0):
                 recipe["gpu_memory_utilization"] = info.recommended_gmu
             return recipe
     return {}
+
+
+# Recipe keys that are per-instance launch config (everything except the gmu,
+# which travels on its own because both load paths clamp it differently).
+RECIPE_CONFIG_KEYS = ("engine_image", "extra_vllm_args", "extra_env",
+                      "extra_volumes", "distributed_executor", "kv_cache_dtype",
+                      "kv_cache_dtype_explicit", "max_model_len",
+                      "trust_remote_code")
+
+
+def parse_launch_overrides(body: dict, *, distributed: bool = False) -> tuple:
+    """Parse the per-launch config overrides out of a load/launch body.
+
+    Returns ``(overrides, error)``: ``error`` is a message string when the body
+    is malformed (the caller answers 400 with it) and None otherwise. Rejecting
+    rather than silently dropping matters because a typo here otherwise surfaces
+    as a container that dies with no explanation.
+
+    Shared by ``/api/models/load`` and ``/api/sharding/launch`` so a distributed
+    launch accepts the same keys a solo load does. ``distributed=True`` also
+    accepts ``distributed_executor`` (meaningless for a solo load).
+    """
+    overrides: dict = {}
+    smn = body.get("served_model_name")
+    if isinstance(smn, str):
+        smn = [smn]
+    if isinstance(smn, list) and smn:
+        overrides["served_model_name"] = [str(s) for s in smn if str(s).strip()]
+    if body.get("max_model_len") is not None:
+        try:
+            overrides["max_model_len"] = int(body["max_model_len"])
+        except (TypeError, ValueError):
+            pass
+    for k in ("kv_cache_dtype", "quantization"):
+        if body.get(k) is not None:
+            overrides[k] = body[k]
+    if "kv_cache_dtype" in overrides:
+        # Mark provenance so the multimodal fp8→auto safety downgrade
+        # (nvidia.py _effective_kv_cache_dtype) is skipped: an EXPLICIT fp8 KV
+        # request on a VLM is honored, giving the user a way to opt back in.
+        overrides["kv_cache_dtype_explicit"] = True
+    if body.get("trust_remote_code") is not None:
+        overrides["trust_remote_code"] = bool(body["trust_remote_code"])
+    # Recipe passthrough: extra vLLM flags + the engine image to run them on.
+    if body.get("extra_vllm_args") is not None:
+        raw = body["extra_vllm_args"]
+        if isinstance(raw, str):
+            raw = shlex.split(raw)
+        if not isinstance(raw, list) or not all(isinstance(a, (str, int, float)) for a in raw):
+            return {}, ("extra_vllm_args must be a list of strings "
+                        "(e.g. [\"--moe-backend\", \"marlin\"]) or a shell-style string")
+        overrides["extra_vllm_args"] = [str(a) for a in raw]
+    if body.get("extra_env") is not None:
+        raw = body["extra_env"]
+        if not isinstance(raw, dict) or not all(
+                isinstance(k, str) and k and isinstance(v, (str, int, float, bool))
+                for k, v in raw.items()):
+            return {}, ("extra_env must be an object of NAME -> value "
+                        "(e.g. {\"VLLM_NVFP4_GEMM_BACKEND\": \"flashinfer-b12x\"})")
+        overrides["extra_env"] = {k: str(v) for k, v in raw.items()}
+    if body.get("extra_volumes") is not None:
+        raw = body["extra_volumes"]
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list) or not all(
+                isinstance(v, str) and ":" in v for v in raw):
+            return {}, ("extra_volumes must be a list of \"host:container\" or "
+                        "\"host:container:ro\" strings")
+        overrides["extra_volumes"] = [str(v) for v in raw]
+    if body.get("engine_image") is not None:
+        img = str(body["engine_image"]).strip()
+        if " " in img:
+            return {}, "engine_image must be a single image ref"
+        overrides["engine_image"] = img
+    if distributed and body.get("distributed_executor") is not None:
+        ex = str(body["distributed_executor"]).strip().lower()
+        if ex not in ("ray", "mp"):
+            return {}, ("distributed_executor must be \"ray\" (ray containers "
+                        "+ docker exec) or \"mp\" (one vllm serve container per "
+                        "node, vLLM's own multi-node executor)")
+        overrides["distributed_executor"] = ex
+    return overrides, None
 
 
 def _resolved_overrides(gmu, overrides) -> dict:
@@ -721,63 +820,17 @@ async def handle_model_load(request: web.Request) -> web.Response:
     # Per-load config overrides applied to the per-instance snapshot only (NOT the
     # shared app config). served_model_name = API alias(es); the rest let stacked
     # models differ in context length / KV dtype / quant without cross-wiring.
-    overrides: dict = {}
-    smn = body.get("served_model_name")
-    if isinstance(smn, str):
-        smn = [smn]
-    if isinstance(smn, list) and smn:
-        overrides["served_model_name"] = [str(s) for s in smn if str(s).strip()]
-    if body.get("max_model_len") is not None:
-        try:
-            overrides["max_model_len"] = int(body["max_model_len"])
-        except (TypeError, ValueError):
-            pass
-    for k in ("kv_cache_dtype", "quantization"):
-        if body.get(k) is not None:
-            overrides[k] = body[k]
-    if "kv_cache_dtype" in overrides:
-        # Mark provenance so the multimodal fp8→auto safety downgrade
-        # (nvidia.py _effective_kv_cache_dtype) is skipped: an EXPLICIT fp8 KV
-        # request on a VLM is honored, giving the user a way to opt back in.
-        overrides["kv_cache_dtype_explicit"] = True
-    if body.get("trust_remote_code") is not None:
-        overrides["trust_remote_code"] = bool(body["trust_remote_code"])
-    # Recipe passthrough: extra vLLM flags + the engine image to run them on.
-    # Rejected (400) rather than silently dropped when malformed — a typo here
-    # otherwise surfaces as a container that dies with no explanation.
-    if body.get("extra_vllm_args") is not None:
-        raw = body["extra_vllm_args"]
-        if isinstance(raw, str):
-            raw = shlex.split(raw)
-        if not isinstance(raw, list) or not all(isinstance(a, (str, int, float)) for a in raw):
-            return web.json_response(
-                {"error": "extra_vllm_args must be a list of strings "
-                          "(e.g. [\"--moe-backend\", \"marlin\"]) or a shell-style string"},
-                status=400)
-        overrides["extra_vllm_args"] = [str(a) for a in raw]
-    if body.get("extra_env") is not None:
-        raw = body["extra_env"]
-        if not isinstance(raw, dict) or not all(
-                isinstance(k, str) and k and isinstance(v, (str, int, float, bool))
-                for k, v in raw.items()):
-            return web.json_response(
-                {"error": "extra_env must be an object of NAME -> value "
-                          "(e.g. {\"VLLM_NVFP4_GEMM_BACKEND\": \"flashinfer-b12x\"})"},
-                status=400)
-        overrides["extra_env"] = {k: str(v) for k, v in raw.items()}
-    if body.get("engine_image") is not None:
-        img = str(body["engine_image"]).strip()
-        if " " in img:
-            return web.json_response({"error": "engine_image must be a single image ref"},
-                                     status=400)
-        overrides["engine_image"] = img
+    # Shared with /api/sharding/launch so both paths accept the same keys.
+    overrides, err = parse_launch_overrides(body)
+    if err:
+        return web.json_response({"error": err}, status=400)
 
     # Curated models carry their proven recipe — apply it as DEFAULTS so a bare
     # {"model": "..."} load (i.e. clicking it in the dashboard) launches with the
     # engine image and flags it actually needs. Anything the caller stated
     # explicitly above wins; the recipe only fills the gaps.
     recipe = catalog_recipe(model)
-    for key in ("engine_image", "extra_vllm_args", "extra_env"):
+    for key in RECIPE_CONFIG_KEYS:
         if key in recipe and key not in overrides:
             overrides[key] = recipe[key]
     if gmu is None and "gpu_memory_utilization" in recipe:

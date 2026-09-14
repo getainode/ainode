@@ -75,6 +75,12 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     (eugr's launch-cluster.sh, or NvidiaBackend's run_cluster path).
     When min_nodes == 1, it falls through to the existing single-node load
     path (/api/models/load).
+
+    Recipe-aware: a curated model's catalog recipe (engine image, extra vLLM
+    flags, env, mounts, distributed shape, kv-cache dtype, context length,
+    trust-remote-code, recommended GPU fraction) is applied as DEFAULTS, and the
+    same per-launch keys the solo load accepts override it, plus
+    ``distributed_executor`` ("ray" | "mp") for the shape itself.
     """
     from ainode.core.config import NodeConfig
     from ainode.engine.backends import get_backend
@@ -223,6 +229,29 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         if gmu is not None and 0.0 < gmu <= 1.0:
             overrides["gpu_memory_utilization"] = gmu
 
+    # A distributed launch is recipe-aware, exactly like the solo load: a curated
+    # model carries the engine image, flag set, env, mounts and DISTRIBUTED SHAPE
+    # it was proven with, and the launch is only one click if we apply them. The
+    # recipe fills gaps; anything the caller states in the body wins over it.
+    # Without this, a model whose image ships no `ray` was launched into the Ray
+    # shape on the fleet default image and died in the container (#84).
+    from ainode.models.api_routes import (  # lazy: avoid an import cycle
+        RECIPE_CONFIG_KEYS,
+        catalog_recipe,
+        parse_launch_overrides,
+    )
+
+    body_overrides, err = parse_launch_overrides(body, distributed=True)
+    if err:
+        return web.json_response({"error": err}, status=400)
+    recipe = catalog_recipe(model)
+    for key in RECIPE_CONFIG_KEYS:
+        if key in recipe and key not in body_overrides:
+            overrides[key] = recipe[key]
+    if "gpu_memory_utilization" not in overrides and "gpu_memory_utilization" in recipe:
+        overrides["gpu_memory_utilization"] = recipe["gpu_memory_utilization"]
+    overrides.update(body_overrides)
+
     inst_config = replace(config, model=model, distributed_mode="head",
                           peer_ips=chosen_peers, api_port=port, **overrides)
     backend = get_backend(inst_config, instance_id=name_token)
@@ -234,16 +263,24 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     if not started:
         return web.json_response({"error": "Distributed launch returned False"}, status=500)
 
+    executor = getattr(inst_config, "distributed_executor", "ray") or "ray"
     manager.add(InstanceRecord(
         instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
         peer_ips=chosen_peers, api_port=port,
-        tensor_parallel_size=1 + len(chosen_peers), status="starting"), backend)
+        tensor_parallel_size=1 + len(chosen_peers), status="starting",
+        distributed_executor=executor), backend)
 
     if is_primary:
         # Back-compat: the proxy/status path reads app["config"] + app["engine"].
         config.model = model
         config.distributed_mode = "head"
         config.peer_ips = chosen_peers
+        # The primary boots from config.json after a restart, so the launch shape
+        # has to be persisted with it or the replay comes back on the fleet
+        # default image in the Ray shape, which is exactly what cannot serve an
+        # mp-only model.
+        for key, value in overrides.items():
+            setattr(config, key, value)
         try:
             config.save()
         except Exception:
@@ -259,6 +296,7 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         "api_port": port,
         "tensor_parallel_size": 1 + len(chosen_peers),
         "strategy": strategy_str,
+        "distributed_executor": executor,
     })
 
 
