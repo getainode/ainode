@@ -566,7 +566,7 @@ def _orphan_engine_ids() -> list:
             text=True, timeout=20, stderr=subprocess.DEVNULL)
     except Exception:
         return []
-    return [l.strip() for l in out.splitlines() if _CONTAINER_ID_RE.match(l.strip())]
+    return [line.strip() for line in out.splitlines() if _CONTAINER_ID_RE.match(line.strip())]
 
 
 async def _sweep_orphan_engine_containers() -> None:
