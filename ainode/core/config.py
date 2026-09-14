@@ -139,7 +139,11 @@ class NodeConfig:
     ssh_user: str = "ubuntu"
     # Interface NCCL/Ray/Gloo bind to (e.g. "enp1s0f0np0" for DGX Spark direct
     # connect, or the dedicated cluster-switch NIC).
-    cluster_interface: str = "eno1"
+    # Empty means autodetect: ainode.cluster.netdev.resolve_cluster_interface
+    # ranks this host's real interfaces (RDMA-capable first, then the
+    # default route) instead of guessing a hardware-specific name that may
+    # not exist here. Set a name to pin it.
+    cluster_interface: str = ""
 
     # Storage paths (override defaults)
     datasets_dir: Optional[str] = None

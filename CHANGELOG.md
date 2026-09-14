@@ -9,6 +9,33 @@ Versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **The cluster interface is auto-detected instead of guessed** (#34, #61). The
+  installer wrote the DGX Spark NIC name `enP2p1s0f1np1` into every new
+  `config.json` and `NodeConfig.cluster_interface` defaulted to `eno1`, so on an
+  ASUS GX10 or any other box neither name existed. NCCL, Ray, Gloo and UCX were
+  pointed at a device that was not there: fabric-IP detection returned nothing
+  and the engine either bound `127.0.0.1` silently or failed EngineCore init
+  with no usable reason. The reporter on #34 had to find the real name
+  (`enp1s0f0np0`) with `ip -br addr` and hand-edit `config.json`. AINode now
+  ranks this host's real interfaces, preferring an up RDMA-capable port with an
+  IPv4, then the default-route device, then any up non-virtual device, and
+  skipping loopback, bridges, veth pairs and VPN or overlay tunnels. The
+  configured name still wins whenever it exists, so a pinned interface is never
+  overruled; when it does not exist AINode logs one warning naming both the
+  configured and the chosen device. `cluster_interface` now defaults to empty,
+  meaning auto-detect, the installer detects a name at install time with the
+  same ranking, `ainode start` prints the chosen interface and its address on a
+  `Fabric` line, and the "could not detect fabric IP" error now lists the
+  interfaces that do have an address.
+- **`ainode start` on a host with no vLLM fails with an explanation, not a
+  traceback** (#61). A pip-installed AINode outside the container runs the eugr
+  backend by default, which shells out to `vllm serve`, so the start died with a
+  raw `FileNotFoundError: [Errno 2] No such file or directory: 'vllm'`. The
+  start now checks for vLLM first and exits 1 with the install command and the
+  `engine_backend: nvidia` alternative, the backend turns that `Popen` failure
+  into a clear error carrying the same guidance, and the old "using the eugr
+  container backend" line is gone: eugr is the in-container path, not a way to
+  run a container from the host.
 - **Replay no longer launches every engine twice** (#80). Engines run with
   `--rm`, so after `docker stop` the daemon removes them asynchronously and
   `docker rm -f` returns first; a `docker run --name` in that gap failed with

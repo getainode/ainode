@@ -74,6 +74,60 @@ resolve_latest_tag() {
         | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
 }
 
+# -- Cluster-interface detection --------------------------------------------
+# The NIC that NCCL / Ray / Gloo bind to is hardware specific: a DGX Spark
+# names its direct-connect port enP2p1s0f1np1, an ASUS GX10 names the same
+# class of port enp1s0f0np0. The installer used to hardcode the Spark name,
+# so on anything else the engine came up bound to nothing and the user had
+# to find the real name with `ip -br addr` and hand-edit config.json
+# (github.com/getainode/ainode issues #34, #61). Detect it instead, using
+# the same ranking as ainode/cluster/netdev.py.
+
+# Overridable so the detection can be exercised against a fake tree.
+SYS_CLASS_NET="${SYS_CLASS_NET:-/sys/class/net}"
+
+# Devices that are never the cluster fabric (bridges, veth, VPN/overlay).
+is_virtual_netdev() {
+    case "$1" in
+        lo|docker*|br-*|veth*|virbr*|tailscale*|wg*|tun*|tap*|cni*|flannel*|cali*|kube*|lxc*|zt*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+# Echo the IPv4 address bound to $1, or nothing.
+netdev_ipv4() {
+    ip -o -4 addr show dev "$1" 2>/dev/null \
+        | awk '{for (i=1; i<=NF; i++) if ($i == "inet") {split($(i+1), a, "/"); print a[1]; exit}}' \
+        || true
+}
+
+# Echo the cluster fabric NIC: an RDMA-capable device carrying an IPv4
+# first, then the default-route device, else nothing (empty string means
+# "autodetect at startup", which AINode now does).
+detect_cluster_interface() {
+    local path name ip4
+    for path in "$SYS_CLASS_NET"/*; do
+        [ -e "$path" ] || continue
+        name="${path##*/}"
+        if is_virtual_netdev "$name"; then continue; fi
+        [ -e "$path/device/infiniband" ] || continue
+        ip4="$(netdev_ipv4 "$name")"
+        if [ -n "$ip4" ]; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    done
+    name="$(ip route show default 2>/dev/null \
+        | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}' || true)"
+    if [ -n "$name" ] && ! is_virtual_netdev "$name"; then
+        printf '%s\n' "$name"
+        return 0
+    fi
+    printf '\n'
+    return 0
+}
+
 # -- 1. Preflight -----------------------------------------------------------
 log "Checking prerequisites"
 [ "$(uname -s)" = "Linux" ] || die "AINode requires Linux (detected $(uname -s))"
@@ -207,6 +261,13 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
             ;;
     esac
 
+    CLUSTER_IFACE="$(detect_cluster_interface)"
+    if [ -n "$CLUSTER_IFACE" ]; then
+        log "Cluster interface: $CLUSTER_IFACE (auto-detected; edit cluster_interface in ~/.ainode/config.json to change)"
+    else
+        log "Cluster interface: none detected (AINode re-detects at startup; edit cluster_interface in ~/.ainode/config.json to pin one)"
+    fi
+
     cat > "$AINODE_HOME/config.json" << CONFIG
 {
   "node_name": "$(hostname)",
@@ -214,7 +275,7 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
   "distributed_mode": "${DIST_MODE}",
   "peer_ips": [${PEER_IPS}],
   "cluster_id": "ainode-cluster",
-  "cluster_interface": "enP2p1s0f1np1",
+  "cluster_interface": "${CLUSTER_IFACE}",
   "ssh_user": "${AINODE_SSH_USER}",
   "api_port": 8000,
   "web_port": 3000,

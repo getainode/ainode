@@ -252,7 +252,8 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     fabric_ip = ""
     try:
         from ainode.cluster.hca_discovery import detect_fabric_ip
-        fabric_ip = detect_fabric_ip(getattr(config, "cluster_interface", "") or "") or ""
+        from ainode.cluster.netdev import resolve_cluster_interface
+        fabric_ip = detect_fabric_ip(resolve_cluster_interface(config)) or ""
     except Exception:
         pass
 

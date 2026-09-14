@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import os
+import shutil
 import signal
 import sys
 import time
@@ -99,6 +100,14 @@ def _gpu_info_table(gpu):
     return table
 
 
+def _fabric_summary(config) -> str:
+    """Cluster interface + its IPv4 for the start banner, never raising."""
+    try:
+        from ainode.cluster.netdev import describe_cluster_interface
+        return describe_cluster_interface(config)
+    except Exception:
+        return "unknown"
+
 
 def cmd_start(args):
     """Start AINode."""
@@ -181,6 +190,11 @@ def cmd_start(args):
     info_table.add_row("API", f"http://localhost:{config.api_port}/v1")
     info_table.add_row("Web", f"http://localhost:{config.web_port}")
     info_table.add_row("Node", config.node_id or "pending")
+    # Which NIC cross-node traffic will bind to. Printed because it is
+    # autodetected when config.cluster_interface is empty or names a device
+    # this host doesn't have. The user should be able to see the choice
+    # without opening config.json (issues #34, #61).
+    info_table.add_row("Fabric", _fabric_summary(config))
     console.print(info_table)
     console.print()
 
@@ -229,6 +243,21 @@ def cmd_start(args):
         return
 
     from ainode.engine.backends import get_backend
+    from ainode.engine.backends.eugr import NO_VLLM_MESSAGE, EugrBackendError
+    backend_name = (config.engine_backend or "eugr").lower()
+
+    # Host start guard (issue #61). The eugr backend drives `vllm serve`
+    # directly. It is the in-container path, NOT a way to run a container
+    # from the host. Outside the container with no vLLM on PATH its Popen
+    # dies with FileNotFoundError, which used to reach the user as a raw
+    # traceback. Say what is actually wrong instead.
+    if not in_container and backend_name == "eugr" and shutil.which("vllm") is None:
+        console.print(
+            f"  [red]Cannot start the engine on this host.[/red]\n\n  {NO_VLLM_MESSAGE}\n"
+        )
+        _remove_pid()
+        sys.exit(1)
+
     if in_container or config.engine_strategy == "docker":
         engine = get_backend(config)
     elif importlib.util.find_spec("vllm") is None:
@@ -240,8 +269,8 @@ def cmd_start(args):
         # A node configured for a container backend should use it rather than
         # launch a certain failure.
         console.print(
-            f"  [dim]vLLM not importable here — using the "
-            f"{(config.engine_backend or 'eugr')} container backend.[/dim]"
+            f"  [dim]vLLM not importable in this interpreter, using the "
+            f"{backend_name} engine backend.[/dim]"
         )
         engine = get_backend(config)
     else:
@@ -251,7 +280,13 @@ def cmd_start(args):
     # Start the engine in the background — do NOT block the web server.
     # The web UI comes up immediately and shows a loading state while the
     # model warms up. Users should never have to stare at a terminal.
-    if not engine.start():
+    try:
+        launched = engine.start()
+    except EugrBackendError as exc:
+        console.print(f"  [red]Cannot start the engine.[/red]\n\n  {exc}\n")
+        _remove_pid()
+        sys.exit(1)
+    if not launched:
         console.print("  [red]Failed to launch engine process.[/red] Check logs in ~/.ainode/logs/")
         _remove_pid()
         sys.exit(1)

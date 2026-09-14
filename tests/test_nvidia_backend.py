@@ -380,6 +380,37 @@ class TestStartDistributed:
         with pytest.raises(NvidiaBackendError, match="peer_ips is empty"):
             backend.start_distributed()
 
+    def test_missing_fabric_ip_error_lists_the_interfaces_that_have_one(self):
+        """Issue #34: the reporter had to go find `ip -br addr` himself.
+
+        When the resolved interface has no IPv4, the error must name the
+        interfaces that DO, so config.json can be fixed from this message
+        alone.
+        """
+        config = _make_config(
+            distributed_mode="head",
+            peer_ips=["10.100.0.13"],
+            cluster_interface="enP2p1s0f1np1",
+        )
+        backend = NvidiaBackend(config)
+        with mock.patch(
+            "ainode.engine.backends.nvidia.detect_fabric_ip", return_value=None
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.resolve_cluster_interface",
+            return_value="enP2p1s0f1np1",
+        ), mock.patch(
+            "ainode.engine.backends.nvidia.interface_candidates_hint",
+            return_value="enp1s0f0np0 (192.168.6.162), eth0 (10.1.0.9)",
+        ):
+            with pytest.raises(NvidiaBackendError) as exc:
+                backend.start_distributed()
+
+        message = str(exc.value)
+        assert "'enP2p1s0f1np1'" in message
+        assert "enp1s0f0np0 (192.168.6.162)" in message
+        assert "eth0 (10.1.0.9)" in message
+        assert "cluster_interface" in message
+
     def test_raises_when_head_container_does_not_become_ready(self):
         """If ``docker inspect`` never reports Running=true, we must raise.
 
