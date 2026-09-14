@@ -82,6 +82,9 @@ class EugrBackend(EngineBackend):
         self._process: Optional[subprocess.Popen] = None
         self._ready = False
         self._log_thread: Optional[threading.Thread] = None
+        # Epoch seconds of the last line this engine printed: proof of life for
+        # the startup replay's bind wait (see EngineBackend.last_log_activity).
+        self._last_log_activity: Optional[float] = None
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file: Path = LOGS_DIR / "vllm.log"
         self._distributed_log: Path = LOGS_DIR / "distributed.log"
@@ -324,6 +327,11 @@ class EugrBackend(EngineBackend):
             if self.config.distributed_mode == "head"
             else self._log_file
         )
+
+    @property
+    def last_log_activity(self) -> Optional[float]:
+        """Epoch seconds of the last line this engine printed (see base class)."""
+        return self._last_log_activity
 
     @property
     def process(self) -> Optional[subprocess.Popen]:
@@ -681,10 +689,12 @@ vllm serve {self.config.model} \\
         """Tee subprocess stdout to a log file, watching for readiness."""
         if not process.stdout:
             return
+        self._last_log_activity = time.time()
         with open(target, "a") as sink:
             for line in process.stdout:
                 sink.write(line)
                 sink.flush()
+                self._last_log_activity = time.time()
                 if not self._ready and (
                     "Uvicorn running on" in line
                     or "Application startup complete" in line

@@ -18,7 +18,10 @@ Parent: `../../AGENTS.md` · State / "why" / history: Obsidian Vault → `Titani
 
 ## Don't kill a slow launch
 
-A multi-minute MoE profiling forward-pass with GPUs at 0% and quiet logs is **not** a hang — do not SIGTERM it. (A premature "hung" call cost a whole session; see the runbook.) Wait 3–5 min for `:8000` to bind.
+A multi-minute MoE profiling forward-pass with GPUs at 0% and quiet logs is **not** a hang — do not SIGTERM it. (A premature "hung" call cost a whole session; see the runbook.) Time-to-bind belongs to the model and the engine image, not to us: on `vllm/vllm-openai:v0.27.1` a 27B NVFP4 model measured ~12 min to bind on a GB10 (FlashInfer fp4_gemm autotune plus CUDA graph capture), a 35B-A3B ~6 min.
+
+- **No fixed bind timeout in code.** The startup replay (`models/api_routes.py::_wait_for_bind`) waits while the container is up and the engine's log is advancing, and gives up only on evidence: container exited, log silent past `NodeConfig.engine_bind_log_silence_seconds`, or `NodeConfig.engine_bind_ceiling_seconds` reached. Do not reintroduce a constant window; tune the knobs.
+- **A backend's `last_log_activity` must come from that engine's own stdout stream** (`_stream_logs`), never from the log file's mtime or size: stacked instances on a node share one log file, so file-based freshness lets a busy primary vouch for a wedged neighbour. A backend that cannot report returns `None`, and the wait then leans on container exit plus the ceiling.
 
 ## Verification
 

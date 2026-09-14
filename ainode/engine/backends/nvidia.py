@@ -127,6 +127,9 @@ class NvidiaBackend(EngineBackend):
         # monotonically as _stream_logs sees the engine's startup markers.
         self._load_phase = "idle"
         self._log_thread: Optional[threading.Thread] = None
+        # Epoch seconds of the last line this engine printed. The startup replay
+        # reads it to tell a slow-but-progressing start from a wedged one.
+        self._last_log_activity: Optional[float] = None
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file: Path = LOGS_DIR / "nvidia-vllm.log"
         self._distributed_log: Path = LOGS_DIR / "nvidia-distributed.log"
@@ -488,6 +491,15 @@ class NvidiaBackend(EngineBackend):
             if self.config.distributed_mode == "head"
             else self._log_file
         )
+
+    @property
+    def last_log_activity(self) -> Optional[float]:
+        """Epoch seconds of the last line this engine printed (see base class).
+
+        Fed by ``_stream_logs``, which reads this container's own stdout, so the
+        value is per-instance even though stacked instances share a log file.
+        """
+        return self._last_log_activity
 
     @property
     def process(self) -> Optional[subprocess.Popen]:
@@ -1470,10 +1482,12 @@ class NvidiaBackend(EngineBackend):
             return
         # A fresh log stream means a fresh launch — start the phase clock over.
         self._load_phase = "starting"
+        self._last_log_activity = time.time()
         with open(target, "a") as sink:
             for line in process.stdout:
                 sink.write(line)
                 sink.flush()
+                self._last_log_activity = time.time()
                 if not self._ready:
                     low = line.lower()
                     for phase, markers in self._LOAD_PHASE_MARKERS:

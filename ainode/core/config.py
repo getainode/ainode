@@ -87,6 +87,25 @@ class NodeConfig:
     # for a 1M-token context (~5 MB of text) plus base64 image/video parts on
     # the multimodal models, with headroom.
     max_request_mb: int = 64
+    # Startup-replay bind wait (see models/api_routes.py::_ensure_serving).
+    # Time-to-bind is a property of the model and the engine image, not of
+    # AINode: on vllm/vllm-openai:v0.27.1 a 27B NVFP4 model spends minutes in
+    # FlashInfer fp4_gemm autotune and CUDA graph capture before it listens on
+    # its port. So the replay does not wait a fixed span; it waits as long as
+    # the engine is visibly making progress and gives up only on evidence of
+    # death.
+    #
+    # engine_bind_log_silence_seconds: how long the engine's log may go quiet
+    # while still counting as alive. A starting engine prints weight-shard,
+    # autotune and graph-capture lines far more often than this; a wedged one
+    # prints nothing. Past this gap (container still up, port still closed) the
+    # replay calls the start dead and relaunches once.
+    engine_bind_log_silence_seconds: int = 120
+    # engine_bind_ceiling_seconds: absolute cap on one bind wait, so an engine
+    # that is wedged but still chatty cannot hold boot open forever. Generous on
+    # purpose: the slowest bind measured on a GB10 (27B NVFP4, autotune + graph
+    # capture) was about 12 minutes.
+    engine_bind_ceiling_seconds: int = 1800
 
     # Cluster
     cluster_enabled: bool = True
