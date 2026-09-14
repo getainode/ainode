@@ -16,20 +16,25 @@ from ainode.engine.backends import nvidia as nvidia_mod
 from ainode.models import api_routes
 
 
+ID = "a848351b1569"
+
+
 class _Ps:
-    """Fake ``docker ps -aq --filter name=...`` that reports an id N times."""
+    """Fake docker: ``check_output`` (the poll) reports an id N times; ``run`` records."""
 
     def __init__(self, hits):
         self.hits = hits
         self.calls = []
 
-    def __call__(self, cmd, **kw):
+    def run(self, cmd, **kw):
         self.calls.append(list(cmd))
-        if cmd[:2] == ["docker", "ps"]:
-            out = "abc123\n" if self.hits > 0 else ""
-            self.hits -= 1
-            return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
-        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+        return types.SimpleNamespace(stdout="ctr_abc\n", stderr="", returncode=0)
+
+    def check_output(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        out = ID + "\n" if self.hits > 0 else ""
+        self.hits -= 1
+        return out
 
 
 def _backend(monkeypatch):
@@ -41,7 +46,8 @@ def _backend(monkeypatch):
 
 def test_cleanup_waits_until_the_name_is_gone(monkeypatch):
     fake = _Ps(hits=3)
-    monkeypatch.setattr(nvidia_mod.subprocess, "run", fake)
+    monkeypatch.setattr(nvidia_mod.subprocess, "run", fake.run)
+    monkeypatch.setattr(nvidia_mod.subprocess, "check_output", fake.check_output)
     b = _backend(monkeypatch)
     assert b._wait_for_container_name_to_clear("ainode-vllm-node-solo") is True
     ps_calls = [c for c in fake.calls if c[:2] == ["docker", "ps"]]
@@ -51,7 +57,8 @@ def test_cleanup_waits_until_the_name_is_gone(monkeypatch):
 
 def test_stop_and_rm_runs_stop_rm_then_waits(monkeypatch):
     fake = _Ps(hits=1)
-    monkeypatch.setattr(nvidia_mod.subprocess, "run", fake)
+    monkeypatch.setattr(nvidia_mod.subprocess, "run", fake.run)
+    monkeypatch.setattr(nvidia_mod.subprocess, "check_output", fake.check_output)
     b = _backend(monkeypatch)
     b._docker_stop_and_rm_best_effort("ainode-vllm-node-solo-8001")
     heads = [c[:2] for c in fake.calls]
@@ -59,9 +66,17 @@ def test_stop_and_rm_runs_stop_rm_then_waits(monkeypatch):
     assert heads[2:] == [["docker", "ps"], ["docker", "ps"]], "polled after rm until clear"
 
 
+def test_a_generic_fake_answer_does_not_read_as_in_use(monkeypatch):
+    """A line that is not a container id (e.g. a test fake's 'ok') must not spin."""
+    monkeypatch.setattr(nvidia_mod.subprocess, "check_output", lambda *a, **k: "ctr_abc\n")
+    b = _backend(monkeypatch)
+    assert b._container_name_in_use("ainode-vllm-node-solo") is False
+
+
 def test_cleanup_gives_up_at_the_ceiling_and_says_so(monkeypatch, caplog):
     fake = _Ps(hits=10_000)
-    monkeypatch.setattr(nvidia_mod.subprocess, "run", fake)
+    monkeypatch.setattr(nvidia_mod.subprocess, "run", fake.run)
+    monkeypatch.setattr(nvidia_mod.subprocess, "check_output", fake.check_output)
     b = _backend(monkeypatch)
     monkeypatch.setattr(nvidia_mod.NvidiaBackend, "NAME_CLEAR_TIMEOUT_S", 0.0)
     with caplog.at_level("WARNING"):
@@ -71,16 +86,17 @@ def test_cleanup_gives_up_at_the_ceiling_and_says_so(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_orphan_sweep_waits_for_removal(monkeypatch):
-    seq = iter(["id1 id2\n", "id1\n", "id1\n", ""])   # first ps lists orphans, then removal drains
     calls = []
 
     def fake_run(cmd, **kw):
         calls.append(list(cmd))
         if cmd[:2] == ["docker", "ps"]:
-            return types.SimpleNamespace(stdout=next(seq), stderr="", returncode=0)
+            return types.SimpleNamespace(stdout="id1 id2\n", stderr="", returncode=0)
         return types.SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    polls = iter([[ID], [ID], []])   # removal drains over three polls
+    monkeypatch.setattr(api_routes, "_orphan_engine_ids", lambda: next(polls))
     slept = []
 
     async def _fast(s):
@@ -90,8 +106,8 @@ async def test_orphan_sweep_waits_for_removal(monkeypatch):
     heads = [c[:2] for c in calls]
     assert heads[0] == ["docker", "ps"]
     assert heads[1] == ["docker", "rm"] and calls[1][2:] == ["-f", "id1", "id2"]
-    assert heads[2:] == [["docker", "ps"]] * 3, "polled until the filter came back empty"
-    assert len(slept) == 2
+    assert heads[2:] == [], "polling goes through its own seam, not subprocess.run"
+    assert len(slept) == 2, "slept between polls until the filter came back empty"
 
 
 @pytest.mark.asyncio

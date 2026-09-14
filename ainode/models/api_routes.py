@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import aiohttp
 import json
 import logging
@@ -548,6 +549,26 @@ _ORPHAN_CLEAR_TIMEOUT_S = 90.0
 _ORPHAN_CLEAR_POLL_S = 1.0
 
 
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def _orphan_engine_ids() -> list:
+    """Ids of stacked engine containers the daemon still knows about.
+
+    Separate seam from the sweep's own ``subprocess.run`` calls so tests that
+    fake ``run`` positionally are not shifted by the poll, and only real-looking
+    ids count so a generic fake answer cannot read as "still present".
+    """
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
+            text=True, timeout=20, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    return [l.strip() for l in out.splitlines() if _CONTAINER_ID_RE.match(l.strip())]
+
+
 async def _sweep_orphan_engine_containers() -> None:
     """Remove stacked engine containers left over from a previous orchestrator.
 
@@ -577,10 +598,7 @@ async def _sweep_orphan_engine_containers() -> None:
             # Poll until the filter comes back empty, bounded so a stuck daemon
             # cannot hold boot; the relaunch then fails loudly on its own.
             for _ in range(int(_ORPHAN_CLEAR_TIMEOUT_S / _ORPHAN_CLEAR_POLL_S)):
-                ps = subprocess.run(
-                    ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
-                    capture_output=True, text=True, timeout=20)
-                if not ps.stdout.strip():
+                if not _orphan_engine_ids():
                     break
                 await asyncio.sleep(_ORPHAN_CLEAR_POLL_S)
             else:

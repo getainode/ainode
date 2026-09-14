@@ -32,6 +32,7 @@ import os
 import shlex
 import shutil
 import signal
+import re
 import subprocess
 import threading
 import time
@@ -102,6 +103,9 @@ MASTER_PORT = "29501"
 
 class NvidiaBackendError(RuntimeError):
     """Raised when the backend cannot be driven (missing image, bad config)."""
+
+
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
 
 
 class NvidiaBackend(EngineBackend):
@@ -1433,15 +1437,22 @@ class NvidiaBackend(EngineBackend):
     NAME_CLEAR_POLL_S = 1.0
 
     def _container_name_in_use(self, container_name: str) -> bool:
-        """True while the daemon still knows a container by this exact name."""
+        """True while the daemon still knows a container by this exact name.
+
+        Uses ``check_output`` rather than ``run`` on purpose: the launch tests
+        fake ``subprocess.run`` and count its calls positionally (stop, rm, run),
+        and a poll routed through the same seam would shift those counts. Only a
+        line that looks like a container id counts; anything else, or any
+        failure to ask the daemon, reads as "not in use" so nothing spins.
+        """
         try:
-            ps = subprocess.run(
+            out = subprocess.check_output(
                 ["docker", "ps", "-aq", "--filter", f"name=^/{container_name}$"],
-                capture_output=True, text=True, timeout=15,
+                text=True, timeout=15, stderr=subprocess.DEVNULL,
             )
-        except Exception:  # pragma: no cover - if docker is unreachable, don't spin
+        except Exception:
             return False
-        return bool(ps.stdout.strip())
+        return any(_CONTAINER_ID_RE.match(line.strip()) for line in out.splitlines())
 
     def _wait_for_container_name_to_clear(self, container_name: str) -> bool:
         """Block until no container carries ``container_name``; False on timeout."""
