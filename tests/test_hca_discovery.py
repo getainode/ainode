@@ -321,3 +321,57 @@ class TestProbePathMtu:
             side_effect=FileNotFoundError("ping"),
         ):
             assert hca_discovery.probe_path_mtu("10.100.0.13") == -1
+
+
+# ---------------------------------------------------------------------------
+# subnet filter: the Spark-2 / Spark-3 pair of 2026-09-14
+# ---------------------------------------------------------------------------
+
+def _gid(ip: str) -> str:
+    a, b, c, d = (int(x) for x in ip.split("."))
+    return f"0000:0000:0000:0000:0000:ffff:{a:02x}{b:02x}:{c:02x}{d:02x}"
+
+
+class TestHcaIpv4FromGid:
+    def test_reads_the_address_out_of_the_gid(self, fake_sysfs):
+        _make_hca(fake_sysfs, "roceP2p1s0f1", gids={3: _gid("10.100.0.13")})
+        assert hca_discovery.hca_ipv4_from_gid("roceP2p1s0f1") == "10.100.0.13"
+
+    def test_mac_gid_has_no_address(self, fake_sysfs):
+        _make_hca(fake_sysfs, "mlx5_0", gids={3: "fe80:0000:0000:0000:1234:5678:9abc:def0"})
+        assert hca_discovery.hca_ipv4_from_gid("mlx5_0") is None
+
+
+class TestFabricIpFilter:
+    """Spark-2 as observed: two fabric ports on 10.100.0.0/24, one live
+    direct-connect port on 10.0.0.0/24, one link-local autoconf port. Only
+    the port that backs the cluster interface (10.100.0.13) may reach NCCL."""
+
+    def _spark2(self, root):
+        _make_hca(root, "roceP2p1s0f0", gids={3: _gid("169.254.102.90")})
+        _make_hca(root, "roceP2p1s0f1", gids={3: _gid("10.100.0.13")})
+        _make_hca(root, "rocep1s0f0", gids={3: _gid("10.0.0.2")})
+        _make_hca(root, "rocep1s0f1", gids={3: _gid("10.100.0.12")})
+
+    def test_without_fabric_ip_everything_with_an_ipv4_gid_is_listed(self, fake_sysfs):
+        self._spark2(fake_sysfs)
+        assert set(hca_discovery.build_nccl_ib_hca_whitelist().split(",")) == {
+            "roceP2p1s0f0", "roceP2p1s0f1", "rocep1s0f0", "rocep1s0f1"}
+
+    def test_fabric_ip_keeps_only_the_port_behind_the_cluster_interface(self, fake_sysfs):
+        self._spark2(fake_sysfs)
+        assert hca_discovery.build_nccl_ib_hca_whitelist(fabric_ip="10.100.0.13") == "roceP2p1s0f1"
+
+    def test_a_down_port_is_dropped_even_when_the_address_matches(self, fake_sysfs):
+        _make_hca(fake_sysfs, "roceP2p1s0f1", port_state="1: DOWN", gids={3: _gid("10.100.0.15")})
+        assert hca_discovery.build_nccl_ib_hca_whitelist(fabric_ip="10.100.0.15") == ""
+
+    def test_remote_lists_are_not_filtered(self, fake_sysfs):
+        _make_hca(fake_sysfs, "roceP2p1s0f1", gids={3: _gid("10.100.0.13")})
+        result = hca_discovery.build_nccl_ib_hca_whitelist(
+            remote_hca_lists=[["mlx5_1"]], fabric_ip="10.100.0.13")
+        assert result == "mlx5_1,roceP2p1s0f1"
+
+    def test_no_match_yields_empty_so_the_caller_leaves_the_var_unset(self, fake_sysfs):
+        self._spark2(fake_sysfs)
+        assert hca_discovery.build_nccl_ib_hca_whitelist(fabric_ip="192.168.50.9") == ""
