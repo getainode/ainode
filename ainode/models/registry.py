@@ -430,6 +430,51 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "NCCL_IB_ROCE_VERSION_NUM": "2",
         },
     ),
+    "qwen3.8-flash-next-nvfp4": ModelInfo(
+        id="qwen3.8-flash-next-nvfp4",
+        name="Qwen3.8-Flash-Next (NVFP4)",
+        hf_repo="nvidia/Qwen3.8-Flash-Next-NVFP4",
+        size_gb=133.0,
+        description=(
+            "Frontier MoE (125B total, 6B active/token) plus a 51B PLE n-gram "
+            "embedding and a 4B MTP module, served across TWO GB10 nodes: 133 GB of "
+            "weights does not fit one 121 GB node. The strongest coding model in the "
+            "Qwen3.8 line, beating the 27B and DeepSeek V4 Flash on three of the four "
+            "coding rows in Qwen's own table. Needs vLLM 0.29 or newer on every node: "
+            "the Qwen4Exp architecture and the FP8-PLE loader for mixed ModelOpt "
+            "checkpoints landed there, and the 0.27/0.28 images do not know it. Mixed "
+            "precision (NVFP4 routed experts, FP8 elsewhere, modelopt). MTP "
+            "speculative decoding is NOT enabled here: it wants "
+            "--enable-expert-parallel, which hangs on this hardware, so it stays a "
+            "follow-up. Not yet served end to end on the fleet."
+        ),
+        quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=145,
+        family="qwen", params_b=125.0,
+        proven_tp=2, verified=False, recommended=False, curated=True,
+        context_length=262144, license="Apache 2.0",
+        format="safetensors",
+        capabilities=["tool_use", "reasoning", "code"],
+        # One vllm serve container per node: nothing in the image but vLLM is
+        # needed, which is what makes a pinned upstream tag usable as the engine.
+        distributed_executor="mp",
+        engine_image="vllm/vllm-openai:v0.29.0",
+        kv_cache_dtype="fp8",
+        max_model_len=262144,
+        trust_remote_code=True,
+        recommended_gmu=0.85,
+        # Everything the model card's serve command carries beyond what the
+        # backend emits itself (host/port, TP, the mp rendezvous flags,
+        # kv-cache dtype, max-model-len, gpu-memory-utilization,
+        # trust-remote-code). Tool calls parse with qwen3_coder on this vLLM
+        # line, same as the Ornith and Qwen3.8 27B entries.
+        extra_vllm_args=[
+            "--quantization", "modelopt",
+            "--enable-prefix-caching",
+            "--reasoning-parser", "qwen3",
+            "--tool-call-parser", "qwen3_coder",
+            "--enable-auto-tool-choice",
+        ],
+    ),
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and
     # stack several per node. proven_tp=1 (no distribution). verified=True is set

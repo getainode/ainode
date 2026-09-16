@@ -856,14 +856,48 @@ class NvidiaBackend(EngineBackend):
         already has on disk (the wart that nuked the WAN on a TP=2 launch)."""
         if not self.config.model:
             return None
-        slug = self.config.model.replace("/", "--")
-        d = Path(self.config.models_dir) / slug
+        d = Path(self.config.models_dir) / self._model_slug()
         try:
             if d.is_dir() and any(d.iterdir()):
                 return str(d)
         except OSError:
             pass
         return None
+
+    def _model_slug(self) -> str:
+        """Flat on-disk dir name for this model (``org--name``), as written by
+        ``POST /api/models/download-repo``."""
+        return (self.config.model or "").replace("/", "--")
+
+    def _mount_trustworthy(self) -> bool:
+        """Whether a ``-v`` SOURCE we can see resolves the same on the host daemon.
+
+        True when AINode runs directly on the host (the two views of the path
+        coincide) or when ``AINODE_HOST_HOME`` tells us the host path for
+        AINODE_HOME. In a container WITHOUT it the source would resolve to an
+        empty root-owned dir, so nothing may be served from a local mount.
+        """
+        in_container = os.environ.get("AINODE_IN_CONTAINER")
+        return (not in_container) or bool(os.environ.get("AINODE_HOST_HOME"))
+
+    def _servable_local_model_dir(self) -> Optional[str]:
+        """:meth:`_local_model_dir` gated on :meth:`_mount_trustworthy`.
+
+        The one test both the solo and the distributed launch use to decide
+        between serving a mount path and serving the repo-id.
+        """
+        if not self._mount_trustworthy():
+            return None
+        return self._local_model_dir()
+
+    def _models_mount_args(self, models_dir: str) -> List[str]:
+        """``-v <models dir>:/ainode-models:ro`` for ONE node's model store.
+
+        The source goes through :meth:`_host_path` for the same reason every
+        other mount does (a no-op for a peer's home-dir store, which is not
+        under AINODE_HOME).
+        """
+        return ["-v", f"{self._host_path(str(Path(models_dir)))}:{self.MODELS_MOUNT}:ro"]
 
     def _is_multimodal_model(self) -> bool:
         """Detect a vision/multimodal model from its on-disk ``config.json``.
@@ -1089,18 +1123,45 @@ class NvidiaBackend(EngineBackend):
         # API id(s) clients address the model by. Custom aliases (e.g. "Aegis-14B")
         # win; otherwise pin the repo-id so /v1/models is stable even when serving
         # from a local mount path. A list emits multiple --served-model-name values.
-        names = self.config.served_model_name or [self.config.model]
-        name_args: List[str] = ["--served-model-name", *names]
-        in_container = os.environ.get("AINODE_IN_CONTAINER")
-        mount_trustworthy = (not in_container) or bool(os.environ.get("AINODE_HOST_HOME"))
-        if mount_trustworthy:
-            local = self._local_model_dir()
-            if local:
-                slug = self.config.model.replace("/", "--")
-                return f"{self.MODELS_MOUNT}/{slug}", name_args
+        name_args = self._served_model_name_args()
+        if self._servable_local_model_dir():
+            return f"{self.MODELS_MOUNT}/{self._model_slug()}", name_args
         # Remote (vLLM downloads the repo-id) — previously emitted NO name args, so
         # the served id was the full repo-id with no alias option. Now aliasable too.
         return self.config.model, name_args
+
+    def _served_model_name_args(self) -> List[str]:
+        """``--served-model-name`` for the API id(s) clients address the model by.
+
+        Custom aliases (e.g. "Aegis-14B") win; otherwise the repo-id is pinned so
+        /v1/models is stable even when serving from a local mount path. A recipe
+        that states the flag itself keeps its value and we emit nothing, the same
+        duplicate-suppression rule as every other serve flag (vLLM errors on a
+        duplicate).
+        """
+        if "--served-model-name" in self._supplied_flags():
+            return []
+        names = self.config.served_model_name or [self.config.model]
+        return ["--served-model-name", *names]
+
+    def _distributed_serve_target_and_name_args(self) -> tuple:
+        """``(serve_target, extra_args)`` for EVERY rank of a distributed launch.
+
+        Same test as solo (:meth:`_servable_local_model_dir`): when this model was
+        downloaded through AINode (the flat ``org--name`` dir our downloader
+        writes) and the mount is trustworthy, every rank serves
+        ``MODELS_MOUNT/<slug>`` and the API id is pinned with
+        ``--served-model-name <repo-id>``. Each node mounts its OWN copy of the
+        store at the same MODELS_MOUNT (the head's ``models_dir``, a peer's
+        per-peer dir filled by :meth:`_ensure_peer_has_model`), so the identifier
+        resolves identically on every rank, which is the invariant that matters.
+
+        Without that local copy we fall back to the repo-id exactly as before and
+        vLLM pulls it into each node's mounted HF cache.
+        """
+        if self._servable_local_model_dir():
+            return f"{self.MODELS_MOUNT}/{self._model_slug()}", self._served_model_name_args()
+        return self.config.model, []
 
     def _build_solo_docker_cmd(self, container_name: str) -> List[str]:
         """Single-container solo mode — ``docker run ... vllm serve ...``.
@@ -1111,7 +1172,6 @@ class NvidiaBackend(EngineBackend):
         """
         nccl_env = self._build_nccl_env(is_head=True)
         hf_cache = self._host_path(self._head_hf_cache())
-        models_src = self._host_path(str(Path(self.config.models_dir)))
         serve_target, name_args = self._serve_target_and_name_args()
 
         cmd: List[str] = [
@@ -1136,11 +1196,10 @@ class NvidiaBackend(EngineBackend):
             "10.24g",
             "-v",
             f"{hf_cache}:{HF_CACHE_MOUNT}",
-            # Mount the on-disk model store read-only so an already-downloaded
-            # model serves straight from disk (no re-download).
-            "-v",
-            f"{models_src}:{self.MODELS_MOUNT}:ro",
         ]
+        # Mount the on-disk model store read-only so an already-downloaded
+        # model serves straight from disk (no re-download).
+        cmd.extend(self._models_mount_args(self.config.models_dir))
         # Operator/recipe mounts (e.g. a writable JIT cache the image compiles
         # kernels into). Last, so they can never displace the two above.
         cmd.extend(self._volume_args())
@@ -1161,6 +1220,7 @@ class NvidiaBackend(EngineBackend):
         head_ip: str,
         node_ip: str,
         hf_cache_dir: str,
+        models_dir: str = "",
     ) -> List[str]:
         """Build the ``docker run -d ... ray start --block`` command.
 
@@ -1219,6 +1279,12 @@ class NvidiaBackend(EngineBackend):
             # peer's home-dir cache, which isn't under AINODE_HOME.
             "-v", f"{self._host_path(hf_cache_dir)}:{HF_CACHE_MOUNT}",
         ]
+        # A model downloaded through AINode is served off local disk on every
+        # rank, so this node's model store is mounted at the same MODELS_MOUNT as
+        # the head's (``models_dir`` empty = the head's own store).
+        serve_target, _name_args = self._distributed_serve_target_and_name_args()
+        if serve_target.startswith(self.MODELS_MOUNT):
+            cmd.extend(self._models_mount_args(models_dir or self.config.models_dir))
         cmd.extend(self._volume_args())
         for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
@@ -1234,6 +1300,7 @@ class NvidiaBackend(EngineBackend):
         master_addr: str,
         hf_cache_dir: str,
         node_ip: str,
+        models_dir: str = "",
     ) -> List[str]:
         """Build the ``docker run -d ... vllm serve ...`` command for ONE node of
         the mp multi-node shape.
@@ -1245,10 +1312,12 @@ class NvidiaBackend(EngineBackend):
         shape work on an image that ships no ``ray`` (the GB10 DeepSeek build,
         and stock ``vllm/vllm-openai``).
 
-        Serves the repo-id rather than the local mount path, exactly like the
-        Ray shape's ``docker exec``: the model identifier has to resolve
-        identically on every rank, and only the HF cache is mounted on a peer
-        (``_ensure_peer_has_model`` fills it over the fabric).
+        ``models_dir`` is THIS node's AINode model store, mounted at MODELS_MOUNT
+        so a model downloaded through AINode serves off local disk instead of
+        vLLM re-downloading it on every rank. Empty means the head's own
+        ``config.models_dir``; a peer's launcher passes its per-peer dir. The
+        serve target is the same string on every rank either way (see
+        :meth:`_distributed_serve_target_and_name_args`).
         """
         is_head = node_rank == 0
         nccl_env = self._build_nccl_env(
@@ -1269,13 +1338,21 @@ class NvidiaBackend(EngineBackend):
         ]
         cmd.extend(self._infiniband_device_args())
         cmd.extend(["-v", f"{self._host_path(hf_cache_dir)}:{HF_CACHE_MOUNT}"])
+        serve_target, name_args = self._distributed_serve_target_and_name_args()
+        # Derive the mount from the target we are actually serving, so the two can
+        # never disagree: a mount-path target ALWAYS gets its mount, a repo-id
+        # target never gets one (today's behaviour, nothing extra to trust).
+        if serve_target.startswith(self.MODELS_MOUNT):
+            cmd.extend(self._models_mount_args(models_dir or self.config.models_dir))
         cmd.extend(self._volume_args())
         for key, value in self._engine_env(nccl_env).items():
             cmd.extend(["-e", f"{key}={value}"])
 
         image = self._engine_image()
-        cmd.extend([image, *self._serve_argv_prefix(image), self.config.model])
+        cmd.extend([image, *self._serve_argv_prefix(image), serve_target])
         cmd.extend(self._build_vllm_serve_args(tp_size=nnodes, executor_backend="mp"))
+        cmd.extend(name_args)
+        # Rendezvous flags stay LAST so ``--headless`` is the final token on a peer.
         cmd.extend(self._mp_rendezvous_args(
             node_rank=node_rank, nnodes=nnodes, master_addr=master_addr,
         ))
@@ -1620,10 +1697,16 @@ class NvidiaBackend(EngineBackend):
         Runs INSIDE the already-started head Ray container. Ray picks up
         the peer workers automatically via the cluster address embedded
         in the container env by run_cluster.sh.
+
+        Serve target and ``--served-model-name`` come from the shared
+        distributed resolver, so a model downloaded through AINode is served off
+        each rank's mounted store rather than re-downloaded by every node.
         """
         head = self._head_container_name()
-        inner = ["vllm", "serve", self.config.model]
+        serve_target, name_args = self._distributed_serve_target_and_name_args()
+        inner = ["vllm", "serve", serve_target]
         inner.extend(self._build_vllm_serve_args(tp_size=tp_size))
+        inner.extend(name_args)
 
         # Wrap the command in bash so stdout/stderr line-buffer correctly.
         # docker exec -i lets us stream logs back; -d would detach.
@@ -1653,10 +1736,11 @@ class NvidiaBackend(EngineBackend):
         (the deploy pipeline distributes it via ``docker load`` from NFS).
         """
         peer_hf_cache = self._peer_hf_cache()
+        peer_models_dir = self._peer_models_dir()
 
         # Phase 3a: ensure the peer actually has the model weights before its
         # worker starts — distribute from the head over the fabric if missing.
-        self._ensure_peer_has_model(peer_ip, peer_hf_cache)
+        self._ensure_peer_has_model(peer_ip, peer_hf_cache, peer_models_dir)
 
         worker_name = self._worker_container_name(peer_ip)
 
@@ -1668,10 +1752,12 @@ class NvidiaBackend(EngineBackend):
             # (We SSH over the fabric, so peer_ip here is the fabric IP.)
             node_ip=peer_ip,
             hf_cache_dir=peer_hf_cache,
+            models_dir=peer_models_dir,
         )
         self._ssh_run_worker_container(
             peer_ip=peer_ip, worker_name=worker_name,
             peer_hf_cache=peer_hf_cache, docker_cmd=docker_cmd,
+            peer_models_dir=peer_models_dir,
         )
 
     def _peer_hf_cache(self) -> str:
@@ -1683,6 +1769,16 @@ class NvidiaBackend(EngineBackend):
         """
         return f"/home/{self.config.ssh_user}/ainode-nvidia-cache"
 
+    def _peer_models_dir(self) -> str:
+        """AINode model store on a peer, mounted into its container at MODELS_MOUNT.
+
+        Chosen exactly like :meth:`_peer_hf_cache` and for the same reason: we SSH
+        in as the non-root ``ssh_user``, so the one path we can count on writing
+        is under that user's home. This is where ``_ensure_peer_has_model`` puts
+        the flat ``org--name`` dir a UI download left on the head.
+        """
+        return f"/home/{self.config.ssh_user}/ainode-nvidia-models"
+
     def _ssh_launch_mp_worker(self, peer_ip: str, head_ip: str,
                               node_rank: int, nnodes: int) -> None:
         """SSH to ``peer_ip`` and launch its ``--headless`` mp rank.
@@ -1693,7 +1789,8 @@ class NvidiaBackend(EngineBackend):
         instead of ``ray start``.
         """
         peer_hf_cache = self._peer_hf_cache()
-        self._ensure_peer_has_model(peer_ip, peer_hf_cache)
+        peer_models_dir = self._peer_models_dir()
+        self._ensure_peer_has_model(peer_ip, peer_hf_cache, peer_models_dir)
         worker_name = self._worker_container_name(peer_ip)
         docker_cmd = self._build_mp_docker_cmd(
             container_name=worker_name,
@@ -1702,25 +1799,32 @@ class NvidiaBackend(EngineBackend):
             master_addr=head_ip,
             hf_cache_dir=peer_hf_cache,
             node_ip=peer_ip,
+            models_dir=peer_models_dir,
         )
         logger.info("SSH-launching mp rank %d on %s", node_rank, peer_ip)
         self._ssh_run_worker_container(
             peer_ip=peer_ip, worker_name=worker_name,
             peer_hf_cache=peer_hf_cache, docker_cmd=docker_cmd,
+            peer_models_dir=peer_models_dir,
         )
 
     def _ssh_run_worker_container(self, *, peer_ip: str, worker_name: str,
                                   peer_hf_cache: str,
-                                  docker_cmd: List[str]) -> None:
+                                  docker_cmd: List[str],
+                                  peer_models_dir: str = "") -> None:
         """Run ``docker_cmd`` on a peer over SSH (shared by both shapes)."""
         # Remote shell command: clean up any stale worker container from
         # a prior run (stable name means we can always find it), make
         # the cache dir, then docker run -d. Chained with && so a failed
         # cleanup still lets docker run surface its own error.
+        # The peer's model store is created alongside it: when the command mounts
+        # that path, docker would otherwise invent a root-owned empty dir as the
+        # bind source, which is the failure this whole path exists to avoid.
+        dirs = [peer_hf_cache] + ([peer_models_dir] if peer_models_dir else [])
         docker_cmd_str = " ".join(shlex.quote(p) for p in docker_cmd)
         remote_cmd = (
             f"docker rm -f {shlex.quote(worker_name)} >/dev/null 2>&1 || true; "
-            f"mkdir -p {shlex.quote(peer_hf_cache)} && {docker_cmd_str}"
+            f"mkdir -p {' '.join(shlex.quote(d) for d in dirs)} && {docker_cmd_str}"
         )
 
         ssh_target = f"{self.config.ssh_user}@{peer_ip}"
@@ -1751,24 +1855,56 @@ class NvidiaBackend(EngineBackend):
                 f"(rc={result.returncode}): {result.stderr.strip()}"
             )
 
-    def _ensure_peer_has_model(self, peer_ip: str, peer_hf_cache: str) -> None:
+    def _ensure_peer_has_model(self, peer_ip: str, peer_hf_cache: str,
+                               peer_models_dir: str = "") -> None:
         """Distribute the model weights to a peer over the fabric if it's missing.
 
-        The launch only succeeds if every node can read the model from its local
-        HF cache. Rather than require manual pre-placement, the head streams the
-        weights to any selected peer that lacks them. Uses tar-over-ssh (the image
-        ships tar + ssh, not rsync) on the cluster fabric (``peer_ip``).
+        The launch only succeeds if every node can read the model locally. Rather
+        than require manual pre-placement, the head streams the weights to any
+        selected peer that lacks them, over the cluster fabric (``peer_ip``).
         Best-effort no-op when the peer already has it, or the head doesn't.
+
+        TWO on-disk layouts, and the one we send has to be the one every rank is
+        told to serve (see :meth:`_distributed_serve_target_and_name_args`):
+
+        - the flat ``<models_dir>/<org--name>`` dir ``POST
+          /api/models/download-repo`` writes, sent to
+          ``<peer models dir>/<org--name>``. Preferred when it exists, because
+          that is then the serve target on every rank.
+        - otherwise the HF cache entry ``<hf cache>/hub/models--<org>--<name>``,
+          for a launch that serves the repo-id.
         """
         model = self.config.model or ""
         if not model:
+            return
+        if peer_models_dir and self._servable_local_model_dir():
+            # Downloaded through AINode: every rank serves MODELS_MOUNT/<slug>, so
+            # the peer needs that exact dir under its own store.
+            slug = self._model_slug()
+            self._distribute_dir_to_peer(
+                peer_ip=peer_ip, name=slug,
+                head_parent=str(Path(self.config.models_dir)),
+                peer_parent=peer_models_dir.rstrip("/"),
+            )
             return
         model_dir = "models--" + model.replace("/", "--")
         head_hub = str(Path(self._head_hf_cache()) / "hub")
         if not (Path(head_hub) / model_dir).is_dir():
             return  # head doesn't have it either — engine will report clearly
-        peer_hub = peer_hf_cache.rstrip("/") + "/hub"
-        target = f"{peer_hub}/{model_dir}"
+        self._distribute_dir_to_peer(
+            peer_ip=peer_ip, name=model_dir, head_parent=head_hub,
+            peer_parent=peer_hf_cache.rstrip("/") + "/hub",
+        )
+
+    def _distribute_dir_to_peer(self, *, peer_ip: str, name: str,
+                                head_parent: str, peer_parent: str) -> None:
+        """Copy ``<head_parent>/<name>`` to ``<peer_parent>/<name>`` over the fabric.
+
+        rsync when the host has it (resumable via ``--partial``, so a re-launch
+        after a dropped transfer doesn't re-send 133 GB), else tar-over-ssh (every
+        image ships tar + ssh). Skips when the peer already has the dir.
+        """
+        target = f"{peer_parent}/{name}"
         ssh_target = f"{self.config.ssh_user}@{peer_ip}"
         ssh_opts = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
 
@@ -1779,33 +1915,34 @@ class NvidiaBackend(EngineBackend):
         if "present" in (check.stdout or ""):
             return  # peer already has the weights
 
-        logger.info("Distributing %s to %s over the fabric (not cached)...", model_dir, peer_ip)
+        logger.info("Distributing %s to %s:%s over the fabric (not cached)...",
+                    name, peer_ip, peer_parent)
         self._load_phase = "distributing"
         ssh_e = "ssh " + " ".join(ssh_opts)
         if shutil.which("rsync"):
             # Preferred: rsync is resumable (--partial) and incremental, so a
             # re-launch after a dropped transfer doesn't re-send the whole model.
-            subprocess.run(["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(peer_hub)}"],
+            subprocess.run(["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(peer_parent)}"],
                            capture_output=True, text=True, timeout=30)
             result = subprocess.run(
                 ["rsync", "-a", "--partial", "-e", ssh_e,
-                 f"{head_hub}/{model_dir}/", f"{ssh_target}:{peer_hub}/{model_dir}/"],
+                 f"{head_parent}/{name}/", f"{ssh_target}:{peer_parent}/{name}/"],
                 capture_output=True, text=True, timeout=7200,
             )
         else:
             # Fallback for images without rsync: tar-over-ssh (not resumable).
             tar = (
-                f"tar -C {shlex.quote(head_hub)} -cf - {shlex.quote(model_dir)} | "
+                f"tar -C {shlex.quote(head_parent)} -cf - {shlex.quote(name)} | "
                 f"{ssh_e} {shlex.quote(ssh_target)} "
-                f"'mkdir -p {shlex.quote(peer_hub)} && tar -C {shlex.quote(peer_hub)} -xf -'"
+                f"'mkdir -p {shlex.quote(peer_parent)} && tar -C {shlex.quote(peer_parent)} -xf -'"
             )
             result = subprocess.run(["bash", "-lc", tar], capture_output=True, text=True, timeout=7200)
         if result.returncode != 0:
             raise NvidiaBackendError(
-                f"Failed to distribute {model_dir} to {peer_ip} "
+                f"Failed to distribute {name} to {peer_ip} "
                 f"(rc={result.returncode}): {result.stderr.strip()[:300]}"
             )
-        logger.info("Distributed %s to %s", model_dir, peer_ip)
+        logger.info("Distributed %s to %s", name, peer_ip)
 
     def _ssh_stop_peer_container(self, peer_ip: str) -> None:
         """Best-effort ``docker stop && docker rm`` on a peer's worker container.

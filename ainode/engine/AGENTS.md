@@ -40,9 +40,22 @@ the same `_build_vllm_serve_args`, the same peer container names and the same
     memlock=-1 --ulimit stack=67108864 --gpus all`, plus
     `--device /dev/infiniband:/dev/infiniband` **only when the host has that
     path** (`_infiniband_present`). A host without it must still launch.
-  - Every rank serves the model by REPO-ID from the mounted HF cache, never a
-    local mount path: the identifier has to resolve identically on all ranks,
-    and a peer only gets its HF cache (filled by `_ensure_peer_has_model`).
+  - **Every rank must resolve the SAME serve-target string**, and both shapes get
+    it from one resolver (`_distributed_serve_target_and_name_args`). Two cases:
+    - The model was downloaded THROUGH AINode, i.e. the flat
+      `<models_dir>/<owner--name>` dir `POST /api/models/download-repo` writes
+      (`_servable_local_model_dir`, same test solo uses, including the
+      AINODE_HOST_HOME mount-trust gate). Then every rank serves
+      `MODELS_MOUNT/<slug>` with `--served-model-name <repo id>`, and every rank
+      mounts its OWN store there: the head's `config.models_dir`, a peer's
+      `_peer_models_dir()` (`/home/<ssh_user>/ainode-nvidia-models`, chosen like
+      `_peer_hf_cache`). `_ensure_peer_has_model` ships that flat dir over the
+      fabric instead of a hub entry. Without this a UI-downloaded model made
+      every node re-download it (133 GB per node on the Flash-Next launch).
+    - No such copy: the REPO-ID, unchanged, and only the HF cache is mounted
+      (vLLM pulls into each node's cache). No `--served-model-name` either.
+    Derive the mount from the target actually chosen, never from a second probe,
+    so a mount-path target can never be rendered without its mount.
   - A recipe that states `--nnodes`, `--node-rank`, `--master-addr`,
     `--master-port` or `--headless` itself suppresses ours, same rule as every
     other serve flag.
