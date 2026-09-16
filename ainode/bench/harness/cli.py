@@ -248,7 +248,7 @@ def main(argv=None, out_dir=None) -> int:
     from ainode.bench.measure import slug
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{stamp}-{slug(args.model)}-{args.label}-harness.json"
+    path = out_dir / f"{stamp}-{slug(args.model)}-{slug(args.label)}-harness.json"
     path.write_text(json.dumps(record, indent=1) + "\n")
     print(f"\n  saved {path}")
     for result in results:
