@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -205,8 +206,7 @@ class HarnessAdapter:
 
         start = time.monotonic()
         try:
-            proc = subprocess.run(command, cwd=str(req.workdir), env=env,
-                                  capture_output=True, text=True, timeout=timeout)
+            proc = _launch(command, cwd=str(req.workdir), env=env, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             return HarnessRun(self.name, command, None, time.monotonic() - start,
                               True, False,
@@ -244,6 +244,39 @@ def _text(value) -> str:
         return ""
     return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
 
+
+
+def _launch(command: list[str], *, cwd: str, env: dict, timeout: float) -> subprocess.CompletedProcess:
+    """Run the harness in its OWN process group and leave nothing behind.
+
+    A coding agent is a tree of processes (a Node launcher, a local server, a
+    shell for its tools). ``subprocess.run`` only ever knew about the top of
+    that tree: on a timeout it killed the launcher and orphaned the rest, and a
+    run that returned normally could still leave a server alive. OpenCode does
+    exactly that, and its next invocation then hung at init or died with
+    "Unexpected server error" (2026-09-16: 20 of 20 bench runs crashed in 0.8 s
+    behind one leftover process). Every launch now starts a new session and the
+    whole group is signalled when the run ends, timed out or not.
+    """
+    proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc.pid, signal.SIGKILL)
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    finally:
+        _signal_group(proc.pid, signal.SIGTERM)
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def _signal_group(pid: int, sig: int) -> None:
+    """Best-effort signal to the launched process group; silent if it is gone."""
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 def _git_init(workdir: Path) -> None:
     """``git init`` the working directory, quietly, for harnesses that need one.

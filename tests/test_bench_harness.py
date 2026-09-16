@@ -788,3 +788,49 @@ def test_a_harness_record_with_throughput_in_it_still_gets_a_row(tmp_path):
     runs = module.load_runs(tmp_path)
     assert module.is_harness_run(runs[0]) is False
     assert "both.json" in module.render_table(runs)
+
+
+# ------------------------------------------------------------ process group
+
+def test_timeout_kills_the_whole_process_group(tmp_path):
+    """The agent forks a child that outlives it; after the timeout neither may
+    remain (OpenCode left a server behind and the next run hung)."""
+    import os as _os, signal as _signal, subprocess as _sp, time as _time
+    from ainode.bench.harness.adapters import _launch
+    pidfile = tmp_path / "child.pid"
+    script = (
+        "import os, sys, time, subprocess\n"
+        f"c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.raises(_sp.TimeoutExpired):
+        _launch([sys.executable, "-c", script], cwd=str(tmp_path), env=dict(_os.environ), timeout=1.5)
+    child = int(pidfile.read_text())
+    for _ in range(20):
+        try:
+            _os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        _time.sleep(0.1)
+    else:
+        _os.kill(child, _signal.SIGKILL)
+        pytest.fail("the grandchild survived the timeout")
+
+
+def test_normal_completion_returns_output_and_reaps_the_group(tmp_path):
+    import os as _os, sys as _sys
+    from ainode.bench.harness.adapters import _launch
+    proc = _launch([_sys.executable, "-c", "print('hi'); import sys; sys.stderr.write('err')"],
+                   cwd=str(tmp_path), env=dict(_os.environ), timeout=10)
+    assert proc.returncode == 0 and proc.stdout.strip() == "hi" and proc.stderr == "err"
+
+
+def test_opencode_isolates_its_state_per_run(tmp_path):
+    from ainode.bench.harness.adapters.opencode import OpencodeAdapter
+    from ainode.bench.harness.adapters import HarnessRequest
+    req = HarnessRequest(workdir=tmp_path / "w", scratch=tmp_path / "s", prompt="p", entry="x.py",
+                         endpoint="http://e/v1", model="m")
+    env = OpencodeAdapter().env(req)
+    assert set(env) == {"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
+    assert all(v.startswith(str(tmp_path / "s")) for v in env.values())
