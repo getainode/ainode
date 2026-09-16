@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.19] - 2026-09-16
+
+The fleet endpoint forwards the Anthropic Messages API; Claude Code is a harness bench adapter; Qwen3.8-Flash-Next entry pinned and proven.
+
 ### Fixed
 - **The fleet endpoint forwards the Anthropic Messages API.** vLLM serves `POST /v1/messages` natively alongside its OpenAI paths, but AINode's port 3000 registered only `/v1/chat/completions` and `/v1/completions`, so `/v1/messages` was a 404 on every node: a client that speaks Messages and nothing else (Claude Code, the Anthropic SDKs) had to be aimed at one engine's `:8000` and lost the model-id lookup, capability-aware ordering and failover that every other protocol gets for free. `/v1/messages` and `/v1/messages/count_tokens` now go through `proxy_to_vllm`, the same handler as chat completions, so routing on the body's `model`, transport failover across every node serving it, the 404 for a model nobody serves, SSE streaming and header passthrough (`x-api-key`, `anthropic-version`, `anthropic-beta` reach the engine untouched) are the code that already existed rather than a second implementation. `is_multimodal_request` now also reads the Messages API's own spelling of media (an `{"type": "image"}` or `{"type": "document"}` block, including one nested in a `tool_result`), so an image sent over `/v1/messages` is ordered onto an instance that accepts images instead of being routed on the model id alone. The proxy also stops dropping the caller's query string (`path_qs`, not `path`): Claude Code posts to `/v1/messages?beta=true`. The Server view's endpoint list no longer calls `/v1/messages` planned.
 
