@@ -1,0 +1,22 @@
+{
+ "slug": "isogram",
+ "language": "python",
+ "entry": "isogram.py",
+ "instructions": "instructions.md",
+ "tests": [
+  "tests/isogram_test.py"
+ ],
+ "test_command": [
+  "python",
+  "-m",
+  "pytest",
+  "-q",
+  "isogram_test.py"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/isogram",
+  "license": "MIT"
+ }
+}

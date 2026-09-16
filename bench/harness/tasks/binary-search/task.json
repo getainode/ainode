@@ -1,0 +1,22 @@
+{
+ "slug": "binary-search",
+ "language": "python",
+ "entry": "binary_search.py",
+ "instructions": "instructions.md",
+ "tests": [
+  "tests/binary_search_test.py"
+ ],
+ "test_command": [
+  "python",
+  "-m",
+  "pytest",
+  "-q",
+  "binary_search_test.py"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/binary-search",
+  "license": "MIT"
+ }
+}

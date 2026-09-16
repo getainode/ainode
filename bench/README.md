@@ -1,7 +1,23 @@
 # AINode bench
 
 What an AINode-served model actually does on the hardware in front of us, as
-opposed to what a model card says. Two ways to run it, one measurement:
+opposed to what a model card says.
+
+Two benches live here, and they answer different questions:
+
+- **Throughput** (this file): TTFT, decode rate, prefill scaling, concurrency,
+  reasoning tax. How fast the model generates.
+- **Harness** (`bench/harness/README.md`): pass@1, pass@2, mean wall clock and
+  crash count for a model driving a real coding agent CLI (aider, dsh, pi,
+  opencode) at ten vendored Exercism exercises with hidden unit tests. Whether
+  what it generates works. Run it with
+  `python3 scripts/ainode-bench.py harness --endpoint http://<node>:3000/v1
+  --model <id> --harness aider --tasks 10 --label <label>`, and always with
+  `--dry-run` first. Both write one schema-1 JSON into `bench/results/`; a harness
+  record carries a `harness` block instead of `results` and is skipped by the
+  README's tok/s table.
+
+The rest of this file is the throughput bench. Two ways to run it, one measurement:
 
 | Path | What it is |
 |------|-----------|

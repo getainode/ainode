@@ -58,6 +58,20 @@ def load_runs(results_dir):
     return runs
 
 
+def is_harness_run(run):
+    """A harness-bench record: it measured a coding agent, not throughput.
+
+    Those runs carry a `harness` block and no `single_stream`, so every column of
+    this table would be "not measured" for them. They belong in their own table
+    (see bench/harness/README.md), not as a row of blanks in this one.
+    """
+    return bool(run.get("harness")) and not (run.get("results") or {}).get("single_stream")
+
+
+def throughput_runs(runs):
+    return [run for run in runs if not is_harness_run(run)]
+
+
 def fmt_params(model):
     params = model.get("params_b")
     active = model.get("active_b")
@@ -134,6 +148,7 @@ def row_for(run, base_url):
 
 
 def render_table(runs, base_url=BASE_URL):
+    runs = throughput_runs(runs)
     # Unpadded cells and a `|---|` rule, matching the other tables in README.md.
     lines = [
         "| " + " | ".join(HEADERS) + " |",
@@ -176,6 +191,10 @@ def main():
     runs = load_runs(args.results)
     if not runs:
         raise SystemExit(f"no result files in {args.results}")
+    shown = len(throughput_runs(runs))
+    if not shown:
+        raise SystemExit(f"{args.results} holds only harness runs; this table is the "
+                         "throughput one and would render empty")
     table = render_table(runs, args.base_url)
 
     if args.print_only:
@@ -189,13 +208,13 @@ def main():
             print(f"{args.readme} is stale; run python3 scripts/render-bench-table.py",
                   file=sys.stderr)
             return 1
-        print(f"{args.readme} is up to date ({len(runs)} runs)")
+        print(f"{args.readme} is up to date ({shown} runs)")
         return 0
     if current == updated:
-        print(f"{args.readme} already up to date ({len(runs)} runs)")
+        print(f"{args.readme} already up to date ({shown} runs)")
         return 0
     args.readme.write_text(updated)
-    print(f"{args.readme} updated ({len(runs)} runs)")
+    print(f"{args.readme} updated ({shown} runs)")
     return 0
 
 

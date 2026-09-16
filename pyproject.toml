@@ -75,9 +75,23 @@ exclude = ["tests*", "ops*", "scripts*"]
 [tool.setuptools.package-data]
 "ainode.web" = ["**/*"]
 
+[tool.pytest.ini_options]
+# The suite is tests/. bench/harness/tasks/*/tests/*_test.py are the harness bench's
+# HIDDEN tests: vendored Exercism tests that import a solution module which only ever
+# exists inside one run's working directory, so collecting them here fails by design.
+# CI runs `pytest tests/ -q` and never saw them; this makes a bare `pytest` agree.
+testpaths = ["tests"]
+norecursedirs = ["bench/harness/tasks", "*.egg", ".*", "_darcs", "build", "CVS",
+                 "dist", "graft", "node_modules", "venv", "{arch}"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+# bench/harness/tasks/ is vendored upstream (Exercism, MIT): stubs with empty bodies
+# and tests we do not own. It is kept verbatim so the benchmark stays comparable, so
+# it is not ours to reformat and a future rule widening must not make it look like it
+# needs a fix.
+extend-exclude = ["bench/harness/tasks"]
 
 [tool.ruff.lint]
 # Pin the rule set explicitly. The dev dependency is `ruff>=0.1.0` (unpinned), and
