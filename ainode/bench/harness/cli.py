@@ -107,9 +107,23 @@ def _preview(arg: str) -> str:
     return f"{head} ... [{len(arg)} chars]"
 
 
+#: Variable names whose value is a credential unless it is our own placeholder.
+SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
+
 def _mask(env: dict, api_key: str) -> dict:
-    """Never print a value we did not put there ourselves."""
-    return {k: (v if v == api_key else "***") for k, v in sorted(env.items())}
+    """Print the overlay, except a credential we did not put there ourselves.
+
+    Paths are the useful half of this line, so they print. A key-shaped variable
+    prints only when it holds our placeholder: the adapters fill in a real key's
+    variable only if it was already set in the environment, and that value is
+    somebody's actual credential.
+    """
+    def show(name, value):
+        keyish = any(word in name.upper() for word in SECRET_WORDS)
+        return value if (value == api_key or not keyish) else "***"
+
+    return {k: show(k, v) for k, v in sorted(env.items())}
 
 
 def dry_run(tasks, adapters, args, out=print) -> int:

@@ -640,6 +640,34 @@ def test_dry_run_prints_the_commands_and_writes_nothing(tmp_path, capsys, monkey
     assert not (tmp_path / "dsh-home").exists()
 
 
+def test_the_env_line_prints_paths_and_masks_a_key_it_did_not_set(tmp_path, capsys,
+                                                                 monkeypatch):
+    """Paths are the useful half of that line, so they print.
+
+    Nothing the adapters build currently trips the mask: they only ever put the
+    placeholder in a key variable, and skip one that already holds a real value. The
+    mask is there so that stays true by construction rather than by memory, which is
+    why it is tested directly as well as through the dry run.
+    """
+    from ainode.bench.harness.cli import _mask
+
+    assert _mask({"DSH_HOME": "/home/x/.dsh", "AINODE_BENCH_API_KEY": "ainode",
+                  "THEIR_REAL_KEY": "sk-do-not-print-me"}, "ainode") == {
+        "AINODE_BENCH_API_KEY": "ainode",
+        "DSH_HOME": "/home/x/.dsh",
+        "THEIR_REAL_KEY": "***",
+    }
+
+    home = tmp_path / "dsh-home"
+    monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(home))
+    harness_main(["--endpoint", ENDPOINT, "--model", MODEL, "--label", "unit",
+                  "--harness", "dsh", "--only-tasks", "two-fer", "--dry-run"],
+                 out_dir=tmp_path / "results")
+    printed = capsys.readouterr().out
+    assert f"'DSH_HOME': '{home}'" in printed
+    assert "'AINODE_BENCH_API_KEY': 'ainode'" in printed
+
+
 def test_dry_run_never_prints_a_merged_config_it_did_not_write(tmp_path, capsys,
                                                               monkeypatch):
     """pi's config file is somebody's own; the bench merges into it and must not
