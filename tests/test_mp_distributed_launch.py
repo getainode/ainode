@@ -862,7 +862,7 @@ def test_flash_next_catalog_entry_is_complete():
     assert info.curated is True
     assert info.distributed_executor == "mp"
     assert info.engine_image == FLASH_IMAGE
-    assert info.kv_cache_dtype == "fp8"
+    assert info.kv_cache_dtype == "auto"  # Qwen4Exp QSA needs a BF16 main KV cache
     assert info.max_model_len == 262144
     assert info.trust_remote_code is True
     assert info.recommended_gmu == 0.85
@@ -903,7 +903,7 @@ def test_flash_next_recipe_reaches_the_launch_config():
     assert recipe == catalog_recipe(FLASH_ID)
     assert recipe["distributed_executor"] == "mp"
     assert recipe["engine_image"] == FLASH_IMAGE
-    assert recipe["kv_cache_dtype"] == "fp8"
+    assert recipe["kv_cache_dtype"] == "auto"
     assert recipe["kv_cache_dtype_explicit"] is True
     assert recipe["max_model_len"] == 262144
     assert recipe["trust_remote_code"] is True
@@ -932,7 +932,7 @@ def test_rendered_flash_next_commands_serve_the_ainode_download(tmp_path, monkey
         assert f"--served-model-name {FLASH_REPO}" in joined
         assert "--tensor-parallel-size 2" in joined
         assert "--distributed-executor-backend mp" in joined
-        assert "--kv-cache-dtype fp8" in joined
+        assert "--kv-cache-dtype auto" in joined
         assert "--max-model-len 262144" in joined
         assert "--gpu-memory-utilization 0.85" in joined
         assert "--quantization modelopt" in joined
