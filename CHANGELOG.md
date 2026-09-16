@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.16] - 2026-09-16
+
+The chat model card fits its panel; the Thinking toggle reaches DeepSeek V4.
+
 ### Fixed
 - **The chat Thinking toggle and the bench's reasoning section now reach DeepSeek V4.** Both sent only Qwen's `enable_thinking` switch, and the toggle sent nothing at all when ON, so a DeepSeek engine launched with thinking off by default could never be turned on from the UI, and the bench's DeepSeek "thinking on" measurement was thinking off. Both states are now sent explicitly under both template switch names (`enable_thinking` and `thinking`); a template ignores the name it does not read.
 - **The chat MODEL CARD stays inside the left rail at any panel width.** An old MODELS LIST rule still declared `.model-card`, and the chat rail's card is the only element left carrying that class, so it picked up `align-items: center` and `padding: 20px`. On a column flex container the cross axis is horizontal, so centring sized the card's head and body to their own content instead of the rail's width: with DeepSeek V4 Flash selected the body measured 368 px inside a 233 px card and `overflow: hidden` cut roughly 67 px off each side, clipping the leading characters of the model id, the section labels and the chips on the left and the values on the right. The dead rule is gone and the rail card now stretches its children, and the pieces that can hold an unbreakable token wrap instead of widening the box: the label and value grid uses `minmax(0, ...)` tracks, the id, HF link, engine image, capability note and chips get `overflow-wrap: anywhere`, the catalog paragraph wraps as prose, and the card, groups and flex rows carry a zero min-width. Measured at 260, 300 and 360 px: `scrollWidth` equals `clientWidth` and nothing sits past an edge.
