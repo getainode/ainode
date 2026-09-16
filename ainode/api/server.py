@@ -31,6 +31,7 @@ from ainode.discovery.broadcast import (
     NodeAnnouncement,
 )
 from ainode.discovery.cluster import ClusterState
+from ainode.discovery.instance import instance_parallel
 from ainode.engine.sharding_routes import register_sharding_routes
 from ainode.engine.ray_autostart import (
     RayAutostartState,
@@ -45,7 +46,15 @@ from ainode.api.server_routes import (
     request_log_middleware,
     init_server_state,
 )
-from ainode.api.chat_routes import register_chat_routes
+from ainode.api.chat_routes import (
+    instance_caps_index,
+    is_multimodal_limit_error,
+    is_multimodal_request,
+    node_label,
+    order_by_vision,
+    record_vision_unsupported,
+    register_chat_routes,
+)
 from ainode.bench.api_routes import register_bench_routes
 
 from ainode import __version__
@@ -750,7 +759,11 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "instances": [
                     {"model": inst.get("model"),
                      "api_port": inst.get("api_port"),
-                     "status": inst.get("status")}
+                     "status": inst.get("status"),
+                     # Real launch width (#92): a distributed instance spans
+                     # several nodes and must not read as single-GPU here. An
+                     # older peer sends no field, which reads as 1.
+                     "tensor_parallel_size": instance_parallel(inst)}
                     for inst in (getattr(n, "instances", []) or [])
                     if isinstance(inst, dict) and inst.get("model")
                 ],
@@ -905,6 +918,46 @@ async def handle_v1_models(request: web.Request) -> web.Response:
     return web.json_response({"object": "list", "data": data})
 
 
+def _error_message(text: str) -> Optional[str]:
+    """The engine's own words out of a JSON error body, trimmed for a cache note."""
+    msg = None
+    try:
+        import json as _json
+        payload = _json.loads(text)
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message")
+            elif isinstance(err, str):
+                msg = err
+            msg = msg or payload.get("message")
+    except Exception:
+        pass
+    msg = " ".join(str(msg or text or "").split())
+    return msg[:300] or None
+
+
+def _no_multimodal_instance(model: str, tried: list) -> web.Response:
+    """400 for a multimodal request no instance of a loaded model will take.
+
+    Named nodes, not a bare refusal: the fix is to relaunch one of them without
+    the modality capped (``--limit-mm-per-prompt``), and the caller can only know
+    that if we say which instances were tried.
+    """
+    where = ", ".join(dict.fromkeys(tried)) or "no instance"
+    return web.json_response(
+        {"error": {
+            "message": (f"'{model}' is loaded but no instance accepts images: "
+                        f"tried {where}. Relaunch one of those instances without "
+                        f"the modality capped (--limit-mm-per-prompt), or load "
+                        f"the model on a node that serves it with vision."),
+            "type": "invalid_request_error",
+            "param": "image",
+            "code": "no_multimodal_instance"}},
+        status=400,
+    )
+
+
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     """Forward the request to the node serving the requested model (F1 federation)."""
     config: NodeConfig = request.app["config"]
@@ -913,11 +966,15 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     # Extract the model name first — it drives BOTH routing and metrics.
     model = config.model or "unknown"
     body_bytes = None
+    body_obj: dict = {}
     if request.method == "POST":
         body_bytes = await request.read()
         try:
             import json as _json
-            model = _json.loads(body_bytes).get("model", model)
+            parsed = _json.loads(body_bytes)
+            if isinstance(parsed, dict):
+                body_obj = parsed
+                model = parsed.get("model", model)
         except Exception:
             pass
     # Tag the request so the server-view log middleware can capture the model
@@ -939,6 +996,25 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                            "code": "model_not_found"}},
                 status=404)
         candidates = [("localhost", config.api_port)]  # back-compat: empty fleet → local
+
+    # Capability-aware routing (#83). The same model id can be served text-only
+    # on one node (launched with --limit-mm-per-prompt '{"image":0}') and with
+    # vision on another, so a request carrying an image part cannot be routed on
+    # the model id alone: the text-only instance answers 400 and the caller sees
+    # a failure the fleet could have avoided. Consult the capability cache
+    # /api/models/caps already fills: accepting instances first, never-probed
+    # next, known refusers dropped. A request with no media keeps today's order
+    # exactly (local hop first, then peers).
+    multimodal = is_multimodal_request(body_obj)
+    caps_index: dict = {}
+    refused_labels: list = []
+    if multimodal:
+        caps_index = instance_caps_index(request.app, model)
+        candidates, refused = order_by_vision(candidates, caps_index)
+        refused_labels = [node_label(caps_index, c) for c in refused]
+        if not candidates:
+            collector.record_request(model, 0.0, error=True)
+            return _no_multimodal_instance(model, refused_labels)
 
     # Build upstream request kwargs. Strip content-length: aiohttp recomputes it
     # from `data`, and forwarding the original alongside makes the upstream wait
@@ -978,6 +1054,21 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                     collector.record_request(model, (time.time() - start_time) * 1000, error=False)
                     return resp
                 body = await upstream.read()
+                # A multimodal-limit 400 is a ROUTING miss, not a bad request:
+                # this instance serves the model with the modality capped at
+                # zero. Remember it in the caps cache and fail over, same as a
+                # dead connection. Every OTHER 4xx is the caller's answer and is
+                # returned untouched: we never retry those.
+                if multimodal and upstream.status == 400:
+                    text = body.decode("utf-8", "replace")
+                    if is_multimodal_limit_error(text):
+                        label = node_label(caps_index, (host, port))
+                        record_vision_unsupported(
+                            request.app, model, host, port,
+                            reason=_error_message(text))
+                        refused_labels.append(label)
+                        last_err = f"{label} serves '{model}' without images"
+                        continue
                 collector.record_request(model, (time.time() - start_time) * 1000, error=False)
                 return web.Response(
                     status=upstream.status, body=body,
@@ -988,6 +1079,10 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
             continue
     # Every candidate failed.
     collector.record_request(model, (time.time() - start_time) * 1000, error=True)
+    if multimodal and refused_labels:
+        # The model IS loaded; no instance of it takes images. Say so, and name
+        # the nodes tried, so the caller knows which engine to relaunch.
+        return _no_multimodal_instance(model, refused_labels)
     return web.json_response(
         {"error": {"message": f"no reachable node is serving '{model}' ({last_err})",
                    "type": "server_error"}},

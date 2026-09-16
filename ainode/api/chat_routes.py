@@ -18,6 +18,11 @@ The chat view needs two answers the rest of the API does not already give:
 
 Both routes are read-only inference. Neither loads, unloads nor restarts
 anything. Any field we cannot see is ``null``, never guessed.
+
+The capability cache filled by ``/api/models/caps`` is also what the fleet proxy
+consults before routing a request that carries an image (#83), which is why
+``instance_caps_index`` / ``order_by_vision`` / ``record_vision_unsupported``
+live here: one cache, read by the badge and by routing.
 """
 
 from __future__ import annotations
@@ -446,6 +451,132 @@ async def handle_model_card(request: web.Request) -> web.Response:
     })
 
 
+# ----------------------------------------------------------- caps, shared --
+#
+# One capability cache, shared by /api/models/caps and the proxy's
+# capability-aware routing (#83):
+#
+#     {(node_id, port, model): {"vision": bool|None, "tools": bool|None, ...}}
+#
+# It lives in the process that probed it, and that is the right home for the
+# master: ``probe_caps`` talks to a REMOTE instance directly on its own engine
+# port (``fleet_instances`` hands out the peer's fabric IP), so the master's own
+# cache already describes peer instances. No second cache, and no round trip to
+# a peer's /api/models/caps, is needed.
+
+# Chat-completions content parts that make a request multimodal. One instance can
+# serve a model id text-only (``--limit-mm-per-prompt '{"image":0}'``) while
+# another serves the same id with vision, so the model id alone cannot route
+# these requests.
+_MULTIMODAL_PARTS = ("image_url", "input_audio", "video_url", "file")
+
+# vLLM's refusal when the modality is capped at zero on this instance: "At most
+# 0 image(s) may be provided in one prompt. (parameter=image)". Matched on the
+# stable middle of the sentence so the count, the modality word and the
+# parameter suffix can all move between engine versions.
+_MM_LIMIT_MARKERS = ("may be provided in one prompt", "at most 0 image")
+
+
+def caps_cache(app) -> dict:
+    """The one capability cache, created on first use."""
+    return app.setdefault("chat_caps_cache", {})
+
+
+def is_multimodal_request(body: dict) -> bool:
+    """True when a chat-completions body carries an image, audio, video or file part.
+
+    Tolerant of both shapes clients send: a typed part
+    (``{"type": "image_url", "image_url": {...}}``) and one that only carries
+    the key.
+    """
+    if not isinstance(body, dict):
+        return False
+    for message in (body.get("messages") or []):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "") in _MULTIMODAL_PARTS:
+                return True
+            if any(key in part for key in _MULTIMODAL_PARTS):
+                return True
+    return False
+
+
+def is_multimodal_limit_error(text: str) -> bool:
+    """True when a 400 means "this instance takes no images", not "bad request"."""
+    low = (text or "").lower()
+    return any(marker in low for marker in _MM_LIMIT_MARKERS)
+
+
+def instance_caps_index(app, model: str) -> dict:
+    """``{(host, port): {"node_id", "node_name", "vision"}}`` for each instance of `model`.
+
+    Keyed the way the proxy addresses a candidate, valued from the shared cache:
+    ``True`` probed accepting, ``False`` probed refusing (or caught refusing a
+    live request), ``None`` never probed.
+    """
+    cache = caps_cache(app)
+    index: dict = {}
+    for entry in fleet_instances(app):
+        if entry["model"] != model:
+            continue
+        caps = cache.get((entry["node_id"], entry["port"], model)) or {}
+        index.setdefault((entry["host"], entry["port"]), {
+            "node_id": entry["node_id"],
+            "node_name": entry["node_name"] or entry["node_id"] or entry["host"],
+            "vision": caps.get("vision"),
+        })
+    return index
+
+
+def order_by_vision(candidates: list, index: dict) -> tuple:
+    """Order candidates for a multimodal request. Returns ``(ordered, refused)``.
+
+    Instances known to accept images go first, never-probed ones next (still
+    worth a try, and a refusal teaches the cache), and instances known to refuse
+    are dropped instead of 400ing the caller.
+    """
+    def vision_of(cand):
+        return (index.get(cand) or {}).get("vision")
+
+    accepts = [c for c in candidates if vision_of(c) is True]
+    unknown = [c for c in candidates if vision_of(c) is None]
+    refused = [c for c in candidates if vision_of(c) is False]
+    return accepts + unknown, refused
+
+
+def record_vision_unsupported(app, model: str, host: str, port: int,
+                              reason: Optional[str] = None) -> None:
+    """Remember that the instance at (host, port) will not take an image.
+
+    Writes into the SAME cache /api/models/caps fills, so one live refusal
+    teaches the chat view's badge and the next route at once. ``probed`` stays
+    False: this came from a real request, not from the probe pair.
+    """
+    cache = caps_cache(app)
+    for entry in fleet_instances(app):
+        if entry["model"] != model or entry["host"] != host or entry["port"] != port:
+            continue
+        key = (entry["node_id"], entry["port"], model)
+        caps = dict(cache.get(key) or {})
+        caps.update({"vision": False, "vision_error": reason, "probed": False})
+        caps.setdefault("tools", None)
+        caps.setdefault("tools_error", None)
+        cache[key] = caps
+        return
+
+
+def node_label(index: dict, cand) -> str:
+    """How a candidate is named to the caller: the node name, else host:port."""
+    entry = index.get(cand) or {}
+    return entry.get("node_name") or f"{cand[0]}:{cand[1]}"
+
+
 async def _probe(session, host: str, port: int, body: dict, timeout: float):
     """One probe request. Returns (status, payload) or (None, {}) if unreachable."""
     url = f"http://{host}:{port}/v1/chat/completions"
@@ -541,7 +672,7 @@ async def handle_model_caps(request: web.Request) -> web.Response:
             {"error": {"message": f"'{model}' is not being served by any node",
                        "type": "model_not_found"}}, status=404)
 
-    cache = app.setdefault("chat_caps_cache", {})
+    cache = caps_cache(app)
     key = (entry["node_id"], entry["port"], model)
     if request.query.get("fresh"):
         cache.pop(key, None)

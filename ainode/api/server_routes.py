@@ -20,6 +20,7 @@ import aiohttp
 from aiohttp import web
 
 from ainode.core.config import NodeConfig
+from ainode.discovery.instance import instance_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,63 @@ ENDPOINT_CATALOG = {
 
 
 # ------------------------------------------------------------------
+# Parallelism (#92)
+# ------------------------------------------------------------------
+#
+# `loaded_models[].parallel` used to be a hard-coded 1 on every row, so a model
+# launched across two nodes (tensor_parallel_size 2) read as single-GPU in the
+# Server view, in the fleet dashboard and in a bench record's placement.tp. The
+# launch width lives on the InstanceRecord; these two helpers are the only places
+# that read it, one for a local instance and one for a peer's announcement.
+
+
+def _local_parallel(app, model: str, port: int) -> int:
+    """TP width of a LOCAL instance, from the record that launched it."""
+    manager = app.get("instances")
+    if manager is not None:
+        try:
+            for inst in manager.instances():
+                rec = inst.record
+                if rec.api_port == port and (not model or rec.model == model):
+                    return instance_parallel(rec)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("failed to read local instance parallelism")
+    # A distributed primary that booted from config.json (replayed head) is not
+    # always in the manager yet; its peer list is the same truth.
+    config = app.get("config")
+    if config is not None and getattr(config, "model", None) == model \
+            and (getattr(config, "distributed_mode", "solo") or "solo") == "head":
+        peers = list(getattr(config, "peer_ips", []) or [])
+        if peers:
+            return 1 + len(peers)
+    return 1
+
+
+def _remote_parallel(node, model: str, port: int) -> int:
+    """TP width of a PEER's instance, from the instance list on its announcement.
+
+    A peer's announcement already carries every instance it heads as a wire dict
+    (``InstanceRecord.to_dict()``), tensor_parallel_size included, so the master
+    reads it there. An older peer that sends no instances falls back to its
+    legacy distributed_peers list, then to 1.
+    """
+    for inst in (getattr(node, "instances", []) or []):
+        if not isinstance(inst, dict):
+            continue
+        if inst.get("model") != model:
+            continue
+        inst_port = inst.get("api_port") or port
+        if inst_port == port:
+            return instance_parallel(inst)
+    if (getattr(node, "distributed_mode", "solo") or "solo") == "head" \
+            and getattr(node, "model", "") == model:
+        peers = list(getattr(node, "distributed_peers", []) or [])
+        if peers:
+            return 1 + len(peers)
+    return 1
+
+
+# ------------------------------------------------------------------
 # Handlers
 # ------------------------------------------------------------------
 
@@ -214,7 +272,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
             "format": "SafeTensors",
             "quantization": None,
             "size_bytes": 0,
-            "parallel": 1,
+            "parallel": _local_parallel(request.app, mid, primary_port),
             "capabilities": ["chat", "completions"],
             "loaded_at": start_time,
         })
@@ -251,7 +309,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     "format": "SafeTensors",
                     "quantization": None,
                     "size_bytes": 0,
-                    "parallel": 1,
+                    "parallel": instance_parallel(rec),
                     "capabilities": ["chat", "completions"],
                     "loaded_at": start_time,
                 })
@@ -308,7 +366,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "format": "SafeTensors",
                         "quantization": None,
                         "size_bytes": 0,
-                        "parallel": 1,
+                        "parallel": _remote_parallel(m, m.model, member_port),
                         "capabilities": ["chat", "completions"],
                         "loaded_at": getattr(m, "last_seen", start_time),
                     })
@@ -334,7 +392,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "format": "SafeTensors",
                         "quantization": None,
                         "size_bytes": 0,
-                        "parallel": 1,
+                        "parallel": instance_parallel(inst),
                         "capabilities": ["chat", "completions"],
                         "loaded_at": getattr(m, "last_seen", start_time),
                     })
