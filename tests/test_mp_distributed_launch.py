@@ -36,7 +36,7 @@ DSPARK_SLUG = DSPARK_REPO.replace("/", "--")
 FLASH_ID = "qwen3.8-flash-next-nvfp4"
 FLASH_REPO = "nvidia/Qwen3.8-Flash-Next-NVFP4"
 FLASH_SLUG = FLASH_REPO.replace("/", "--")
-FLASH_IMAGE = "vllm/vllm-openai:v0.29.0"
+FLASH_IMAGE = "vllm/vllm-openai:nightly-af1c01499b289be555c475669ba50a88e96d846e"
 
 MODELS_MOUNT = NvidiaBackend.MODELS_MOUNT
 PEER_CACHE = "/home/ubuntu/ainode-nvidia-cache"
@@ -891,7 +891,7 @@ def test_flash_next_catalog_entry_is_complete():
     # What an operator has to know before pressing launch.
     assert "6B active" in info.description
     assert "TWO GB10 nodes" in info.description
-    assert "vLLM 0.29 or newer" in info.description
+    assert "vLLM nightly newer than 2026-09-03" in info.description
     assert "MTP" in info.description
     assert "strongest coding model" in info.description
 

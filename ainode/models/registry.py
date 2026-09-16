@@ -440,13 +440,13 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "embedding and a 4B MTP module, served across TWO GB10 nodes: 133 GB of "
             "weights does not fit one 121 GB node. The strongest coding model in the "
             "Qwen3.8 line, beating the 27B and DeepSeek V4 Flash on three of the four "
-            "coding rows in Qwen's own table. Needs vLLM 0.29 or newer on every node: "
+            "coding rows in Qwen's own table. Needs a vLLM nightly newer than 2026-09-03 (the 0.29.0 release predates the FP8 PLE fix) on every node: "
             "the Qwen4Exp architecture and the FP8-PLE loader for mixed ModelOpt "
             "checkpoints landed there, and the 0.27/0.28 images do not know it. Mixed "
             "precision (NVFP4 routed experts, FP8 elsewhere, modelopt). MTP "
             "speculative decoding is NOT enabled here: it wants "
             "--enable-expert-parallel, which hangs on this hardware, so it stays a "
-            "follow-up. Not yet served end to end on the fleet."
+            "follow-up. Served end to end on Spark-2 + Spark-3 on 2026-09-16 from an AINode-downloaded copy (36 min to ready, 26.6 tok/s single-stream without MTP)."
         ),
         quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=145,
         family="qwen", params_b=125.0,
@@ -457,7 +457,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         # One vllm serve container per node: nothing in the image but vLLM is
         # needed, which is what makes a pinned upstream tag usable as the engine.
         distributed_executor="mp",
-        engine_image="vllm/vllm-openai:v0.29.0",
+        # Pinned nightly: v0.29.0 diverged from main before the FP8 PLE loading fix
+        # (vLLM d4d703c, 2026-09-03) and rank 1 dies loading ngram_embedding.weight_scale
+        # on it; this nightly (2026-09-16) served the pair. Move to the first release
+        # that contains the fix.
+        engine_image="vllm/vllm-openai:nightly-af1c01499b289be555c475669ba50a88e96d846e",
         kv_cache_dtype="auto",
         # Qwen4Exp QSA raises "requires a BF16 main KV cache" on fp8 (vLLM 0.29.0,
         # first launch on the Spark pair 2026-09-16), so this entry overrides the
