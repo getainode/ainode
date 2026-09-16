@@ -505,16 +505,39 @@ class NvidiaBackend(EngineBackend):
             time.sleep(2)
         return False
 
+    def _engine_container_name(self) -> str:
+        """The container that IS the engine for this backend's launch shape."""
+        if self._is_mp_distributed() or (self.config.distributed_mode or "solo") == "head":
+            return self._head_container_name()
+        return self._solo_container_name()
+
     def is_running(self) -> bool:
         if self._process is not None and self._process.poll() is None:
             return True
-        # In the mp shape the head CONTAINER is the server; ``_process`` is only
-        # the ``docker logs -f`` follower, so a dead follower (log stream closed,
-        # AINode restarted) must not read as a dead engine. The Ray and solo
-        # shapes keep the process-only answer and never pay for a docker call.
-        if self._is_mp_distributed():
-            return self._docker_container_state(self._head_container_name()) == "running"
-        return False
+        # The launch subprocess is not the engine: the solo ``docker run -d``
+        # returns as soon as the container exists and the mp head's ``_process``
+        # is only the ``docker logs -f`` follower. Once THIS backend has issued a
+        # launch, ask docker about its container. A backend that never launched
+        # keeps the process-only answer and never pays for a docker call.
+        if self._launched_at is None and not self._is_mp_distributed():
+            return False
+        return self._docker_container_state(self._engine_container_name()) == "running"
+
+    def engine_exited(self) -> Optional[bool]:
+        """See ``EngineBackend.engine_exited``: judged from ``docker inspect``.
+
+        'running' is alive. 'exited', 'dead' or 'removing' is gone. An absent
+        container is gone only once a launch was actually issued (a fresh
+        backend that has not launched yet has nothing to be dead).
+        """
+        state = self._docker_container_state(self._engine_container_name())
+        if state == "running":
+            return False
+        if state in ("exited", "dead", "removing"):
+            return True
+        if state == "":
+            return self._launched_at is not None
+        return None
 
     def health_check(self) -> dict:
         """Mirrors EugrBackend.health_check for dashboard parity."""

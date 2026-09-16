@@ -108,6 +108,19 @@ class EngineBackend(abc.ABC):
         """
         return None
 
+    def engine_exited(self) -> Optional[bool]:
+        """Positive evidence about the engine container itself, or None.
+
+        True: the container this backend launched is gone or stopped. False: it
+        is running. None: this backend has no container-level view, so the
+        caller may fall back to its launch subprocess. A detached ``docker run
+        -d`` returns in a second while the engine keeps loading, so the
+        subprocess alone is NOT evidence of death (every solo launch on 0.5.12
+        earned a pointless relaunch that then failed on the container-name
+        conflict).
+        """
+        return None
+
     @property
     def launched_at(self) -> Optional[float]:
         """Epoch seconds when this backend last issued a launch, or None.
