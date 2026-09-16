@@ -8,7 +8,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The chat Thinking toggle and the bench's reasoning section now reach DeepSeek V4.** Both sent only Qwen's `enable_thinking` switch, and the toggle sent nothing at all when ON, so a DeepSeek engine launched with thinking off by default could never be turned on from the UI, and the bench's DeepSeek "thinking on" measurement was thinking off. Both states are now sent explicitly under both template switch names (`enable_thinking` and `thinking`); a template ignores the name it does not read.
 
 ---
 
