@@ -199,14 +199,17 @@ the fleet, hidden tests 6/6 for every one of them.
 | Harness | Version | First-attempt wall clock |
 |---------|---------|--------------------------|
 | `aider` | 0.86.2 (PyPI `aider-chat`) | 10 s |
-| `opencode` | 1.18.31 (`opencode-ai`) | 16 s (about 18 s of any run is skill loading) |
+| `opencode` | 1.18.31 (`opencode-ai`) | 16 s |
 | `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | 20 s |
 | `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | 34 s |
 
-One task on one model is a working adapter, not a score, and the wall clocks are not
-comparable as they stand: opencode spends about 18 s loading skills before it starts
-and dsh installs its profile on first use. Read them as "this adapter reaches the
-endpoint and the model can do the task", and get the real numbers from a full run.
+One task on one model is a working adapter, not a score. Read the column as "this
+adapter reaches the endpoint and the model can do the task" and nothing more: these
+are single observations, the harnesses were not run under identical conditions, and
+opencode's startup alone was separately timed at about 18 s, which is longer than its
+whole run above. Startup overhead is real and it is inside `mean_wall_s` (opencode
+loads every installed skill; dsh installs its profile on first use), so a comparison
+worth making comes out of a full run with the caveats in the per-harness notes below.
 
 ### aider
 
