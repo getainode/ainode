@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.18] - 2026-09-16
+
+The distributed launch serves a model downloaded through AINode; harness bench; Qwen3.8-Flash-Next entry.
+
 ### Fixed
 - **A distributed launch now serves a model that was downloaded through AINode instead of making every node re-download it.** `POST /api/models/download-repo` writes a flat `<models_dir>/<owner--name>` directory, not the Hugging Face cache layout, and the solo launch has served that directory for releases. The distributed shapes did not: both served the repo id, the head and peer containers mounted only the HF cache, and `_ensure_peer_has_model` distributed only a `hub/models--<owner>--<name>` entry, so a 133 GB model already sitting on the head was pulled again on every rank, over the WAN, for every launch. Both shapes now go through one resolver: when that flat directory exists on the head and the mount is trustworthy (the same `AINODE_HOST_HOME` test the solo path uses), every rank serves `/ainode-models/<owner--name>` with `--served-model-name <repo id>` so `/v1/models` is unchanged, and every rank mounts its own copy of the store there: the head's `models_dir`, a peer's `/home/<ssh_user>/ainode-nvidia-models` (chosen like the peer HF cache, because we ssh in as that user). `_ensure_peer_has_model` ships the flat directory over the fabric (rsync when present, else tar over ssh, skipped when the peer already has it) instead of the hub entry, and the peer's `mkdir -p` covers the new path so docker can never invent a root-owned empty bind source. With no such local copy, nothing changes: the repo id is served and only the HF cache is mounted. A recipe that states `--served-model-name` itself still wins, in solo too.
 
