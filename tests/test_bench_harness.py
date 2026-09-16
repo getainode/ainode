@@ -532,6 +532,17 @@ def test_the_record_has_a_harness_block_and_no_invented_throughput(two_fer, tmp_
     assert "/api/metrics" in notes
 
 
+def test_the_recorded_command_keeps_the_flags_and_elides_the_prompt():
+    from ainode.bench.harness.adapters import recorded_command
+
+    recorded = recorded_command(["aider", "--model", "openai/x", "--message",
+                                 "instructions " * 200, "x.py"])
+    assert "--model openai/x" in recorded
+    assert "instructions instructions" not in recorded
+    assert "<2600 chars>" in recorded
+    assert recorded.endswith("x.py")
+
+
 def test_the_ainode_base_is_the_endpoint_without_its_v1():
     assert ainode_base("http://node:3000/v1") == "http://node:3000"
     assert ainode_base("http://node:3000/v1/") == "http://node:3000"

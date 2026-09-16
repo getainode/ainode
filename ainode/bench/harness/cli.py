@@ -166,6 +166,10 @@ def main(argv=None, out_dir=None) -> int:
     names = [h.strip() for h in args.harness.split(",") if h.strip()]
     if not names:
         p.error("--harness needs at least one name")
+    if args.attempts < 1:
+        p.error("--attempts must be at least 1")
+    if args.timeout <= 0:
+        p.error("--timeout must be positive")
     try:
         adapters = [registry.get(n) for n in names]
     except KeyError as exc:

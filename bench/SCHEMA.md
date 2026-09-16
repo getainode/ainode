@@ -83,7 +83,7 @@ blocks in one file and does get a row.
             "attempts": [
               {
                 "attempt": 1,
-                "harness": { "command": "aider --model openai/... isogram.py",
+                "harness": { "command": "aider --model openai/... --message '<602 chars>' isogram.py",
                              "exit_code": 0, "wall_s": 10.2, "timed_out": false,
                              "crashed": false, "turns": 1,
                              "tokens_sent": 709, "tokens_received": 87,
@@ -118,6 +118,11 @@ Rules specific to this block, all load-bearing:
   `tokens_received` under an attempt are the harness's own report of what it sent,
   which is a different thing and labelled separately.
 - `version: null` means the harness could not be asked, and the notes say so.
+- `command` keeps every flag verbatim and elides any argument over 200 characters as
+  `<N chars>`. That argument is the prompt, which is the task's instructions plus (on
+  a second attempt) a screenful of pytest output; it is regenerated exactly from the
+  task by `build_prompt`, and recording it twice per task would make the file mostly
+  prompt.
 - `context_window_declared` / `max_output_tokens_declared` are what two of the
   harnesses had to be told before they would route; they are declared inputs, not
   properties of the served model.

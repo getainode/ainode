@@ -32,6 +32,8 @@ from pathlib import Path
 DEFAULT_API_KEY = "ainode"
 VERSION_TIMEOUT = 30
 TAIL_CHARS = 2000
+#: Longer than this, an argv entry is the prompt, and the record elides it.
+ARG_PREVIEW = 200
 
 # Catalog defaults for the harnesses that demand a model entry before they will
 # route. Conservative rather than accurate: they are declared, and recorded as
@@ -98,7 +100,7 @@ class HarnessRun:
     error: str | None = None
 
     def as_json(self) -> dict:
-        out = {"command": shlex.join(self.command), "exit_code": self.exit_code,
+        out = {"command": recorded_command(self.command), "exit_code": self.exit_code,
                "wall_s": round(self.wall_s, 2), "timed_out": self.timed_out,
                "crashed": self.crashed}
         for key in ("turns", "tokens_sent", "tokens_received", "error"):
@@ -115,6 +117,18 @@ class HarnessRun:
 def tail(text: str, chars: int = TAIL_CHARS) -> str:
     text = (text or "").strip()
     return text if len(text) <= chars else "..." + text[-chars:]
+
+
+def recorded_command(command: list[str], limit: int = ARG_PREVIEW) -> str:
+    """The argv for the record, with the prompt argument elided.
+
+    The flags are the reproducible part and they go in whole. The prompt does not:
+    it is a task's instructions plus, on a second attempt, a screenful of pytest
+    output, and putting all of that in the record twice per task would make a
+    ten-task run's JSON mostly prompt. It is regenerated exactly by
+    ``build_prompt`` from the task anyway.
+    """
+    return shlex.join(f"<{len(a)} chars>" if len(a) > limit else a for a in command)
 
 
 class HarnessAdapter:
