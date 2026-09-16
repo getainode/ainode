@@ -1725,7 +1725,8 @@
   "A harness crash or timeout still gets its tests run against whatever it left on disk; crashes and timeouts are counted separately.",
   "Token counts are AINode's /api/metrics counters differenced over each task's window: they are the node's totals, so any other traffic on the node during the run is inside them.",
   "Version unknown for: pi, aider.",
-  "Spark-1-DGX does not report serving nvidia/Qwen3.8-Flash-Next-NVFP4; placement and telemetry may describe the wrong node"
+  "Spark-1-DGX does not report serving nvidia/Qwen3.8-Flash-Next-NVFP4; placement and telemetry may describe the wrong node",
+  "The claude rows here are a configuration miss, not a model result: Claude Code's default reasoning effort 'high' is rejected by Flash-Next's chat template (400 'Unexpected reasoning effort high'); the rerun at effort medium is the separate record from 20:51 the same day (8/10 then 10/10, 46 s mean). Treat these claude scores as not measured."
  ],
  "source": "scripts/ainode-bench.py harness"
 }
