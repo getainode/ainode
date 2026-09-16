@@ -123,11 +123,13 @@ class NodeConfig:
     # death.
     #
     # engine_bind_log_silence_seconds: how long the engine's log may go quiet
-    # while still counting as alive. A starting engine prints weight-shard,
-    # autotune and graph-capture lines far more often than this; a wedged one
-    # prints nothing. Past this gap (container still up, port still closed) the
-    # replay calls the start dead and relaunches once.
-    engine_bind_log_silence_seconds: int = 120
+    # while still counting as alive. vLLM prints its weight-loading progress bar
+    # once per shard: a two-shard checkpoint on a GB10 was quiet for 206 s
+    # between updates (Qwen3.8 27B NVFP4, 2026-09-16), so anything under about
+    # four minutes declares a healthy load dead. A wedged engine prints nothing
+    # at all. Past this gap (container still up, port still closed) the replay
+    # calls the start dead and relaunches once.
+    engine_bind_log_silence_seconds: int = 360
     # engine_bind_ceiling_seconds: absolute cap on one bind wait, so an engine
     # that is wedged but still chatty cannot hold boot open forever. Generous on
     # purpose: the slowest bind measured on a GB10 (27B NVFP4, autotune + graph
