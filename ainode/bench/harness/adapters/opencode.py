@@ -93,6 +93,19 @@ class OpencodeAdapter(HarnessAdapter):
         return [ConfigFile(req.workdir / CONFIG_NAME,
                            json.dumps(project_config(req), indent=1) + "\n")]
 
+    def env(self, req: HarnessRequest) -> dict[str, str]:
+        # OpenCode keeps a SQLite database, logs and snapshots under the XDG
+        # directories and reads global config from ~/.config/opencode. Point all
+        # of that at the run's own scratch dir so runs never share state and a
+        # crashed run cannot poison the next one (it creates the dirs itself).
+        xdg = req.scratch / "opencode-xdg"
+        return {
+            "XDG_DATA_HOME": str(xdg / "data"),
+            "XDG_CONFIG_HOME": str(xdg / "config"),
+            "XDG_CACHE_HOME": str(xdg / "cache"),
+            "XDG_STATE_HOME": str(xdg / "state"),
+        }
+
     def command(self, req: HarnessRequest) -> list[str]:
         return [
             self.binary, "run",
