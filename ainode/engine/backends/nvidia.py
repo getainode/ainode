@@ -235,7 +235,13 @@ class NvidiaBackend(EngineBackend):
             daemon=True,
         )
         self._log_thread.start()
-        return self._confirm_container_started(container_name)
+        if not self._confirm_container_started(container_name):
+            return False
+        # ``docker run -d`` has returned by now; follow the container itself so
+        # the engine's own output reaches the solo log and keeps
+        # ``last_log_activity`` moving for the bind wait.
+        self._follow_container_logs(container_name, self._log_file)
+        return True
 
     def _confirm_container_started(self, container_name: str, timeout: float = 25.0) -> bool:
         """Return True only if the container is actually RUNNING shortly after
@@ -1367,13 +1373,19 @@ class NvidiaBackend(EngineBackend):
             return False
         return True
 
-    def _follow_container_logs(self, container_name: str) -> None:
-        """Stream ``docker logs -f <container>`` into the distributed log file.
+    def _follow_container_logs(self, container_name: str, target: Optional[Path] = None) -> None:
+        """Stream ``docker logs -f <container>`` into ``target`` (the distributed
+        log by default, the solo log for a solo launch).
 
         The resulting Popen becomes ``self._process``, which is what
         ``is_running`` / ``wait_ready`` / ``stop`` already watch, and feeds
         ``_stream_logs`` so ``last_log_activity`` (the adaptive bind wait's
-        liveness signal) comes from the engine's own stdout.
+        liveness signal) comes from the engine's own stdout. Every detached
+        launch needs this: a ``docker run -d`` client prints one container id
+        and exits, so without a follower the engine looks silent, the bind wait
+        gives up at the silence threshold, and the next stacked launch starts
+        while this one is still loading (Spark-1, 0.5.13 roll: Ornith died
+        with "No available memory for the cache blocks").
         """
         self._process = subprocess.Popen(
             ["docker", "logs", "-f", container_name],
@@ -1385,7 +1397,7 @@ class NvidiaBackend(EngineBackend):
         )
         self._log_thread = threading.Thread(
             target=self._stream_logs,
-            args=(self._process, self._distributed_log),
+            args=(self._process, target if target is not None else self._distributed_log),
             daemon=True,
         )
         self._log_thread.start()
