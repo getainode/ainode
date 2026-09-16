@@ -32,15 +32,24 @@ def test_readme_table_matches_results():
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
-def test_every_result_file_has_a_row():
+def test_every_throughput_result_file_has_a_row():
+    """One row per run that measured throughput.
+
+    A harness-bench record (a `harness` block and no `single_stream`) measured a
+    coding agent instead, so every column here would read "not measured"; those are
+    filtered out rather than rendered as a very slow model.
+    """
     m = _module()
     runs = m.load_runs(REPO / "bench" / "results")
     table = m.render_table(runs)
-    files = sorted(p.name for p in (REPO / "bench" / "results").glob("*.json"))
-    assert files, "no bench results to render"
-    for name in files:
-        assert name in table, f"{name} missing from the rendered table"
-    assert len(table.splitlines()) == len(files) + 2  # header + rule + one row each
+    shown = m.throughput_runs(runs)
+    skipped = [r["_file"] for r in runs if m.is_harness_run(r)]
+    assert shown, "no throughput bench results to render"
+    for run in shown:
+        assert run["_file"] in table, f"{run['_file']} missing from the rendered table"
+    for name in skipped:
+        assert name not in table, f"{name} is a harness run and should not be a row"
+    assert len(table.splitlines()) == len(shown) + 2  # header + rule + one row each
 
 
 def test_missing_measurement_is_not_invented(tmp_path):

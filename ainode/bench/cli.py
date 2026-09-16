@@ -33,7 +33,9 @@ SOURCE = "scripts/ainode-bench.py"
 def build_parser():
     p = argparse.ArgumentParser(
         prog="ainode-bench",
-        description="measure what a spec sheet does not, on an AINode-served model")
+        description="measure what a spec sheet does not, on an AINode-served model",
+        epilog="subcommand: `ainode-bench harness --help` measures a model driving a "
+               "coding agent to passing tests instead of its throughput")
     p.add_argument("--url", help="engine or AINode proxy base, e.g. http://host:8000")
     p.add_argument("--model", help="model id exactly as served")
     p.add_argument("--ainode", default="", help="AINode web base, e.g. http://host:3000 "
@@ -54,6 +56,16 @@ def build_parser():
 
 
 def main(argv=None, out_dir=None):
+    # One subcommand, dispatched before argparse sees it, so every existing flag
+    # keeps working exactly as documented. `harness` measures a different thing
+    # (a model driving a coding agent to passing tests) and has its own parser in
+    # ainode/bench/harness/cli.py; everything else is the throughput bench.
+    words = list(sys.argv[1:]) if argv is None else list(argv)
+    if words and words[0] == "harness":
+        from ainode.bench.harness.cli import main as harness_main
+
+        return harness_main(words[1:], out_dir=out_dir)
+
     p = build_parser()
     a = p.parse_args(argv)
     out_dir = pathlib.Path(out_dir) if out_dir else pathlib.Path.cwd() / "bench" / "results"

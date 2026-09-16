@@ -1,0 +1,22 @@
+{
+ "slug": "robot-name",
+ "language": "python",
+ "entry": "robot_name.py",
+ "instructions": "instructions.md",
+ "tests": [
+  "tests/robot_name_test.py"
+ ],
+ "test_command": [
+  "python",
+  "-m",
+  "pytest",
+  "-q",
+  "robot_name_test.py"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/robot-name",
+  "license": "MIT"
+ }
+}
