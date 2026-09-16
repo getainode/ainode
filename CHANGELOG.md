@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.13] - 2026-09-15
+
+Engine liveness comes from the container, not the launch client.
+
 ### Fixed
 - **A solo engine is no longer declared dead the moment its `docker run -d` client returns.** 0.5.12 made the solo launch detached (#85), but the bind wait still judged death from the launch subprocess, so every solo launch read as `container exited` after 1 to 11 s and got a relaunch that failed on the container-name conflict with its own live engine (seen on every 0.5.12 roll of Spark-1). The backend now answers `engine_exited()` from `docker inspect`, `is_running()` asks docker for every launch shape, and the bind wait trusts that before the subprocess.
 
