@@ -795,7 +795,10 @@ def test_a_harness_record_with_throughput_in_it_still_gets_a_row(tmp_path):
 def test_timeout_kills_the_whole_process_group(tmp_path):
     """The agent forks a child that outlives it; after the timeout neither may
     remain (OpenCode left a server behind and the next run hung)."""
-    import os as _os, signal as _signal, subprocess as _sp, time as _time
+    import os as _os
+    import signal as _signal
+    import subprocess as _sp
+    import time as _time
     from ainode.bench.harness.adapters import _launch
     pidfile = tmp_path / "child.pid"
     script = (
@@ -819,7 +822,8 @@ def test_timeout_kills_the_whole_process_group(tmp_path):
 
 
 def test_normal_completion_returns_output_and_reaps_the_group(tmp_path):
-    import os as _os, sys as _sys
+    import os as _os
+    import sys as _sys
     from ainode.bench.harness.adapters import _launch
     proc = _launch([_sys.executable, "-c", "print('hi'); import sys; sys.stderr.write('err')"],
                    cwd=str(tmp_path), env=dict(_os.environ), timeout=10)
