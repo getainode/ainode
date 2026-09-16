@@ -31,6 +31,16 @@ from ainode.engine.backends.nvidia import (
 DSPARK_ID = "deepseek-v4-flash-dspark"
 DSPARK_REPO = "fraserprice/DeepSeek-V4-Flash-DSpark"
 DSPARK_IMAGE = "vllm-dspark-runtime:dspark-nvfp4-stage-c"
+DSPARK_SLUG = DSPARK_REPO.replace("/", "--")
+
+FLASH_ID = "qwen3.8-flash-next-nvfp4"
+FLASH_REPO = "nvidia/Qwen3.8-Flash-Next-NVFP4"
+FLASH_SLUG = FLASH_REPO.replace("/", "--")
+FLASH_IMAGE = "vllm/vllm-openai:v0.29.0"
+
+MODELS_MOUNT = NvidiaBackend.MODELS_MOUNT
+PEER_CACHE = "/home/ubuntu/ainode-nvidia-cache"
+PEER_MODELS = "/home/ubuntu/ainode-nvidia-models"
 
 
 class _FakePopen:
@@ -117,12 +127,29 @@ def _peer_cmd(config: NodeConfig, **kw) -> List[str]:
         return b._build_mp_docker_cmd(
             container_name=b._worker_container_name("10.100.0.13"), node_rank=1,
             nnodes=2, master_addr="10.100.0.11",
-            hf_cache_dir="/home/ubuntu/ainode-nvidia-cache", node_ip="10.100.0.13",
+            hf_cache_dir=PEER_CACHE, node_ip="10.100.0.13",
+            models_dir=PEER_MODELS,
         )
 
 
 def _after(argv: List[str], flag: str) -> str:
     return argv[argv.index(flag) + 1]
+
+
+def _downloaded(tmp_path, monkeypatch, repo: str = DSPARK_REPO) -> str:
+    """Make ``repo`` look like it was downloaded THROUGH AINode and return the
+    ``models_dir`` to configure.
+
+    ``POST /api/models/download-repo`` writes a flat ``<models_dir>/<org--name>``
+    directory, not the HF cache layout, which is the case the mp launch used to
+    miss. The env is cleared so the mount reads as trustworthy (a host-side run).
+    """
+    monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    d = tmp_path / repo.replace("/", "--")
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}")
+    return str(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +556,173 @@ def test_a_recipe_supplied_rendezvous_flag_is_not_duplicated():
 
 
 # ---------------------------------------------------------------------------
+# A model downloaded THROUGH AINode (flat org--name dir) serves off local disk
+# on every rank, instead of vLLM re-downloading it per node (#120).
+# ---------------------------------------------------------------------------
+
+
+def test_mp_head_serves_the_flat_download_and_mounts_the_model_store(tmp_path, monkeypatch):
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    argv = _head_cmd(_mp_config(models_dir=models_dir))
+
+    i = argv.index(DSPARK_IMAGE)
+    assert argv[i + 1 : i + 4] == ["vllm", "serve", f"{MODELS_MOUNT}/{DSPARK_SLUG}"]
+    # The head's own store, read-only, at the same mount point solo uses.
+    assert f"{models_dir}:{MODELS_MOUNT}:ro" in argv
+    # /v1/models stays addressable by the repo id even though we serve a path.
+    assert _after(argv, "--served-model-name") == DSPARK_REPO
+
+
+def test_mp_head_still_serves_the_repo_id_when_nothing_is_on_disk(tmp_path, monkeypatch):
+    monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    argv = _head_cmd(_mp_config(models_dir=str(tmp_path)))
+
+    i = argv.index(DSPARK_IMAGE)
+    assert argv[i + 1 : i + 4] == ["vllm", "serve", DSPARK_REPO]
+    # Today's behaviour exactly: no model store mounted, no name args.
+    assert MODELS_MOUNT not in " ".join(argv)
+    assert "--served-model-name" not in argv
+
+
+def test_mp_head_keeps_the_repo_id_in_a_container_without_a_host_path(tmp_path, monkeypatch):
+    """Same guard as solo: an untranslatable -v SOURCE would mount an empty dir."""
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+    argv = _head_cmd(_mp_config(models_dir=models_dir))
+    assert argv[argv.index(DSPARK_IMAGE) + 3] == DSPARK_REPO
+    assert MODELS_MOUNT not in " ".join(argv)
+
+
+def test_mp_peer_mounts_its_own_store_at_the_same_mount_point(tmp_path, monkeypatch):
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    config = _mp_config(models_dir=models_dir)
+    head, peer = _head_cmd(config), _peer_cmd(config)
+
+    assert f"{PEER_MODELS}:{MODELS_MOUNT}:ro" in peer
+    assert f"{models_dir}:{MODELS_MOUNT}:ro" not in peer   # the head's path is not the peer's
+    # THE invariant: the serve target string is identical on every rank.
+    assert peer[peer.index(DSPARK_IMAGE) + 3] == head[head.index(DSPARK_IMAGE) + 3]
+    assert peer[peer.index(DSPARK_IMAGE) + 3] == f"{MODELS_MOUNT}/{DSPARK_SLUG}"
+    # Rendezvous args still land last, so --headless stays the final token.
+    assert peer[-1] == "--headless"
+
+
+def test_mp_peer_launch_distributes_the_flat_download_and_mounts_it(tmp_path, monkeypatch):
+    """End to end over the (faked) ssh: transfer, mkdir, mount, serve target."""
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    b = _backend(_mp_config(models_dir=models_dir))
+    calls: List[List[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "ssh" and "test -d" in cmd[-1]:
+            return _FakeCompleted(stdout="missing\n")
+        return _FakeCompleted(returncode=0)
+
+    fabric, hca = _nccl_free()
+    with fabric, hca, mock.patch(
+        "ainode.engine.backends.nvidia.shutil.which", return_value=None
+    ), mock.patch(
+        "ainode.engine.backends.nvidia.subprocess.run", side_effect=fake_run
+    ):
+        b._ssh_launch_mp_worker(peer_ip="10.100.0.13", head_ip="10.100.0.11",
+                                node_rank=1, nnodes=2)
+
+    # The flat dir goes over the fabric with tar-over-ssh, models dir to models dir.
+    tar = [c for c in calls if c and c[0] == "bash"]
+    assert len(tar) == 1, calls
+    payload = tar[0][2]
+    assert f"tar -C {models_dir} -cf - {DSPARK_SLUG}" in payload
+    assert f"tar -C {PEER_MODELS} -xf -" in payload
+    assert "ubuntu@10.100.0.13" in payload
+    # No hub entry is shipped: the flat dir is what every rank is told to serve.
+    assert "models--" not in payload
+
+    remote = [c for c in calls if c and c[0] == "ssh"][-1][-1]
+    assert f"mkdir -p {PEER_CACHE} {PEER_MODELS}" in remote
+    assert f"-v {PEER_MODELS}:{MODELS_MOUNT}:ro" in remote
+    assert f"serve {MODELS_MOUNT}/{DSPARK_SLUG}" in remote
+    assert f"--served-model-name {DSPARK_REPO}" in remote
+
+
+def test_peer_transfer_of_the_flat_download_skips_when_the_peer_has_it(tmp_path, monkeypatch):
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    b = _backend(_mp_config(models_dir=models_dir))
+    calls: List[List[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeCompleted(stdout="present\n")
+
+    with mock.patch("ainode.engine.backends.nvidia.subprocess.run", side_effect=fake_run):
+        b._ensure_peer_has_model("10.100.0.13", PEER_CACHE, PEER_MODELS)
+
+    assert len(calls) == 1 and calls[0][0] == "ssh"     # the probe, nothing else
+    assert f"test -d {PEER_MODELS}/{DSPARK_SLUG}" in calls[0][-1]
+    assert not any(c[0] in ("bash", "rsync") for c in calls)
+
+
+def test_peer_transfer_falls_back_to_the_hub_entry_without_a_flat_download(tmp_path, monkeypatch):
+    """No flat download: the old hub-cache distribution is untouched."""
+    monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    hub = tmp_path / "hf-cache" / "hub" / f"models--{DSPARK_SLUG}"
+    hub.mkdir(parents=True)
+    b = _backend(_mp_config(models_dir=str(tmp_path),
+                            hf_cache_dir=str(tmp_path / "hf-cache")))
+    calls: List[List[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "ssh" and "test -d" in cmd[-1]:
+            return _FakeCompleted(stdout="missing\n")
+        return _FakeCompleted(returncode=0)
+
+    with mock.patch(
+        "ainode.engine.backends.nvidia.shutil.which", return_value=None
+    ), mock.patch("ainode.engine.backends.nvidia.subprocess.run", side_effect=fake_run):
+        b._ensure_peer_has_model("10.100.0.13", PEER_CACHE, PEER_MODELS)
+
+    payload = [c for c in calls if c and c[0] == "bash"][0][2]
+    assert f"models--{DSPARK_SLUG}" in payload
+    assert f"tar -C {PEER_CACHE}/hub -xf -" in payload
+
+
+def test_a_recipe_supplied_served_model_name_is_not_duplicated(tmp_path, monkeypatch):
+    # vLLM errors on a duplicate flag, so a recipe that names the served id keeps
+    # its value and we emit nothing, the same rule as every other serve flag.
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    argv = _head_cmd(_mp_config(models_dir=models_dir,
+                                extra_vllm_args=["--served-model-name", "flash-next"]))
+    assert argv.count("--served-model-name") == 1
+    assert _after(argv, "--served-model-name") == "flash-next"
+    assert DSPARK_REPO not in argv[argv.index(DSPARK_IMAGE) + 4 :]
+
+
+def test_ray_shape_also_serves_the_flat_download_on_every_rank(tmp_path, monkeypatch):
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    b = _backend(_mp_config(models_dir=models_dir, distributed_executor="ray"))
+    fabric, hca = _nccl_free()
+    with fabric, hca:
+        head = b._build_ray_docker_cmd(
+            container_name=HEAD_CONTAINER_NAME, role="head", head_ip="10.100.0.11",
+            node_ip="10.100.0.11", hf_cache_dir="/root/.ainode/models/hf-cache",
+        )
+        peer = b._build_ray_docker_cmd(
+            container_name="w", role="worker", head_ip="10.100.0.11",
+            node_ip="10.100.0.13", hf_cache_dir=PEER_CACHE, models_dir=PEER_MODELS,
+        )
+        exec_cmd = b._build_vllm_exec_cmd(tp_size=2)
+
+    assert f"{models_dir}:{MODELS_MOUNT}:ro" in head
+    assert f"{PEER_MODELS}:{MODELS_MOUNT}:ro" in peer
+    inner = exec_cmd[-1]
+    assert f"vllm serve {MODELS_MOUNT}/{DSPARK_SLUG}" in inner
+    assert f"--served-model-name {DSPARK_REPO}" in inner
+
+
+# ---------------------------------------------------------------------------
 # Catalog entry
 # ---------------------------------------------------------------------------
 
@@ -644,6 +838,110 @@ def test_rendered_deepseek_commands_carry_the_whole_proven_recipe():
         # 0.17-era GB10 workarounds must not ride along on a custom image, and
         # that includes the attention-backend pin: this fork HONORS it, and a
         # dense backend on V4's sparse MLA path is how a serve talks nonsense.
+        assert "--enforce-eager" not in joined
+        assert "VLLM_ATTENTION_BACKEND" not in joined
+    assert "--headless" not in " ".join(head)
+    assert " ".join(peer).endswith("--headless")
+
+
+def test_flash_next_catalog_entry_is_complete():
+    from ainode.models.registry import CURATED_CLUSTER_MODELS, ModelInfo
+
+    info = CURATED_CLUSTER_MODELS[FLASH_ID]
+    assert info.hf_repo == FLASH_REPO
+    assert info.name == "Qwen3.8-Flash-Next (NVFP4)"
+    assert (info.size_gb, info.params_b) == (133.0, 125.0)
+    assert info.context_length == 262144
+    assert info.license == "Apache 2.0"
+    assert info.family == "qwen"
+    assert info.quantization == "NVFP4 (mixed, FP8 PLE)"
+    assert info.format == "safetensors"
+    assert info.proven_tp == 2
+    assert info.verified is False        # not served end to end on the fleet yet
+    assert info.recommended is False     # flips with verified, once proven
+    assert info.curated is True
+    assert info.distributed_executor == "mp"
+    assert info.engine_image == FLASH_IMAGE
+    assert info.kv_cache_dtype == "fp8"
+    assert info.max_model_len == 262144
+    assert info.trust_remote_code is True
+    assert info.recommended_gmu == 0.85
+    assert set(info.capabilities) == {"tool_use", "reasoning", "code"}
+    assert ModelInfo(**info.to_dict()) == info
+
+    # The recipe states the flags the backend does NOT emit, and none it does.
+    assert _after(info.extra_vllm_args, "--quantization") == "modelopt"
+    assert _after(info.extra_vllm_args, "--reasoning-parser") == "qwen3"
+    assert _after(info.extra_vllm_args, "--tool-call-parser") == "qwen3_coder"
+    assert "--enable-prefix-caching" in info.extra_vllm_args
+    assert "--enable-auto-tool-choice" in info.extra_vllm_args
+    for emitted in ("--tensor-parallel-size", "--nnodes", "--node-rank",
+                    "--master-addr", "--master-port", "--kv-cache-dtype",
+                    "--max-model-len", "--gpu-memory-utilization", "--host",
+                    "--port", "--trust-remote-code", "--served-model-name"):
+        assert emitted not in info.extra_vllm_args, emitted
+    # MTP speculative decoding wants --enable-expert-parallel, which hangs on this
+    # MoE/hardware (engine/AGENTS.md). Deliberately a follow-up, not shipped here.
+    for deferred in ("--enable-expert-parallel", "--speculative-config",
+                     "--speculative_config"):
+        assert deferred not in info.extra_vllm_args, deferred
+    # A stock vllm/vllm-openai image needs no PATH/HF_HOME surgery.
+    assert info.extra_env == {} and info.extra_volumes == []
+
+    # What an operator has to know before pressing launch.
+    assert "6B active" in info.description
+    assert "TWO GB10 nodes" in info.description
+    assert "vLLM 0.29 or newer" in info.description
+    assert "MTP" in info.description
+    assert "strongest coding model" in info.description
+
+
+def test_flash_next_recipe_reaches_the_launch_config():
+    from ainode.models.api_routes import catalog_recipe
+
+    recipe = catalog_recipe(FLASH_REPO)
+    assert recipe == catalog_recipe(FLASH_ID)
+    assert recipe["distributed_executor"] == "mp"
+    assert recipe["engine_image"] == FLASH_IMAGE
+    assert recipe["kv_cache_dtype"] == "fp8"
+    assert recipe["kv_cache_dtype_explicit"] is True
+    assert recipe["max_model_len"] == 262144
+    assert recipe["trust_remote_code"] is True
+    assert recipe["gpu_memory_utilization"] == 0.85
+    assert "extra_env" not in recipe
+
+
+def test_rendered_flash_next_commands_serve_the_ainode_download(tmp_path, monkeypatch):
+    """End to end on the argv: the catalog entry plus the mp shape serve the copy
+    the UI downloaded, on both nodes, with one identical serve target."""
+    from ainode.models.api_routes import RECIPE_CONFIG_KEYS, catalog_recipe
+
+    models_dir = _downloaded(tmp_path, monkeypatch, FLASH_REPO)
+    recipe = catalog_recipe(FLASH_REPO)
+    cfg_kwargs = {k: recipe[k] for k in RECIPE_CONFIG_KEYS if k in recipe}
+    config = _mp_config(model=FLASH_REPO, models_dir=models_dir,
+                        gpu_memory_utilization=recipe["gpu_memory_utilization"],
+                        **cfg_kwargs)
+    head, peer = _head_cmd(config), _peer_cmd(config)
+
+    for argv, rank, store in ((head, "0", models_dir), (peer, "1", PEER_MODELS)):
+        joined = " ".join(argv)
+        assert FLASH_IMAGE in argv
+        assert f"-v {store}:{MODELS_MOUNT}:ro" in joined
+        assert f"serve {MODELS_MOUNT}/{FLASH_SLUG}" in joined
+        assert f"--served-model-name {FLASH_REPO}" in joined
+        assert "--tensor-parallel-size 2" in joined
+        assert "--distributed-executor-backend mp" in joined
+        assert "--kv-cache-dtype fp8" in joined
+        assert "--max-model-len 262144" in joined
+        assert "--gpu-memory-utilization 0.85" in joined
+        assert "--quantization modelopt" in joined
+        assert "--reasoning-parser qwen3" in joined
+        assert "--tool-call-parser qwen3_coder" in joined
+        assert "--trust-remote-code" in joined
+        assert f"--node-rank {rank}" in joined
+        assert "--enable-expert-parallel" not in joined
+        # 0.17-era GB10 workarounds must not ride along on a pinned newer image.
         assert "--enforce-eager" not in joined
         assert "VLLM_ATTENTION_BACKEND" not in joined
     assert "--headless" not in " ".join(head)
