@@ -259,9 +259,9 @@ async def test_the_knobs_come_from_nodeconfig(monkeypatch):
     from ainode.core.config import NodeConfig
 
     cfg = NodeConfig()
-    assert cfg.engine_bind_log_silence_seconds == 120
+    assert cfg.engine_bind_log_silence_seconds == 360
     assert cfg.engine_bind_ceiling_seconds == 1800
-    assert api_routes._bind_limits({"config": cfg}) == (120.0, 1800.0)
+    assert api_routes._bind_limits({"config": cfg}) == (360.0, 1800.0)
     # No config, or a config from before these fields existed.
     assert api_routes._bind_limits({}) == (
         api_routes._DEFAULT_BIND_LOG_SILENCE_SECONDS,
