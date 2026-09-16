@@ -40,19 +40,29 @@ def parse_quant(model_id):
 
 
 def derive_arch(mb: dict, model: str) -> None:
-    """Fill arch/active_b/quant from the model id, in place.
+    """Fill arch/active_b/quant, in place, for whatever the catalog did not state.
 
-    Active params and architecture come off the model id, which states them: the
-    "A3B" in 30B-A3B is the vendor's own active-parameter count. No ``A<n>B``
-    marker means the row is recorded as dense.
+    The catalog comes first: a curated entry carries ``arch`` and
+    ``active_params_b`` (``ainode/models/registry.py``), which ``_apply_catalog``
+    has already copied in, and those are the vendor's numbers rather than a guess.
+
+    Only what is still missing is read off the model id, which usually states it:
+    the "A3B" in 30B-A3B is the vendor's own active-parameter count, and no
+    ``A<n>B`` marker means the row is recorded as dense. A model neither the
+    catalog nor its id describes keeps the field absent - a MoE whose active count
+    nobody stated is not silently reported as reading all of its weights.
     """
     mm = re.search(r"(?:^|[-_])A(\d+(?:\.\d+)?)B(?:[-_]|$)", model or "", re.I)
-    if mm:
-        mb["arch"] = "moe"
-        mb["active_b"] = float(mm.group(1)) if "." in mm.group(1) else int(mm.group(1))
-    elif mb.get("params_b"):
-        mb["arch"] = "dense"
-        mb["active_b"] = mb["params_b"]
+    if not mb.get("arch"):
+        if mm:
+            mb["arch"] = "moe"
+        elif mb.get("params_b"):
+            mb["arch"] = "dense"
+    if mb.get("active_b") is None:
+        if mb.get("arch") == "moe" and mm:
+            mb["active_b"] = float(mm.group(1)) if "." in mm.group(1) else int(mm.group(1))
+        elif mb.get("arch") == "dense" and mb.get("params_b"):
+            mb["active_b"] = mb["params_b"]
     mb.setdefault("quant", parse_quant(model))
     if not mb.get("quant"):
         mb.pop("quant", None)
@@ -65,6 +75,13 @@ def _apply_catalog(mb: dict, pl: dict, info: dict) -> None:
         mb["name"] = strip_paren(info["name"])
     if info.get("params_b"):
         mb["params_b"] = info["params_b"]
+    # Active params and shape, when the entry states them. These beat the id: an
+    # entry like MiniMax-M2.7 is a MoE whose id carries no A<n>B marker at all, so
+    # reading the id alone recorded it as dense.
+    if info.get("active_params_b"):
+        mb["active_b"] = info["active_params_b"]
+    if info.get("arch"):
+        mb["arch"] = info["arch"]
     if info.get("quantization"):
         mb["quant"] = info["quantization"]
     if info.get("context_length"):

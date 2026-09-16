@@ -77,6 +77,9 @@ def fmt_params(model):
     active = model.get("active_b")
     if params is None:
         return NOT_MEASURED
+    if model.get("arch") == "moe" and (active is None or active == params):
+        # MoE with no active count in the record is still not dense.
+        return f"{params:g}B MoE"
     if model.get("arch") == "dense" or active is None or active == params:
         return f"{params:g}B dense"
     return f"{params:g}B / {active:g}B active"

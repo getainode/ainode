@@ -269,6 +269,7 @@ def run_task(task: Task, adapter: HarnessAdapter, endpoint: str, model: str,
              attempts: int = DEFAULT_ATTEMPTS, api_key: str = "ainode",
              context_window: int = DEFAULT_CONTEXT_WINDOW,
              max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+             claude_effort: str | None = None,
              tokens_reader=None, log=print) -> TaskResult:
     """One task, up to ``attempts`` tries, one harness. Never raises on harness
     failure; raises only if the isolation invariant breaks."""
@@ -285,7 +286,8 @@ def run_task(task: Task, adapter: HarnessAdapter, endpoint: str, model: str,
                              prompt=build_prompt(task, failure), entry=task.entry,
                              endpoint=endpoint, model=model, api_key=api_key,
                              context_window=context_window,
-                             max_output_tokens=max_output_tokens)
+                             max_output_tokens=max_output_tokens,
+                             claude_effort=claude_effort)
         run = adapter.run(req, timeout=timeout)
         copy_tests_in(task, workdir)
         tests = run_tests(task, workdir)
@@ -388,11 +390,29 @@ class HarnessResult:
     harness: str
     version: str | None
     tasks: list = field(default_factory=list)
+    #: Run options that apply to this harness alone, for its block in the record.
+    #: Empty for a harness that took none, and absent from the JSON then.
+    options: dict = field(default_factory=dict)
 
     def as_json(self) -> dict:
-        return {"harness": self.harness, "version": self.version,
-                "scores": score(self.tasks),
-                "tasks": [t.as_json() for t in self.tasks]}
+        out = {"harness": self.harness, "version": self.version,
+               "scores": score(self.tasks),
+               "tasks": [t.as_json() for t in self.tasks]}
+        if self.options:
+            out["options"] = dict(self.options)
+        return out
+
+
+def harness_options(adapter: HarnessAdapter, claude_effort: str | None = None) -> dict:
+    """Which run options a harness actually saw.
+
+    Recorded per harness rather than once for the run, because ``--claude-effort``
+    reaches exactly one argv: a record that put it beside every harness's scores
+    would be claiming a flag the other four never got.
+    """
+    if claude_effort and adapter.name == "claude":
+        return {"effort": claude_effort}
+    return {}
 
 
 def run_suite(tasks: list, adapters: list, endpoint: str, model: str,
@@ -400,6 +420,7 @@ def run_suite(tasks: list, adapters: list, endpoint: str, model: str,
               attempts: int = DEFAULT_ATTEMPTS, api_key: str = "ainode",
               context_window: int = DEFAULT_CONTEXT_WINDOW,
               max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+              claude_effort: str | None = None,
               tokens_reader=None, log=print) -> list:
     """Every adapter over every task. Harness-major, so one harness's numbers are
     measured under conditions as close together as the fleet allows."""
@@ -412,13 +433,14 @@ def run_suite(tasks: list, adapters: list, endpoint: str, model: str,
     for adapter in adapters:
         version = adapter.version()
         log(f"\n  {adapter.name} {version or '(version unknown)'}")
-        result = HarnessResult(harness=adapter.name, version=version)
+        result = HarnessResult(harness=adapter.name, version=version,
+                               options=harness_options(adapter, claude_effort))
         for task in tasks:
             result.tasks.append(run_task(
                 task, adapter, endpoint, model, root, timeout=timeout,
                 attempts=attempts, api_key=api_key, context_window=context_window,
-                max_output_tokens=max_output_tokens, tokens_reader=tokens_reader,
-                log=log))
+                max_output_tokens=max_output_tokens, claude_effort=claude_effort,
+                tokens_reader=tokens_reader, log=log))
         scores = score(result.tasks)
         log(f"    {adapter.name}: pass@1 {scores['passed_at_1']}/{scores['tasks']}, "
             f"pass@2 {scores['passed_at_2']}/{scores['tasks']}, "

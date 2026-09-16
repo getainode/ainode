@@ -79,6 +79,11 @@ Useful flags:
 - `--context-window` / `--max-output-tokens` - what pi and dsh are told about the
   model, because neither can discover it from an OpenAI-compatible endpoint. They
   are declared, and the record says they were declared.
+- `--claude-effort medium` - the reasoning effort `claude` is run with, passed to it
+  as `--effort`. Unset sends nothing, which is what every measurement before this
+  option was taken with; set it when the served chat template rejects Claude Code's
+  default (see the `claude` section). Recorded in the run's `settings` and on the
+  claude block's `options`, and ignored by every other harness.
 - `--no-metrics` - skip the `/api/metrics` token window.
 
 It is inference only. It never loads, unloads, restarts or deletes anything, so it
@@ -394,6 +399,26 @@ Claude Code reports a run it could not finish (a turn cap hit mid-edit, an API e
 it gave up on) in the payload and still exits cleanly. `stderr` carries
 `[claude-code:unrecognized_model] {...}` for any non-Anthropic model id, which is
 expected for every model this bench measures and is harmless.
+
+**The effort level is a real failure mode, and `--claude-effort` is the way out of
+it.** Claude Code sends reasoning effort "high" by default, and a served chat
+template does not have to accept that value. Qwen3.8-Flash-Next takes only xhigh,
+medium and low: on 2026-09-16 every request came back `API Error: 400 Unexpected
+reasoning effort high`, so the harness crashed in about 0.3 s per attempt and scored
+0/10 on a model the other three harnesses were passing. The same suite scored 8/10
+and then 10/10 once the level was lowered:
+
+```
+scripts/ainode-bench.py harness --endpoint http://<node>:3000/v1 \
+    --model nvidia/Qwen3.8-Flash-Next-NVFP4 --harness claude \
+    --claude-effort medium --label flash-next-claude
+```
+
+which appends `--effort medium` to the argv above. Leave it unset for a model that
+accepts high, so its number stays comparable with the runs already recorded. The
+level goes into the run's `settings` as `claude_effort` and onto the claude block's
+`options` as `effort`, so a record always says which one was measured, and a run
+without the flag says nothing rather than claiming a default.
 
 **`CLAUDE_CONFIG_DIR` points at the run's scratch directory, and that is the
 load-bearing part.** A bench run must never read or write the operator's own Claude

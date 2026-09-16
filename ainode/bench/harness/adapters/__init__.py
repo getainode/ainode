@@ -72,6 +72,12 @@ class HarnessRequest:
     #: writes both down so a reader can see what the harness was told.
     context_window: int = DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    #: Reasoning effort for the one harness that sends one (claude). None means
+    #: the adapter passes nothing and the agent's own default stands, which is
+    #: what every run before this option measured. A served chat template may
+    #: accept only some of the levels: Qwen3.8-Flash-Next rejects Claude Code's
+    #: default "high" with a 400 (see the claude adapter and #127).
+    claude_effort: str | None = None
 
 
 @dataclass

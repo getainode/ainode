@@ -39,6 +39,12 @@ model on one placement (node, engine image, flags) on one day.
 Sections may be omitted when not measured. Never fill a missing measurement with an
 estimate; the page renders "not measured" for a missing key.
 
+`active_b` and `arch` come from the catalog entry when it states them
+(`active_params_b` / `arch` in `ainode/models/registry.py`) and otherwise off the
+`A<n>B` marker in the model id, which is the vendor stating the active count in the
+name. Neither is a measurement, and an entry whose shape nobody stated leaves them
+out rather than reporting a MoE as dense.
+
 ## The `harness` block
 
 A harness-bench run (`scripts/ainode-bench.py harness`, docs in
@@ -118,6 +124,10 @@ Rules specific to this block, all load-bearing:
   `tokens_received` under an attempt are the harness's own report of what it sent,
   which is a different thing and labelled separately.
 - `version: null` means the harness could not be asked, and the notes say so.
+- A run block carries `options` only when that harness was given one: `claude` run
+  with `--claude-effort medium` gets `"options": {"effort": "medium"}` and the level
+  also lands in the record's `settings` as `claude_effort`. A record without either
+  was run with the agent's own default, which is not the same statement as a null.
 - `command` keeps every flag verbatim and elides any argument over 200 characters as
   `<N chars>`. That argument is the prompt, which is the task's instructions plus (on
   a second attempt) a screenful of pytest output; it is regenerated exactly from the

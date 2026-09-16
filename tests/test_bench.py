@@ -216,6 +216,75 @@ def test_slug_matches_the_schema_filename_convention():
         "nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4"
 
 
+# ------------------------------------------------------- the record's model block
+
+def _catalog_model_block(model_id):
+    """The ``model`` block a record gets for a catalog model, built the way both
+    describe paths build it: catalog metadata first, then what the id states."""
+    from ainode.bench.fleet import _apply_catalog, _catalog_entry, derive_arch
+
+    mb, pl = {"id": model_id}, {}
+    info = _catalog_entry(model_id)
+    assert info, f"{model_id} is not in the curated catalog any more"
+    _apply_catalog(mb, pl, info)
+    derive_arch(mb, model_id)
+    return mb
+
+
+def test_a_moe_entry_carries_its_active_params_even_with_no_marker_in_the_id():
+    """The catalog states the shape, so an id like DeepSeek-V4-Flash-DSpark or
+    Qwen3.8-Flash-Next - neither of which carries an A<n>B marker - is no longer
+    recorded as a dense model that reads all of its weights per token."""
+    deepseek = _catalog_model_block("fraserprice/DeepSeek-V4-Flash-DSpark")
+    assert (deepseek["params_b"], deepseek["active_b"]) == (284.0, 13.0)
+    assert deepseek["arch"] == "moe"
+
+    flash_next = _catalog_model_block("nvidia/Qwen3.8-Flash-Next-NVFP4")
+    assert (flash_next["params_b"], flash_next["active_b"]) == (125.0, 6.0)
+    assert flash_next["arch"] == "moe"
+
+
+def test_a_dense_entry_is_recorded_dense_and_reads_every_parameter():
+    dense = _catalog_model_block("unsloth/Qwen3.8-27B-NVFP4")
+    assert dense["arch"] == "dense"
+    assert dense["active_b"] == dense["params_b"] == 27.0
+
+
+def test_what_the_catalog_does_not_state_still_comes_off_the_model_id():
+    """The fallback is unchanged for a model nothing curated describes."""
+    from ainode.bench.fleet import derive_arch
+
+    mb = {"params_b": 30.0}
+    derive_arch(mb, "fakeorg/Fake-30B-A3B-NVFP4")
+    assert (mb["arch"], mb["active_b"], mb["quant"]) == ("moe", 3, "NVFP4")
+
+    mb = {"params_b": 8.0}
+    derive_arch(mb, "fakeorg/Fake-8B")
+    assert (mb["arch"], mb["active_b"]) == ("dense", 8.0)
+
+    # An entry that states MoE without an active count keeps the field out rather
+    # than claiming the model reads all of its parameters per token.
+    mb = {"params_b": 504.0, "arch": "moe"}
+    derive_arch(mb, "madeby561/GLM-5.2-NVFP4-REAP-504B")
+    assert mb["arch"] == "moe" and "active_b" not in mb
+
+
+def test_the_catalog_cache_round_trips_the_shape_fields():
+    """The cache is asdict/ModelInfo(**d), and a file written before these fields
+    existed still has to load."""
+    from ainode.models.registry import CURATED_CLUSTER_MODELS, ModelInfo
+
+    info = CURATED_CLUSTER_MODELS["deepseek-v4-flash-dspark"]
+    cached = json.loads(json.dumps(info.to_dict()))
+    again = ModelInfo(**cached)
+    assert again == info
+    assert (again.active_params_b, again.arch) == (13.0, "moe")
+
+    stale = {k: v for k, v in cached.items() if k not in ("active_params_b", "arch")}
+    assert ModelInfo(**stale).active_params_b is None
+    assert ModelInfo(**stale).arch == ""
+
+
 # ---------------------------------------------------------------- job lifecycle
 
 async def _describe():
