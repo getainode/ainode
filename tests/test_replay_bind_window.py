@@ -438,3 +438,52 @@ def test_the_bind_loop_stays_off_the_event_loop_thread():
     in the bind loop: this runs during server startup."""
     assert inspect.iscoroutinefunction(api_routes._wait_for_bind)
     assert inspect.iscoroutinefunction(api_routes._port_serving)
+
+
+# ---------------------------------------------------------------------------
+# Container evidence beats the launch subprocess (0.5.12 regression: solo
+# ``docker run -d`` returns in a second, which read as "container exited")
+# ---------------------------------------------------------------------------
+
+def _nvidia_backend_with_state(monkeypatch, state, launched):
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends.nvidia import NvidiaBackend
+    b = NvidiaBackend(NodeConfig(engine_backend="nvidia", distributed_mode="solo"))
+    monkeypatch.setattr(b, "_docker_container_state", lambda name: state)
+    b._launched_at = 1.0 if launched else None
+    b._process = None
+    return b
+
+
+def test_running_container_is_not_exited_even_when_the_launch_client_returned(monkeypatch):
+    from ainode.models.api_routes import _engine_exited
+    b = _nvidia_backend_with_state(monkeypatch, "running", launched=True)
+    b._process = _FakeProc(0)  # docker run -d already returned
+    assert b.engine_exited() is False
+    assert _engine_exited(b) is False
+    assert b.is_running() is True
+
+
+def test_exited_container_is_exited(monkeypatch):
+    from ainode.models.api_routes import _engine_exited
+    b = _nvidia_backend_with_state(monkeypatch, "exited", launched=True)
+    assert b.engine_exited() is True
+    assert _engine_exited(b) is True
+    assert b.is_running() is False
+
+
+def test_absent_container_counts_as_exited_only_after_a_launch(monkeypatch):
+    b = _nvidia_backend_with_state(monkeypatch, "", launched=False)
+    assert b.engine_exited() is False
+    b._launched_at = 1.0
+    assert b.engine_exited() is True
+
+
+def test_backend_without_container_view_falls_back_to_the_subprocess():
+    from ainode.models.api_routes import _engine_exited
+    class NoView:
+        process = _FakeProc(1)
+    assert _engine_exited(NoView()) is True
+    class Alive:
+        process = _FakeProc(None)
+    assert _engine_exited(Alive()) is False

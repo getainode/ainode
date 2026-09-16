@@ -616,11 +616,24 @@ async def _wait_port_ready(port: int, timeout: float = 300.0) -> bool:
 def _engine_exited(backend) -> bool:
     """True only on positive evidence that the engine we launched is gone.
 
-    ``docker run`` runs attached, so the launch subprocess exits when the
-    container does. Absence of a handle is NOT evidence of death: a backend that
-    never owned a subprocess (an engine that outlived a previous orchestrator)
-    must not read as a crash and earn an instant relaunch.
+    Ask the backend about its CONTAINER first (``EngineBackend.engine_exited``):
+    the solo launch is ``docker run -d``, whose client returns in about a second
+    while the engine keeps loading, so a finished launch subprocess is not death.
+    On 0.5.12 every solo launch read as "container exited" after 1 to 11 s and
+    got a relaunch that failed on the container-name conflict with its own live
+    engine. Only a backend with no container view (eugr's attached ``vllm
+    serve``) falls back to the subprocess. Absence of any handle is NOT evidence
+    of death: an engine that outlived a previous orchestrator must not read as a
+    crash and earn an instant relaunch.
     """
+    asker = getattr(backend, "engine_exited", None)
+    if callable(asker):
+        try:
+            verdict = asker()
+        except Exception:
+            verdict = None
+        if verdict is not None:
+            return bool(verdict)
     proc = getattr(backend, "process", None)
     if proc is None:
         return False
