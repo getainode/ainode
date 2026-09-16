@@ -2131,32 +2131,11 @@ select {
 /* ============================================================
    MODELS LIST
    ============================================================ */
-.model-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  transition: border-color 0.15s ease;
-  margin-bottom: 8px;
-}
-
-.model-card:hover {
-  border-color: var(--nvidia-green);
-}
-
-.model-info {
-  flex: 1;
-}
-
-.model-name {
-  font-size: 15px;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  margin-bottom: 4px;
-}
+/* `.model-card` is NOT declared here. The only element carrying that class is
+   the chat rail's collapsible card (see CHAT: MODEL CARD below); this section's
+   old row-card rule matched it too and set `align-items: center`, which sized
+   the rail card's children to their own content instead of the card's width.
+   `.model-info` / `.model-name` went with it; neither is rendered any more. */
 
 .model-meta {
   font-size: 12px;
@@ -5703,6 +5682,17 @@ select {
   background: var(--bg-card);
   display: flex;
   flex-direction: column;
+  /* Stretch, never centre. On a column flex container the cross axis is the
+     horizontal one, so `align-items: center` would size the head and the body
+     to their OWN content and centre them: one long model id or HF cache path
+     then makes the body wider than the card and `overflow: hidden` clips it on
+     BOTH edges at once. Declared explicitly so a stray `.model-card` rule
+     elsewhere in this sheet cannot bring the centring back. */
+  align-items: stretch;
+  /* The rail is a fixed 280px column. Nothing inside may be sized by its own
+     content, so the card and every descendant that can hold an unbreakable
+     token carry a zero min-width and wrap instead of pushing the box wide. */
+  min-width: 0;
   /* The card is the left rail's main content, so it takes the slack and the
      conversation list is capped below. Otherwise the capability badges and the
      running averages sit under the fold on a 900px-tall window. */
@@ -5734,13 +5724,21 @@ select {
   font-weight: 600;
   letter-spacing: 1.4px;
   cursor: pointer;
+  min-width: 0;
 }
 
 .model-card-head:hover { color: var(--nvidia-green); }
-.model-card-chevron { color: var(--nvidia-green-dim); font-size: 11px; }
+.model-card-chevron { color: var(--nvidia-green-dim); font-size: 11px; flex: 0 0 auto; }
+.model-card-head-label { min-width: 0; }
 
 .model-card-body {
   padding: 10px 12px 12px;
+  /* Takes the card's slack and scrolls inside it (the card is `overflow:
+     hidden` with a min-height), so the group list never spills out the bottom.
+     `min-height: 0` is what lets a flex item actually shrink to scroll. */
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   font-size: 12px;
   color: var(--text-primary);
@@ -5761,10 +5759,15 @@ select {
   font-weight: 600;
   color: var(--nvidia-green-bright);
   line-height: 1.35;
+  min-width: 0;
+  /* `anywhere` rather than `break-word`: only `anywhere` also shrinks the
+     element's min-content width, which is what keeps a repo id like
+     fraserprice/DeepSeek-V4-Flash-DSpark from widening the whole card. */
+  overflow-wrap: anywhere;
   word-break: break-all;
 }
 
-.mc-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 8px; }
+.mc-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 8px; min-width: 0; }
 
 .mc-tag {
   font-family: var(--font-mono);
@@ -5775,6 +5778,8 @@ select {
   border: 1px solid var(--border-hover);
   color: var(--text-secondary);
   background: var(--bg-surface);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .mc-tag.local { border-color: var(--nvidia-green-dim); color: var(--nvidia-green); }
 .mc-tag.ok { border-color: var(--cyan); color: var(--cyan); }
@@ -5789,11 +5794,12 @@ select {
   color: var(--nvidia-green);
   font-size: 11px;
   text-decoration: none;
+  overflow-wrap: anywhere;
   word-break: break-all;
 }
 .mc-hf:hover { background: var(--bg-card-hover); border-color: var(--nvidia-green-dim); }
 
-.mc-grp { border-top: 1px solid var(--border); padding: 9px 0 2px; }
+.mc-grp { border-top: 1px solid var(--border); padding: 9px 0 2px; min-width: 0; }
 .mc-grp:first-of-type { border-top: none; }
 
 .mc-lbl {
@@ -5808,16 +5814,27 @@ select {
 
 .mc-dl {
   display: grid;
-  grid-template-columns: auto 1fr;
+  /* Both tracks need an explicit zero minimum. A bare `auto` or `1fr` track
+     keeps an automatic minimum the size of its own content, so a value like
+     "2 nodes: 25033c02, 10.100.0.15" or an engine image tag widens the grid
+     past the rail instead of wrapping inside its cell. */
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
   gap: 4px 10px;
   margin: 0;
+  min-width: 0;
 }
-.mc-dl dt { color: var(--text-secondary); font-size: 11.5px; }
+.mc-dl dt {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .mc-dl dd {
   margin: 0;
+  min-width: 0;
   text-align: right;
   font-size: 11.5px;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 .mc-dl dd b { color: var(--nvidia-green-bright); font-weight: 600; }
@@ -5831,19 +5848,36 @@ select {
   color: var(--text-muted);
 }
 
-.mc-mono { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-primary); }
+.mc-mono {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-primary);
+  /* Engine image tags and draft-model names have no spaces to break on. */
+  overflow-wrap: anywhere;
+}
 
 .mc-note {
   margin-top: 7px;
   color: var(--text-muted);
   font-size: 10.5px;
   line-height: 1.45;
+  min-width: 0;
+  /* The caps note is usually an engine message carrying a full HF snapshot
+     path, which is one unbreakable token. */
+  overflow-wrap: anywhere;
 }
 
-.mc-desc { color: var(--text-secondary); font-size: 11.5px; line-height: 1.5; }
+/* Prose, so break a word only when it genuinely cannot fit on its own line. */
+.mc-desc {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
 
 /* --- Probed capability badges --- */
-.mc-caps { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.mc-caps { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
 
 .mc-cap {
   font-family: var(--font-mono);
@@ -5855,6 +5889,8 @@ select {
   background: var(--bg-surface);
   color: var(--text-muted);
   cursor: default;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .mc-cap.on { color: var(--nvidia-green); border-color: var(--nvidia-green-dim); }
 .mc-cap.off { color: var(--amber); border-color: rgba(255, 184, 0, 0.4); }
@@ -5872,6 +5908,9 @@ select {
 
 /* --- Running averages, per instance --- */
 .mc-st { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+/* An auto-layout table is still sized by its cells' min-content width, so let
+   every cell wrap rather than push the table past the rail. */
+.mc-st th, .mc-st td { overflow-wrap: anywhere; }
 .mc-st th {
   font-family: var(--font-mono);
   font-size: 8.5px;
