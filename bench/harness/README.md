@@ -266,8 +266,11 @@ which provider the run selected. That is what the failure looks like, and it loo
 nothing like its cause. So the adapter points `DSH_HOME` at
 `~/.ainode/bench/harness/dsh-home`, writes a one-route `settings.yaml` there, and
 never reads or writes the real one. That directory persists between runs on purpose:
-the first use of a profile installs it, which takes minutes, so pre-warm with
-`dsh --profile headless --dump-config` or raise `--timeout` for the first run.
+the first use of a profile installs it, which takes minutes. **Pre-warm it** with
+`dsh --profile headless --dump-config` before a real run. Not only so the first task
+does not hit its timeout: an install inside the first invocation lands in that task's
+wall clock and drags `mean_wall_s` with it, and that would be a package manager in a
+number that is supposed to be about a model.
 
 `$AINODE_HARNESS_DSH_HOME` moves that home. Point it at a home you have curated and
 the adapter leaves its `settings.yaml` completely alone and relies on the overlay
