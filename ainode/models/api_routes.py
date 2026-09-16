@@ -579,7 +579,7 @@ _BIND_POLL_SECONDS = 3.0
 _GPU_RELEASE_SECONDS = 30.0
 # Used when no NodeConfig is reachable (a config written by an older release, or
 # a caller that passes a bare dict). Mirrors the NodeConfig defaults.
-_DEFAULT_BIND_LOG_SILENCE_SECONDS = 360.0
+_DEFAULT_BIND_LOG_SILENCE_SECONDS = 900.0
 _DEFAULT_BIND_CEILING_SECONDS = 1800.0
 
 
