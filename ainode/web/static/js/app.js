@@ -1300,8 +1300,10 @@ const AINode = {
       stopBtn.addEventListener('click', function () { self.stopGeneration(); });
     }
 
-    // Thinking toggle. OFF sends chat_template_kwargs.enable_thinking=false;
-    // ON sends nothing, leaving the model's own template default alone.
+    // Thinking toggle. Both states are sent explicitly, under both switch names
+    // the chat templates use (Qwen/Nemotron: enable_thinking; DeepSeek V4:
+    // thinking), so the toggle wins over an engine's --default-chat-template-kwargs.
+    // A template ignores the name it does not read.
     var thinkBtn = document.getElementById('chat-thinking');
     if (thinkBtn) {
       thinkBtn.addEventListener('click', function () {
@@ -1972,9 +1974,13 @@ const AINode = {
       temperature: settings.temperature,
       max_tokens: settings.maxTokens,
     };
-    // Only sent when thinking is OFF: leaving it out keeps the model's own chat
-    // template default, which is what the engine was launched to do.
-    if (!settings.thinking) body.chat_template_kwargs = { enable_thinking: false };
+    // Sent in both states, under both switch names (see the toggle comment): the
+    // DeepSeek recipe launches with thinking off by default, and ON must be able
+    // to override that, which "send nothing when ON" never could (2026-09-16).
+    body.chat_template_kwargs = {
+      enable_thinking: !!settings.thinking,
+      thinking: !!settings.thinking,
+    };
 
     var assistantMsg = { role: 'assistant', content: '', reasoning: '', instance: inst };
     this.state.messages.push(assistantMsg);

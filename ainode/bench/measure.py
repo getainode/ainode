@@ -144,7 +144,8 @@ def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None)
     """Stream one chat completion and time it.
 
     ``thinking`` None leaves the chat template's own default alone; True/False
-    sends ``chat_template_kwargs.enable_thinking`` explicitly. ``should_stop`` is
+    sends ``chat_template_kwargs.enable_thinking`` and ``.thinking`` explicitly
+    (the Qwen-family and DeepSeek V4 switch names). ``should_stop`` is
     an optional predicate checked while reading the stream, so a cancelled run
     stops inside a long generation rather than after it. Returns a dict with
     ok/error plus wall_s, ttft_s, decode_tok_s, gen_tokens, prompt_tokens.
@@ -159,7 +160,14 @@ def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None)
         "stream_options": {"include_usage": True},
     }
     if thinking is not None:
-        payload["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
+        # Both switch names: Qwen and Nemotron templates read enable_thinking,
+        # DeepSeek V4 reads thinking. A template ignores the one it does not use,
+        # so sending both makes the reasoning section mean the same thing on
+        # every model (before this, DeepSeek's "thinking on" never turned it on).
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": bool(thinking),
+            "thinking": bool(thinking),
+        }
     req = urllib.request.Request(
         url.rstrip("/") + "/v1/chat/completions",
         data=json.dumps(payload).encode(),
