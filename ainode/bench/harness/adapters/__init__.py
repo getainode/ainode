@@ -11,7 +11,7 @@ deliberately nothing else. It answers four questions:
 
 ``command``, ``env`` and ``config`` are **pure functions of the request**. That is
 the rule that makes this testable without a model: the tests pin the argv and the
-config bytes for all four harnesses, so a flag that moves is a failing test rather
+config bytes for every harness that ships, so a flag that moves is a failing test rather
 than a silently wrong benchmark. ``run()`` is implemented once, here, in terms of
 those three, so no adapter owns its own subprocess handling.
 
@@ -313,11 +313,13 @@ class Registry:
 def registry() -> Registry:
     """Every adapter that ships. Imported late to keep the module import cheap."""
     from ainode.bench.harness.adapters.aider import AiderAdapter
+    from ainode.bench.harness.adapters.claude import ClaudeAdapter
     from ainode.bench.harness.adapters.dsh import DshAdapter
     from ainode.bench.harness.adapters.opencode import OpencodeAdapter
     from ainode.bench.harness.adapters.pi import PiAdapter
 
     reg = Registry()
-    for adapter in (AiderAdapter(), DshAdapter(), PiAdapter(), OpencodeAdapter()):
+    for adapter in (AiderAdapter(), DshAdapter(), PiAdapter(), OpencodeAdapter(),
+                    ClaudeAdapter()):
         reg.register(adapter)
     return reg

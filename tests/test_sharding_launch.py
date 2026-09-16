@@ -158,6 +158,7 @@ def test_proxy_returns_503_loading_during_swap():
     class _Req:
         method = "GET"
         path = "/v1/models"
+        path_qs = "/v1/models"
         headers = {}
         def __init__(self):
             self.app = app

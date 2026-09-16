@@ -26,6 +26,11 @@ from ainode.bench.harness.adapters import (
     HarnessRequest,
 )
 from ainode.bench.harness.adapters.aider import AiderAdapter, parse_tokens
+from ainode.bench.harness.adapters.claude import (
+    ClaudeAdapter,
+    messages_base,
+    parse_result,
+)
 from ainode.bench.harness.adapters.dsh import (
     API_KEY_ENV,
     DshAdapter,
@@ -294,6 +299,74 @@ def test_opencode_counts_turns_off_its_event_stream():
     assert parse_events("") == {}
 
 
+def test_claude_command_is_pinned(tmp_path):
+    req = _request(tmp_path, prompt="solve isogram")
+    assert ClaudeAdapter().command(req) == [
+        "claude",
+        "-p", "solve isogram",
+        "--model", MODEL,
+        # No TTY to approve a write or trust the directory: without this the run
+        # sits until the timeout instead of failing.
+        "--dangerously-skip-permissions",
+        "--output-format", "json",
+        "--max-turns", "12",
+    ]
+    assert ClaudeAdapter().needs_git is True
+
+
+def test_claude_is_given_the_endpoint_without_its_v1(tmp_path):
+    """Claude Code appends /v1/messages itself, so the /v1 has to come off."""
+    assert messages_base("http://node:3000/v1") == "http://node:3000"
+    assert messages_base("http://node:3000/v1/") == "http://node:3000"
+    # Anything else is passed through: an endpoint already in base form, and a
+    # path that merely ends in something v1-ish, are both left alone.
+    assert messages_base("http://node:8000") == "http://node:8000"
+    assert messages_base("http://node/openai/v1") == "http://node/openai"
+    assert messages_base("") == ""
+
+
+def test_claude_env_isolates_the_operators_own_profile(tmp_path):
+    req = _request(tmp_path)
+    env = ClaudeAdapter().env(req)
+    assert env["ANTHROPIC_BASE_URL"] == "http://fake-node.invalid:3000"
+    # The placeholder in both, because which one it reads depends on how the
+    # client got built, and the endpoint authenticates nothing either way.
+    assert env["ANTHROPIC_API_KEY"] == "ainode"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "ainode"
+    assert env["ANTHROPIC_MODEL"] == MODEL
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == MODEL
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["DISABLE_TELEMETRY"] == "1"
+    # The run's own profile, under the scratch dir: never ~/.claude, so a bench
+    # run cannot read or write the operator's settings, hooks, sessions or keys.
+    assert env["CLAUDE_CONFIG_DIR"] == str(req.scratch / "claude-config")
+    assert str(pathlib.Path.home()) not in env["CLAUDE_CONFIG_DIR"]
+    # And it needs no seed file: verified on 2.1.272, claude creates the whole
+    # tree itself from a directory that does not exist.
+    assert ClaudeAdapter().config(req) == []
+
+
+def test_claude_reads_turns_out_of_its_result_json():
+    payload = {"type": "result", "subtype": "success", "is_error": False,
+               "num_turns": 6, "duration_ms": 294118, "total_cost_usd": 0.42,
+               "result": "isogram.py now returns False for repeated letters",
+               "session_id": "831de781-4bb9-4ff3-869c-c621c84d7fd5",
+               "usage": {"input_tokens": 9001, "output_tokens": 311}}
+    assert parse_result(json.dumps(payload)) == {"turns": 6}
+
+
+def test_claude_is_error_is_a_crash_even_on_a_clean_exit():
+    """Claude Code reports a run it could not finish in the payload and still
+    exits 0, so the exit code alone would record that as a good run."""
+    payload = {"type": "result", "subtype": "error_max_turns", "is_error": True,
+               "num_turns": 12, "result": "", "duration_ms": 900000}
+    assert parse_result(json.dumps(payload)) == {"turns": 12, "crashed": True}
+    # Output we cannot read costs the fields and nothing else.
+    assert parse_result("[claude-code:unrecognized_model] {...}") == {}
+    assert parse_result("{not json") == {}
+    assert parse_result("") == {}
+
+
 def test_dsh_command_and_overlay(tmp_path, monkeypatch):
     monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(tmp_path / "dsh-home"))
     req = _request(tmp_path)
@@ -380,7 +453,7 @@ def test_every_shipped_adapter_is_registered_and_needs_no_real_key(tmp_path, mon
     monkeypatch.setenv("AINODE_HARNESS_PI_HOME", str(tmp_path / "pi-home"))
     monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(tmp_path / "dsh-home"))
     registry = adapters_mod.registry()
-    assert registry.names() == ["aider", "dsh", "opencode", "pi"]
+    assert registry.names() == ["aider", "claude", "dsh", "opencode", "pi"]
     for name in registry.names():
         adapter = registry.get(name)
         req = _request(tmp_path)
@@ -388,8 +461,10 @@ def test_every_shipped_adapter_is_registered_and_needs_no_real_key(tmp_path, mon
         assert argv[0] == adapter.binary
         blob = " ".join(argv) + json.dumps(adapter.env(req)) + \
             "".join(c.content for c in adapter.config(req))
-        # Every harness is told the endpoint, somewhere, and the model.
-        assert ENDPOINT in blob, name
+        # Every harness is told where the endpoint is, somewhere, and the model.
+        # claude is the one exception to the exact string: it speaks the Messages
+        # API and appends /v1/messages itself, so it gets the base without the /v1.
+        assert (ENDPOINT[:-3] if name == "claude" else ENDPOINT) in blob, name
         assert MODEL in blob, name
         # And none of them is handed anything that looks like a real key.
         assert "sk-" not in blob, name
@@ -640,6 +715,26 @@ def test_dry_run_prints_the_commands_and_writes_nothing(tmp_path, capsys, monkey
     assert not (tmp_path / "dsh-home").exists()
 
 
+def test_dry_run_shows_claude_pointed_at_the_base_and_its_own_config_dir(tmp_path,
+                                                                        capsys):
+    work = tmp_path / "work"
+    code = harness_main(["--endpoint", ENDPOINT, "--model", MODEL, "--label", "unit",
+                         "--harness", "claude", "--only-tasks", "two-fer",
+                         "--work-dir", str(work), "--dry-run"],
+                        out_dir=tmp_path / "results")
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "claude -p" in printed
+    assert f"--model {MODEL} --dangerously-skip-permissions" in printed
+    assert "--output-format json --max-turns 12" in printed
+    # The base without the /v1, and a config dir under this run's scratch.
+    assert f"'ANTHROPIC_BASE_URL': '{ENDPOINT[:-3]}'" in printed
+    assert f"'CLAUDE_CONFIG_DIR': '{work / 'claude' / 'two-fer.scratch' / 'claude-config'}'" \
+        in printed
+    assert f"git init : {work / 'claude' / 'two-fer'}" in printed
+    assert not work.exists()
+
+
 def test_the_env_line_prints_paths_and_masks_a_key_it_did_not_set(tmp_path, capsys,
                                                                  monkeypatch):
     """Paths are the useful half of that line, so they print.
@@ -733,7 +828,7 @@ def test_a_missing_binary_is_refused_before_a_single_request(tmp_path, capsys,
 def test_list_harnesses_says_what_is_installed(capsys):
     assert harness_main(["--list-harnesses"]) == 0
     printed = capsys.readouterr().out
-    for name in ("aider", "dsh", "opencode", "pi"):
+    for name in ("aider", "claude", "dsh", "opencode", "pi"):
         assert name in printed
 
 

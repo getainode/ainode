@@ -13,7 +13,7 @@ the gate that says which model and which harness are worth putting subagents on.
 |------|-----------|
 | `ainode/bench/harness/` | The bench, as a package |
 | `ainode/bench/harness/tasks.py` | How a task is loaded, and the isolation rule |
-| `ainode/bench/harness/adapters/` | One class per agent CLI: aider, dsh, pi, opencode |
+| `ainode/bench/harness/adapters/` | One class per agent CLI: aider, dsh, pi, opencode, claude |
 | `ainode/bench/harness/runner.py` | The measurement: attempts, tests, scoring |
 | `bench/harness/tasks/` | The task set, vendored (see below) |
 | `bench/results/*.json` | Where a run lands, schema 1 with a `harness` block |
@@ -28,10 +28,20 @@ python3 scripts/ainode-bench.py harness \
     --harness aider,dsh,pi --tasks 10 --label fleet-flash
 ```
 
-`--endpoint` is the OpenAI-compatible base every harness is pointed at, normally an
+`--endpoint` is the base every harness is pointed at in its `/v1` form, normally an
 AINode node's port 3000 (the fleet endpoint, so the run goes wherever the model is
 actually loaded). `--model` is the id exactly as served. `--label` is required and
 says what made the run distinct.
+
+One endpoint, whatever protocol the harness speaks. Four of the five talk the
+OpenAI protocol and get `--endpoint` verbatim; `claude` talks the Anthropic Messages
+API, and its adapter strips the `/v1` because Claude Code appends `/v1/messages`
+itself. The fleet endpoint forwards `/v1/messages` (and `/v1/messages/count_tokens`)
+by model id, the same way it forwards chat completions, so
+`--endpoint http://<master>:3000/v1` is the right answer for every harness here.
+Until that landed, `:3000` answered 404 on that path and a Messages client had to be
+aimed at one engine's `:8000`, which threw away fleet routing, capability-aware
+ordering and failover.
 
 `--dry-run` prints the exact argv, environment overlay and config file for every
 task and harness and touches nothing: no subprocess, no config write, no request.
@@ -55,8 +65,8 @@ Run it first, every time, especially after a harness upgrade:
 
 Useful flags:
 
-- `--harness aider,dsh,pi,opencode` - which harnesses. `--list-harnesses` prints
-  them with whether each binary is on PATH.
+- `--harness aider,dsh,pi,opencode,claude` - which harnesses. `--list-harnesses`
+  prints them with whether each binary is on PATH.
 - `--tasks N` - the first N of the set in slug order, so two runs of different
   sizes still agree on their overlap. `--only-tasks isogram,bob` names them instead.
 - `--attempts 1` - drop the second try (see the protocol below).
@@ -193,25 +203,30 @@ authenticate, and the placeholder exists only because some of these tools refuse
 start with an empty key field.
 
 The provider id the adapters register is `ainode-bench`, not `ainode`, so the bench
-adds its own route rather than rewriting a provider somebody made by hand.
+adds its own route rather than rewriting a provider somebody made by hand. `claude`
+registers no provider at all: Claude Code has exactly one, and the adapter re-points
+it at the endpoint through the environment.
 
-All four are verified end to end: one task (`isogram`) driven by DeepSeek V4 Flash on
-the fleet, hidden tests 6/6 for every one of them.
+All five are verified end to end on one task (`isogram`) against a model on the
+fleet, hidden tests 6/6 for every one of them.
 
-| Harness | Version | First-attempt wall clock |
-|---------|---------|--------------------------|
-| `aider` | 0.86.2 (PyPI `aider-chat`) | 10 s |
-| `opencode` | 1.18.31 (`opencode-ai`) | 16 s |
-| `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | 20 s |
-| `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | 34 s |
+| Harness | Version | Verified against | First attempt |
+|---------|---------|------------------|---------------|
+| `aider` | 0.86.2 (PyPI `aider-chat`) | DeepSeek V4 Flash | 10 s |
+| `opencode` | 1.18.31 (`opencode-ai`) | DeepSeek V4 Flash | 16 s |
+| `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | DeepSeek V4 Flash | 20 s |
+| `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | DeepSeek V4 Flash | 34 s |
+| `claude` | 2.1.272 (Claude Code) | Qwen3.8 27B NVFP4 | 294 s, 6 turns |
 
-One task on one model is a working adapter, not a score. Read the column as "this
+One task on one model is a working adapter, not a score. Read those columns as "this
 adapter reaches the endpoint and the model can do the task" and nothing more: these
 are single observations, the harnesses were not run under identical conditions, and
 opencode's startup alone was separately timed at about 18 s, which is longer than its
-whole run above. Startup overhead is real and it is inside `mean_wall_s` (opencode
-loads every installed skill; dsh installs its profile on first use), so a comparison
-worth making comes out of a full run with the caveats in the per-harness notes below.
+whole run above. `claude`'s number is not comparable with the other four at all: a
+different model answered it, on a different day. Startup overhead is real and it is
+inside `mean_wall_s` (opencode loads every installed skill; dsh installs its profile
+on first use), so a comparison worth making comes out of a full run with the caveats
+in the per-harness notes below.
 
 ### aider
 
@@ -345,6 +360,61 @@ loads every skill under `~/.claude/skills` and `~/.agents/skills` even with `--p
 and that is inside `mean_wall_s`. And `-m ainode-bench/<model id>` relies on the
 provider/model split taking the first slash so a model id with slashes in it survives;
 verified for one such id, and an "unknown model" error is the first place to look.
+
+### claude
+
+The only harness here that does not speak the OpenAI protocol. Claude Code talks the
+Anthropic Messages API and nothing else, which is why it could not be benched against
+AINode until the proxy forwarded that path.
+
+```
+env ANTHROPIC_BASE_URL=http://<node>:3000 ANTHROPIC_API_KEY=ainode \
+    ANTHROPIC_AUTH_TOKEN=ainode \
+    ANTHROPIC_MODEL=<model id> ANTHROPIC_SMALL_FAST_MODEL=<model id> \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 \
+    CLAUDE_CONFIG_DIR=<scratch>/claude-config \
+  claude -p "<prompt>" --model <model id> --dangerously-skip-permissions \
+    --output-format json --max-turns 12
+```
+
+Verified end to end on claude 2.1.272: 6/6 hidden tests on `isogram` driving Qwen3.8
+27B NVFP4 on the fleet, 294 s over 6 turns, exit 0.
+
+**`ANTHROPIC_BASE_URL` is the base without the `/v1`.** Claude Code appends
+`/v1/messages` itself, so the `/v1` form every other harness wants would produce
+`/v1/v1/messages` and a 404. `--endpoint` stays the `/v1` form on the command line and
+this adapter is the one place that strips it, so nothing else has to know.
+
+`--dangerously-skip-permissions` is what makes the run non-interactive: there is no
+TTY to approve a file write or to trust the directory, and without it the run sits
+until the timeout rather than failing. `--output-format json` puts one JSON object on
+stdout, and the adapter reads two fields out of it: `num_turns` becomes the task's
+`turns`, and **`is_error: true` is recorded as a crash even on exit 0**, because
+Claude Code reports a run it could not finish (a turn cap hit mid-edit, an API error
+it gave up on) in the payload and still exits cleanly. `stderr` carries
+`[claude-code:unrecognized_model] {...}` for any non-Anthropic model id, which is
+expected for every model this bench measures and is harmless.
+
+**`CLAUDE_CONFIG_DIR` points at the run's scratch directory, and that is the
+load-bearing part.** A bench run must never read or write the operator's own Claude
+Code profile: no settings, no hooks, no MCP servers, no sessions, no credentials.
+That is also what keeps the measurement honest, since a personal `settings.json` can
+add hooks and MCP servers that change what the agent does. **It needs no seed file.**
+Verified on 2.1.272 against a fake Messages endpoint: pointed at a directory that had
+never existed, `claude -p` with the key in the environment created `.claude.json`,
+`projects/`, `sessions/` and `backups/` itself, never prompted for a login, and
+exited 0. So `config()` writes nothing.
+
+One gap that isolation does not close: a `CLAUDE.md` in a **parent** of the working
+directory is still discovered and still reaches the model (measured: a marker string
+in a parent `CLAUDE.md` arrived in the request body). The default work dir is a fresh
+temp dir, so a normal run is clean; if you pass `--work-dir` into a checkout that has
+a `CLAUDE.md` above it, that file is in the run. There is no per-run flag for this
+short of `--bare`, which also turns off hooks, skills and auto-memory and has not
+been verified end to end against a model, so it is not wired in.
+
+Claude Code is given a `git init`ed working directory: it reads git state for context
+and keeps its own edits diffable.
 
 ## How to add a harness
 
