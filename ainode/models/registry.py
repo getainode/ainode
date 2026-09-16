@@ -458,7 +458,10 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         # needed, which is what makes a pinned upstream tag usable as the engine.
         distributed_executor="mp",
         engine_image="vllm/vllm-openai:v0.29.0",
-        kv_cache_dtype="fp8",
+        kv_cache_dtype="auto",
+        # Qwen4Exp QSA raises "requires a BF16 main KV cache" on fp8 (vLLM 0.29.0,
+        # first launch on the Spark pair 2026-09-16), so this entry overrides the
+        # GB10 fp8 default with auto.
         max_model_len=262144,
         trust_remote_code=True,
         recommended_gmu=0.85,

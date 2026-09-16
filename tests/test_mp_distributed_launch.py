@@ -862,7 +862,7 @@ def test_flash_next_catalog_entry_is_complete():
     assert info.curated is True
     assert info.distributed_executor == "mp"
     assert info.engine_image == FLASH_IMAGE
-    assert info.kv_cache_dtype == "fp8"
+    assert info.kv_cache_dtype == "auto"  # Qwen4Exp QSA needs a BF16 main KV cache
     assert info.max_model_len == 262144
     assert info.trust_remote_code is True
     assert info.recommended_gmu == 0.85
