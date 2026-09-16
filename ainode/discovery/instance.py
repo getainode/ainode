@@ -44,3 +44,22 @@ class InstanceRecord:
             "distributed_executor",
         )
         return cls(**{k: d[k] for k in fields if k in d})
+
+
+def instance_parallel(inst) -> int:
+    """How many GPUs an instance spans, read from a record OR a wire dict.
+
+    The launch width lives only on the InstanceRecord, so every view that reports
+    parallelism (``/api/server/status``'s ``loaded_models[].parallel``,
+    ``/api/nodes``) must read it from there rather than assume 1 (#92). An older
+    node does not send the field at all, and a missing, zero or unparseable value
+    reads as 1 (one node, no sharding), which keeps the wire format backward
+    compatible in both directions.
+    """
+    raw = (inst.get("tensor_parallel_size") if isinstance(inst, dict)
+           else getattr(inst, "tensor_parallel_size", None))
+    try:
+        width = int(raw or 1)
+    except (TypeError, ValueError):
+        return 1
+    return width if width > 0 else 1
