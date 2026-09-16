@@ -1,0 +1,1720 @@
+{
+ "schema": 1,
+ "stamp": "20260916-112526",
+ "label": "DeepSeek V4 Flash, TP=2 Spark-2+Spark-3, four harnesses, 10 Exercism tasks",
+ "model": {
+  "id": "fraserprice/DeepSeek-V4-Flash-DSpark",
+  "name": "DeepSeek V4 Flash",
+  "params_b": 284.0,
+  "quant": "FP8",
+  "context": 1048576,
+  "license": "MIT",
+  "vision": false,
+  "arch": "dense",
+  "active_b": 284.0
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-1-DGX",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.17",
+  "tp": 2,
+  "gpus": 2,
+  "stacked_with": [
+   "unsloth/Qwen3.8-27B-NVFP4",
+   "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"
+  ],
+  "engine_image": "vllm-dspark-runtime:dspark-nvfp4-stage-c",
+  "flags": [
+   "--block-size",
+   "256",
+   "--max-num-seqs",
+   "6",
+   "--max-num-batched-tokens",
+   "8192",
+   "--enable-prefix-caching",
+   "--async-scheduling",
+   "--enable-chunked-prefill",
+   "--speculative-config",
+   "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\"}",
+   "--tokenizer-mode",
+   "deepseek_v4",
+   "--tool-call-parser",
+   "deepseek_v4",
+   "--enable-auto-tool-choice",
+   "--reasoning-parser",
+   "deepseek_v4",
+   "--reasoning-config",
+   "{\"reasoning_parser\":\"deepseek_v4\",\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}",
+   "--default-chat-template-kwargs",
+   "{\"thinking\":false}",
+   "--generation-config",
+   "vllm",
+   "--enable-flashinfer-autotune"
+  ],
+  "flags_source": "curated catalog recipe (/api/models); the live container command line was not readable"
+ },
+ "settings": {
+  "attempts": 2,
+  "timeout_s": 600.0,
+  "tasks_requested": null,
+  "harnesses": [
+   "aider",
+   "opencode",
+   "pi",
+   "dsh"
+  ],
+  "context_window_declared": 262144,
+  "max_output_tokens_declared": 16384
+ },
+ "harness": {
+  "task_set": {
+   "id": "exercism-python-10",
+   "count": 10,
+   "available": 10,
+   "slugs": [
+    "binary-search",
+    "bob",
+    "hamming",
+    "isogram",
+    "matrix",
+    "raindrops",
+    "robot-name",
+    "run-length-encoding",
+    "two-fer",
+    "word-count"
+   ],
+   "language": "python",
+   "source": {
+    "repo": "https://github.com/exercism/python",
+    "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+    "path": "exercises/practice/<slug>",
+    "license": "MIT",
+    "license_file": "LICENSE-exercism"
+   }
+  },
+  "endpoint": "http://100.122.26.9:3000/v1",
+  "protocol": {
+   "attempts": 2,
+   "timeout_s": 600.0,
+   "second_attempt_sees": "the failing test output"
+  },
+  "runs": [
+   {
+    "harness": "aider",
+    "version": "aider 0.86.2",
+    "scores": {
+     "tasks": 10,
+     "passed_at_1": 9,
+     "passed_at_2": 10,
+     "pass_at_1": 0.9,
+     "pass_at_2": 1.0,
+     "mean_wall_s": 47.3,
+     "crashes": 0,
+     "timeouts": 0
+    },
+    "tasks": [
+     {
+      "slug": "binary-search",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 75.37,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<2827 chars>' binary_search.py",
+         "exit_code": 0,
+         "wall_s": 75.37,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 38000,
+         "tokens_received": 100,
+         "stdout_tail": "...el: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded binary_search.py to the chat.\n\n\nhttps://docs.python.org/3/library/exceptions.html#base-classes)\nScraping https://docs.python.org/3/library/exceptions.html#base-classes)...\nFor the best web scraping, install Playwright:\n\n/Users/sem/.local/share/uv/tools/aider-chat/bin/python -m pip install --upgrade \n--upgrade-strategy only-if-needed aider-chat[playwright]\n/Users/sem/.local/share/uv/tools/aider-chat/bin/python -m playwright install \n--with-deps chromium\n\nSee https://aider.chat/docs/install/optional.html#enable-playwright for more \ninfo.\n\n\nInstalling: /Users/sem/.local/share/uv/tools/aider-chat/bin/python -m pip install --upgrade --upgrade-strategy only-if-needed 'aider-chat[playwright]'\nInstallation complete.\n\n\nInstalling: /Users/sem/.local/share/uv/tools/aider-chat/bin/python -m playwright install --with-deps chromium\nInstallation complete.\n\n\nhttps://docs.python.org/3/reference/simple_stmts.html#the-raise-statement)\nScraping \nhttps://docs.python.org/3/reference/simple_stmts.html#the-raise-statement)...\n\nhttps://docs.python.org/3/tutorial/errors.html#raising-exceptions)\nScraping https://docs.python.org/3/tutorial/errors.html#raising-exceptions)...\nbinary_search.py\n```\ndef find(search_list, value):\n    low = 0\n    high = len(search_list) - 1\n\n    while low <= high:\n        mid = (low + high) // 2\n        guess = search_list[mid]\n\n        if guess == value:\n            return mid\n        if guess > value:\n            high = mid - 1\n        else:\n            low = mid + 1\n\n    raise ValueError(\"value not in array\")\n```\nTokens: 38k sent, 100 received.\nApplied edit to binary_search.py\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nsummarizer unexpectedly failed for all models",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0).\nx .\nx ./usr\nx ./usr/local\nx ./usr/local/bin\nx ./usr/local/bin/pandoc\nx ./usr/local/bin/pandoc-lua\nx ./usr/local/bin/pandoc-server\nx ./usr/local/share\nx ./usr/local/share/man\nx ./usr/local/share/man/man1\nx ./usr/local/share/man/man1/pandoc-lua.1\nx ./usr/local/share/man/man1/pandoc-server.1\nx ./usr/local/share/man/man1/pandoc.1"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.37,
+         "passed": true,
+         "tests_passed": 11,
+         "output_tail": "...........                                                              [100%]\n11 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "bob",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 11.8,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<994 chars>' bob.py",
+         "exit_code": 0,
+         "wall_s": 11.8,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 892,
+         "tokens_received": 196,
+         "stdout_tail": "Aider v0.86.2\nModel: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded bob.py to the chat.\n\nbob.py\n```\ndef response(hey_bob):\n    # Strip whitespace from both ends\n    stripped = hey_bob.strip()\n    \n    # Check for silence (empty string after stripping)\n    if not stripped:\n        return \"Fine. Be that way!\"\n    \n    # Check if it's a question (ends with '?')\n    is_question = stripped.endswith('?')\n    \n    # Check if it's yelling (all letters are uppercase, and there is at least one letter)\n    # We need to check if there is at least one alphabetic character\n    has_letters = any(c.isalpha() for c in stripped)\n    is_yelling = has_letters and stripped == stripped.upper()\n    \n    if is_yelling and is_question:\n        return \"Calm down, I know what I'm doing!\"\n    if is_yelling:\n        return \"Whoa, chill out!\"\n    if is_question:\n        return \"Sure.\"\n    return \"Whatever.\"\n```\nTokens: 892 sent, 196 received.\nApplied edit to bob.py",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 26,
+         "output_tail": "..........................                                               [100%]\n26 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 1,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "hamming",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 54.71,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<1843 chars>' hamming.py",
+         "exit_code": 0,
+         "wall_s": 54.71,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 38000,
+         "tokens_received": 64,
+         "stdout_tail": "Aider v0.86.2\nModel: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded hamming.py to the chat.\n\n\nhttps://docs.python.org/3/reference/simple_stmts.html#the-raise-statement)\nScraping \nhttps://docs.python.org/3/reference/simple_stmts.html#the-raise-statement)...\n\nhttps://docs.python.org/3/library/exceptions.html#base-classes)\nScraping https://docs.python.org/3/library/exceptions.html#base-classes)...\n\nhttps://docs.python.org/3/tutorial/errors.html#raising-exceptions)\nScraping https://docs.python.org/3/tutorial/errors.html#raising-exceptions)...\nhamming.py\n```\ndef distance(strand_a, strand_b):\n    if len(strand_a) != len(strand_b):\n        raise ValueError(\"Strands must be of equal length.\")\n    return sum(1 for a, b in zip(strand_a, strand_b) if a != b)\n```\nTokens: 38k sent, 64 received.\nApplied edit to hamming.py\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nsummarizer unexpectedly failed for all models",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 9,
+         "output_tail": ".........                                                                [100%]\n9 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "isogram",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 3.39,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<602 chars>' isogram.py",
+         "exit_code": 0,
+         "wall_s": 3.39,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 797,
+         "tokens_received": 68,
+         "stdout_tail": "Aider v0.86.2\nModel: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded isogram.py to the chat.\n\nisogram.py\n```\ndef is_isogram(phrase):\n    # Normalize: convert to lowercase, keep only letters\n    seen = set()\n    for ch in phrase:\n        if ch.isalpha():\n            lower = ch.lower()\n            if lower in seen:\n                return False\n            seen.add(lower)\n    return True\n```\nTokens: 797 sent, 68 received.\nApplied edit to isogram.py",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 14,
+         "output_tail": "..............                                                           [100%]\n14 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 1,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "matrix",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 67.8,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<1865 chars>' matrix.py",
+         "exit_code": 0,
+         "wall_s": 67.8,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 35000,
+         "tokens_received": 564,
+         "stdout_tail": "...le.\n\nLet's write the code.\n\n```python\nclass Matrix:\n    def __init__(self, matrix_string):\n        # Split the string into lines\n        lines = matrix_string.strip().split('\\n')\n        # Parse each line into a list of integers\n        self._rows = []\n        for line in lines:\n            if line.strip() == '':\n                continue\n            row = [int(num) for num in line.split()]\n            self._rows.append(row)\n        # Determine number of columns (assuming rectangular)\n        self._num_cols = len(self._rows[0]) if self._rows else 0\n\n    def row(self, index):\n        # index is 1-based\n        return self._rows[index - 1].copy()\n\n    def column(self, index):\n        # index is 1-based\n        return [row[index - 1] for row in self._rows]\n```\n\nI'll return the file listing.</think>matrix.py\n```\nclass Matrix:\n    def __init__(self, matrix_string):\n        # Split the string into lines\n        lines = matrix_string.strip().split('\\n')\n        # Parse each line into a list of integers\n        self._rows = []\n        for line in lines:\n            if line.strip() == '':\n                continue\n            row = [int(num) for num in line.split()]\n            self._rows.append(row)\n        # Determine number of columns (assuming rectangular)\n        self._num_cols = len(self._rows[0]) if self._rows else 0\n\n    def row(self, index):\n        # index is 1-based\n        return self._rows[index - 1].copy()\n\n    def column(self, index):\n        # index is 1-based\n        return [row[index - 1] for row in self._rows]\n```\nTokens: 35k sent, 564 received.\n\nI'll return the file listing.</think>matrix.py\nApplied edit to matrix.py\nApplied edit to I'll return the file listing.</think>matrix.py\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nsummarizer unexpectedly failed for all models",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 8,
+         "output_tail": "........                                                                 [100%]\n8 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "raindrops",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 160.96,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<2469 chars>' raindrops.py",
+         "exit_code": 0,
+         "wall_s": 160.96,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 113000,
+         "tokens_received": 81,
+         "stdout_tail": "Aider v0.86.2\nModel: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded raindrops.py to the chat.\n\n\nhttps://en.wikipedia.org/wiki/Modulo_operation\nScraping https://en.wikipedia.org/wiki/Modulo_operation...\n\nhttps://docs.python.org/3/library/math.html\nScraping https://docs.python.org/3/library/math.html...\n\nhttps://docs.python.org/3/library/math.html#math.fmod\nScraping https://docs.python.org/3/library/math.html#math.fmod...\n\nhttps://docs.python.org/3/library/operator.html#operator.mod\nScraping https://docs.python.org/3/library/operator.html#operator.mod...\n\nhttps://docs.python.org/3/library/functions.html#divmod\nScraping https://docs.python.org/3/library/functions.html#divmod...\n\nhttps://docs.python.org/3/library/math.html#math.remainder\nScraping https://docs.python.org/3/library/math.html#math.remainder...\n\nhttps://exercism.org/docs/programming/operators/remainder\nScraping https://exercism.org/docs/programming/operators/remainder...\nPage didn't quiesce, scraping content anyway: https://exercism.org/docs/programming/operators/remainder\n\nhttps://www.programiz.com/python-programming/operators#arithmetic\nScraping https://www.programiz.com/python-programming/operators#arithmetic...\nPage didn't quiesce, scraping content anyway: https://www.programiz.com/python-programming/operators#arithmetic\nraindrops.py\n```\ndef convert(number):\n    result = ''\n    if number % 3 == 0:\n        result += 'Pling'\n    if number % 5 == 0:\n        result += 'Plang'\n    if number % 7 == 0:\n        result += 'Plong'\n    if result == '':\n        result = str(number)\n    return result\n```\nTokens: 113k sent, 81 received.\nApplied edit to raindrops.py\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nsummarizer unexpectedly failed for all models",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 18,
+         "output_tail": "..................                                                       [100%]\n18 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "robot-name",
+      "passed": true,
+      "passed_at_attempt": 2,
+      "harness_wall_s": 76.85,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<866 chars>' robot_name.py",
+         "exit_code": 0,
+         "wall_s": 25.3,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 841,
+         "tokens_received": 863,
+         "stdout_tail": "... also need to ensure that the `name` attribute is accessible. The tests likely do `robot.name`.\n\nNow, we need to output the entire file content.\n\nWe'll produce:\n\nrobot_name.py\n```\nimport random\nimport string\n\nclass Robot:\n    used_names = set()\n\n    def __init__(self):\n        self.name = None\n        self.reset()\n\n    def reset(self):\n        if self.name is not None:\n            Robot.used_names.discard(self.name)\n        self.name = self._generate_name()\n\n    def _generate_name(self):\n        while True:\n            letters = ''.join(random.choices(string.ascii_uppercase, k=2))\n            digits = ''.join(random.choices(string.digits, k=3))\n            name = letters + digits\n            if name not in Robot.used_names:\n                Robot.used_names.add(name)\n                return name\n```\n\nThat should satisfy the requirements.\n\nWe'll output the file listing.</think>robot_name.py\n```\nimport random\nimport string\n\nclass Robot:\n    used_names = set()\n\n    def __init__(self):\n        self.name = None\n        self.reset()\n\n    def reset(self):\n        if self.name is not None:\n            Robot.used_names.discard(self.name)\n        self.name = self._generate_name()\n\n    def _generate_name(self):\n        while True:\n            letters = ''.join(random.choices(string.ascii_uppercase, k=2))\n            digits = ''.join(random.choices(string.digits, k=3))\n            name = letters + digits\n            if name not in Robot.used_names:\n                Robot.used_names.add(name)\n                return name\n```\nTokens: 841 sent, 863 received.\n\nWe'll output the file listing.</think>robot_name.py\nApplied edit to We'll output the file listing.</think>robot_name.py\nApplied edit to robot_name.py\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nsummarizer unexpectedly failed for all models",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.35,
+         "passed": false,
+         "tests_passed": 3,
+         "tests_failed": 1,
+         "output_tail": "...F                                                                     [100%]\n=================================== FAILURES ===================================\n________________________ RobotNameTest.test_reset_name _________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_reset_name>\n\n    def test_reset_name(self):\n        # Set a seed\n        seed = \"Totally random.\"\n    \n        # Initialize RNG using the seed\n        random.seed(seed)\n    \n        # Call the generator\n        robot = Robot()\n        name = robot.name\n    \n        # Reinitialize RNG using seed\n        random.seed(seed)\n    \n        # Call the generator again\n        robot.reset()\n        name2 = robot.name\n>       self.assertNotEqual(name, name2)\nE       AssertionError: 'EJ348' == 'EJ348'\n\nrobot_name_test.py:46: AssertionError\n=========================== short test summary info ============================\nFAILED robot_name_test.py::RobotNameTest::test_reset_name - AssertionError: '...\n1 failed, 3 passed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<2025 chars>' robot_name.py",
+         "exit_code": 0,
+         "wall_s": 51.55,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 1200,
+         "tokens_received": 2000,
+         "stdout_tail": "...ld_name = self.name\n        # Keep old name in used_names while generating new name to avoid collision\n        self.name = self._generate_name()\n        if old_name is not None:\n            Robot.used_names.discard(old_name)\n\n    def _generate_name(self):\n        while True:\n            letters = ''.join(random.choices(string.ascii_uppercase, k=2))\n            digits = ''.join(random.choices(string.digits, k=3))\n            name = letters + digits\n            if name not in Robot.used_names:\n                Robot.used_names.add(name)\n                return name\n```\n\nThat should fix the test.\n\nBut we should also consider that the test might be checking that the name is not the same as the previous name even if the random state is not reset. The fix ensures that.\n\nNow, let's output.</think>robot_name.py\n```\nimport random\nimport string\n\nclass Robot:\n    used_names = set()\n\n    def __init__(self):\n        self.name = None\n        self.reset()\n\n    def reset(self):\n        old_name = self.name\n        # Keep old name in used_names while generating new name to avoid collision\n        self.name = self._generate_name()\n        if old_name is not None:\n            Robot.used_names.discard(old_name)\n\n    def _generate_name(self):\n        while True:\n            letters = ''.join(random.choices(string.ascii_uppercase, k=2))\n            digits = ''.join(random.choices(string.digits, k=3))\n            name = letters + digits\n            if name not in Robot.used_names:\n                Robot.used_names.add(name)\n                return name\n```\nTokens: 1.2k sent, 2.0k received.\n\nNow, let's output.</think>robot_name.py\nApplied edit to Now, let's output.</think>robot_name.py\nApplied edit to robot_name.py\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nSummarization failed for model openai/fraserprice/DeepSeek-V4-Flash-DSpark: cannot schedule new futures after shutdown\nsummarizer unexpectedly failed for all models",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.29,
+         "passed": true,
+         "tests_passed": 4,
+         "output_tail": "....                                                                     [100%]\n4 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 6,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "run-length-encoding",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 6.54,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<1113 chars>' run_length_encoding.py",
+         "exit_code": 0,
+         "wall_s": 6.54,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 931,
+         "tokens_received": 266,
+         "stdout_tail": "Aider v0.86.2\nModel: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded run_length_encoding.py to the chat.\n\n\n\nrun_length_encoding.py\n```\ndef decode(string):\n    if not string:\n        return \"\"\n    result = []\n    i = 0\n    n = len(string)\n    while i < n:\n        # collect digits\n        count_str = \"\"\n        while i < n and string[i].isdigit():\n            count_str += string[i]\n            i += 1\n        # now i points to a non-digit character (or end)\n        if count_str:\n            count = int(count_str)\n        else:\n            count = 1\n        # the character to repeat\n        if i < n:\n            ch = string[i]\n            result.append(ch * count)\n            i += 1\n        else:\n            # shouldn't happen for valid input, but handle gracefully\n            break\n    return \"\".join(result)\n\n\ndef encode(string):\n    if not string:\n        return \"\"\n    result = []\n    i = 0\n    n = len(string)\n    while i < n:\n        ch = string[i]\n        count = 1\n        while i + count < n and string[i + count] == ch:\n            count += 1\n        if count > 1:\n            result.append(str(count))\n        result.append(ch)\n        i += count\n    return \"\".join(result)\n```\nTokens: 931 sent, 266 received.\nApplied edit to run_length_encoding.py",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.29,
+         "passed": true,
+         "tests_passed": 13,
+         "output_tail": ".............                                                            [100%]\n13 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 1,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "two-fer",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 3.12,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<821 chars>' two_fer.py",
+         "exit_code": 0,
+         "wall_s": 3.12,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 875,
+         "tokens_received": 28,
+         "stdout_tail": "Aider v0.86.2\nModel: openai/fraserprice/DeepSeek-V4-Flash-DSpark with whole edit format\nGit repo: none\nRepo-map: disabled\nAdded two_fer.py to the chat.\n\ntwo_fer.py\n```\ndef two_fer(name=\"you\"):\n    return f\"One for {name}, one for me.\"\n```\nTokens: 875 sent, 28 received.\nApplied edit to two_fer.py",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.29,
+         "passed": true,
+         "tests_passed": 3,
+         "output_tail": "...                                                                      [100%]\n3 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 1,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "word-count",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 12.07,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "aider --model openai/fraserprice/DeepSeek-V4-Flash-DSpark --openai-api-base http://100.122.26.9:3000/v1 --yes-always --no-git --no-auto-commits --no-show-model-warnings --no-check-update --no-analytics --no-pretty --message '<1591 chars>' word_count.py",
+         "exit_code": 0,
+         "wall_s": 12.07,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 1,
+         "tokens_sent": 1100,
+         "tokens_received": 458,
+         "stdout_tail": "...map: disabled\nAdded word_count.py to the chat.\n\nword_count.py\n```\nimport re\n\ndef count_words(sentence):\n    # Normalize to lowercase\n    sentence = sentence.lower()\n    # Split on any non-alphanumeric characters except apostrophe\n    # We want to keep apostrophes that are part of contractions.\n    # Use a regex that matches sequences of letters, digits, and apostrophes.\n    # But we must not allow apostrophes at start or end? The spec says apostrophe in contractions is part of word.\n    # We'll split on any character that is not a letter, digit, or apostrophe.\n    # However, we need to treat apostrophe as part of word only when it's inside a word.\n    # For simplicity, we can split on any character that is not a letter, digit, or apostrophe.\n    # Then filter out empty strings.\n    words = re.findall(r\"[a-z0-9']+\", sentence)\n    # But we need to handle cases like 'password' (with leading apostrophe) or trailing apostrophe.\n    # The spec says apostrophe in contractions is considered part of word. But a leading apostrophe like 'tis is a word.\n    # However, the example \"That's the password: 'PASSWORD 123'!\" includes a leading apostrophe before PASSWORD.\n    # In that example, the word 'PASSWORD' is counted as \"password\". The leading apostrophe is punctuation that separates words.\n    # So we should not include leading/trailing apostrophes as part of the word.\n    # The regex [a-z0-9']+ will include leading/trailing apostrophes if they appear.\n    # We need to strip apostrophes from the edges.\n    # Also, we need to handle apostrophes that are not part of a word, like a single apostrophe.\n    # We'll process each match: strip leading/trailing apostrophes, and if the result is non-empty, count it.\n    counts = {}\n    for w in words:\n        # Strip leading and trailing apostrophes\n        w = w.strip(\"'\")\n        if w == '':\n            continue\n        counts[w] = counts.get(w, 0) + 1\n    return counts\n```\nTokens: 1.1k sent, 458 received.\nApplied edit to word_count.py",
+         "stderr_tail": "Warning: Input is not a terminal (fd=0)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 17,
+         "output_tail": ".................                                                        [100%]\n17 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 1,
+       "tokens_generated": 0
+      }
+     }
+    ]
+   },
+   {
+    "harness": "opencode",
+    "version": "1.18.31",
+    "scores": {
+     "tasks": 10,
+     "passed_at_1": 0,
+     "passed_at_2": 0,
+     "pass_at_1": 0.0,
+     "pass_at_2": 0.0,
+     "mean_wall_s": 1.6,
+     "crashes": 10,
+     "timeouts": 0
+    },
+    "tasks": [
+     {
+      "slug": "binary-search",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.76,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<2827 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.96,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557595027,\"sessionID\":\"ses_f560e253fffeCgpJAkq4ReP3jy\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_7b9e4d8d\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 11,
+         "output_tail": "... ___________\n\nself = <binary_search_test.BinarySearchTest testMethod=test_nothing_is_found_in_an_empty_array>\n\n    def test_nothing_is_found_in_an_empty_array(self):\n    \n>       with self.assertRaises(ValueError) as err:\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: ValueError not raised\n\nbinary_search_test.py:65: AssertionError\n_ BinarySearchTest.test_nothing_is_found_when_the_left_and_right_bounds_cross __\n\nself = <binary_search_test.BinarySearchTest testMethod=test_nothing_is_found_when_the_left_and_right_bounds_cross>\n\n    def test_nothing_is_found_when_the_left_and_right_bounds_cross(self):\n    \n>       with self.assertRaises(ValueError) as err:\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: ValueError not raised\n\nbinary_search_test.py:73: AssertionError\n=========================== short test summary info ============================\nFAILED binary_search_test.py::BinarySearchTest::test_a_value_larger_than_the_array_s_largest_value_is_not_found\nFAILED binary_search_test.py::BinarySearchTest::test_a_value_smaller_than_the_array_s_smallest_value_is_not_found\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_at_the_beginning_of_an_array\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_at_the_end_of_an_array\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_an_array_of_even_length\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_an_array_of_odd_length\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_an_array_with_one_element\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_the_middle_of_an_array\nFAILED binary_search_test.py::BinarySearchTest::test_identifies_that_a_value_is_not_included_in_the_array\nFAILED binary_search_test.py::BinarySearchTest::test_nothing_is_found_in_an_empty_array\nFAILED binary_search_test.py::BinarySearchTest::test_nothing_is_found_when_the_left_and_right_bounds_cross\n11 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<6972 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557596082,\"sessionID\":\"ses_f560e2128ffeMjlSh38vz8Ge7Q\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_5b2857ae\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 11,
+         "output_tail": "... ___________\n\nself = <binary_search_test.BinarySearchTest testMethod=test_nothing_is_found_in_an_empty_array>\n\n    def test_nothing_is_found_in_an_empty_array(self):\n    \n>       with self.assertRaises(ValueError) as err:\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: ValueError not raised\n\nbinary_search_test.py:65: AssertionError\n_ BinarySearchTest.test_nothing_is_found_when_the_left_and_right_bounds_cross __\n\nself = <binary_search_test.BinarySearchTest testMethod=test_nothing_is_found_when_the_left_and_right_bounds_cross>\n\n    def test_nothing_is_found_when_the_left_and_right_bounds_cross(self):\n    \n>       with self.assertRaises(ValueError) as err:\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: ValueError not raised\n\nbinary_search_test.py:73: AssertionError\n=========================== short test summary info ============================\nFAILED binary_search_test.py::BinarySearchTest::test_a_value_larger_than_the_array_s_largest_value_is_not_found\nFAILED binary_search_test.py::BinarySearchTest::test_a_value_smaller_than_the_array_s_smallest_value_is_not_found\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_at_the_beginning_of_an_array\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_at_the_end_of_an_array\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_an_array_of_even_length\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_an_array_of_odd_length\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_an_array_with_one_element\nFAILED binary_search_test.py::BinarySearchTest::test_finds_a_value_in_the_middle_of_an_array\nFAILED binary_search_test.py::BinarySearchTest::test_identifies_that_a_value_is_not_included_in_the_array\nFAILED binary_search_test.py::BinarySearchTest::test_nothing_is_found_in_an_empty_array\nFAILED binary_search_test.py::BinarySearchTest::test_nothing_is_found_when_the_left_and_right_bounds_cross\n11 failed in 0.02s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "bob",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.68,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<994 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557597253,\"sessionID\":\"ses_f560e1c92ffePVfqNM23gSJ0mE\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_4ff1db15\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.29,
+         "passed": false,
+         "tests_failed": 26,
+         "output_tail": "...umeric_question - AssertionError:...\nFAILED bob_test.py::BobTest::test_asking_a_question - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_asking_gibberish - AssertionError: None != ...\nFAILED bob_test.py::BobTest::test_ending_with_whitespace - AssertionError: No...\nFAILED bob_test.py::BobTest::test_forceful_question - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_multiple_line_question - AssertionError: No...\nFAILED bob_test.py::BobTest::test_no_letters - AssertionError: None != 'Whate...\nFAILED bob_test.py::BobTest::test_non_letters_with_question - AssertionError:...\nFAILED bob_test.py::BobTest::test_non_question_ending_with_whitespace - Asser...\nFAILED bob_test.py::BobTest::test_other_whitespace - AssertionError: None != ...\nFAILED bob_test.py::BobTest::test_prattling_on - AssertionError: None != 'Sure.'\nFAILED bob_test.py::BobTest::test_prolonged_silence - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_question_with_no_letters - AssertionError: ...\nFAILED bob_test.py::BobTest::test_shouting - AssertionError: None != 'Whoa, c...\nFAILED bob_test.py::BobTest::test_shouting_a_statement_containing_a_question_mark\nFAILED bob_test.py::BobTest::test_shouting_gibberish - AssertionError: None !...\nFAILED bob_test.py::BobTest::test_shouting_numbers - AssertionError: None != ...\nFAILED bob_test.py::BobTest::test_shouting_with_no_exclamation_mark - Asserti...\nFAILED bob_test.py::BobTest::test_shouting_with_special_characters - Assertio...\nFAILED bob_test.py::BobTest::test_silence - AssertionError: None != 'Fine. Be...\nFAILED bob_test.py::BobTest::test_starting_with_whitespace - AssertionError: ...\nFAILED bob_test.py::BobTest::test_statement_containing_question_mark - Assert...\nFAILED bob_test.py::BobTest::test_stating_something - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_talking_forcefully - AssertionError: None !...\nFAILED bob_test.py::BobTest::test_using_acronyms_in_regular_speech - Assertio...\n26 failed in 0.04s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<5129 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.89,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557598430,\"sessionID\":\"ses_f560e180affe1X0qU5EhOYYI72\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_30692b89\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.64,
+         "passed": false,
+         "tests_failed": 26,
+         "output_tail": "...umeric_question - AssertionError:...\nFAILED bob_test.py::BobTest::test_asking_a_question - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_asking_gibberish - AssertionError: None != ...\nFAILED bob_test.py::BobTest::test_ending_with_whitespace - AssertionError: No...\nFAILED bob_test.py::BobTest::test_forceful_question - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_multiple_line_question - AssertionError: No...\nFAILED bob_test.py::BobTest::test_no_letters - AssertionError: None != 'Whate...\nFAILED bob_test.py::BobTest::test_non_letters_with_question - AssertionError:...\nFAILED bob_test.py::BobTest::test_non_question_ending_with_whitespace - Asser...\nFAILED bob_test.py::BobTest::test_other_whitespace - AssertionError: None != ...\nFAILED bob_test.py::BobTest::test_prattling_on - AssertionError: None != 'Sure.'\nFAILED bob_test.py::BobTest::test_prolonged_silence - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_question_with_no_letters - AssertionError: ...\nFAILED bob_test.py::BobTest::test_shouting - AssertionError: None != 'Whoa, c...\nFAILED bob_test.py::BobTest::test_shouting_a_statement_containing_a_question_mark\nFAILED bob_test.py::BobTest::test_shouting_gibberish - AssertionError: None !...\nFAILED bob_test.py::BobTest::test_shouting_numbers - AssertionError: None != ...\nFAILED bob_test.py::BobTest::test_shouting_with_no_exclamation_mark - Asserti...\nFAILED bob_test.py::BobTest::test_shouting_with_special_characters - Assertio...\nFAILED bob_test.py::BobTest::test_silence - AssertionError: None != 'Fine. Be...\nFAILED bob_test.py::BobTest::test_starting_with_whitespace - AssertionError: ...\nFAILED bob_test.py::BobTest::test_statement_containing_question_mark - Assert...\nFAILED bob_test.py::BobTest::test_stating_something - AssertionError: None !=...\nFAILED bob_test.py::BobTest::test_talking_forcefully - AssertionError: None !...\nFAILED bob_test.py::BobTest::test_using_acronyms_in_regular_speech - Assertio...\n26 failed in 0.05s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "hamming",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.69,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1843 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.89,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557600093,\"sessionID\":\"ses_f560e1186ffetHOf4sNAb31lVI\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_2f08d1d2\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 9,
+         "output_tail": "...ferent_strands(self):\n>       self.assertEqual(distance(\"GGACGGATTCTG\", \"AGGACGGATTCT\"), 9)\nE       AssertionError: None != 9\n\nhamming_test.py:26: AssertionError\n___________________ HammingTest.test_long_identical_strands ____________________\n\nself = <hamming_test.HammingTest testMethod=test_long_identical_strands>\n\n    def test_long_identical_strands(self):\n>       self.assertEqual(distance(\"GGACTGAAATCTG\", \"GGACTGAAATCTG\"), 0)\nE       AssertionError: None != 0\n\nhamming_test.py:23: AssertionError\n_______________ HammingTest.test_single_letter_different_strands _______________\n\nself = <hamming_test.HammingTest testMethod=test_single_letter_different_strands>\n\n    def test_single_letter_different_strands(self):\n>       self.assertEqual(distance(\"G\", \"T\"), 1)\nE       AssertionError: None != 1\n\nhamming_test.py:20: AssertionError\n_______________ HammingTest.test_single_letter_identical_strands _______________\n\nself = <hamming_test.HammingTest testMethod=test_single_letter_identical_strands>\n\n    def test_single_letter_identical_strands(self):\n>       self.assertEqual(distance(\"A\", \"A\"), 0)\nE       AssertionError: None != 0\n\nhamming_test.py:17: AssertionError\n=========================== short test summary info ============================\nFAILED hamming_test.py::HammingTest::test_disallow_empty_first_strand - Asser...\nFAILED hamming_test.py::HammingTest::test_disallow_empty_second_strand - Asse...\nFAILED hamming_test.py::HammingTest::test_disallow_first_strand_longer - Asse...\nFAILED hamming_test.py::HammingTest::test_disallow_second_strand_longer - Ass...\nFAILED hamming_test.py::HammingTest::test_empty_strands - AssertionError: Non...\nFAILED hamming_test.py::HammingTest::test_long_different_strands - AssertionE...\nFAILED hamming_test.py::HammingTest::test_long_identical_strands - AssertionE...\nFAILED hamming_test.py::HammingTest::test_single_letter_different_strands - A...\nFAILED hamming_test.py::HammingTest::test_single_letter_identical_strands - A...\n9 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<5982 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.8,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557601151,\"sessionID\":\"ses_f560e0d59ffedFhYI41Vb0Ui5u\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_1c9c0244\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.25,
+         "passed": false,
+         "tests_failed": 9,
+         "output_tail": "...ferent_strands(self):\n>       self.assertEqual(distance(\"GGACGGATTCTG\", \"AGGACGGATTCT\"), 9)\nE       AssertionError: None != 9\n\nhamming_test.py:26: AssertionError\n___________________ HammingTest.test_long_identical_strands ____________________\n\nself = <hamming_test.HammingTest testMethod=test_long_identical_strands>\n\n    def test_long_identical_strands(self):\n>       self.assertEqual(distance(\"GGACTGAAATCTG\", \"GGACTGAAATCTG\"), 0)\nE       AssertionError: None != 0\n\nhamming_test.py:23: AssertionError\n_______________ HammingTest.test_single_letter_different_strands _______________\n\nself = <hamming_test.HammingTest testMethod=test_single_letter_different_strands>\n\n    def test_single_letter_different_strands(self):\n>       self.assertEqual(distance(\"G\", \"T\"), 1)\nE       AssertionError: None != 1\n\nhamming_test.py:20: AssertionError\n_______________ HammingTest.test_single_letter_identical_strands _______________\n\nself = <hamming_test.HammingTest testMethod=test_single_letter_identical_strands>\n\n    def test_single_letter_identical_strands(self):\n>       self.assertEqual(distance(\"A\", \"A\"), 0)\nE       AssertionError: None != 0\n\nhamming_test.py:17: AssertionError\n=========================== short test summary info ============================\nFAILED hamming_test.py::HammingTest::test_disallow_empty_first_strand - Asser...\nFAILED hamming_test.py::HammingTest::test_disallow_empty_second_strand - Asse...\nFAILED hamming_test.py::HammingTest::test_disallow_first_strand_longer - Asse...\nFAILED hamming_test.py::HammingTest::test_disallow_second_strand_longer - Ass...\nFAILED hamming_test.py::HammingTest::test_empty_strands - AssertionError: Non...\nFAILED hamming_test.py::HammingTest::test_long_different_strands - AssertionE...\nFAILED hamming_test.py::HammingTest::test_long_identical_strands - AssertionE...\nFAILED hamming_test.py::HammingTest::test_single_letter_different_strands - A...\nFAILED hamming_test.py::HammingTest::test_single_letter_identical_strands - A...\n9 failed in 0.02s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "isogram",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.58,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<602 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557602319,\"sessionID\":\"ses_f560e08c8ffe8QX5he9yDreKM4\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_c4adc8b8\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 14,
+         "output_tail": "...\nself = <isogram_test.IsogramTest testMethod=test_word_with_one_duplicated_character>\n\n    def test_word_with_one_duplicated_character(self):\n>       self.assertIs(is_isogram(\"eleven\"), False)\nE       AssertionError: None is not False\n\nisogram_test.py:20: AssertionError\n_ IsogramTest.test_word_with_one_duplicated_character_from_the_end_of_the_alphabet _\n\nself = <isogram_test.IsogramTest testMethod=test_word_with_one_duplicated_character_from_the_end_of_the_alphabet>\n\n    def test_word_with_one_duplicated_character_from_the_end_of_the_alphabet(self):\n>       self.assertIs(is_isogram(\"zzyzx\"), False)\nE       AssertionError: None is not False\n\nisogram_test.py:23: AssertionError\n=========================== short test summary info ============================\nFAILED isogram_test.py::IsogramTest::test_duplicated_character_in_the_middle\nFAILED isogram_test.py::IsogramTest::test_empty_string - AssertionError: None...\nFAILED isogram_test.py::IsogramTest::test_hypothetical_isogrammic_word_with_hyphen\nFAILED isogram_test.py::IsogramTest::test_hypothetical_word_with_duplicated_character_following_hyphen\nFAILED isogram_test.py::IsogramTest::test_isogram_with_duplicated_hyphen - As...\nFAILED isogram_test.py::IsogramTest::test_isogram_with_only_lower_case_characters\nFAILED isogram_test.py::IsogramTest::test_longest_reported_english_isogram - ...\nFAILED isogram_test.py::IsogramTest::test_made_up_name_that_is_an_isogram - A...\nFAILED isogram_test.py::IsogramTest::test_same_first_and_last_characters - As...\nFAILED isogram_test.py::IsogramTest::test_word_with_duplicated_character_and_with_two_hyphens\nFAILED isogram_test.py::IsogramTest::test_word_with_duplicated_character_in_mixed_case\nFAILED isogram_test.py::IsogramTest::test_word_with_duplicated_character_in_mixed_case_lowercase_first\nFAILED isogram_test.py::IsogramTest::test_word_with_one_duplicated_character\nFAILED isogram_test.py::IsogramTest::test_word_with_one_duplicated_character_from_the_end_of_the_alphabet\n14 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<4741 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557603373,\"sessionID\":\"ses_f560e04a4ffenkNHT6gsr0P46K\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_ee5353a8\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.25,
+         "passed": false,
+         "tests_failed": 14,
+         "output_tail": "...\nself = <isogram_test.IsogramTest testMethod=test_word_with_one_duplicated_character>\n\n    def test_word_with_one_duplicated_character(self):\n>       self.assertIs(is_isogram(\"eleven\"), False)\nE       AssertionError: None is not False\n\nisogram_test.py:20: AssertionError\n_ IsogramTest.test_word_with_one_duplicated_character_from_the_end_of_the_alphabet _\n\nself = <isogram_test.IsogramTest testMethod=test_word_with_one_duplicated_character_from_the_end_of_the_alphabet>\n\n    def test_word_with_one_duplicated_character_from_the_end_of_the_alphabet(self):\n>       self.assertIs(is_isogram(\"zzyzx\"), False)\nE       AssertionError: None is not False\n\nisogram_test.py:23: AssertionError\n=========================== short test summary info ============================\nFAILED isogram_test.py::IsogramTest::test_duplicated_character_in_the_middle\nFAILED isogram_test.py::IsogramTest::test_empty_string - AssertionError: None...\nFAILED isogram_test.py::IsogramTest::test_hypothetical_isogrammic_word_with_hyphen\nFAILED isogram_test.py::IsogramTest::test_hypothetical_word_with_duplicated_character_following_hyphen\nFAILED isogram_test.py::IsogramTest::test_isogram_with_duplicated_hyphen - As...\nFAILED isogram_test.py::IsogramTest::test_isogram_with_only_lower_case_characters\nFAILED isogram_test.py::IsogramTest::test_longest_reported_english_isogram - ...\nFAILED isogram_test.py::IsogramTest::test_made_up_name_that_is_an_isogram - A...\nFAILED isogram_test.py::IsogramTest::test_same_first_and_last_characters - As...\nFAILED isogram_test.py::IsogramTest::test_word_with_duplicated_character_and_with_two_hyphens\nFAILED isogram_test.py::IsogramTest::test_word_with_duplicated_character_in_mixed_case\nFAILED isogram_test.py::IsogramTest::test_word_with_duplicated_character_in_mixed_case_lowercase_first\nFAILED isogram_test.py::IsogramTest::test_word_with_one_duplicated_character\nFAILED isogram_test.py::IsogramTest::test_word_with_one_duplicated_character_from_the_end_of_the_alphabet\n14 failed in 0.02s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "matrix",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.61,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1865 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.81,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557604553,\"sessionID\":\"ses_f560e0015ffe1XtLFDGld8wFA9\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_a695272a\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.27,
+         "passed": false,
+         "tests_failed": 8,
+         "output_tail": "...mn_where_numbers_have_different_widths ______\n\nself = <matrix_test.MatrixTest testMethod=test_extract_column_where_numbers_have_different_widths>\n\n    def test_extract_column_where_numbers_have_different_widths(self):\n        matrix = Matrix(\"89 1903 3\\n18 3 1\\n9 4 800\")\n>       self.assertEqual(matrix.column(2), [1903, 3, 4])\nE       AssertionError: None != [1903, 3, 4]\n\nmatrix_test.py:43: AssertionError\n______________ MatrixTest.test_extract_row_from_one_number_matrix ______________\n\nself = <matrix_test.MatrixTest testMethod=test_extract_row_from_one_number_matrix>\n\n    def test_extract_row_from_one_number_matrix(self):\n        matrix = Matrix(\"1\")\n>       self.assertEqual(matrix.row(1), [1])\nE       AssertionError: None != [1]\n\nmatrix_test.py:15: AssertionError\n_______ MatrixTest.test_extract_row_where_numbers_have_different_widths ________\n\nself = <matrix_test.MatrixTest testMethod=test_extract_row_where_numbers_have_different_widths>\n\n    def test_extract_row_where_numbers_have_different_widths(self):\n        matrix = Matrix(\"1 2\\n10 20\")\n>       self.assertEqual(matrix.row(2), [10, 20])\nE       AssertionError: None != [10, 20]\n\nmatrix_test.py:23: AssertionError\n=========================== short test summary info ============================\nFAILED matrix_test.py::MatrixTest::test_can_extract_column - AssertionError: ...\nFAILED matrix_test.py::MatrixTest::test_can_extract_column_from_non_square_matrix_with_no_corresponding_row\nFAILED matrix_test.py::MatrixTest::test_can_extract_row - AssertionError: Non...\nFAILED matrix_test.py::MatrixTest::test_can_extract_row_from_non_square_matrix_with_no_corresponding_column\nFAILED matrix_test.py::MatrixTest::test_extract_column_from_one_number_matrix\nFAILED matrix_test.py::MatrixTest::test_extract_column_where_numbers_have_different_widths\nFAILED matrix_test.py::MatrixTest::test_extract_row_from_one_number_matrix - ...\nFAILED matrix_test.py::MatrixTest::test_extract_row_where_numbers_have_different_widths\n8 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<6003 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557605616,\"sessionID\":\"ses_f560dfbe3ffedKjSK7IhpoGOni\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_e73d2d2a\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.25,
+         "passed": false,
+         "tests_failed": 8,
+         "output_tail": "...mn_where_numbers_have_different_widths ______\n\nself = <matrix_test.MatrixTest testMethod=test_extract_column_where_numbers_have_different_widths>\n\n    def test_extract_column_where_numbers_have_different_widths(self):\n        matrix = Matrix(\"89 1903 3\\n18 3 1\\n9 4 800\")\n>       self.assertEqual(matrix.column(2), [1903, 3, 4])\nE       AssertionError: None != [1903, 3, 4]\n\nmatrix_test.py:43: AssertionError\n______________ MatrixTest.test_extract_row_from_one_number_matrix ______________\n\nself = <matrix_test.MatrixTest testMethod=test_extract_row_from_one_number_matrix>\n\n    def test_extract_row_from_one_number_matrix(self):\n        matrix = Matrix(\"1\")\n>       self.assertEqual(matrix.row(1), [1])\nE       AssertionError: None != [1]\n\nmatrix_test.py:15: AssertionError\n_______ MatrixTest.test_extract_row_where_numbers_have_different_widths ________\n\nself = <matrix_test.MatrixTest testMethod=test_extract_row_where_numbers_have_different_widths>\n\n    def test_extract_row_where_numbers_have_different_widths(self):\n        matrix = Matrix(\"1 2\\n10 20\")\n>       self.assertEqual(matrix.row(2), [10, 20])\nE       AssertionError: None != [10, 20]\n\nmatrix_test.py:23: AssertionError\n=========================== short test summary info ============================\nFAILED matrix_test.py::MatrixTest::test_can_extract_column - AssertionError: ...\nFAILED matrix_test.py::MatrixTest::test_can_extract_column_from_non_square_matrix_with_no_corresponding_row\nFAILED matrix_test.py::MatrixTest::test_can_extract_row - AssertionError: Non...\nFAILED matrix_test.py::MatrixTest::test_can_extract_row_from_non_square_matrix_with_no_corresponding_column\nFAILED matrix_test.py::MatrixTest::test_extract_column_from_one_number_matrix\nFAILED matrix_test.py::MatrixTest::test_extract_column_where_numbers_have_different_widths\nFAILED matrix_test.py::MatrixTest::test_extract_row_from_one_number_matrix - ...\nFAILED matrix_test.py::MatrixTest::test_extract_row_where_numbers_have_different_widths\n8 failed in 0.02s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "raindrops",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.6,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<2469 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.8,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557606774,\"sessionID\":\"ses_f560df75effeTBssExtGFitSzA\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_c8065e6c\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 18,
+         "output_tail": "...r_3>\n\n    def test_the_sound_for_9_is_pling_as_it_has_a_factor_3(self):\n>       self.assertEqual(convert(9), \"Pling\")\nE       AssertionError: None != 'Pling'\n\nraindrops_test.py:34: AssertionError\n=========================== short test summary info ============================\nFAILED raindrops_test.py::RaindropsTest::test_2_to_the_power_3_does_not_make_a_raindrop_sound_as_3_is_the_exponent_not_the_base\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_105_is_pling_plang_plong_as_it_has_factors_3_5_and_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_10_is_plang_as_it_has_a_factor_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_14_is_plong_as_it_has_a_factor_of_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_15_is_pling_plang_as_it_has_factors_3_and_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_1_is_1 - Assertio...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_21_is_pling_plong_as_it_has_factors_3_and_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_25_is_plang_as_it_has_a_factor_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_27_is_pling_as_it_has_a_factor_3\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_3125_is_plang_as_it_has_a_factor_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_35_is_plang_plong_as_it_has_factors_5_and_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_3_is_pling - Asse...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_49_is_plong_as_it_has_a_factor_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_52_is_52 - Assert...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_5_is_plang - Asse...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_6_is_pling_as_it_has_a_factor_3\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_7_is_plong - Asse...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_9_is_pling_as_it_has_a_factor_3\n18 failed in 0.03s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<6610 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.8,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557607836,\"sessionID\":\"ses_f560df33bffe10EiKusalHHvWA\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_05fc98df\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 18,
+         "output_tail": "...r_3>\n\n    def test_the_sound_for_9_is_pling_as_it_has_a_factor_3(self):\n>       self.assertEqual(convert(9), \"Pling\")\nE       AssertionError: None != 'Pling'\n\nraindrops_test.py:34: AssertionError\n=========================== short test summary info ============================\nFAILED raindrops_test.py::RaindropsTest::test_2_to_the_power_3_does_not_make_a_raindrop_sound_as_3_is_the_exponent_not_the_base\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_105_is_pling_plang_plong_as_it_has_factors_3_5_and_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_10_is_plang_as_it_has_a_factor_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_14_is_plong_as_it_has_a_factor_of_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_15_is_pling_plang_as_it_has_factors_3_and_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_1_is_1 - Assertio...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_21_is_pling_plong_as_it_has_factors_3_and_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_25_is_plang_as_it_has_a_factor_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_27_is_pling_as_it_has_a_factor_3\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_3125_is_plang_as_it_has_a_factor_5\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_35_is_plang_plong_as_it_has_factors_5_and_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_3_is_pling - Asse...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_49_is_plong_as_it_has_a_factor_7\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_52_is_52 - Assert...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_5_is_plang - Asse...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_6_is_pling_as_it_has_a_factor_3\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_7_is_plong - Asse...\nFAILED raindrops_test.py::RaindropsTest::test_the_sound_for_9_is_pling_as_it_has_a_factor_3\n18 failed in 0.03s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "robot-name",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.61,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<866 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.83,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557609036,\"sessionID\":\"ses_f560dee86ffeGU4KO7VzjKrIeH\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_42b959b0\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 4,
+         "output_tail": "...robot_name_test.RobotNameTest testMethod=test_different_robots_have_different_names>\n\n    def test_different_robots_have_different_names(self):\n        self.assertNotEqual(\n>           Robot().name,\n            ^^^^^^^^^^^^\n            Robot().name\n        )\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:25: AttributeError\n_________________________ RobotNameTest.test_has_name __________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_has_name>\n\n    def test_has_name(self):\n>       self.assertRegex(Robot().name, self.name_re)\n                         ^^^^^^^^^^^^\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:16: AttributeError\n________________________ RobotNameTest.test_name_sticks ________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_name_sticks>\n\n    def test_name_sticks(self):\n        robot = Robot()\n>       robot.name\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:20: AttributeError\n________________________ RobotNameTest.test_reset_name _________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_reset_name>\n\n    def test_reset_name(self):\n        # Set a seed\n        seed = \"Totally random.\"\n    \n        # Initialize RNG using the seed\n        random.seed(seed)\n    \n        # Call the generator\n        robot = Robot()\n>       name = robot.name\n               ^^^^^^^^^^\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:38: AttributeError\n=========================== short test summary info ============================\nFAILED robot_name_test.py::RobotNameTest::test_different_robots_have_different_names\nFAILED robot_name_test.py::RobotNameTest::test_has_name - AttributeError: 'Ro...\nFAILED robot_name_test.py::RobotNameTest::test_name_sticks - AttributeError: ...\nFAILED robot_name_test.py::RobotNameTest::test_reset_name - AttributeError: '...\n4 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<3256 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557610091,\"sessionID\":\"ses_f560dea64ffed2MH0yqH07xJab\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_4fdf086d\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 4,
+         "output_tail": "...robot_name_test.RobotNameTest testMethod=test_different_robots_have_different_names>\n\n    def test_different_robots_have_different_names(self):\n        self.assertNotEqual(\n>           Robot().name,\n            ^^^^^^^^^^^^\n            Robot().name\n        )\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:25: AttributeError\n_________________________ RobotNameTest.test_has_name __________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_has_name>\n\n    def test_has_name(self):\n>       self.assertRegex(Robot().name, self.name_re)\n                         ^^^^^^^^^^^^\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:16: AttributeError\n________________________ RobotNameTest.test_name_sticks ________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_name_sticks>\n\n    def test_name_sticks(self):\n        robot = Robot()\n>       robot.name\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:20: AttributeError\n________________________ RobotNameTest.test_reset_name _________________________\n\nself = <robot_name_test.RobotNameTest testMethod=test_reset_name>\n\n    def test_reset_name(self):\n        # Set a seed\n        seed = \"Totally random.\"\n    \n        # Initialize RNG using the seed\n        random.seed(seed)\n    \n        # Call the generator\n        robot = Robot()\n>       name = robot.name\n               ^^^^^^^^^^\nE       AttributeError: 'Robot' object has no attribute 'name'\n\nrobot_name_test.py:38: AttributeError\n=========================== short test summary info ============================\nFAILED robot_name_test.py::RobotNameTest::test_different_robots_have_different_names\nFAILED robot_name_test.py::RobotNameTest::test_has_name - AttributeError: 'Ro...\nFAILED robot_name_test.py::RobotNameTest::test_name_sticks - AttributeError: ...\nFAILED robot_name_test.py::RobotNameTest::test_reset_name - AttributeError: '...\n4 failed in 0.02s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "run-length-encoding",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.6,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1113 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.81,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557611270,\"sessionID\":\"ses_f560de5d5ffe0vIXRHRz3Ggh8Q\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_a653b56d\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.25,
+         "passed": false,
+         "tests_failed": 13,
+         "output_tail": "...stance of <class 'str'> : First argument is not a string\n\nrun_length_encoding_test.py:18: AssertionError\n______ RunLengthEncodingTest.test_encode_string_with_no_single_characters ______\n\nself = <run_length_encoding_test.RunLengthEncodingTest testMethod=test_encode_string_with_no_single_characters>\n\n    def test_encode_string_with_no_single_characters(self):\n>       self.assertMultiLineEqual(encode(\"AABBBCCCC\"), \"2A3B4C\")\nE       AssertionError: None is not an instance of <class 'str'> : First argument is not a string\n\nrun_length_encoding_test.py:21: AssertionError\n=========================== short test summary info ============================\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_empty_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_lowercase_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_multiple_whitespace_mixed_in_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_single_characters_only\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_single_characters_with_repeated_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_string_with_no_single_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_empty_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_followed_by_decode_gives_original_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_lowercase_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_multiple_whitespace_mixed_in_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_single_characters_mixed_with_repeated_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_single_characters_only_are_encoded_without_count\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_string_with_no_single_characters\n13 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<5264 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557612313,\"sessionID\":\"ses_f560de1baffeBlkdpYbjUWlrX8\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_bf39154c\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.25,
+         "passed": false,
+         "tests_failed": 13,
+         "output_tail": "...stance of <class 'str'> : First argument is not a string\n\nrun_length_encoding_test.py:18: AssertionError\n______ RunLengthEncodingTest.test_encode_string_with_no_single_characters ______\n\nself = <run_length_encoding_test.RunLengthEncodingTest testMethod=test_encode_string_with_no_single_characters>\n\n    def test_encode_string_with_no_single_characters(self):\n>       self.assertMultiLineEqual(encode(\"AABBBCCCC\"), \"2A3B4C\")\nE       AssertionError: None is not an instance of <class 'str'> : First argument is not a string\n\nrun_length_encoding_test.py:21: AssertionError\n=========================== short test summary info ============================\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_empty_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_lowercase_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_multiple_whitespace_mixed_in_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_single_characters_only\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_single_characters_with_repeated_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_decode_string_with_no_single_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_empty_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_followed_by_decode_gives_original_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_lowercase_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_multiple_whitespace_mixed_in_string\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_single_characters_mixed_with_repeated_characters\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_single_characters_only_are_encoded_without_count\nFAILED run_length_encoding_test.py::RunLengthEncodingTest::test_encode_string_with_no_single_characters\n13 failed in 0.02s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "two-fer",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.6,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<821 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557613461,\"sessionID\":\"ses_f560ddd3effegCHIHIKpO2wcnI\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_a24ff01b\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.24,
+         "passed": false,
+         "tests_failed": 3,
+         "output_tail": "FFF                                                                      [100%]\n=================================== FAILURES ===================================\n_________________________ TwoFerTest.test_a_name_given _________________________\n\nself = <two_fer_test.TwoFerTest testMethod=test_a_name_given>\n\n    def test_a_name_given(self):\n>       self.assertEqual(two_fer(\"Alice\"), \"One for Alice, one for me.\")\nE       AssertionError: None != 'One for Alice, one for me.'\n\ntwo_fer_test.py:17: AssertionError\n______________________ TwoFerTest.test_another_name_given ______________________\n\nself = <two_fer_test.TwoFerTest testMethod=test_another_name_given>\n\n    def test_another_name_given(self):\n>       self.assertEqual(two_fer(\"Bob\"), \"One for Bob, one for me.\")\nE       AssertionError: None != 'One for Bob, one for me.'\n\ntwo_fer_test.py:20: AssertionError\n________________________ TwoFerTest.test_no_name_given _________________________\n\nself = <two_fer_test.TwoFerTest testMethod=test_no_name_given>\n\n    def test_no_name_given(self):\n>       self.assertEqual(two_fer(), \"One for you, one for me.\")\n                         ^^^^^^^^^\nE       TypeError: two_fer() missing 1 required positional argument: 'name'\n\ntwo_fer_test.py:14: TypeError\n=========================== short test summary info ============================\nFAILED two_fer_test.py::TwoFerTest::test_a_name_given - AssertionError: None ...\nFAILED two_fer_test.py::TwoFerTest::test_another_name_given - AssertionError:...\nFAILED two_fer_test.py::TwoFerTest::test_no_name_given - TypeError: two_fer()...\n3 failed in 0.01s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<2547 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.81,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557614516,\"sessionID\":\"ses_f560dd920ffeyCkpH7d9G9M3BS\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_86f322ec\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 3,
+         "output_tail": "FFF                                                                      [100%]\n=================================== FAILURES ===================================\n_________________________ TwoFerTest.test_a_name_given _________________________\n\nself = <two_fer_test.TwoFerTest testMethod=test_a_name_given>\n\n    def test_a_name_given(self):\n>       self.assertEqual(two_fer(\"Alice\"), \"One for Alice, one for me.\")\nE       AssertionError: None != 'One for Alice, one for me.'\n\ntwo_fer_test.py:17: AssertionError\n______________________ TwoFerTest.test_another_name_given ______________________\n\nself = <two_fer_test.TwoFerTest testMethod=test_another_name_given>\n\n    def test_another_name_given(self):\n>       self.assertEqual(two_fer(\"Bob\"), \"One for Bob, one for me.\")\nE       AssertionError: None != 'One for Bob, one for me.'\n\ntwo_fer_test.py:20: AssertionError\n________________________ TwoFerTest.test_no_name_given _________________________\n\nself = <two_fer_test.TwoFerTest testMethod=test_no_name_given>\n\n    def test_no_name_given(self):\n>       self.assertEqual(two_fer(), \"One for you, one for me.\")\n                         ^^^^^^^^^\nE       TypeError: two_fer() missing 1 required positional argument: 'name'\n\ntwo_fer_test.py:14: TypeError\n=========================== short test summary info ============================\nFAILED two_fer_test.py::TwoFerTest::test_a_name_given - AssertionError: None ...\nFAILED two_fer_test.py::TwoFerTest::test_another_name_given - AssertionError:...\nFAILED two_fer_test.py::TwoFerTest::test_no_name_given - TypeError: two_fer()...\n3 failed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "word-count",
+      "passed": false,
+      "passed_at_attempt": null,
+      "harness_wall_s": 1.6,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1591 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.79,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557615678,\"sessionID\":\"ses_f560dd494ffeo7LaoMv1ZvIU54\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_49211fb8\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.27,
+         "passed": false,
+         "tests_failed": 17,
+         "output_tail": "..._______________ WordCountTest.test_with_quotations ______________________\n\nself = <word_count_test.WordCountTest testMethod=test_with_quotations>\n\n    def test_with_quotations(self):\n>       self.assertEqual(\n            count_words(\"Joe can't tell between 'large' and large.\"),\n            {\"joe\": 1, \"can't\": 1, \"tell\": 1, \"between\": 1, \"large\": 2, \"and\": 1},\n        )\nE       AssertionError: None != {'joe': 1, \"can't\": 1, 'tell': 1, 'between': 1, 'large': 2, 'and': 1}\n\nword_count_test.py:63: AssertionError\n=========================== short test summary info ============================\nFAILED word_count_test.py::WordCountTest::test_alternating_word_separators_not_detected_as_a_word\nFAILED word_count_test.py::WordCountTest::test_count_one_of_each_word - Asser...\nFAILED word_count_test.py::WordCountTest::test_count_one_word - AssertionErro...\nFAILED word_count_test.py::WordCountTest::test_handles_cramped_lists - Assert...\nFAILED word_count_test.py::WordCountTest::test_handles_expanded_lists - Asser...\nFAILED word_count_test.py::WordCountTest::test_ignore_punctuation - Assertion...\nFAILED word_count_test.py::WordCountTest::test_include_numbers - AssertionErr...\nFAILED word_count_test.py::WordCountTest::test_multiple_apostrophes_ignored\nFAILED word_count_test.py::WordCountTest::test_multiple_occurrences_of_a_word\nFAILED word_count_test.py::WordCountTest::test_multiple_spaces_not_detected_as_a_word\nFAILED word_count_test.py::WordCountTest::test_non_alphanumeric - AssertionEr...\nFAILED word_count_test.py::WordCountTest::test_normalize_case - AssertionErro...\nFAILED word_count_test.py::WordCountTest::test_quotation_for_word_with_apostrophe\nFAILED word_count_test.py::WordCountTest::test_substrings_from_the_beginning\nFAILED word_count_test.py::WordCountTest::test_tabs - AssertionError: None !=...\nFAILED word_count_test.py::WordCountTest::test_with_apostrophes - AssertionEr...\nFAILED word_count_test.py::WordCountTest::test_with_quotations - AssertionErr...\n17 failed in 0.03s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "opencode run --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<5733 chars>'",
+         "exit_code": 1,
+         "wall_s": 0.81,
+         "timed_out": false,
+         "crashed": true,
+         "stdout_tail": "{\"type\":\"error\",\"timestamp\":1789557616767,\"sessionID\":\"ses_f560dd055ffeHEGR1XTgbyW4Bd\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"Unexpected server error. Check server logs for details.\",\"ref\":\"err_d49cdfae\"}}}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.26,
+         "passed": false,
+         "tests_failed": 17,
+         "output_tail": "..._______________ WordCountTest.test_with_quotations ______________________\n\nself = <word_count_test.WordCountTest testMethod=test_with_quotations>\n\n    def test_with_quotations(self):\n>       self.assertEqual(\n            count_words(\"Joe can't tell between 'large' and large.\"),\n            {\"joe\": 1, \"can't\": 1, \"tell\": 1, \"between\": 1, \"large\": 2, \"and\": 1},\n        )\nE       AssertionError: None != {'joe': 1, \"can't\": 1, 'tell': 1, 'between': 1, 'large': 2, 'and': 1}\n\nword_count_test.py:63: AssertionError\n=========================== short test summary info ============================\nFAILED word_count_test.py::WordCountTest::test_alternating_word_separators_not_detected_as_a_word\nFAILED word_count_test.py::WordCountTest::test_count_one_of_each_word - Asser...\nFAILED word_count_test.py::WordCountTest::test_count_one_word - AssertionErro...\nFAILED word_count_test.py::WordCountTest::test_handles_cramped_lists - Assert...\nFAILED word_count_test.py::WordCountTest::test_handles_expanded_lists - Asser...\nFAILED word_count_test.py::WordCountTest::test_ignore_punctuation - Assertion...\nFAILED word_count_test.py::WordCountTest::test_include_numbers - AssertionErr...\nFAILED word_count_test.py::WordCountTest::test_multiple_apostrophes_ignored\nFAILED word_count_test.py::WordCountTest::test_multiple_occurrences_of_a_word\nFAILED word_count_test.py::WordCountTest::test_multiple_spaces_not_detected_as_a_word\nFAILED word_count_test.py::WordCountTest::test_non_alphanumeric - AssertionEr...\nFAILED word_count_test.py::WordCountTest::test_normalize_case - AssertionErro...\nFAILED word_count_test.py::WordCountTest::test_quotation_for_word_with_apostrophe\nFAILED word_count_test.py::WordCountTest::test_substrings_from_the_beginning\nFAILED word_count_test.py::WordCountTest::test_tabs - AssertionError: None !=...\nFAILED word_count_test.py::WordCountTest::test_with_apostrophes - AssertionEr...\nFAILED word_count_test.py::WordCountTest::test_with_quotations - AssertionErr...\n17 failed in 0.03s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     }
+    ]
+   },
+   {
+    "harness": "pi",
+    "version": "0.73.1",
+    "scores": {
+     "tasks": 10,
+     "passed_at_1": 9,
+     "passed_at_2": 10,
+     "pass_at_1": 0.9,
+     "pass_at_2": 1.0,
+     "mean_wall_s": 13.8,
+     "crashes": 0,
+     "timeouts": 0
+    },
+    "tasks": [
+     {
+      "slug": "binary-search",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 16.53,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<2827 chars>'",
+         "exit_code": 0,
+         "wall_s": 16.53,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "Done. Implementation:\n\n- **Two-pointer approach**: `low` starts at 0, `high` at `len(search_list) - 1`.\n- **Loop**: while `low <= high`, compute `mid` via integer division, compare `search_list[mid]` to `value`.\n- **Half elimination**: if `mid_value < value`, discard the left half (`low = mid + 1`); if `mid_value > value`, discard the right half (`high = mid - 1`).\n- **Found**: return the index `mid`.\n- **Not found**: after loop exits, raise `ValueError(\"value not in array\")`."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.27,
+         "passed": true,
+         "tests_passed": 11,
+         "output_tail": "...........                                                              [100%]\n11 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "bob",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 16.35,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<994 chars>'",
+         "exit_code": 0,
+         "wall_s": 16.35,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution handles all cases:\n\n1. **Silence** (empty string or whitespace-only) \u2192 returns `\"Fine. Be that way!\"`\n2. **Yelled question** (all caps with letters, ending in `?`) \u2192 returns `\"Calm down, I know what I'm doing!\"`\n3. **Yelling** (all caps with at least one letter) \u2192 returns `\"Whoa, chill out!\"`\n4. **Question** (ends with `?`) \u2192 returns `\"Sure.\"`\n5. **Anything else** \u2192 returns `\"Whatever.\"`\n\nThe yelling detection checks that the input contains at least one alphabetic character and that every alphabetic character is uppercase \u2014 this correctly handles strings with numbers/punctuation (e.g., `\"1, 2, 3 GO!\"` is yelling, but `\"1, 2, 3\"` alone is not)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.26,
+         "passed": true,
+         "tests_passed": 26,
+         "output_tail": "..........................                                               [100%]\n26 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 4,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "hamming",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 6.79,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<1843 chars>'",
+         "exit_code": 0,
+         "wall_s": 6.79,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "Done. The solution:\n\n- Raises `ValueError(\"Strands must be of equal length.\")` if the strands differ in length.\n- Uses `zip` and a generator expression to count positions where characters differ (the Hamming distance)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.28,
+         "passed": true,
+         "tests_passed": 9,
+         "output_tail": ".........                                                                [100%]\n9 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "isogram",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 6.77,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<602 chars>'",
+         "exit_code": 0,
+         "wall_s": 6.77,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "Done. The solution:\n\n- Normalizes the phrase to lowercase\n- Iterates through each character\n- Only considers alphabetic characters (ignores spaces, hyphens, etc.)\n- Tracks seen letters in a set\n- Returns `False` if a letter repeats, `True` otherwise"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 14,
+         "output_tail": "..............                                                           [100%]\n14 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "matrix",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 7.42,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<1865 chars>'",
+         "exit_code": 0,
+         "wall_s": 7.42,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "Done. The implementation:\n\n- **`__init__`** parses the string into a 2D list of ints by splitting on newlines, then splitting each row by spaces and converting to integers.\n- **`row(index)`** returns the row at 1-based index `index`.\n- **`column(index)`** returns the column at 1-based index `index` by plucking the same position from each row."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 8,
+         "output_tail": "........                                                                 [100%]\n8 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "raindrops",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 7.07,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<2469 chars>'",
+         "exit_code": 0,
+         "wall_s": 7.07,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "Done. The `convert` function:\n\n- Appends `\"Pling\"` if divisible by 3\n- Appends `\"Plang\"` if divisible by 5\n- Appends `\"Plong\"` if divisible by 7\n- Returns the concatenated string if any factor matched, otherwise returns the number as a string"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 18,
+         "output_tail": "..................                                                       [100%]\n18 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "robot-name",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 18.07,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<866 chars>'",
+         "exit_code": 0,
+         "wall_s": 18.07,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is complete. The `Robot` class:\n\n- **`__init__`**: sets `_name = None` (factory state \u2014 no name yet)\n- **`name` property**: generates a unique random name on first access (format: 2 uppercase letters + 3 digits), caches it, and tracks all used names via a class-level `_used_names` set to guarantee uniqueness\n- **`reset()`**: wipes `_name` so the next `name` access generates a fresh unique name\n- Uses `random.choices` for properly random generation \u2014 no predictable sequences"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 4,
+         "output_tail": "....                                                                     [100%]\n4 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "run-length-encoding",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 15.96,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<1113 chars>'",
+         "exit_code": 0,
+         "wall_s": 15.96,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "Works perfectly. The implementation:\n\n- **`encode`**: Iterates through the string counting consecutive identical characters. When the character changes, appends the count (if > 1) and the character.\n- **`decode`**: Iterates through the string, collecting digit sequences as counts (defaulting to 1 if no digits), then appends the following character `count` times."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 13,
+         "output_tail": ".............                                                            [100%]\n13 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "two-fer",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 5.37,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<821 chars>'",
+         "exit_code": 0,
+         "wall_s": 5.37,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is in place. The function `two_fer` takes an optional `name` parameter (defaulting to `None`). If a name is provided, it returns `\"One for {name}, one for me.\"`. Otherwise, it returns `\"One for you, one for me.\"`."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.26,
+         "passed": true,
+         "tests_passed": 3,
+         "output_tail": "...                                                                      [100%]\n3 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 3,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "word-count",
+      "passed": true,
+      "passed_at_attempt": 2,
+      "harness_wall_s": 37.25,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<1591 chars>'",
+         "exit_code": 0,
+         "wall_s": 20.2,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The output matches the expected mapping exactly. The solution is correct and complete."
+        },
+        "tests": {
+         "exit_code": 2,
+         "wall_s": 0.29,
+         "passed": false,
+         "tests_errored": 2,
+         "output_tail": "==================================== ERRORS ====================================\n_____________________ ERROR collecting word_count_test.py ______________________\nImportError while importing test module '/private/var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/pi/word-count/word_count_test.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nword_count_test.py:7: in <module>\n    from word_count import (\nE   ImportError: cannot import name 'count_words' from 'word_count' (/private/var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/pi/word-count/word_count.py)\n=========================== short test summary info ============================\nERROR word_count_test.py\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n1 error in 0.05s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "pi --provider ainode-bench --model fraserprice/DeepSeek-V4-Flash-DSpark --tools read,grep,find,ls,edit,write,bash --no-session --no-context-files -p '<2841 chars>'",
+         "exit_code": 0,
+         "wall_s": 17.05,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "That's the only issue \u2014 the function was named `word_count` but the test imports `count_words`. The logic itself handles:\n\n- Words separated by punctuation/whitespace (via regex `[a-zA-Z0-9']+`)\n- Contractions with apostrophes preserved\n- Numbers included (digit in regex)\n- Case insensitive (`.lower()`)\n- Leading/trailing apostrophes stripped (`strip(\"'\")`)\n\nThe fix is just renaming `word_count` \u2192 `count_words`."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 17,
+         "output_tail": ".................                                                        [100%]\n17 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 9,
+       "tokens_generated": 0
+      }
+     }
+    ]
+   },
+   {
+    "harness": "dsh",
+    "version": "0.1.5-rc.1",
+    "scores": {
+     "tasks": 10,
+     "passed_at_1": 10,
+     "passed_at_2": 10,
+     "pass_at_1": 1.0,
+     "pass_at_2": 1.0,
+     "mean_wall_s": 16.4,
+     "crashes": 0,
+     "timeouts": 0
+    },
+    "tasks": [
+     {
+      "slug": "binary-search",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 15.48,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/binary-search.scratch/dsh-harness.patch.yml '<2827 chars>'",
+         "exit_code": 0,
+         "wall_s": 15.48,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The implementation is complete. The `find` function:\n\n1. Sets `low` and `high` pointers at the start and end of the list.\n2. Repeatedly calculates the `mid` index and compares the element at that index with the target `value`.\n3. If the middle element equals the value, returns its index.\n4. If the middle element is greater, narrows the search to the left half.\n5. If the middle element is less, narrows to the right half.\n6. If the loop exits without finding the value, raises `ValueError(\"value not in array\")`."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 11,
+         "output_tail": "...........                                                              [100%]\n11 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 4,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "bob",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 16.79,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/bob.scratch/dsh-harness.patch.yml '<994 chars>'",
+         "exit_code": 0,
+         "wall_s": 16.79,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The implementation is complete. Here's the logic:\n\n1. **Silence** (empty or whitespace-only after strip) \u2192 `\"Fine. Be that way!\"`\n2. **Yelled question** (ALL CAPS + ends with `?`) \u2192 `\"Calm down, I know what I'm doing!\"`\n3. **Yell** (ALL CAPS) \u2192 `\"Whoa, chill out!\"`\n4. **Question** (ends with `?`) \u2192 `\"Sure.\"`\n5. **Anything else** \u2192 `\"Whatever.\"`\n\nThe `isupper()` method naturally handles the \"yelling\" convention: it returns `True` only if the string contains at least one cased character and all cased characters are uppercase (numbers, punctuation, and spaces are ignored)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 26,
+         "output_tail": "..........................                                               [100%]\n26 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 6,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "hamming",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 9.92,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/hamming.scratch/dsh-harness.patch.yml '<1843 chars>'",
+         "exit_code": 0,
+         "wall_s": 9.92,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is written. Here's what it does:\n\n1. **Length check**: Raises a `ValueError` with the message `\"Strands must be of equal length.\"` if the two strands have different lengths.\n2. **Hamming distance**: Uses `zip` to pair up corresponding characters and `sum` with a generator expression counting positions where the characters differ."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.26,
+         "passed": true,
+         "tests_passed": 9,
+         "output_tail": ".........                                                                [100%]\n9 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 4,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "isogram",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 13.59,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/isogram.scratch/dsh-harness.patch.yml '<602 chars>'",
+         "exit_code": 0,
+         "wall_s": 13.59,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is complete. The `is_isogram` function:\n\n1. Converts the phrase to lowercase for case-insensitive comparison\n2. Iterates through each character\n3. Only checks alphabetic characters (ignoring spaces, hyphens, and other non-letters)\n4. Returns `False` the first time it sees a duplicate letter\n5. Returns `True` if no duplicates are found"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.28,
+         "passed": true,
+         "tests_passed": 14,
+         "output_tail": "..............                                                           [100%]\n14 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "matrix",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 10.94,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/matrix.scratch/dsh-harness.patch.yml '<1865 chars>'",
+         "exit_code": 0,
+         "wall_s": 10.94,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is ready. Here's what the implementation does:\n\n- **`__init__`**: Splits the input string on newlines, splits each row on whitespace, and converts each token to an integer \u2014 storing the result as `self.rows` (a list of lists).\n- **`row(index)`**: Returns the `index-1`-th row from `self.rows` (1-based indexing as shown in the problem).\n- **`column(index)`**: Collects the `index-1`-th element from every row, returning that as a list (also 1-based)."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 8,
+         "output_tail": "........                                                                 [100%]\n8 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "raindrops",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 14.04,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/raindrops.scratch/dsh-harness.patch.yml '<2469 chars>'",
+         "exit_code": 0,
+         "wall_s": 14.04,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The implementation works correctly for all three examples. The solution:\n\n- Uses the `%` modulo operator to check divisibility by 3, 5, and 7\n- Appends \"Pling\", \"Plang\", or \"Plong\" accordingly\n- Returns the number as a string if none of the divisors match\n- Handles numbers divisible by multiple factors (e.g., 30 returns \"PlingPlang\")"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 18,
+         "output_tail": "..................                                                       [100%]\n18 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 6,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "robot-name",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 18.15,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/robot-name.scratch/dsh-harness.patch.yml '<866 chars>'",
+         "exit_code": 0,
+         "wall_s": 18.15,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is complete. Here's the implementation:\n\n- **`Robot.name`** (property): Returns a random name in the format of two uppercase letters followed by three digits (e.g., `MA413`). The name is generated once per robot instance and cached.\n- **`Robot.reset()`**: Wipes the robot's name so the next access generates a new random name.\n- **Uniqueness**: A class-level `_used_names` set tracks all names ever assigned across all robot instances, ensuring no collisions.\n- **Randomness**: Uses `random.choice()` with uppercase letters and digits, so names are not predictable."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.27,
+         "passed": true,
+         "tests_passed": 4,
+         "output_tail": "....                                                                     [100%]\n4 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 6,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "run-length-encoding",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 21.89,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/run-length-encoding.scratch/dsh-harness.patch.yml '<1113 chars>'",
+         "exit_code": 0,
+         "wall_s": 21.89,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "All tests pass. The implementation:\n\n- **encode**: Walks through the string counting consecutive identical characters. If count > 1, prepends the count to the character. Appends the character itself in all cases.\n- **decode**: Reads digits to build a count number, then repeats the following character that many times. If no digits precede a character, it outputs the character once."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.34,
+         "passed": true,
+         "tests_passed": 13,
+         "output_tail": ".............                                                            [100%]\n13 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 6,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "two-fer",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 14.75,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/two-fer.scratch/dsh-harness.patch.yml '<821 chars>'",
+         "exit_code": 0,
+         "wall_s": 14.75,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "The solution is complete. The `two_fer` function:\n\n- Takes an optional `name` parameter (defaulting to `None`).\n- If a truthy name is provided (e.g., \"Alice\", \"Bohdan\", \"Zaphod\"), returns `\"One for {name}, one for me.\"`.\n- If no name is provided (falsy like `None` or empty string), returns `\"One for you, one for me.\"`."
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 3,
+         "output_tail": "...                                                                      [100%]\n3 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 6,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "word-count",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 28.04,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "dsh --profile headless --patch /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-cc1_hgxe/dsh/word-count.scratch/dsh-harness.patch.yml '<1591 chars>'",
+         "exit_code": 0,
+         "wall_s": 28.04,
+         "timed_out": false,
+         "crashed": false,
+         "stdout_tail": "All tests pass. The output matches the expected example exactly:\n\n- `123: 1`, `agent: 1`, `cried: 1`, `fled: 1`, `i: 1`, `password: 2`, `so: 1`, `special: 1`, `that's: 1`, `the: 2` \u2014 matches perfectly.\n\nThe implementation handles:\n- **Contractions** (`that's`, `we're`, `they're`, `it's`) as single words\n- **Numbers** (`100`, `123`) as their own words\n- **Case insensitivity** (all lowercase)\n- **Punctuation as separators** (quotes, colons, exclamation marks, commas, periods, etc.)\n- **Whitespace as separators** (spaces, newlines)\n- **Apostrophes only within contractions** \u2014 standalone apostrophes/punctuation are not counted"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.36,
+         "passed": true,
+         "tests_passed": 17,
+         "output_tail": ".................                                                        [100%]\n17 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 7,
+       "tokens_generated": 0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py harness in 810s; nothing loaded, unloaded or restarted.",
+  "The hidden tests are copied into the working directory only after the harness has exited, and removed again before the next attempt.",
+  "pass@2 is cumulative and the second attempt is given the failing test output, which is Aider's polyglot protocol.",
+  "A harness crash or timeout still gets its tests run against whatever it left on disk; crashes and timeouts are counted separately.",
+  "Token counts are AINode's /api/metrics counters differenced over each task's window: they are the node's totals, so any other traffic on the node during the run is inside them.",
+  "Spark-1-DGX does not report serving fraserprice/DeepSeek-V4-Flash-DSpark; placement and telemetry may describe the wrong node",
+  "opencode 1.18.31 rows are a host defect, not a model result: every runner invocation died in about 1 s with OpenCode's own 'Unexpected server error', and by hand it alternates between passing in 13 s and hanging at its model request after a couple of runs; cause not found on 2026-09-16 (no lingering processes, isolated state, endpoint answering). Treat its scores as not measured."
+ ],
+ "source": "scripts/ainode-bench.py harness"
+}
