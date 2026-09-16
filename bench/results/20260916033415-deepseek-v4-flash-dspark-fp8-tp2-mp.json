@@ -1,17 +1,17 @@
 {
   "schema": 1,
-  "stamp": "20260914-231752",
+  "stamp": "20260916-033415",
   "label": "AINode 0.5.11, TP=2 Spark-2+Spark-3, mp shape",
   "model": {
     "id": "fraserprice/DeepSeek-V4-Flash-DSpark",
     "name": "DeepSeek V4 Flash (DSpark, FP8)",
     "params_b": 284,
-    "license": "MIT",
-    "active_b": 13,
-    "arch": "moe",
     "quant": "FP8 (FP4 experts)",
     "context": 1048576,
+    "license": "MIT",
     "vision": false,
+    "arch": "moe",
+    "active_b": 13,
     "catalog_id": "deepseek-v4-flash-dspark"
   },
   "placement": {
@@ -126,112 +126,122 @@
       1,
       2,
       4,
-      8
+      8,
+      16
     ],
-    "chars_per_token_probe": 5.5
+    "chars_per_token_probe": 5.49
   },
   "results": {
     "single_stream": {
-      "decode_tok_s": 37.55,
+      "decode_tok_s": 34.55,
       "gen_tokens": 200,
-      "ttft_ms": 239,
-      "prompt_tokens": 56
+      "ttft_ms": 242,
+      "prompt_tokens": 54
     },
     "prefill": [
       {
-        "ttft_ms": 2189,
-        "prompt_tokens": 3956,
-        "prefill_tok_s": 1807.5,
-        "decode_tok_s": 37.83
+        "ttft_ms": 2061,
+        "prompt_tokens": 3953,
+        "prefill_tok_s": 1918.1,
+        "decode_tok_s": 35.96
       },
       {
-        "ttft_ms": 8686,
+        "ttft_ms": 8020,
         "prompt_tokens": 15884,
-        "prefill_tok_s": 1828.7,
-        "decode_tok_s": 33.33
+        "prefill_tok_s": 1980.7,
+        "decode_tok_s": 37.28
       },
       {
-        "ttft_ms": 16244,
-        "prompt_tokens": 31788,
-        "prefill_tok_s": 1957.0,
-        "decode_tok_s": 38.77
+        "ttft_ms": 15788,
+        "prompt_tokens": 31787,
+        "prefill_tok_s": 2013.4,
+        "decode_tok_s": 37.68
       },
       {
-        "ttft_ms": 33294,
-        "prompt_tokens": 63593,
-        "prefill_tok_s": 1910.1,
-        "decode_tok_s": 33.57
+        "ttft_ms": 32477,
+        "prompt_tokens": 63523,
+        "prefill_tok_s": 1955.9,
+        "decode_tok_s": 45.36
       }
     ],
     "sustained": {
-      "decode_tok_s": 41.37,
+      "decode_tok_s": 40.6,
       "gen_tokens": 1500,
-      "wall_s": 36.529,
-      "ttft_ms": 297
+      "wall_s": 37.213,
+      "ttft_ms": 292
     },
     "concurrency": [
       {
         "streams": 1,
-        "aggregate_tok_s": 34.6,
+        "aggregate_tok_s": 35.9,
         "ok": 1,
         "failed": 0,
-        "wall_s": 5.77,
-        "per_stream_tok_s": 36.3,
-        "median_ttft_ms": 287
+        "wall_s": 5.56,
+        "per_stream_tok_s": 37.8,
+        "median_ttft_ms": 294
       },
       {
         "streams": 2,
-        "aggregate_tok_s": 49.5,
+        "aggregate_tok_s": 56.1,
         "ok": 2,
         "failed": 0,
-        "wall_s": 8.07,
-        "per_stream_tok_s": 26.0,
-        "median_ttft_ms": 336
+        "wall_s": 7.13,
+        "per_stream_tok_s": 29.8,
+        "median_ttft_ms": 302
       },
       {
         "streams": 4,
-        "aggregate_tok_s": 49.0,
+        "aggregate_tok_s": 80.2,
         "ok": 4,
         "failed": 0,
-        "wall_s": 16.34,
-        "per_stream_tok_s": 21.9,
-        "median_ttft_ms": 6433
+        "wall_s": 9.97,
+        "per_stream_tok_s": 21.3,
+        "median_ttft_ms": 370
       },
       {
         "streams": 8,
-        "aggregate_tok_s": 84.1,
+        "aggregate_tok_s": 81.0,
         "ok": 8,
         "failed": 0,
-        "wall_s": 19.04,
-        "per_stream_tok_s": 18.9,
-        "median_ttft_ms": 1195
+        "wall_s": 19.76,
+        "per_stream_tok_s": 18.0,
+        "median_ttft_ms": 1410
+      },
+      {
+        "streams": 16,
+        "aggregate_tok_s": 94.0,
+        "ok": 16,
+        "failed": 0,
+        "wall_s": 34.04,
+        "per_stream_tok_s": 18.6,
+        "median_ttft_ms": 11156
       }
     ],
     "reasoning_tax": {
-      "thinking_off_wall_s": 3.073,
-      "thinking_off_tokens": 142,
-      "thinking_on_wall_s": 5.706,
-      "thinking_on_tokens": 309,
-      "tax_x": 1.86
+      "thinking_off_wall_s": 4.223,
+      "thinking_off_tokens": 251,
+      "thinking_on_wall_s": 7.519,
+      "thinking_on_tokens": 368,
+      "tax_x": 1.78
     },
     "telemetry": {
-      "gpu_mem_used_gb": 112.0,
+      "gpu_mem_used_gb": 110.7,
       "gpu_mem_total_gb": 121.7,
-      "gpu_util_pct": 96,
-      "temp_c": 74,
-      "samples": 94,
+      "gpu_util_pct": 0,
+      "temp_c": 41,
+      "samples": 107,
       "reading": "peak observed over the run; sampled from /api/nodes",
       "gpu_util_pct_at_start": 0,
-      "temp_c_at_start": 42
+      "temp_c_at_start": 41
     }
   },
   "notes": [
-    "Measured by ainode /api/bench (ainode.bench) in 183s; nothing loaded, unloaded or restarted.",
+    "Measured by ainode /api/bench (ainode.bench) in 210s; nothing loaded, unloaded or restarted.",
     "prefill_tok_s is prompt_tokens/TTFT, a floor: TTFT includes queueing, and the OpenAI API exposes no internal prefill timing.",
     "Sections other than reasoning_tax ran with enable_thinking=false.",
+    "GPU utilisation read 0% on every sample: AINode reports no utilisation for a GB10 unified-memory GPU, so read it as unread rather than idle. Memory and temperature are real reads.",
     "Spark-2-DGX served 24 request(s) in the last minute; a busy node measures the queue as well as the engine",
-    "Catalog metadata filled by hand: the master ran 0.5.8, which predates the deepseek-v4-flash-dspark entry (0.5.9+).",
-    "Two-node tensor parallel across Spark-2 (head) and Spark-3 over RoCE, launched by AINode's mp shape; DSpark speculative decoding on; thinking off except the reasoning section."
+    "Two-node tensor parallel across Spark-2 (head) and Spark-3 over RoCE, launched by AINode's mp shape from the catalog; DSpark speculative decoding on; thinking off except the reasoning section. Replaces the 2026-09-14 23:17 run, which stopped at 8 streams."
   ],
   "source": "ainode /api/bench (ainode.bench)"
 }
