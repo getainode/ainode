@@ -193,6 +193,9 @@ def params_txt(m):
         return "-"
     if m.get("arch") == "moe" and a and a != p:
         return f"{num(p)}B / {num(a)}B active"
+    if m.get("arch") == "moe":
+        # A record that says MoE without an active count is still not dense.
+        return f"{num(p)}B MoE"
     return f"{num(p)}B dense"
 
 

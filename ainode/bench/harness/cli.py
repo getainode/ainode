@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS,
                    help=f"max output tokens declared the same way "
                         f"(default {DEFAULT_MAX_OUTPUT_TOKENS})")
+    p.add_argument("--claude-effort", default=None,
+                   help="reasoning effort for the claude harness, passed as "
+                        "--effort (low, medium, high, xhigh). Unset sends nothing "
+                        "and Claude Code's own default stands; a template that "
+                        "rejects that default needs this (Qwen3.8-Flash-Next takes "
+                        "only xhigh, medium, low)")
     p.add_argument("--no-metrics", action="store_true",
                    help="skip the /api/metrics token window")
     p.add_argument("--dry-run", action="store_true",
@@ -97,6 +103,13 @@ def ainode_base(endpoint: str, override: str = "") -> str:
         return override.rstrip("/")
     base = (endpoint or "").rstrip("/")
     return base[:-3].rstrip("/") if base.endswith("/v1") else base
+
+
+def effort(args) -> str | None:
+    """``--claude-effort`` as the request wants it: a level, or None for "send
+    nothing". Blank is the same as unset, so a shell variable that expanded to
+    nothing does not become an empty ``--effort`` argument."""
+    return (getattr(args, "claude_effort", None) or "").strip() or None
 
 
 def _preview(arg: str) -> str:
@@ -139,7 +152,8 @@ def dry_run(tasks, adapters, args, out=print) -> int:
                                  endpoint=args.endpoint, model=args.model,
                                  api_key=args.api_key,
                                  context_window=args.context_window,
-                                 max_output_tokens=args.max_output_tokens)
+                                 max_output_tokens=args.max_output_tokens,
+                                 claude_effort=effort(args))
             info = adapter.describe(req)
             out(f"\n    task     : {task.slug}")
             out(f"    cwd      : {workdir}")
@@ -205,6 +219,9 @@ def main(argv=None, out_dir=None) -> int:
           f"({meta.get('id')}): {', '.join(t.slug for t in tasks)}")
     print(f"  protocol: {args.attempts} attempt(s), {args.timeout:g}s per invocation; "
           "the tests are hidden until the harness exits")
+    if effort(args):
+        seen = "" if "claude" in names else "  (no claude harness in this run: ignored)"
+        print(f"  effort  : claude --effort {effort(args)}{seen}")
 
     if args.dry_run:
         return dry_run(tasks, adapters, args)
@@ -230,7 +247,7 @@ def main(argv=None, out_dir=None) -> int:
                         timeout=args.timeout, attempts=args.attempts,
                         api_key=args.api_key, context_window=args.context_window,
                         max_output_tokens=args.max_output_tokens,
-                        tokens_reader=reader)
+                        claude_effort=effort(args), tokens_reader=reader)
     seconds = round(time.time() - started)
 
     harness_block = build_harness_block(results, tasks, args.endpoint, args.attempts,
@@ -239,6 +256,10 @@ def main(argv=None, out_dir=None) -> int:
                 "tasks_requested": args.tasks, "harnesses": names,
                 "context_window_declared": args.context_window,
                 "max_output_tokens_declared": args.max_output_tokens}
+    # Only when asked for: absent means the run sent no --effort at all, which is
+    # not the same statement as a level of None.
+    if effort(args):
+        settings["claude_effort"] = effort(args)
     tokens_used = any(t.tokens for r in results for t in r.tasks)
     notes = build_notes(results, tokens_used, seconds) + list(warnings)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())

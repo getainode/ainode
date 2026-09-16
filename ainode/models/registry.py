@@ -63,6 +63,15 @@ class ModelInfo:
     min_memory_gb: float = 0.0
     family: str = ""
     params_b: float = 0.0
+    # Active parameters per token, in billions, and which shape the model is:
+    # "moe" or "dense". A MoE reads only its active experts per token, which on
+    # GB10 (bandwidth-bound decode) is the number that predicts speed, so a bench
+    # record carries both. None / "" mean the entry does not state it, and a
+    # reader falls back to the A<n>B marker in the model id
+    # (ainode/bench/fleet.py::derive_arch). Not to be confused with
+    # ``architecture`` below, which is the HF class name (LlamaForCausalLM).
+    active_params_b: Optional[float] = None
+    arch: str = ""
     context_length: int = 0
     license: str = ""
     recommended: bool = False
@@ -131,6 +140,7 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
         min_memory_gb=8,
         family="llama",
         params_b=3.21,
+        arch="dense",
         context_length=131072,
         license="Llama 3.2",
         recommended=True,
@@ -144,6 +154,7 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
         min_memory_gb=16,
         family="qwen",
         params_b=7.62,
+        arch="dense",
         context_length=131072,
         license="Qwen",
         recommended=True,
@@ -157,6 +168,7 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
         min_memory_gb=16,
         family="mistral",
         params_b=7.25,
+        arch="dense",
         context_length=32768,
         license="Apache 2.0",
         recommended=True,
@@ -170,6 +182,7 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
         min_memory_gb=8,
         family="phi",
         params_b=3.82,
+        arch="dense",
         context_length=4096,
         license="MIT",
         recommended=True,
@@ -183,6 +196,7 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
         min_memory_gb=20,
         family="gemma",
         params_b=9.24,
+        arch="dense",
         context_length=8192,
         license="Gemma",
         recommended=True,
@@ -223,6 +237,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "OOM-kills the engine on a node without ~40 GB free."
         ),
         quantization="NVFP4", min_memory_gb=32, family="ornith", params_b=35.0,
+        active_params_b=3.0, arch="moe",
         proven_tp=1, verified=True, curated=True,
         context_length=262144, license="MIT", recommended=True,
         format="safetensors",
@@ -261,6 +276,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "Text only (no vision). First launch also pulls the 1.3 GB DSpark drafter."
         ),
         quantization="NVFP4", min_memory_gb=30, family="nemotron", params_b=30.0,
+        active_params_b=3.0, arch="moe",
         proven_tp=1, verified=True, curated=True,
         context_length=1048576, license="OpenMDW-1.1", recommended=True,
         format="safetensors", capabilities=["tool_use", "reasoning", "code"],
@@ -292,6 +308,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "Use temperature 0 for OCR/transcription."
         ),
         quantization="NVFP4", min_memory_gb=32, family="qwen", params_b=27.0,
+        arch="dense",
         proven_tp=1, verified=True, curated=True,
         context_length=262144, license="Apache 2.0", recommended=True,
         format="safetensors",
@@ -328,6 +345,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "that image ships no ray."
         ),
         quantization="FP8", min_memory_gb=175, family="deepseek", params_b=284.0,
+        active_params_b=13.0, arch="moe",
         proven_tp=2, verified=True,
         context_length=1048576, license="MIT", recommended=True, curated=True,
         format="safetensors",
@@ -450,6 +468,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         ),
         quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=145,
         family="qwen", params_b=125.0,
+        active_params_b=6.0, arch="moe",
         proven_tp=2, verified=False, recommended=False, curated=True,
         context_length=262144, license="Apache 2.0",
         format="safetensors",
@@ -493,6 +512,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=12.0,
         description="Fast dense 9B, AWQ-4bit (awq_marlin). ~19 tok/s single-stream on one GB10. Great default chat model.",
         quantization="AWQ", min_memory_gb=14, family="qwen", params_b=9.0,
+        arch="dense",
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
@@ -503,6 +523,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=4.0,
         description="Tiny dense 4B, AWQ-4bit. ~15 tok/s single-stream (dense AWQ is dequant-bound on GB10, not size-bound — the MoE is the fast pick). Lowest memory / highest QPS for batched routes.",
         quantization="AWQ", min_memory_gb=6, family="qwen", params_b=4.0,
+        arch="dense",
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", format="awq",
     ),
@@ -513,6 +534,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=24.0,
         description="MoE (3B active/token), AWQ-4bit. ~27 tok/s single-stream on one GB10 — fast decode AND large-model quality. The flagship single-node model.",
         quantization="AWQ", min_memory_gb=28, family="qwen", params_b=35.0,
+        active_params_b=3.0, arch="moe",
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
@@ -523,6 +545,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=6.0,
         description="Dense 8B, Blackwell-native NVFP4 — ~18 tok/s single-stream on one GB10 (dense is bandwidth-bound). Solid general-purpose chat model, light enough to stack.",
         quantization="NVFP4", min_memory_gb=8, family="llama", params_b=8.0,
+        arch="dense",
         proven_tp=1, verified=True,
         context_length=131072, license="Llama 3.1", recommended=True, format="nvfp4",
     ),
@@ -534,6 +557,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=18.0,
         description="NVIDIA's distilled hybrid (mamba+attention) MoE, 3B active. Blackwell-native NVFP4 — ~32 tok/s single-stream on one GB10 (eager-on; the ~60 t/s Spark forum reports need CUDA graphs/eager-off). Fast daily driver, great for stacking.",
         quantization="NVFP4", min_memory_gb=22, family="nemotron", params_b=30.0,
+        active_params_b=3.0, arch="moe",
         proven_tp=1, verified=True,
         context_length=131072, license="NVIDIA Open Model", recommended=True, format="nvfp4",
     ),
@@ -544,6 +568,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=120.0,
         description="The community's top agentic-coding pick — 'Sonnet at home'. Large MoE (A10B active), AWQ-4bit. ~42 tok/s across 2 Sparks (TP=2). fp8 KV recommended.",
         quantization="AWQ", min_memory_gb=130, family="minimax", params_b=230.0,
+        active_params_b=10.0, arch="moe",
         proven_tp=2, verified=False,
         context_length=131072, license="MiniMax", recommended=True, format="awq",
     ),
@@ -554,6 +579,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=250.0,
         description="Frontier MoE (A22B active). Runs distributed TP=4 on the cluster. NVFP4 for GB10.",
         quantization="NVFP4", min_memory_gb=275, family="qwen", params_b=235.0,
+        active_params_b=22.0, arch="moe",
         proven_tp=4, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
     ),
@@ -564,6 +590,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=468.0,
         description="Frontier MoE (A17B active) — the cluster's design point. Distributed TP=4. NVFP4.",
         quantization="NVFP4", min_memory_gb=500, family="qwen", params_b=397.0,
+        active_params_b=17.0, arch="moe",
         proven_tp=4, verified=False,
         context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
     ),
@@ -574,6 +601,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=437.0,
         description="Dense 405B, NVFP4. Needs the cluster's pooled memory (TP=4).",
         quantization="NVFP4", min_memory_gb=470, family="llama", params_b=405.0,
+        arch="dense",
         proven_tp=4, verified=False,
         context_length=131072, license="Llama 3.1", format="nvfp4",
     ),
@@ -584,6 +612,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=408.0,
         description="Dense 405B, AWQ-INT4. Distributed TP=4.",
         quantization="AWQ", min_memory_gb=440, family="llama", params_b=405.0,
+        arch="dense",
         proven_tp=4, verified=False,
         context_length=131072, license="Llama 3.1", format="awq",
     ),
@@ -594,6 +623,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=80.0,
         description="Dense 70B, NVFP4. Fits TP=2; bandwidth-bound single-stream on GB10.",
         quantization="NVFP4", min_memory_gb=88, family="llama", params_b=70.0,
+        arch="dense",
         proven_tp=2, verified=True,
         context_length=131072, license="Llama 3.3", recommended=True, format="nvfp4",
     ),
@@ -604,6 +634,8 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=874.0,
         description="Large GLM. Needs the full cluster's pooled memory (TP=4).",
         quantization=None, min_memory_gb=900, family="glm", params_b=0.0,
+        # Shape unstated on purpose: this entry has no params_b either, and
+        # neither the id nor the card here says how many experts fire per token.
         proven_tp=4, verified=False,
         context_length=131072, license="GLM",
     ),
@@ -614,6 +646,9 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=309.0,
         description="REAP-pruned GLM-5.2 MoE, NVFP4 for GB10. ~309 GB on disk — needs the cluster's pooled memory (TP=4). DeepSeek Sparse Attention. NOT yet load-tested on GB10.",
         quantization="NVFP4", min_memory_gb=360, family="glm", params_b=504.0,
+        # MoE per the card; REAP pruning moves the active count, which the id
+        # does not state, so active_params_b stays unset rather than guessed.
+        arch="moe",
         proven_tp=4, verified=False,
         context_length=131072, license="MIT", recommended=False, format="nvfp4",
     ),

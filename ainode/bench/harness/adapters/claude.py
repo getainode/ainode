@@ -42,6 +42,15 @@ against a fake Messages endpoint: pointed at a directory that did not exist,
 ``claude -p`` with the key in the environment created ``.claude.json``, ``projects/``,
 ``sessions/`` and ``backups/`` itself, never prompted for a login, and exited 0.
 
+``--effort <level>`` is appended only when the run asked for one
+(``--claude-effort``). Claude Code sends reasoning effort "high" by default, and a
+served chat template does not have to accept that: Qwen3.8-Flash-Next takes only
+xhigh, medium and low, so every request came back
+``API Error: 400 Unexpected reasoning effort high`` and the harness scored 0/10 in
+0.3 s crashes on 2026-09-16, then 8/10 and 10/10 at ``--claude-effort medium``
+(#127). Unset is the default because a model that accepts high keeps the
+measurement already recorded for it.
+
 Two notes on the run itself. ``stderr`` carries
 ``[claude-code:unrecognized_model] {...}`` for any model id that is not Anthropic's,
 which is harmless and expected for every model this bench measures. And a shell
@@ -110,7 +119,7 @@ class ClaudeAdapter(HarnessAdapter):
     needs_git = True
 
     def command(self, req: HarnessRequest) -> list[str]:
-        return [
+        command = [
             self.binary,
             "-p", req.prompt,
             "--model", req.model,
@@ -118,6 +127,11 @@ class ClaudeAdapter(HarnessAdapter):
             "--output-format", "json",
             "--max-turns", str(MAX_TURNS),
         ]
+        # Only when the run asked for one. Unset means Claude Code's own default
+        # goes out, which is what every earlier measurement was taken with.
+        if req.claude_effort:
+            command += ["--effort", req.claude_effort]
+        return command
 
     def env(self, req: HarnessRequest) -> dict[str, str]:
         base = messages_base(req.endpoint)

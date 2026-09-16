@@ -8,7 +8,11 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`ainode-bench harness --claude-effort <level>` sets the reasoning effort Claude Code runs with** ([#127](https://github.com/getainode/ainode/issues/127)). Claude Code sends effort "high" by default, and a served chat template does not have to accept that value: Qwen3.8-Flash-Next takes only xhigh, medium and low, so every request came back `API Error: 400 Unexpected reasoning effort high`, the harness crashed in about 0.3 s per attempt and the model scored 0/10 on a suite the other three harnesses were passing. The same ten tasks then scored 8/10 and 10/10 at medium. The level is appended to the claude argv as `--effort <level>` and nothing else about the invocation moves; unset stays the default and sends nothing, so every number already recorded (Ornith, Qwen3.8 27B) keeps its meaning. It is written down where a reader will find it: the run's `settings` as `claude_effort` and the claude block's `options` as `effort`, both absent when the flag was not used, because a run with the agent's own default is a different statement from a null. Docs: the `claude` section of `bench/harness/README.md`.
+
+### Fixed
+- **Catalog entries state their active parameter count and architecture, so a bench record stops reporting a MoE as dense.** `ModelInfo` had no field for either, and the record's `model` block was filled by reading the `A<n>B` marker off the model id, which works for `Ornith-1.5-35B-A3B` and not at all for an id that does not carry one: DeepSeek V4 Flash (284B total, 13B active) and Qwen3.8-Flash-Next (125B, 6B) were both written down as `params_b 125/284, active_b 125/284, arch dense`, which on GB10 is the one number that predicts decode speed, said wrong. `ModelInfo` now carries `active_params_b` and `arch` (`"moe"` / `"dense"`), every curated and fallback entry states its shape, and the model block takes both from the catalog when it has them and falls back to the id only for a model the catalog does not describe. An entry that says MoE without an active count (GLM-5.2 REAP, where pruning moves it) leaves `active_b` out and both renderers print `504B MoE` rather than claiming dense. The catalog cache round-trips the new fields and a cache file written before they existed still loads. Applies to the throughput bench, the in-product `/api/bench` runs and the harness bench alike: all three build the block through `ainode/bench/fleet.py`.
 
 ---
 

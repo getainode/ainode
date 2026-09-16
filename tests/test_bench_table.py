@@ -68,6 +68,19 @@ def test_missing_measurement_is_not_invented(tmp_path):
     assert "0.0" not in row.replace("12.0", "")
 
 
+def test_a_moe_row_names_its_active_params_and_a_dense_row_says_dense():
+    """The params column is how a reader knows why decode is fast: on GB10 it is
+    the active count that sets the ceiling, not the total."""
+    m = _module()
+    assert m.fmt_params({"params_b": 284.0, "active_b": 13.0, "arch": "moe"}) \
+        == "284B / 13B active"
+    assert m.fmt_params({"params_b": 27.0, "active_b": 27.0, "arch": "dense"}) \
+        == "27B dense"
+    # A record that says MoE without an active count is still not dense.
+    assert m.fmt_params({"params_b": 504.0, "arch": "moe"}) == "504B MoE"
+    assert m.fmt_params({}) == m.NOT_MEASURED
+
+
 def test_stacked_runs_are_labelled():
     m = _module()
     runs = m.load_runs(REPO / "bench" / "results")

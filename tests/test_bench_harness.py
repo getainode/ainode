@@ -137,9 +137,10 @@ def two_fer(tasks_dir):
     return load_tasks(tasks_dir, slugs=["two-fer"])[0]
 
 
-def _request(tmp_path, entry="two_fer.py", prompt="do the thing"):
+def _request(tmp_path, entry="two_fer.py", prompt="do the thing", **kwargs):
     return HarnessRequest(workdir=tmp_path / "work", scratch=tmp_path / "scratch",
-                          prompt=prompt, entry=entry, endpoint=ENDPOINT, model=MODEL)
+                          prompt=prompt, entry=entry, endpoint=ENDPOINT, model=MODEL,
+                          **kwargs)
 
 
 # ---------------------------------------------------------------- the task set
@@ -312,6 +313,37 @@ def test_claude_command_is_pinned(tmp_path):
         "--max-turns", "12",
     ]
     assert ClaudeAdapter().needs_git is True
+
+
+def test_claude_effort_is_appended_only_when_the_run_asked_for_one(tmp_path):
+    """#127: Claude Code sends effort "high" by default and Qwen3.8-Flash-Next's
+    template rejects it with a 400, so the level has to be settable - and unset has
+    to keep sending nothing, or every number already recorded moves."""
+    plain = _request(tmp_path)
+    assert plain.claude_effort is None
+    assert "--effort" not in ClaudeAdapter().command(plain)
+
+    asked = _request(tmp_path, claude_effort="medium")
+    command = ClaudeAdapter().command(asked)
+    assert command[-2:] == ["--effort", "medium"]
+    # Nothing else about the invocation moves.
+    assert command[:-2] == ClaudeAdapter().command(plain)
+    # And it is the argv, not the environment: the env stays what it was.
+    assert ClaudeAdapter().env(asked) == ClaudeAdapter().env(plain)
+
+
+def test_the_effort_level_is_recorded_on_the_harness_that_got_it(tmp_path):
+    """It reaches one argv, so it is recorded on one harness's block."""
+    from ainode.bench.harness.runner import HarnessResult, harness_options
+
+    assert harness_options(ClaudeAdapter(), "medium") == {"effort": "medium"}
+    # Not on a harness that never saw it, and not at all when unset.
+    assert harness_options(AiderAdapter(), "medium") == {}
+    assert harness_options(ClaudeAdapter(), None) == {}
+    assert "options" not in HarnessResult("claude", "2.1.272").as_json()
+    assert HarnessResult("claude", "2.1.272",
+                         options={"effort": "medium"}).as_json()["options"] == \
+        {"effort": "medium"}
 
 
 def test_claude_is_given_the_endpoint_without_its_v1(tmp_path):
@@ -733,6 +765,77 @@ def test_dry_run_shows_claude_pointed_at_the_base_and_its_own_config_dir(tmp_pat
         in printed
     assert f"git init : {work / 'claude' / 'two-fer'}" in printed
     assert not work.exists()
+
+
+def test_the_cli_parses_the_effort_level_and_dry_run_shows_it(tmp_path, capsys):
+    from ainode.bench.harness.cli import build_parser, effort
+
+    # Default is unset, which means "pass nothing", not "pass a default".
+    assert build_parser().parse_args([]).claude_effort is None
+    assert effort(build_parser().parse_args([])) is None
+    assert effort(build_parser().parse_args(["--claude-effort", "xhigh"])) == "xhigh"
+    # A shell variable that expanded to nothing is not an empty --effort argument.
+    assert effort(build_parser().parse_args(["--claude-effort", "  "])) is None
+
+    code = harness_main(["--endpoint", ENDPOINT, "--model", MODEL, "--label", "unit",
+                         "--harness", "claude", "--only-tasks", "two-fer",
+                         "--claude-effort", "medium",
+                         "--work-dir", str(tmp_path / "work"), "--dry-run"],
+                        out_dir=tmp_path / "results")
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "effort  : claude --effort medium" in printed
+    assert "--max-turns 12 --effort medium" in printed
+
+
+def test_the_effort_level_is_written_into_the_records_settings(tmp_path, monkeypatch):
+    """The flag is only honest if the record says it was used."""
+    import shutil
+
+    from ainode.bench import fleet as fleet_mod
+    from ainode.bench.harness import cli as cli_mod
+
+    monkeypatch.setattr(shutil, "which", lambda *_a, **_k: "/usr/bin/claude")
+    monkeypatch.setattr(fleet_mod, "describe_via_http",
+                        lambda *_a, **_k: ({"id": MODEL}, {"node": "Fake-Spark"},
+                                           "fake-node", []))
+    seen = {}
+
+    def fake_suite(tasks, adapters, endpoint, model, **kwargs):
+        seen.update(kwargs)
+        return [_harness_result(a, kwargs.get("claude_effort")) for a in adapters]
+
+    monkeypatch.setattr(cli_mod, "run_suite", fake_suite)
+
+    def record_for(extra):
+        out_dir = tmp_path / f"results{len(list(tmp_path.iterdir()))}"
+        assert harness_main(["--endpoint", ENDPOINT, "--model", MODEL,
+                            "--label", "unit", "--harness", "claude",
+                            "--only-tasks", "two-fer", "--no-metrics", *extra],
+                           out_dir=out_dir) == 0
+        written = list(out_dir.glob("*-harness.json"))
+        assert len(written) == 1
+        return json.loads(written[0].read_text())
+
+    record = record_for(["--claude-effort", "medium"])
+    assert seen["claude_effort"] == "medium"
+    assert record["settings"]["claude_effort"] == "medium"
+    # And on the block of the harness that was actually given it.
+    assert record["harness"]["runs"][0]["options"] == {"effort": "medium"}
+
+    record = record_for([])
+    assert seen["claude_effort"] is None
+    # Absent, not null: a run that sent no --effort says nothing about the level.
+    assert "claude_effort" not in record["settings"]
+    assert "options" not in record["harness"]["runs"][0]
+
+
+def _harness_result(adapter, claude_effort):
+    from ainode.bench.harness.runner import HarnessResult, harness_options
+
+    return HarnessResult(harness=adapter.name, version="2.1.272",
+                         tasks=[TaskResult(slug="two-fer")],
+                         options=harness_options(adapter, claude_effort))
 
 
 def test_the_env_line_prints_paths_and_masks_a_key_it_did_not_set(tmp_path, capsys,
