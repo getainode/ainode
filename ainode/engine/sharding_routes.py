@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -254,50 +255,79 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
 
     inst_config = replace(config, model=model, distributed_mode="head",
                           peer_ips=chosen_peers, api_port=port, **overrides)
-    backend = get_backend(inst_config, instance_id=name_token)
+
+    # One engine launches at a time on this node (#96): vLLM sizes its KV cache
+    # from what is free when it profiles, so a launch that starts while another is
+    # still reserving memory under-provisions itself. The slot is held until this
+    # engine binds, handed to a background bind watch once the launch is away.
+    from ainode.models.api_routes import (  # lazy: avoid an import cycle
+        LaunchBusy,
+        acquire_launch_slot,
+        hold_launch_slot_until_bound,
+        launch_busy_error,
+        release_launch_slot,
+    )
+
+    slot_label = f"distributed launch {model}"
     try:
-        started = backend.start_distributed()
-    except Exception as exc:
-        logger.exception("start_distributed raised")
-        return web.json_response({"error": f"Distributed launch failed: {exc}"}, status=500)
-    if not started:
-        return web.json_response({"error": "Distributed launch returned False"}, status=500)
-
-    executor = getattr(inst_config, "distributed_executor", "ray") or "ray"
-    manager.add(InstanceRecord(
-        instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
-        peer_ips=chosen_peers, api_port=port,
-        tensor_parallel_size=1 + len(chosen_peers), status="starting",
-        distributed_executor=executor), backend)
-
-    if is_primary:
-        # Back-compat: the proxy/status path reads app["config"] + app["engine"].
-        config.model = model
-        config.distributed_mode = "head"
-        config.peer_ips = chosen_peers
-        # The primary boots from config.json after a restart, so the launch shape
-        # has to be persisted with it or the replay comes back on the fleet
-        # default image in the Ray shape, which is exactly what cannot serve an
-        # mp-only model.
-        for key, value in overrides.items():
-            setattr(config, key, value)
+        await acquire_launch_slot(slot_label)
+    except LaunchBusy as busy:
+        refused = launch_busy_error(busy)
+        return web.json_response({"error": refused["error"]}, status=refused["status"])
+    handed_off = False
+    try:
+        backend = get_backend(inst_config, instance_id=name_token)
         try:
-            config.save()
-        except Exception:
-            logger.exception("Failed to persist config.json before distributed launch")
-        request.app["engine"] = backend
+            started = backend.start_distributed()
+        except Exception as exc:
+            logger.exception("start_distributed raised")
+            return web.json_response({"error": f"Distributed launch failed: {exc}"},
+                                     status=500)
+        if not started:
+            return web.json_response({"error": "Distributed launch returned False"},
+                                     status=500)
 
-    return web.json_response({
-        "status": "launching",
-        "instance_id": instance_id,
-        "model": model,
-        "distributed_mode": "head",
-        "peer_ips": chosen_peers,
-        "api_port": port,
-        "tensor_parallel_size": 1 + len(chosen_peers),
-        "strategy": strategy_str,
-        "distributed_executor": executor,
-    })
+        executor = getattr(inst_config, "distributed_executor", "ray") or "ray"
+        manager.add(InstanceRecord(
+            instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
+            peer_ips=chosen_peers, api_port=port,
+            tensor_parallel_size=1 + len(chosen_peers), status="starting",
+            distributed_executor=executor), backend)
+
+        if is_primary:
+            # Back-compat: the proxy/status path reads app["config"] + app["engine"].
+            config.model = model
+            config.distributed_mode = "head"
+            config.peer_ips = chosen_peers
+            # The primary boots from config.json after a restart, so the launch shape
+            # has to be persisted with it or the replay comes back on the fleet
+            # default image in the Ray shape, which is exactly what cannot serve an
+            # mp-only model.
+            for key, value in overrides.items():
+                setattr(config, key, value)
+            try:
+                config.save()
+            except Exception:
+                logger.exception("Failed to persist config.json before distributed launch")
+            request.app["engine"] = backend
+
+        asyncio.get_event_loop().create_task(hold_launch_slot_until_bound(
+            request.app, port, backend, slot_label))
+        handed_off = True
+        return web.json_response({
+            "status": "launching",
+            "instance_id": instance_id,
+            "model": model,
+            "distributed_mode": "head",
+            "peer_ips": chosen_peers,
+            "api_port": port,
+            "tensor_parallel_size": 1 + len(chosen_peers),
+            "strategy": strategy_str,
+            "distributed_executor": executor,
+        })
+    finally:
+        if not handed_off:
+            release_launch_slot()
 
 
 async def handle_sharding_status(request: web.Request) -> web.Response:

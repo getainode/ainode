@@ -1533,17 +1533,41 @@ async def handle_set_model(request: web.Request) -> web.Response:
     config.model = model
     config.save()
 
-    # Stop current engine and start fresh with new model
+    # Stop current engine and start fresh with new model. Under the node's launch
+    # slot: this is a launch like any other, and two engines profiling at once
+    # under-provision the second one's KV cache (#96).
     if engine is not None:
+        from ainode.models.api_routes import (
+            LaunchBusy,
+            acquire_launch_slot,
+            hold_launch_slot_until_bound,
+            launch_busy_error,
+            release_launch_slot,
+        )
+
+        slot_label = f"set-model {model}"
         try:
-            engine.stop()
-        except Exception:
-            pass
+            await acquire_launch_slot(slot_label)
+        except LaunchBusy as busy:
+            refused = launch_busy_error(busy)
+            return web.json_response({"error": refused["error"]}, status=refused["status"])
+        handed_off = False
         try:
-            engine.config.model = model
-            engine.start()
-        except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            try:
+                engine.stop()
+            except Exception:
+                pass
+            try:
+                engine.config.model = model
+                engine.start()
+            except Exception as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+            asyncio.get_event_loop().create_task(hold_launch_slot_until_bound(
+                request.app, getattr(config, "api_port", 8000), engine, slot_label))
+            handed_off = True
+        finally:
+            if not handed_off:
+                release_launch_slot()
 
     return web.json_response({"status": "restarting", "model": model})
 
