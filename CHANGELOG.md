@@ -8,7 +8,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The solo engine's logs are followed after the detached launch**, so the bind wait sees the engine's own output instead of one container id and then silence. On the 0.5.13 roll of Spark-1 the wait declared Qwen3.8 silent after 121 s, moved on to Ornith while Qwen was still loading, and Ornith died with "No available memory for the cache blocks". `start_solo` now attaches `docker logs -f` to the solo log the moment the container is confirmed running, the same follower the mp head uses, so serialized replay actually waits for the primary to bind.
 
 ---
 

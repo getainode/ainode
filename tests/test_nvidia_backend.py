@@ -302,8 +302,12 @@ class TestStartSolo:
         assert result is True
         # idempotent launch: the solo container name is pre-cleaned before docker run
         preclean.assert_called_once_with("ainode-vllm-node-solo")
-        popen.assert_called_once()
-        argv: List[str] = popen.call_args.args[0]
+        # Two Popens: the detached ``docker run -d``, then the ``docker logs -f``
+        # follower that feeds the solo log and the bind wait's liveness signal.
+        assert popen.call_count == 2
+        follower: List[str] = popen.call_args_list[1].args[0]
+        assert follower[:3] == ["docker", "logs", "-f"] and follower[3] == "ainode-vllm-node-solo"
+        argv: List[str] = popen.call_args_list[0].args[0]
 
         # Structural checks — order-independent where possible
         assert argv[0] == "docker"

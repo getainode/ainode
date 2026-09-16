@@ -487,3 +487,46 @@ def test_backend_without_container_view_falls_back_to_the_subprocess():
     class Alive:
         process = _FakeProc(None)
     assert _engine_exited(Alive()) is False
+
+
+def test_solo_launch_follows_its_container_logs_into_the_solo_log(monkeypatch, tmp_path):
+    """The detached run's client prints one id and exits; the follower is what
+    keeps last_log_activity moving so the bind wait does not misread silence."""
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends import nvidia as nv
+    b = nv.NvidiaBackend(NodeConfig(engine_backend="nvidia", distributed_mode="solo", model="m/x"))
+    b._log_file = tmp_path / "solo.log"
+    calls = []
+    class P:
+        stdout = None
+        def poll(self): return 0
+    monkeypatch.setattr(nv.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or P())
+    monkeypatch.setattr(b, "_docker_stop_and_rm_best_effort", lambda name: None)
+    monkeypatch.setattr(b, "ensure_image", lambda image: True)
+    monkeypatch.setattr(b, "_image_entrypoint", lambda image: [])
+    monkeypatch.setattr(b, "_confirm_container_started", lambda name, timeout=25.0: True)
+    targets = []
+    monkeypatch.setattr(b, "_stream_logs", lambda proc, target: targets.append(target))
+    assert b.start_solo() is True
+    assert [c[:2] for c in calls] == [["docker", "run"], ["docker", "logs"]]
+    assert calls[1][2:4] == ["-f", "ainode-vllm-node-solo"]
+    b._log_thread.join(timeout=2)
+    assert tmp_path / "solo.log" in targets, "the follower must write to the SOLO log"
+
+
+def test_solo_launch_does_not_follow_when_the_container_never_started(monkeypatch):
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends import nvidia as nv
+    b = nv.NvidiaBackend(NodeConfig(engine_backend="nvidia", distributed_mode="solo", model="m/x"))
+    calls = []
+    class P:
+        stdout = None
+        def poll(self): return 0
+    monkeypatch.setattr(nv.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or P())
+    monkeypatch.setattr(b, "_docker_stop_and_rm_best_effort", lambda name: None)
+    monkeypatch.setattr(b, "ensure_image", lambda image: True)
+    monkeypatch.setattr(b, "_image_entrypoint", lambda image: [])
+    monkeypatch.setattr(b, "_confirm_container_started", lambda name, timeout=25.0: False)
+    monkeypatch.setattr(b, "_stream_logs", lambda proc, target: None)
+    assert b.start_solo() is False
+    assert [c[:2] for c in calls] == [["docker", "run"]]
