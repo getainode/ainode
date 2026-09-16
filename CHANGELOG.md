@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.15] - 2026-09-16
+
+The bind wait tolerates a real weight-loading pause.
+
 ### Changed
 - **The bind wait's log-silence window defaults to 360 s, up from 120 s.** vLLM prints its weight-loading progress bar once per shard; a two-shard checkpoint (Qwen3.8 27B NVFP4 on Spark-1) is quiet for 206 s between updates, so the old window declared a healthy load silent, logged `never bound ... (log silent for 121s); relaunching once`, and spent the engine's single retry on a no-op. Six minutes covers the observed gaps with margin and the 1800 s ceiling still bounds a truly wedged engine. `engine_bind_log_silence_seconds` in config.json overrides it.
 
