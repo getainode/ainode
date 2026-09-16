@@ -88,3 +88,131 @@ def test_stacked_runs_are_labelled():
     assert stacked, "expected at least one stacked run in bench/results"
     for run in stacked:
         assert "(stacked)" in m.fmt_placement(run["placement"])
+
+
+def _write(tmp_path, name, obj):
+    (tmp_path / name).write_text(json.dumps(obj))
+
+
+def test_harness_record_renders_a_row(tmp_path):
+    """A record whose harness block measured one model on one harness becomes a row."""
+    m = _module()
+    _write(tmp_path, "20260101-000001-harness.json", {
+        "schema": 1, "stamp": "20260101-000001", "label": "my-run",
+        "model": {"id": "x/y", "name": "Xeno", "params_b": 7, "arch": "moe"},
+        "placement": {"node": "Spark-5", "gpu": "NVIDIA GB10", "gpus": 2, "tp": 2},
+        "harness": {"runs": [{
+            "harness": "dsh", "version": "0.1.5",
+            "scores": {"tasks": 10, "passed_at_1": 8, "passed_at_2": 10,
+                       "mean_wall_s": 12.5},
+        }]},
+    })
+    table = m.render_harness_table(m.load_runs(tmp_path))
+    lines = table.splitlines()
+    assert len(lines) == 3  # header + rule + one row
+    assert "| Xeno |" in table
+    assert "| dsh 0.1.5 | 8/10 | 10/10 | 12.5 | Spark-5, TP=2 | 2026-01-01 |" in table
+    assert ("[my-run]("
+            "https://github.com/getainode/ainode/blob/main/bench/results/"
+            "20260101-000001-harness.json)") in table
+
+
+def test_note_marks_harness_rows_not_measured(tmp_path):
+    """A note that names a harness alongside 'not measured' blanks its score cells."""
+    m = _module()
+    _write(tmp_path, "20260101-000001-harness.json", {
+        "schema": 1, "stamp": "20260101-000001", "label": "my-run",
+        "model": {"id": "x/y", "name": "Xeno", "params_b": 7, "arch": "moe"},
+        "placement": {"node": "Spark-5", "gpus": 1, "tp": 1},
+        "harness": {"runs": [
+            {"harness": "dsh", "version": "0.1.5",
+             "scores": {"tasks": 10, "passed_at_1": 8, "passed_at_2": 10,
+                        "mean_wall_s": 12.5}},
+            {"harness": "broken", "version": "broken 9",
+             "scores": {"tasks": 10, "passed_at_1": 3, "passed_at_2": 5,
+                        "mean_wall_s": 4.0}},
+        ]},
+        "notes": ["The broken 9 rows are a host defect; treat its scores as "
+                  "not measured."],
+    })
+    table = m.render_harness_table(m.load_runs(tmp_path))
+    assert "| 8/10 | 10/10 | 12.5 |" in table  # the good row still has numbers
+    broken = [ln for ln in table.splitlines() if "broken 9" in ln][0]
+    assert "| not measured | not measured | not measured |" in broken
+
+
+def test_later_record_wins_for_the_same_pair(tmp_path):
+    """Two records for one (model, harness): the newer stamp supplies the row."""
+    m = _module()
+    _write(tmp_path, "20260101-000001-earlier.json", {
+        "schema": 1, "stamp": "20260101-000001", "label": "early",
+        "model": {"id": "x/y", "name": "Xeno", "params_b": 7, "arch": "moe"},
+        "placement": {"node": "Spark-5", "gpus": 1, "tp": 1},
+        "harness": {"runs": [{
+            "harness": "dsh", "version": "0.1.5",
+            "scores": {"tasks": 10, "passed_at_1": 2, "passed_at_2": 4,
+                       "mean_wall_s": 99.0},
+        }]},
+    })
+    _write(tmp_path, "20260201-000001-later.json", {
+        "schema": 1, "stamp": "20260201-000001", "label": "late",
+        "model": {"id": "x/y", "name": "Xeno", "params_b": 7, "arch": "moe"},
+        "placement": {"node": "Spark-6", "gpus": 1, "tp": 1},
+        "harness": {"runs": [{
+            "harness": "dsh", "version": "0.2.0",
+            "scores": {"tasks": 10, "passed_at_1": 9, "passed_at_2": 10,
+                       "mean_wall_s": 30.0},
+        }]},
+    })
+    table = m.render_harness_table(m.load_runs(tmp_path))
+    assert "| 9/10 | 10/10 | 30.0 |" in table
+    assert "99.0" not in table  # the earlier row is gone, not merged
+    assert "| Spark-6, TP=1 |" in table
+    assert "20260201-000001-later.json" in table
+
+
+def test_check_detects_stale_harness_table(tmp_path):
+    """--check returns 1 when only the harness table of README.md has drifted."""
+    results = tmp_path / "results"
+    results.mkdir()
+    _write(results, "throughput.json", {
+        "schema": 1, "stamp": "20260101-000001", "label": "thr",
+        "model": {"id": "x/y", "name": "Thr", "params_b": 7, "active_b": 7,
+                  "arch": "dense"},
+        "placement": {"node": "N", "gpus": 1, "tp": 1},
+        "results": {"single_stream": {"decode_tok_s": 10.0},
+                    "concurrency": [{"streams": 16, "aggregate_tok_s": 5.0}]},
+    })
+    _write(results, "harness.json", {
+        "schema": 1, "stamp": "20260101-000002", "label": "har",
+        "model": {"id": "a/b", "name": "Har", "params_b": 7, "arch": "dense"},
+        "placement": {"node": "Spark-7", "gpus": 1, "tp": 1},
+        "harness": {"runs": [{
+            "harness": "dsh", "version": "0.1.5",
+            "scores": {"tasks": 10, "passed_at_1": 8, "passed_at_2": 10,
+                       "mean_wall_s": 20.0},
+        }]},
+    })
+
+    readme = tmp_path / "README.md"
+    m = _module()
+    readme.write_text(
+        "# Bench\n\n"
+        f"{m.BEGIN}\n\n{m.render_table(m.load_runs(results))}\n\n{m.END}\n\n"
+        f"{m.HARNESS_BEGIN}\n\n{m.render_harness_table(m.load_runs(results))}\n\n"
+        f"{m.HARNESS_END}\n"
+    )
+
+    def check():
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--check", "--results", str(results),
+             "--readme", str(readme), "--harness-begin", m.HARNESS_BEGIN,
+             "--harness-end", m.HARNESS_END],
+            capture_output=True, text=True, cwd=REPO)
+        return proc.returncode
+
+    assert check() == 0
+    text = readme.read_text().replace("8/10", "7/10")
+    readme.write_text(text)
+    assert check() == 1
+
