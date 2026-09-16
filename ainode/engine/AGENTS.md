@@ -68,6 +68,43 @@ A multi-minute MoE profiling forward-pass with GPUs at 0% and quiet logs is **no
 - **No fixed bind timeout in code.** The startup replay (`models/api_routes.py::_wait_for_bind`) waits while the container is up and the engine's log is advancing, and gives up only on evidence: container exited, log silent past `NodeConfig.engine_bind_log_silence_seconds`, or `NodeConfig.engine_bind_ceiling_seconds` reached. Do not reintroduce a constant window; tune the knobs.
 - **A backend's `last_log_activity` must come from that engine's own stdout stream** (`_stream_logs`), never from the log file's mtime or size: stacked instances on a node share one log file, so file-based freshness lets a busy primary vouch for a wedged neighbour. A backend that cannot report returns `None`, and the wait then leans on container exit plus the ceiling.
 
+## Launch ORDER on a node: sweep, primary, bind, then stacked one at a time
+
+vLLM sizes its KV cache from what is FREE when the engine profiles, so two engines
+profiling on one node at once under-provision whichever finishes second. On the
+0.5.11 roll a stacked engine that launched 2 s behind the primary got
+`Available KV cache memory: 1.59 GiB` and failed engine init, at the same
+`gpu_memory_utilization` that gave it a 600K-token cache on a settled node (#96).
+The order below is a contract, not a nicety.
+
+1. **Sweep before anything launches, and wait for it.** `ainode start` calls
+   `models/api_routes.py::sweep_engines_before_boot()` BEFORE it starts the boot
+   engine: `docker rm -f` every engine container this node owns (the primary
+   `ainode-vllm-node-solo`, the stacked `-<port>` ones, a distributed
+   `ainode-vllm-head`; never a peer's `ainode-vllm-worker-*`, which belongs to
+   whichever head placed it) and poll until the names are gone, because `--rm`
+   removal is asynchronous. A container that will not go is logged BY NAME and boot
+   continues. The sweep is claimed once per process, so the replay's
+   `ensure_startup_sweep()` is then a no-op. **Never widen the replay's own sweep
+   past the stacked prefix**: it runs ~10 s into boot, and a wide sweep there would
+   remove the primary this boot just launched.
+2. **Boot primary next**, and let it BIND before anything stacks on it
+   (`_ensure_serving`, the adaptive wait, one retry).
+3. **Then the stacked instances, one at a time**, each waiting for the previous one
+   to bind. A launch that fails after its one retry logs and the replay moves to the
+   next model; it never blocks the rest of the manifest.
+4. **Every launch path takes the per-node launch slot** and holds it until the
+   engine binds: the startup replay (`launch_slot(..., wait=WAIT_FOREVER)`, boot has
+   nobody to refuse to), `POST /api/models/load`, `POST /api/sharding/launch`,
+   `POST /api/engine/set-model`. Release the slot when the engine BINDS, not when
+   the launch returns, or the next load profiles against memory this one has not
+   finished reserving. An HTTP caller that cannot get the slot within
+   `_LAUNCH_QUEUE_SECONDS` gets a 409 naming the holder; do not make it queue
+   forever.
+5. **A bind wait reports the CONTAINER's life**, from `EngineBackend.launched_at`,
+   not the age of the wait (which can start minutes after the launch). A backend
+   that launches containers stamps it on launch and clears it in `stop()`.
+
 ## Verification
 
 - After engine/flag changes: `pytest tests/` and confirm the resolved vLLM command in the launch logs matches the invariants above. Don't claim a serve works unless you saw it reach READY and generate tokens.

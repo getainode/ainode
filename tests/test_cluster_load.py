@@ -268,7 +268,13 @@ def test_instance_manifest_persist_and_replay(monkeypatch, tmp_path):
 
     async def _noop_sleep(*a, **k):
         return None
+
+    async def _no_sweep():
+        return None
     monkeypatch.setattr(mr.asyncio, "sleep", _noop_sleep)
+    # The replay sweeps engine containers before it launches (#96), but not
+    # through this test's fake docker.
+    monkeypatch.setattr(mr, "ensure_startup_sweep", _no_sweep)
     asyncio.run(mr.replay_instances_on_startup(app2))
 
     models = {i.record.model for i in app2["instances"].instances()}
