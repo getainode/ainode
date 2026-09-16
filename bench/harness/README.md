@@ -62,8 +62,10 @@ Useful flags:
 - `--attempts 1` - drop the second try (see the protocol below).
 - `--timeout 900` - seconds per harness invocation. A first `dsh` run installs its
   profile before it does anything, so give that one room.
-- `--work-dir DIR` - keep the working copies instead of using a fresh temp dir.
-  Useful when you want to read what the agent actually wrote.
+- `--work-dir DIR` - put the working copies somewhere you chose. Without it they go
+  to a fresh temp dir, which the run prints as `workdir :` and leaves in place when
+  it finishes: reading what the agent actually wrote is the first thing worth doing
+  after a surprising score.
 - `--context-window` / `--max-output-tokens` - what pi and dsh are told about the
   model, because neither can discover it from an OpenAI-compatible endpoint. They
   are declared, and the record says they were declared.

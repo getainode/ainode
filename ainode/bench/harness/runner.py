@@ -404,6 +404,10 @@ def run_suite(tasks: list, adapters: list, endpoint: str, model: str,
     """Every adapter over every task. Harness-major, so one harness's numbers are
     measured under conditions as close together as the fleet allows."""
     root = pathlib.Path(root) if root else pathlib.Path(tempfile.mkdtemp(prefix="ainode-harness-"))
+    # Said out loud and left on disk when the run ends: what the agent actually wrote
+    # is the first thing anybody wants after a surprising score, and a path nobody
+    # was told is a path nobody looks at.
+    log(f"  workdir : {root}")
     out = []
     for adapter in adapters:
         version = adapter.version()
