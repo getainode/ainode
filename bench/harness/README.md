@@ -193,12 +193,20 @@ start with an empty key field.
 The provider id the adapters register is `ainode-bench`, not `ainode`, so the bench
 adds its own route rather than rewriting a provider somebody made by hand.
 
-| Harness | Version | How far it is verified |
-|---------|---------|------------------------|
-| `aider` | 0.86.2 (PyPI `aider-chat`) | **End to end** against a fleet endpoint: exit 0, 6/6 hidden tests green on `isogram` |
-| `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | **End to end**: exit 0 in 20 s, stub edited, 6/6 hidden tests green |
-| `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | **End to end**: stub edited, 6/6 hidden tests green. The overlay's composition is also checkable offline with `--dump-config` |
-| `opencode` | 1.18.31 (`opencode-ai`) | Flags from `--help` and `run --help`. Provider config not yet confirmed against a live endpoint |
+All four are verified end to end: one task (`isogram`) driven by DeepSeek V4 Flash on
+the fleet, hidden tests 6/6 for every one of them.
+
+| Harness | Version | First-attempt wall clock |
+|---------|---------|--------------------------|
+| `aider` | 0.86.2 (PyPI `aider-chat`) | 10 s |
+| `opencode` | 1.18.31 (`opencode-ai`) | 16 s (about 18 s of any run is skill loading) |
+| `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | 20 s |
+| `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | 34 s |
+
+One task on one model is a working adapter, not a score, and the wall clocks are not
+comparable as they stand: opencode spends about 18 s loading skills before it starts
+and dsh installs its profile on first use. Read them as "this adapter reaches the
+endpoint and the model can do the task", and get the real numbers from a full run.
 
 ### aider
 
@@ -305,19 +313,33 @@ gets to change what the model was told.
 ### opencode
 
 ```
-opencode run --pure --auto -m ainode-bench/<model id> "<prompt>"
+opencode run --pure --auto --format json -m ainode-bench/<model id> "<prompt>"
 ```
 
-`--auto` is required, not optional: without a TTY there is nobody to approve the
-file write, so the run would sit until the timeout. `--pure` skips external plugins.
-The provider is a project-local `opencode.json` written into the working directory
-(config, not a hint), naming the endpoint through `@ai-sdk/openai-compatible`.
-OpenCode expects to be inside a git repo, so the working directory gets a bare
-`git init` with no commit and no identity.
+Three of those flags are working requirements, not preferences:
 
-Assumed, not verified: that `-m ainode-bench/<model id>` splits on the first slash,
-so a model id containing slashes stays intact. If a run reports an unknown model,
-that is the first thing to check.
+- `--auto` approves permissions that are not explicitly denied. Without a TTY there
+  is nobody to approve the file write, so the run sits until the timeout.
+- `--format json` makes it stream NDJSON events on stdout. Without it, two verified
+  runs produced **no output at all** until they timed out.
+- `--pure` skips external plugins.
+
+The adapter reads one thing out of that stream: `step_start` events, counted as
+turns. The event schema is upstream's, so a line that does not parse is skipped and
+a shape change costs the `turns` field and nothing else.
+
+The provider is a project-local `opencode.json` written into the working directory
+(config, not a hint), naming the endpoint through `@ai-sdk/openai-compatible`. The
+model entry carries just a name, which is the shape that was verified, so the run's
+declared context window and output cap do not reach opencode; they exist for pi and
+dsh, which will not route without them. OpenCode expects to be inside a git repo, so
+the working directory gets a bare `git init` with no commit and no identity.
+
+Two things to know before reading its wall clock: startup costs about 18 s because it
+loads every skill under `~/.claude/skills` and `~/.agents/skills` even with `--pure`,
+and that is inside `mean_wall_s`. And `-m ainode-bench/<model id>` relies on the
+provider/model split taking the first slash so a model id with slashes in it survives;
+verified for one such id, and an "unknown model" error is the first place to look.
 
 ## How to add a harness
 

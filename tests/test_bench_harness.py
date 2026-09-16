@@ -34,7 +34,11 @@ from ainode.bench.harness.adapters.dsh import (
     settings_yaml,
     thinking_format,
 )
-from ainode.bench.harness.adapters.opencode import OpencodeAdapter, project_config
+from ainode.bench.harness.adapters.opencode import (
+    OpencodeAdapter,
+    parse_events,
+    project_config,
+)
 from ainode.bench.harness.adapters.pi import PiAdapter, merge_models_json
 from ainode.bench.harness.cli import ainode_base
 from ainode.bench.harness.cli import main as harness_main
@@ -260,17 +264,34 @@ def test_pi_only_moves_home_when_the_config_was_redirected(tmp_path, monkeypatch
 
 def test_opencode_command_and_project_config(tmp_path):
     req = _request(tmp_path)
+    # --auto because there is no TTY to approve the write, and --format json because
+    # without it two verified runs produced no output at all until the timeout.
     assert OpencodeAdapter().command(req) == [
-        "opencode", "run", "--pure", "--auto", "-m", f"{PROVIDER}/{MODEL}", req.prompt,
+        "opencode", "run", "--pure", "--auto", "--format", "json",
+        "-m", f"{PROVIDER}/{MODEL}", req.prompt,
     ]
     assert OpencodeAdapter().needs_git is True
     provider = project_config(req)["provider"][PROVIDER]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["options"] == {"baseURL": ENDPOINT, "apiKey": "ainode"}
-    assert MODEL in provider["models"]
+    # The verified model entry carries a name and nothing else.
+    assert provider["models"] == {MODEL: {"name": MODEL}}
     cfg = OpencodeAdapter().config(req)[0]
     assert cfg.path == req.workdir / "opencode.json"
     assert cfg.merged is False
+
+
+def test_opencode_counts_turns_off_its_event_stream():
+    stream = ('{"type":"step_start"}\n'
+              'not json at all\n'
+              '{"type":"tool","part":{"tool":"edit","state":{"status":"completed"}}}\n'
+              '{"type":"step_start"}\n'
+              '{"type":"text","part":{"text":"done"}}\n'
+              '{"type":"step_finish"}\n')
+    assert parse_events(stream) == {"turns": 2}
+    # A stream we cannot read costs the turns field and nothing else.
+    assert parse_events("plain human output\n") == {}
+    assert parse_events("") == {}
 
 
 def test_dsh_command_and_overlay(tmp_path, monkeypatch):
