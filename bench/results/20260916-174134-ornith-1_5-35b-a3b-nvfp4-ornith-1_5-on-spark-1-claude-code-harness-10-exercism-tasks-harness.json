@@ -1,0 +1,494 @@
+{
+ "schema": 1,
+ "stamp": "20260916-174134",
+ "label": "Ornith 1.5 on Spark-1, Claude Code harness, 10 Exercism tasks",
+ "model": {
+  "id": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "name": "Ornith 1.5 35B-A3B",
+  "params_b": 35.0,
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "MIT",
+  "vision": false,
+  "arch": "moe",
+  "active_b": 3
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-1-DGX",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.18",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [
+   "unsloth/Qwen3.8-27B-NVFP4"
+  ],
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "flags": [
+   "--enable-prefix-caching",
+   "--kv-cache-dtype",
+   "auto",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--limit-mm-per-prompt",
+   "{\"image\":0,\"video\":0}",
+   "--speculative_config",
+   "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":2}"
+  ],
+  "flags_source": "curated catalog recipe (/api/models); the live container command line was not readable"
+ },
+ "settings": {
+  "attempts": 2,
+  "timeout_s": 900.0,
+  "tasks_requested": null,
+  "harnesses": [
+   "claude"
+  ],
+  "context_window_declared": 131072,
+  "max_output_tokens_declared": 16384
+ },
+ "harness": {
+  "task_set": {
+   "id": "exercism-python-10",
+   "count": 10,
+   "available": 10,
+   "slugs": [
+    "binary-search",
+    "bob",
+    "hamming",
+    "isogram",
+    "matrix",
+    "raindrops",
+    "robot-name",
+    "run-length-encoding",
+    "two-fer",
+    "word-count"
+   ],
+   "language": "python",
+   "source": {
+    "repo": "https://github.com/exercism/python",
+    "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+    "path": "exercises/practice/<slug>",
+    "license": "MIT",
+    "license_file": "LICENSE-exercism"
+   }
+  },
+  "endpoint": "http://100.122.26.9:8001/v1",
+  "protocol": {
+   "attempts": 2,
+   "timeout_s": 900.0,
+   "second_attempt_sees": "the failing test output"
+  },
+  "runs": [
+   {
+    "harness": "claude",
+    "version": "2.1.272 (Claude Code)",
+    "scores": {
+     "tasks": 10,
+     "passed_at_1": 8,
+     "passed_at_2": 10,
+     "pass_at_1": 0.8,
+     "pass_at_2": 1.0,
+     "mean_wall_s": 50.8,
+     "crashes": 1,
+     "timeouts": 0
+    },
+    "tasks": [
+     {
+      "slug": "binary-search",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 45.76,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<2827 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 45.76,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":69598,\"outputTokens\":1015,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.373365,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":4,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nAll cases behave correctly. The exit code 1 is just the expected `ValueError` from the empty-list case (which is what should happen), printed before the earlier results.\\n\\nThe implementation in `binary_search.py`:\\n\\n- Iterates with `low`/`high` bounds, computing the middle index each round.\\n- Returns the index when the candidate matches `value`.\\n- Discards the wrong half each iteration (left half if candidate is smaller, right half if larger).\\n- Raises `ValueError(\\\"value not in array\\\")` once the bounds cross \u2014 i.e. the item has been fully eliminated.\\n\\nVerified:\\n- `find([4, 8, 12, 16, 23, 28, 32], 23)` \u2192 `4` (matches the walkthrough)\\n- First/last elements found at their correct indices\\n- Empty list (or any missing value) raises `ValueError` with the required message\",\"ttft_ms\":15532,\"type\":\"result\",\"duration_ms\":45579,\"uuid\":\"f5befd93-0518-47b7-aa41-4a17940f45e0\",\"ttft_stream_ms\":15217,\"time_to_request_ms\":46,\"first_content_frame_ms\":15217,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.26,
+         "passed": true,
+         "tests_passed": 11,
+         "output_tail": "...........                                                              [100%]\n11 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "bob",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 18.2,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<994 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 18.2,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 3,
+         "stdout_tail": "{\"duration_api_ms\":17964,\"stop_reason\":\"end_turn\",\"session_id\":\"d1c6c772-cc4e-4ef6-a9a0-d4203c132f8a\",\"total_cost_usd\":0.262585,\"usage\":{\"input_tokens\":50167,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":470,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":50167,\"outputTokens\":470,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.262585,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":3,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. `bob.py` implements the five cases.\\n\\nKey detail: `str.isupper()` returns `False` for strings with no cased letters (e.g. `\\\"1, 2, 3!\\\"`), so digits-only input is correctly treated as *not* yelling. `strip()` first handles silence and any trailing whitespace before the question check.\",\"ttft_ms\":5064,\"type\":\"result\",\"duration_ms\":18027,\"uuid\":\"a2a3b9a2-766d-4506-9080-f0808b0d82bb\",\"ttft_stream_ms\":3571,\"time_to_request_ms\":43,\"first_content_frame_ms\":3571,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.26,
+         "passed": true,
+         "tests_passed": 26,
+         "output_tail": "..........................                                               [100%]\n26 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "hamming",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 19.34,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<1843 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 19.34,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 3,
+         "stdout_tail": "..._turn\",\"session_id\":\"f0485a3e-a113-4b6b-9351-696d994f5c31\",\"total_cost_usd\":0.26675499999999996,\"usage\":{\"input_tokens\":50706,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":529,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":50706,\"outputTokens\":529,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.26675499999999996,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":3,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. The implementation in `hamming.py:1`:\\n\\n```python\\ndef distance(strand_a, strand_b):\\n    if len(strand_a) != len(strand_b):\\n        raise ValueError(\\\"Strands must be of equal length.\\\")\\n    return sum(a != b for a, b in zip(strand_a, strand_b))\\n```\\n\\n- Raises `ValueError` with the required message when the strands differ in length.\\n- Otherwise counts positions where the nucleotides differ via `zip` + a generator sum.\",\"ttft_ms\":4655,\"type\":\"result\",\"duration_ms\":19125,\"uuid\":\"846ce97d-9d8b-46e5-9662-1605e2961782\",\"ttft_stream_ms\":3575,\"time_to_request_ms\":43,\"first_content_frame_ms\":3575,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 9,
+         "output_tail": ".........                                                                [100%]\n9 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "isogram",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 18.13,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<602 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 18.13,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 3,
+         "stdout_tail": "...eation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":512,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":49830,\"outputTokens\":512,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.26195,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":3,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. `isogram.py` now implements `is_isogram`.\\n\\nThe function counts only alphabetic letters (so spaces and hyphens are ignored, allowing repeats) and, by default, treats letters case-insensitively. It returns `False` on the first repeated letter and `True` otherwise.\\n\\n```python\\ndef is_isogram(phrase, case_insensitive=True):\\n    seen = set()\\n    for char in phrase:\\n        if char.isalpha():\\n            letter = char.lower() if case_insensitive else char\\n            if letter in seen:\\n                return False\\n            seen.add(letter)\\n    return True\\n```\",\"ttft_ms\":4162,\"type\":\"result\",\"duration_ms\":17970,\"uuid\":\"244bf753-af56-44fa-898e-920034d383fe\",\"ttft_stream_ms\":3530,\"time_to_request_ms\":44,\"first_content_frame_ms\":3530,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 14,
+         "output_tail": "..............                                                           [100%]\n14 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "matrix",
+      "passed": true,
+      "passed_at_attempt": 2,
+      "harness_wall_s": 73.73,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<1865 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 29.49,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "{\"duration_api_ms\":29111,\"stop_reason\":\"end_turn\",\"session_id\":\"a818db6e-f311-4157-9f00-364ceb707a6a\",\"total_cost_usd\":0.369305,\"usage\":{\"input_tokens\":69456,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":881,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":69456,\"outputTokens\":881,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.369305,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":4,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. The `Matrix` class in `matrix.py` parses the input string into a list of lists of integers, and exposes `rows()` and `columns()` methods.\\n\\nVerified against the example:\\n- `rows()` \u2192 `[[9, 8, 7], [5, 3, 2], [6, 6, 7]]`\\n- `columns()` \u2192 `[[9, 5, 6], [8, 3, 6], [7, 2, 7]]`\\n\\n`rows()` returns copies of each row so callers can't mutate the stored matrix, and `columns()` transposes it.\",\"ttft_ms\":6754,\"type\":\"result\",\"duration_ms\":29327,\"uuid\":\"7e57aa70-b1f6-4a5f-bef4-e0e918518dab\",\"ttft_stream_ms\":3763,\"time_to_request_ms\":43,\"first_content_frame_ms\":3763,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 1,
+         "wall_s": 0.25,
+         "passed": false,
+         "tests_failed": 8,
+         "output_tail": "...n18 3 1\\n9 4 800\")\n>       self.assertEqual(matrix.column(2), [1903, 3, 4])\n                         ^^^^^^^^^^^^^\nE       AttributeError: 'Matrix' object has no attribute 'column'. Did you mean: 'columns'?\n\nmatrix_test.py:43: AttributeError\n______________ MatrixTest.test_extract_row_from_one_number_matrix ______________\n\nself = <matrix_test.MatrixTest testMethod=test_extract_row_from_one_number_matrix>\n\n    def test_extract_row_from_one_number_matrix(self):\n        matrix = Matrix(\"1\")\n>       self.assertEqual(matrix.row(1), [1])\n                         ^^^^^^^^^^\nE       AttributeError: 'Matrix' object has no attribute 'row'. Did you mean: 'rows'?\n\nmatrix_test.py:15: AttributeError\n_______ MatrixTest.test_extract_row_where_numbers_have_different_widths ________\n\nself = <matrix_test.MatrixTest testMethod=test_extract_row_where_numbers_have_different_widths>\n\n    def test_extract_row_where_numbers_have_different_widths(self):\n        matrix = Matrix(\"1 2\\n10 20\")\n>       self.assertEqual(matrix.row(2), [10, 20])\n                         ^^^^^^^^^^\nE       AttributeError: 'Matrix' object has no attribute 'row'. Did you mean: 'rows'?\n\nmatrix_test.py:23: AttributeError\n=========================== short test summary info ============================\nFAILED matrix_test.py::MatrixTest::test_can_extract_column - AttributeError: ...\nFAILED matrix_test.py::MatrixTest::test_can_extract_column_from_non_square_matrix_with_no_corresponding_row\nFAILED matrix_test.py::MatrixTest::test_can_extract_row - AttributeError: 'Ma...\nFAILED matrix_test.py::MatrixTest::test_can_extract_row_from_non_square_matrix_with_no_corresponding_column\nFAILED matrix_test.py::MatrixTest::test_extract_column_from_one_number_matrix\nFAILED matrix_test.py::MatrixTest::test_extract_column_where_numbers_have_different_widths\nFAILED matrix_test.py::MatrixTest::test_extract_row_from_one_number_matrix - ...\nFAILED matrix_test.py::MatrixTest::test_extract_row_where_numbers_have_different_widths\n8 failed in 0.02s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "claude -p '<6003 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 44.24,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...kens\":74400,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1571,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":74400,\"outputTokens\":1571,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.41127499999999995,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":4,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nFixed. The previous implementation only exposed `rows()`/`columns()` (no-argument accessors), but the hidden tests call single-element accessors with a 1-based index: `matrix.row(n)` and `matrix.column(n)`.\\n\\nI added two methods to `matrix.py`:\\n\\n- `row(self, index)` \u2192 returns a copy of the `n`-th row (1-based)\\n- `column(self, index)` \u2192 returns a copy of the `n`-th column (1-based)\\n\\nThe original `rows()`/`columns()` accessors are left in place so any all-elements tests still work. Verified against every case shown in the failed output.\",\"ttft_ms\":3687,\"type\":\"result\",\"duration_ms\":44080,\"uuid\":\"7d579685-2b0f-485f-94f9-29fed7a5ccfd\",\"ttft_stream_ms\":3288,\"time_to_request_ms\":30,\"first_content_frame_ms\":3288,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 8,
+         "output_tail": "........                                                                 [100%]\n8 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "raindrops",
+      "passed": true,
+      "passed_at_attempt": 2,
+      "harness_wall_s": 34.2,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<2469 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 15.55,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 2,
+         "stdout_tail": "{\"duration_api_ms\":15144,\"stop_reason\":\"end_turn\",\"session_id\":\"f3ba231b-9072-47f7-bbf9-3e294ffe9e41\",\"total_cost_usd\":0.18216000000000004,\"usage\":{\"input_tokens\":34132,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":460,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":34132,\"outputTokens\":460,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.18216000000000004,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":2,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. `raindrops.py` now converts a number to its raindrop sound:\\n\\n- Appends `\\\"Pling\\\"`, `\\\"Plang\\\"`, `\\\"Plong\\\"` when divisible by 3, 5, 7 respectively.\\n- Falls back to the number's string form when none match.\\n\\nVerified against the examples: `28 \u2192 \\\"Plong\\\"`, `30 \u2192 \\\"PlingPlang\\\"`, `34 \u2192 \\\"34\\\"`.\",\"ttft_ms\":5711,\"type\":\"result\",\"duration_ms\":15392,\"uuid\":\"b2e2929e-1f0f-44f5-a9fd-2429a61eb29e\",\"ttft_stream_ms\":3914,\"time_to_request_ms\":228,\"first_content_frame_ms\":3914,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 2,
+         "wall_s": 0.3,
+         "passed": false,
+         "tests_errored": 2,
+         "output_tail": "==================================== ERRORS ====================================\n______________________ ERROR collecting raindrops_test.py ______________________\nImportError while importing test module '/private/var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-r289oa7c/claude/raindrops/raindrops_test.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nraindrops_test.py:7: in <module>\n    from raindrops import (\nE   ImportError: cannot import name 'convert' from 'raindrops' (/private/var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-r289oa7c/claude/raindrops/raindrops.py)\n=========================== short test summary info ============================\nERROR raindrops_test.py\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n1 error in 0.05s"
+        }
+       },
+       {
+        "attempt": 2,
+        "harness": {
+         "command": "claude -p '<3714 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 18.64,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 3,
+         "stdout_tail": "{\"duration_api_ms\":18435,\"stop_reason\":\"end_turn\",\"session_id\":\"0b8d2839-924e-4cd6-bb90-62ac96ebdc10\",\"total_cost_usd\":0.27396,\"usage\":{\"input_tokens\":52477,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":463,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":52477,\"outputTokens\":463,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.27396,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":3,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nThe test module (`raindrops_test.py`) imports `convert`, but the original file only defined `raindrops` \u2014 hence the `ImportError`. I added a `convert` function that delegates to the existing `raindrops` logic, which already correctly handles the Pling/Plang/Plong rules and falls back to the number as a string.\\n\\nThe fix is complete; the hidden tests should now be able to import `convert` and run.\",\"ttft_ms\":3688,\"type\":\"result\",\"duration_ms\":18488,\"uuid\":\"30cdd494-d533-463d-80cd-a889f8aef763\",\"ttft_stream_ms\":2970,\"time_to_request_ms\":31,\"first_content_frame_ms\":2970,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 18,
+         "output_tail": "..................                                                       [100%]\n18 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "robot-name",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 76.97,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<866 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 76.97,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 5,
+         "stdout_tail": "...ens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":71822,\"outputTokens\":2812,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.42941,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":5,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. The implementation in `robot_name.py` passes all sanity checks.\\n\\n**How it works:**\\n- `name` is a property generated lazily on first access and cached, so it stays stable across repeated reads.\\n- `reset()` clears the cached name, forcing the next access to pull a fresh one (which is necessarily different, since that name is already consumed).\\n- Uniqueness is guaranteed, not just likely: the entire 676,000-name space (`[A-Z]{2}\\\\d{3}`) is shuffled once at first use and handed out one at a time via a class-level cursor. This produces random ordering while making collisions impossible \u2014 no retry loops, no flaky tests. When the pool is exhausted it reshuffles a fresh random order.\\n\\nVerification confirmed 20,000 robots produced 20,000 unique names, the format matches `[A-Z]{2}\\\\d{3}`, and reset behaves correctly.\",\"ttft_ms\":4137,\"type\":\"result\",\"duration_ms\":76798,\"uuid\":\"ec56f820-a7b9-434c-8d09-5e2babcea5ff\",\"ttft_stream_ms\":3470,\"time_to_request_ms\":44,\"first_content_frame_ms\":3470,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.48,
+         "passed": true,
+         "tests_passed": 4,
+         "output_tail": "....                                                                     [100%]\n4 passed in 0.15s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "run-length-encoding",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 142.44,
+      "crashed": true,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<1113 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 1,
+         "wall_s": 142.44,
+         "timed_out": false,
+         "crashed": true,
+         "turns": 13,
+         "stdout_tail": "{\"duration_api_ms\":139708,\"stop_reason\":\"tool_use\",\"session_id\":\"3a1a5c45-f3ef-4438-82c7-d5dcbb239041\",\"total_cost_usd\":1.2550899999999998,\"usage\":{\"input_tokens\":229078,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":4388,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":229078,\"outputTokens\":4388,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":1.2550899999999998,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"max_turns\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":true,\"num_turns\":13,\"subtype\":\"error_max_turns\",\"errors\":[\"Reached maximum number of turns (12)\"],\"type\":\"result\",\"duration_ms\":141710,\"uuid\":\"32aa1bc1-c4c2-4d03-8bec-f166edc23e6d\",\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.27,
+         "passed": true,
+         "tests_passed": 13,
+         "output_tail": ".............                                                            [100%]\n13 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "two-fer",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 30.51,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<821 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 30.51,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "{\"duration_api_ms\":29947,\"stop_reason\":\"end_turn\",\"session_id\":\"8232ebd5-e923-4670-a6cf-8ac11c140677\",\"total_cost_usd\":0.362335,\"usage\":{\"input_tokens\":67952,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":903,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":67952,\"outputTokens\":903,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.362335,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":4,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nDone. `two_fer.py` now returns the correct line for any name, defaulting to \\\"you\\\" when no name is given (including an explicit `None`):\\n\\n```python\\ndef two_fer(name=\\\"you\\\"):\\n    if name is None:\\n        name = \\\"you\\\"\\n    return f\\\"One for {name}, one for me.\\\"\\n```\\n\\nAll four documented cases match \u2014 Alice, Bohdan, Zaphod get their names, and a missing name says \\\"one for you\\\".\",\"ttft_ms\":6236,\"type\":\"result\",\"duration_ms\":30178,\"uuid\":\"a3afd288-ec81-4a9b-bbab-f960d6c4e3c9\",\"ttft_stream_ms\":3538,\"time_to_request_ms\":57,\"first_content_frame_ms\":3539,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 3,
+         "output_tail": "...                                                                      [100%]\n3 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "word-count",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 49.0,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "claude -p '<1591 chars>' --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 --dangerously-skip-permissions --output-format json --max-turns 12",
+         "exit_code": 0,
+         "wall_s": 49.0,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 7,
+         "stdout_tail": "...:0,\"output_tokens\":1338,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\":{\"inputTokens\":121626,\"outputTokens\":1338,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.6415799999999999,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"ornith-ai/ornith-1.5-35b-a3b-nvfp4\",\"provider\":\"firstParty\",\"costBasis\":\"unknown\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":7,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"\\n\\nMatches the expected output exactly. The solution:\\n\\n```python\\nimport re\\nfrom collections import Counter\\n\\n\\ndef count_words(sentence):\\n    return dict(\\n        Counter(\\n            match\\n            for match in re.findall(r\\\"[a-z0-9]+(?:'[a-z0-9]+)?\\\", sentence.lower())\\n        )\\n    )\\n```\\n\\nThe regex `[a-z0-9]+(?:'[a-z0-9]+)?` matches runs of letters/digits, optionally followed by an apostrophe plus more alphanumerics \u2014 so contractions like `that's` stay intact while all other punctuation and whitespace act as separators. Lowercasing makes counts case-insensitive, and it returns a plain dict.\",\"ttft_ms\":4090,\"type\":\"result\",\"duration_ms\":48829,\"uuid\":\"08fbb38b-80ff-4541-8829-ceea50d64405\",\"ttft_stream_ms\":3617,\"time_to_request_ms\":148,\"first_content_frame_ms\":3618,\"queued_turn_count\":0,\"result_index\":0}",
+         "stderr_tail": "[claude-code:unrecognized_model] {\"model\":\"ornith-ai/Ornith-1.5-35B-A3B-NVFP4\",\"query_source\":\"sdk\"}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 17,
+         "output_tail": ".................                                                        [100%]\n17 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 0,
+       "tokens_generated": 0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py harness in 513s; nothing loaded, unloaded or restarted.",
+  "The hidden tests are copied into the working directory only after the harness has exited, and removed again before the next attempt.",
+  "pass@2 is cumulative and the second attempt is given the failing test output, which is Aider's polyglot protocol.",
+  "A harness crash or timeout still gets its tests run against whatever it left on disk; crashes and timeouts are counted separately.",
+  "Token counts are AINode's /api/metrics counters differenced over each task's window: they are the node's totals, so any other traffic on the node during the run is inside them.",
+  "Spark-1-DGX does not report serving ornith-ai/Ornith-1.5-35B-A3B-NVFP4; placement and telemetry may describe the wrong node",
+  "Claude Code 2.1.272 driving Ornith 1.5 on Spark-1 through the engine's own /v1/messages (the fleet proxy forwards it from 0.5.19 on); thinking on by default. The one 'crash' is a first attempt that Claude Code reported as is_error and the second attempt passed."
+ ],
+ "source": "scripts/ainode-bench.py harness"
+}
