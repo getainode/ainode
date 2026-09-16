@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.17] - 2026-09-16
+
+The bind wait tolerates a long autotune pause.
+
 ### Changed
 - **The bind wait's log-silence window defaults to 900 s, up from 360 s.** Nemotron 3.5 Lightning on the GX10 goes quiet for 363 s during FlashInfer autotune and graph capture, so the 360 s window still declared a healthy start silent on the 0.5.16 roll of Spark-4 (`never bound on :8000 after 870s (log silent for 363s); relaunching once`). The relaunch is a no-op since 0.5.13, but the verdict spends the engine's single retry and the line misleads. Fifteen minutes covers every startup pause measured so far; the 1800 s ceiling still bounds a wedged engine.
 
