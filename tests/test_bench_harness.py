@@ -31,6 +31,8 @@ from ainode.bench.harness.adapters.dsh import (
     DshAdapter,
     api_key_envs,
     patch_overlay,
+    settings_yaml,
+    thinking_format,
 )
 from ainode.bench.harness.adapters.opencode import OpencodeAdapter, project_config
 from ainode.bench.harness.adapters.pi import PiAdapter, merge_models_json
@@ -271,7 +273,8 @@ def test_opencode_command_and_project_config(tmp_path):
     assert cfg.merged is False
 
 
-def test_dsh_command_and_overlay(tmp_path):
+def test_dsh_command_and_overlay(tmp_path, monkeypatch):
+    monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(tmp_path / "dsh-home"))
     req = _request(tmp_path)
     adapter = DshAdapter()
     patch = tmp_path / "scratch" / "dsh-harness.patch.yml"
@@ -284,22 +287,64 @@ def test_dsh_command_and_overlay(tmp_path):
     assert "- id: llm-pi-ai" in overlay
     assert "- id: agent-default-model" in overlay
     assert f"      {PROVIDER}:" in overlay
+    # baseURL, not baseUrl: the key the llm-pi-ai plugin documents.
     assert f"baseURL: {json.dumps(ENDPOINT)}" in overlay
     assert f"apiKeyEnv: {API_KEY_ENV}" in overlay
+    assert "api: openai-completions" in overlay
     # A model id has slashes and dots in it; it has to survive as one scalar.
     assert f'model: "{MODEL}"' in overlay
-    assert adapter.config(req)[0].path == patch
+    assert [c.path for c in adapter.config(req)] == \
+           [tmp_path / "dsh-home" / "settings.yaml", patch]
+
+
+def test_dsh_declares_deepseek_thinking_only_for_deepseek(tmp_path):
+    assert thinking_format("fraserprice/DeepSeek-V4-Flash-DSpark") == "deepseek"
+    assert thinking_format("unsloth/Qwen3.8-27B-NVFP4") is None
+    plain = patch_overlay(_request(tmp_path))
+    assert "thinkingFormat" not in plain
+
+    deep = HarnessRequest(workdir=tmp_path, scratch=tmp_path, prompt="p", entry="x.py",
+                          endpoint=ENDPOINT, model="fraserprice/DeepSeek-V4-Flash")
+    assert "thinkingFormat: deepseek" in patch_overlay(deep)
+    assert "thinkingFormat: deepseek" in settings_yaml(deep)
+
+
+def test_dsh_runs_in_its_own_home_and_never_the_real_one(tmp_path, monkeypatch):
+    """One stale route in somebody's ~/.dsh/settings.yaml fails every dsh run,
+    whichever provider the run selected, so the bench brings its own home."""
+    home = tmp_path / "dsh-home"
+    monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(home))
+    monkeypatch.setenv("DSH_HOME", "/somebody/elses/.dsh")
+    adapter = DshAdapter()
+    req = _request(tmp_path)
+
+    assert adapter.env(req)["DSH_HOME"] == str(home)
+    settings = [c for c in adapter.config(req) if c.path.name == "settings.yaml"][0]
+    assert settings.path == home / "settings.yaml"
+    # Exactly one route, so the boot-time check has one thing to validate.
+    assert settings.content.count("baseURL:") == 1
+    assert f"    {PROVIDER}:" in settings.content
+    assert f"  provider: {PROVIDER}" in settings.content
+
+    # A home somebody curated is left completely alone; the overlay still carries
+    # the provider, so the run works without rewriting their file.
+    adapter.write_config(req)
+    home.joinpath("settings.yaml").write_text("llm-pi-ai:\n  providers:\n    theirs:\n"
+                                              "      apiKeyEnv: THEIR_KEY\n")
+    assert [c.path.name for c in adapter.config(req)] == ["dsh-harness.patch.yml"]
+    assert PROVIDER in patch_overlay(req)
 
 
 def test_dsh_sets_every_api_key_env_the_settings_file_names(tmp_path, monkeypatch):
-    settings = tmp_path / "settings.yaml"
-    settings.write_text(
-        "llm-pi-ai:\n  providers:\n    spark4:\n      apiKeyEnv: SPARK4_API_KEY\n"
-        "      api: openai-completions\n    other:\n      apiKeyEnv: 'OTHER_KEY'\n"
-        "      apiKeyEnv: SPARK4_API_KEY\n")
-    assert api_key_envs(settings.read_text()) == ["SPARK4_API_KEY", "OTHER_KEY"]
+    text = ("llm-pi-ai:\n  providers:\n    spark4:\n      apiKeyEnv: SPARK4_API_KEY\n"
+            "      api: openai-completions\n    other:\n      apiKeyEnv: 'OTHER_KEY'\n"
+            "      apiKeyEnv: SPARK4_API_KEY\n")
+    assert api_key_envs(text) == ["SPARK4_API_KEY", "OTHER_KEY"]
 
-    monkeypatch.setenv("DSH_HOME", str(tmp_path))
+    home = tmp_path / "curated"
+    home.mkdir()
+    (home / "settings.yaml").write_text(text)
+    monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(home))
     monkeypatch.delenv("SPARK4_API_KEY", raising=False)
     monkeypatch.setenv("OTHER_KEY", "a-real-key-already-set")
     env = DshAdapter().env(_request(tmp_path))
@@ -312,7 +357,7 @@ def test_dsh_sets_every_api_key_env_the_settings_file_names(tmp_path, monkeypatc
 
 def test_every_shipped_adapter_is_registered_and_needs_no_real_key(tmp_path, monkeypatch):
     monkeypatch.setenv("AINODE_HARNESS_PI_HOME", str(tmp_path / "pi-home"))
-    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(tmp_path / "dsh-home"))
     registry = adapters_mod.registry()
     assert registry.names() == ["aider", "dsh", "opencode", "pi"]
     for name in registry.names():
@@ -554,6 +599,7 @@ def test_the_ainode_base_is_the_endpoint_without_its_v1():
 
 def test_dry_run_prints_the_commands_and_writes_nothing(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("AINODE_HARNESS_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("AINODE_HARNESS_DSH_HOME", str(tmp_path / "dsh-home"))
     out_dir = tmp_path / "results"
     code = harness_main(["--endpoint", ENDPOINT, "--model", MODEL, "--label", "unit",
                          "--harness", "aider,dsh", "--only-tasks", "two-fer",
@@ -570,6 +616,7 @@ def test_dry_run_prints_the_commands_and_writes_nothing(tmp_path, capsys, monkey
     assert not out_dir.exists()
     assert not (tmp_path / "work").exists()
     assert not (tmp_path / "pi-home").exists()
+    assert not (tmp_path / "dsh-home").exists()
 
 
 def test_dry_run_never_prints_a_merged_config_it_did_not_write(tmp_path, capsys,

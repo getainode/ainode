@@ -73,6 +73,21 @@ It is inference only. It never loads, unloads, restarts or deletes anything, so 
 is safe to point at a node somebody else is using; it will add real load, and ten
 tasks across three harnesses is a lot of tokens.
 
+## Where it has to run
+
+**An unsandboxed shell with normal network and home-directory access.** This is not
+a preference. Every one of these agents writes state under `$HOME` (`~/.pi`,
+`~/.local/share/opencode`, `~/.dsh`) and opens its own connections, and pi, opencode
+and dsh were all seen to hang or error when launched from a sandboxed shell (Claude
+Code's Bash sandbox) on a machine where a plain Node `fetch` to the same endpoint
+succeeded. pi passed 6/6 the moment it ran unsandboxed. A sandboxed run does not
+fail loudly, it just times out, so a whole sweep of zeroes with long wall clocks is
+the signature to look for.
+
+Everything except the harness subprocesses is sandbox-safe: `--dry-run`, the task
+loader, the scoring and the record all work anywhere, which is why the test suite
+does.
+
 ## What it measures
 
 Four numbers per harness:
@@ -178,12 +193,12 @@ start with an empty key field.
 The provider id the adapters register is `ainode-bench`, not `ainode`, so the bench
 adds its own route rather than rewriting a provider somebody made by hand.
 
-| Harness | Version verified | Flags verified how |
-|---------|------------------|--------------------|
-| `aider` | 0.86.2 (PyPI `aider-chat`) | Run end to end against a fleet endpoint: exit 0, 6/6 hidden tests green on `isogram` |
-| `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | `--help`, `--profile headless --help`, and `--dump-config` showing the generated overlay landing |
-| `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | `--help`, and the provider-entry shape read off a working `models.json` |
-| `opencode` | 1.18.31 (`opencode-ai`) | `--help` and `run --help` |
+| Harness | Version | How far it is verified |
+|---------|---------|------------------------|
+| `aider` | 0.86.2 (PyPI `aider-chat`) | **End to end** against a fleet endpoint: exit 0, 6/6 hidden tests green on `isogram` |
+| `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | **End to end**: exit 0 in 20 s, stub edited, 6/6 hidden tests green |
+| `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | **End to end**: stub edited, 6/6 hidden tests green. The overlay's composition is also checkable offline with `--dump-config` |
+| `opencode` | 1.18.31 (`opencode-ai`) | Flags from `--help` and `run --help`. Provider config not yet confirmed against a live endpoint |
 
 ### aider
 
@@ -236,18 +251,32 @@ the adapter generates a two-entry overlay per run, in the run's scratch director
     model: "<model id>"
 ```
 
-Verified offline, with no endpoint involved, by running
+`baseURL` is the spelling the plugin documents, not `baseUrl`. `compat.thinkingFormat:
+deepseek` is added when the model id contains "deepseek", because those models return
+reasoning in DeepSeek's own shape and the plugin has to be told or it arrives as
+content. The composition is checkable offline, with no endpoint involved, by running
 `dsh --profile headless --patch <overlay> --dump-config` and reading both overrides
-back out of the composed tree. The overlay route means the bench never edits
-`$DSH_HOME/settings.yaml`, where a person's own providers live.
+back out of the composed tree.
 
-One thing the overlay cannot avoid: dsh validates **every** provider route at boot,
-including the ones already in `settings.yaml`. So the adapter scans that file for
-`apiKeyEnv:` names and sets a placeholder for any that is unset, leaving alone any
-that already has a real value. Assumed, not verified: that `DSH_HOME` defaults to
-`~/.dsh` (it is honoured when set, which is what the bench relies on). The first run
-of a profile installs it, which takes minutes; pre-warm with
-`dsh --profile headless --dump-config` or raise `--timeout`.
+**The bench gives dsh its own `DSH_HOME`, and that is the load-bearing part.** dsh
+validates **every** configured provider route at boot, so one stale entry in a
+person's `~/.dsh/settings.yaml` (a provider pointing at a port that stopped serving)
+ends every run with `dsh: TRANSPORT: Connection error.` after about 17 s, no matter
+which provider the run selected. That is what the failure looks like, and it looks
+nothing like its cause. So the adapter points `DSH_HOME` at
+`~/.ainode/bench/harness/dsh-home`, writes a one-route `settings.yaml` there, and
+never reads or writes the real one. That directory persists between runs on purpose:
+the first use of a profile installs it, which takes minutes, so pre-warm with
+`dsh --profile headless --dump-config` or raise `--timeout` for the first run.
+
+`$AINODE_HARNESS_DSH_HOME` moves that home. Point it at a home you have curated and
+the adapter leaves its `settings.yaml` completely alone and relies on the overlay
+instead; every route in that file then has to resolve, for the reason above, and the
+adapter fills in a placeholder for each `apiKeyEnv:` it names that is unset while
+leaving real values alone.
+
+dsh prints the final assistant message on stdout and streams reasoning to stderr;
+both tails land in the record.
 
 ### pi
 
@@ -257,8 +286,9 @@ pi --provider ainode-bench --model <model id> \
    -p "<prompt>"
 ```
 
-`-p` is a boolean that makes the run non-interactive; the prompt is positional, so
-it goes last. pi has no permission prompts at all, so nothing else is needed to let
+Verified end to end: exit 0 in 20 s, the final answer on stdout, the stub edited,
+6/6 hidden tests green. `-p` is a boolean that makes the run non-interactive; the
+prompt is positional, so it goes last. pi has no permission prompts at all, so nothing else is needed to let
 it edit. There is no base-URL flag: an OpenAI-compatible endpoint is a provider
 entry in `~/.pi/agent/models.json`, and the adapter **merges** one key under
 `providers` into whatever is already in that file, leaving the rest byte for byte
