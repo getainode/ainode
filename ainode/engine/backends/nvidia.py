@@ -164,6 +164,9 @@ class NvidiaBackend(EngineBackend):
         # Epoch seconds of the last line this engine printed. The startup replay
         # reads it to tell a slow-but-progressing start from a wedged one.
         self._last_log_activity: Optional[float] = None
+        # Epoch seconds when this backend last issued a launch: the bind wait
+        # reports the CONTAINER's life from it, not the wait's own age (#96).
+        self._launched_at: Optional[float] = None
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file: Path = LOGS_DIR / "nvidia-vllm.log"
         self._distributed_log: Path = LOGS_DIR / "nvidia-distributed.log"
@@ -208,6 +211,9 @@ class NvidiaBackend(EngineBackend):
             return False
         cmd = self._build_solo_docker_cmd(container_name)
         env = self._build_env_for_subprocess()
+        # Stamp before the launch, so a container that dies during weight load is
+        # reported with the time it was actually alive (#96).
+        self._launched_at = time.time()
 
         logger.info(
             "Starting NVIDIA solo vLLM: docker run %s vllm serve %s (extra args: %s)",
@@ -345,6 +351,9 @@ class NvidiaBackend(EngineBackend):
             )
 
         hf_cache = self._head_hf_cache()
+        # Stamp the launch for the bind wait (see EngineBackend.launched_at).
+        # Before the shape branch, so both mp and ray are covered.
+        self._launched_at = time.time()
 
         # Two distributed shapes, chosen per instance (see NodeConfig.
         # distributed_executor and engine/AGENTS.md). "mp" needs no ray in the
@@ -472,6 +481,7 @@ class NvidiaBackend(EngineBackend):
 
         self._ready = False
         self._load_phase = "idle"
+        self._launched_at = None
 
     def wait_ready(self, timeout: float = 600.0) -> bool:
         """Poll ``/v1/models`` on the API port until 2xx or timeout."""
@@ -562,6 +572,11 @@ class NvidiaBackend(EngineBackend):
         value is per-instance even though stacked instances share a log file.
         """
         return self._last_log_activity
+
+    @property
+    def launched_at(self) -> Optional[float]:
+        """Epoch seconds of this backend's last launch (see base class)."""
+        return self._launched_at
 
     @property
     def process(self) -> Optional[subprocess.Popen]:

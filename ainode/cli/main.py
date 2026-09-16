@@ -152,27 +152,26 @@ def cmd_start(args):
     # persisted models this boot, so `restart` actually frees a node (replay
     # otherwise reloads config.model + the stacked manifest). Non-destructive —
     # on-disk config is untouched, so a normal restart resumes serving.
-    from ainode.models.api_routes import consume_start_clean
+    from ainode.models.api_routes import consume_start_clean, sweep_engines_before_boot
     if consume_start_clean():
         if config.model:
             console.print("  [yellow]Start-clean — not replaying persisted model(s) this boot.[/yellow]\n")
         config.model = None
         config._skip_replay = True
-        # Actually free the node: a vLLM engine container is a sibling spawned via
-        # docker.sock, so the ainode restart does NOT stop it — and with no boot
-        # engine to reclaim it, it would keep holding memory. Sweep them here.
-        try:
-            import subprocess
-            ps = subprocess.run(
-                ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo"],
-                capture_output=True, text=True, timeout=20)
-            ids = [i for i in ps.stdout.split() if i]
-            if ids:
-                subprocess.run(["docker", "rm", "-f", *ids],
-                               capture_output=True, text=True, timeout=60)
-                console.print(f"  [dim]Start-clean — freed {len(ids)} engine container(s).[/dim]\n")
-        except Exception:
-            pass
+
+    # Nothing may launch while an engine from this node's previous life is still
+    # running. A vLLM engine container is a sibling spawned through docker.sock, so
+    # an `ainode update` restart does NOT stop it: on the 0.5.11 roll the old
+    # stacked engine was only reaped 14 s AFTER the new primary had started, so the
+    # primary profiled against a node that still had the previous model resident
+    # and both engines then under-sized their KV caches (#96). Sweep first, wait
+    # for the containers to be gone, and only then launch anything. Also what makes
+    # start-clean actually free the node: with config.model cleared there is no
+    # boot engine to reclaim the old container.
+    freed = sweep_engines_before_boot()
+    if freed:
+        console.print(
+            f"  [dim]Freed {len(freed)} engine container(s) from the previous run.[/dim]\n")
 
     # Detect GPU
     gpu = detect_gpu()

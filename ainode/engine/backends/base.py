@@ -107,3 +107,20 @@ class EngineBackend(abc.ABC):
         yet; the replay then falls back to its absolute ceiling.
         """
         return None
+
+    @property
+    def launched_at(self) -> Optional[float]:
+        """Epoch seconds when this backend last issued a launch, or None.
+
+        The bind wait does not necessarily start when the engine does: the boot
+        primary is launched by ``ainode start`` before the web server exists, and
+        the startup replay only reaches its wait after the settle sleep and the
+        pre-launch sweep. Timing the WAIT therefore misreports the engine -- a
+        container that lived 47 s was logged as "never bound ... after 0s" on the
+        0.5.11 roll (#96). This stamp lets the wait report the container's own life.
+
+        Set when a launch is issued (not when it succeeds) and cleared by
+        ``stop()``. Returns None when the backend does not track it; the wait then
+        measures itself, as it always did.
+        """
+        return None

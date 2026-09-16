@@ -10,6 +10,7 @@ import logging
 import shlex
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,118 @@ def _download_gate():
             n = 1
         _DOWNLOAD_SEM = asyncio.Semaphore(n)
     return _DOWNLOAD_SEM
+
+
+# --- Per-node launch slot -----------------------------------------------------
+# ONE engine launches at a time on a node. vLLM sizes its KV cache from what is
+# FREE when the engine profiles, so two engines profiling at once under-provision
+# whichever finishes second: on the 0.5.11 roll a stacked Ornith launched 2 s
+# behind the primary and died with "Available KV cache memory: 1.59 GiB" at the
+# same gpu_memory_utilization that gave it a 600K-token cache on a settled node
+# (#96). Every launch path takes this slot -- the startup replay, the boot
+# primary's wait, POST /api/models/load, POST /api/sharding/launch,
+# POST /api/engine/set-model -- and HOLDS it until the engine binds, so the next
+# launch always profiles against memory the previous one has finished reserving.
+_LAUNCH_LOCK = None
+_LAUNCH_LOCK_LOOP = None
+# Label of whatever holds the slot, reported in the 409 a refused launch gets.
+_LAUNCH_OWNER = None
+# How long a queued launch waits for the in-flight one before it is refused. Short
+# on purpose: a bind can take 12 minutes on a GB10, and a request that hangs that
+# long is worse than a 409 naming who is launching.
+_LAUNCH_QUEUE_SECONDS = 5.0
+# ``wait=WAIT_FOREVER`` queues instead of ever raising LaunchBusy. The startup
+# replay uses it -- boot has nobody to report a refusal to.
+WAIT_FOREVER = float("inf")
+
+
+class LaunchBusy(Exception):
+    """Raised when the node's launch slot is held and the queue wait expired."""
+
+    def __init__(self, owner=None):
+        self.owner = owner or "another launch"
+        super().__init__(f"{self.owner} is still launching on this node")
+
+
+def _launch_lock():
+    """The node's launch lock, bound lazily to the running loop.
+
+    Rebuilt when the running loop changes: an ``asyncio.Lock`` binds to the first
+    loop that awaits it and raises on every other one, and the test suite runs a
+    fresh loop per test. In the product there is exactly one loop per process.
+    """
+    global _LAUNCH_LOCK, _LAUNCH_LOCK_LOOP, _LAUNCH_OWNER
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _LAUNCH_LOCK is None or _LAUNCH_LOCK_LOOP is not loop:
+        _LAUNCH_LOCK = asyncio.Lock()
+        _LAUNCH_LOCK_LOOP = loop
+        _LAUNCH_OWNER = None
+    return _LAUNCH_LOCK
+
+
+def launch_owner():
+    """Label of the launch that holds the slot right now, or None."""
+    if _LAUNCH_LOCK is not None and _LAUNCH_LOCK.locked():
+        return _LAUNCH_OWNER
+    return None
+
+
+async def acquire_launch_slot(label: str, wait=None) -> None:
+    """Take the node's launch slot for ``label``, or raise :class:`LaunchBusy`.
+
+    ``wait`` is how long to queue before refusing: the default
+    ``_LAUNCH_QUEUE_SECONDS``, ``WAIT_FOREVER`` to queue indefinitely, 0 to refuse
+    an in-flight launch immediately.
+    """
+    global _LAUNCH_OWNER
+    lock = _launch_lock()
+    timeout = _LAUNCH_QUEUE_SECONDS if wait is None else float(wait)
+    if lock.locked() and timeout != WAIT_FOREVER:
+        if timeout <= 0:
+            raise LaunchBusy(_LAUNCH_OWNER)
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            raise LaunchBusy(_LAUNCH_OWNER) from None
+    else:
+        await lock.acquire()
+    _LAUNCH_OWNER = label
+
+
+def release_launch_slot() -> None:
+    """Hand the slot back. A no-op when it is not held."""
+    global _LAUNCH_OWNER
+    _LAUNCH_OWNER = None
+    lock = _LAUNCH_LOCK
+    if lock is not None and lock.locked():
+        lock.release()
+
+
+@asynccontextmanager
+async def launch_slot(label: str, wait=None):
+    """Hold the node's launch slot for the duration of the block."""
+    await acquire_launch_slot(label, wait)
+    try:
+        yield
+    finally:
+        release_launch_slot()
+
+
+def launch_busy_error(busy: LaunchBusy) -> dict:
+    """The refusal a caller gets when the slot is taken: 409 + who holds it."""
+    return {
+        "ok": False,
+        "status": 409,
+        "error": (
+            f"Another launch is in flight on this node: {busy.owner}. Wait for it "
+            f"to finish, then retry. Two engines profiling at once split the node's "
+            f"free memory, so the second one sizes its KV cache from what the first "
+            f"has not reserved yet and fails engine init."
+        ),
+    }
 
 
 def register_model_routes(app: web.Application, manager: Optional[ModelManager] = None) -> None:
@@ -531,6 +644,23 @@ def _engine_log_mark(backend):
     return ts
 
 
+def _engine_launch_mark(backend):
+    """Epoch seconds when this engine's container was launched, or None.
+
+    The bind wait usually starts well AFTER the launch: the boot primary is
+    launched by ``ainode start`` before the web server exists, and the replay only
+    reaches its wait after the settle sleep and the pre-launch sweep. Timing the
+    WAIT therefore understated the container's life badly -- a primary that lived
+    47 s was logged as "never bound ... after 0s" on the 0.5.11 roll (#96). Prefer
+    the backend's own launch stamp (``EngineBackend.launched_at``) and fall back to
+    the start of the wait for a backend that publishes none.
+    """
+    ts = getattr(backend, "launched_at", None)
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return ts
+
+
 def _bind_limits(app):
     """(log-silence seconds, ceiling seconds) from NodeConfig, with fallbacks."""
     config = app.get("config") if hasattr(app, "get") else None
@@ -562,39 +692,49 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
     budget, or the absolute ceiling hit (a wedged-but-chatty engine must not hold
     boot open forever). With no handle to watch, or a handle that reports nothing
     watchable, fall back to the fixed window.
-    """
-    if backend is None:
-        began = time.monotonic()
-        ok = await _wait_port_ready(port, timeout=timeout)
-        waited = time.monotonic() - began
-        return ok, ("bound" if ok else f"fixed {timeout:.0f}s window expired"), waited
 
-    # A handle that publishes neither a launch process nor a log stamp gives us
-    # nothing to be adaptive about, so don't hold the port open for the whole
-    # ceiling on it: that is the fixed-window case.
-    if _engine_log_mark(backend) is None and getattr(backend, "process", None) is None:
-        return await _wait_for_bind(app, port, None, timeout)
+    The seconds returned are how long the CONTAINER has been alive (from the
+    backend's launch stamp when it publishes one), not how long this wait ran --
+    the two differ by however late the wait started, which is what made a 47 s
+    life read as "after 0s" (#96). The silence budget and the ceiling still measure
+    the wait: they bound how long boot is held open, not the engine's life.
+    """
+    launched = _engine_launch_mark(backend)
+    began = time.monotonic()
+
+    def _alive() -> float:
+        """Seconds the container has been up, or the wait's own age as a fallback."""
+        if launched is None:
+            return time.monotonic() - began
+        return max(0.0, time.time() - launched)
+
+    # No handle, or a handle that publishes neither a launch process nor a log
+    # stamp, gives us nothing to be adaptive about -- so don't hold the port open
+    # for the whole ceiling on it: that is the fixed-window case.
+    if backend is None or (_engine_log_mark(backend) is None
+                           and getattr(backend, "process", None) is None):
+        ok = await _wait_port_ready(port, timeout=timeout)
+        return ok, ("bound" if ok else f"fixed {timeout:.0f}s window expired"), _alive()
 
     silence, ceiling = _bind_limits(app)
-    began = time.monotonic()
     mark = _engine_log_mark(backend)
     progress_at = began
     while True:
         if await _port_serving(port):
-            return True, "bound", time.monotonic() - began
+            return True, "bound", _alive()
         now = time.monotonic()
         waited = now - began
         if waited >= ceiling:
-            return False, f"ceiling of {ceiling:.0f}s reached", waited
+            return False, f"ceiling of {ceiling:.0f}s reached", _alive()
         if _engine_exited(backend):
-            return False, "container exited", waited
+            return False, "container exited", _alive()
         latest = _engine_log_mark(backend)
         if latest is not None and (mark is None or latest > mark):
             mark = latest
             progress_at = now
         silent_for = now - progress_at
         if mark is not None and silent_for >= silence:
-            return False, f"log silent for {silent_for:.0f}s", waited
+            return False, f"log silent for {silent_for:.0f}s", _alive()
         await asyncio.sleep(_BIND_POLL_SECONDS)
 
 
@@ -618,12 +758,13 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     ``_wait_for_bind``). Without it the wait is the old fixed ``timeout``, which
     relaunches a slow start that was never in trouble.
     """
-    bound, reason, waited = await _wait_for_bind(app, port, backend, timeout)
+    bound, reason, alive = await _wait_for_bind(app, port, backend, timeout)
     if bound:
-        logger.info("%s bound on :%s after %.0fs", label, port, waited)
+        logger.info("%s bound on :%s after %.0fs", label, port, alive)
         return True
+    # The seconds are the container's life, not this wait's: see _wait_for_bind.
     logger.warning("%s never bound on :%s after %.0fs (%s); relaunching once",
-                   label, port, waited, reason)
+                   label, port, alive, reason)
     # Give the GPU time to finish releasing before asking for it again.
     await asyncio.sleep(_GPU_RELEASE_SECONDS)
     loop = asyncio.get_event_loop()
@@ -635,37 +776,162 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     if not ok:
         logger.error("%s relaunch failed to start", label)
         return False
-    served, reason, waited = await _wait_for_bind(app, port, backend, timeout)
+    served, reason, alive = await _wait_for_bind(app, port, backend, timeout)
     logger.info("%s relaunch %s after %.0fs%s", label,
-                "is serving" if served else "still not serving", waited,
+                "is serving" if served else "still not serving", alive,
                 "" if served else f" ({reason})")
     return served
 
 
+async def hold_launch_slot_until_bound(app, port: int, backend, label: str) -> bool:
+    """Keep the node's launch slot until ``port`` binds, then release it.
+
+    Launch-and-return is not enough: a second load two seconds behind this one
+    profiles while this engine is still reserving memory, which is the #96 failure.
+    The HTTP caller still gets its "launching" answer immediately -- this runs as a
+    background task -- but until the engine binds, the next launch is queued and
+    then refused with a 409 naming this one.
+    """
+    try:
+        bound, reason, elapsed = await _wait_for_bind(app, port, backend)
+        if bound:
+            logger.info("%s bound on :%s after %.0fs", label, port, elapsed)
+        else:
+            logger.warning("%s never bound on :%s after %.0fs (%s); releasing the "
+                           "launch slot", label, port, elapsed, reason)
+        return bound
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("%s bind watch failed", label)
+        return False
+    finally:
+        release_launch_slot()
+
+
+async def launch_solo_serialized(app, model: str, gmu=None, *, overrides=None,
+                                 persist: bool = True, label=None) -> dict:
+    """``append_solo_instance`` under the node's launch slot (#96).
+
+    Returns what ``append_solo_instance`` returns, or the 409 refusal shape when
+    another launch is in flight. On a successful launch the slot is handed to a
+    background bind watch, so the NEXT caller is refused until this engine binds
+    instead of profiling alongside it.
+
+    Not used by the startup replay: the replay already holds the slot for its whole
+    serialized run, and the lock is not reentrant.
+    """
+    label = label or f"load {model}"
+    try:
+        await acquire_launch_slot(label)
+    except LaunchBusy as busy:
+        return launch_busy_error(busy)
+    handed_off = False
+    try:
+        loop = asyncio.get_event_loop()
+        # backend.start() shells out to docker -- run it off the event loop so a
+        # concurrent request can still be answered (with a 409) while it runs.
+        res = await loop.run_in_executor(
+            None,
+            lambda: append_solo_instance(app, model, gmu, overrides=overrides,
+                                         persist=persist))
+        if isinstance(res, dict) and res.get("ok") and res.get("api_port"):
+            manager = app.get("instances")
+            inst = manager.by_model(model) if manager is not None else None
+            loop.create_task(hold_launch_slot_until_bound(
+                app, res["api_port"], inst.backend if inst is not None else None, label))
+            handed_off = True
+        return res
+    finally:
+        if not handed_off:
+            release_launch_slot()
+
+
 # Bound on waiting for the daemon to finish removing swept engine containers
-# before replay reuses their names (see the sweep below).
+# before anything reuses their names (see the sweep below).
 _ORPHAN_CLEAR_TIMEOUT_S = 90.0
 _ORPHAN_CLEAR_POLL_S = 1.0
 
 
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
 
+# Container-name prefixes for the engines a node launches LOCALLY. A solo engine
+# is `ainode-vllm-node-solo` for the primary and `-<port>` per stacked instance; a
+# distributed head is `ainode-vllm-head`. Peer worker containers
+# (`ainode-vllm-worker-<ip>`) live on the peers and belong to whichever head
+# placed them, so they are never swept from here.
+_PRIMARY_ENGINE_NAME = "ainode-vllm-node-solo"
+_STACKED_ENGINE_PREFIX = "ainode-vllm-node-solo-"
+_HEAD_ENGINE_PREFIX = "ainode-vllm-head"
 
-def _orphan_engine_ids() -> list:
-    """Ids of stacked engine containers the daemon still knows about.
 
-    Separate seam from the sweep's own ``subprocess.run`` calls so tests that
-    fake ``run`` positionally are not shifted by the poll, and only real-looking
-    ids count so a generic fake answer cannot read as "still present".
+def _engine_name_filters(include_primary: bool) -> list:
+    """`docker ps` name filters for this node's engine containers.
+
+    ``include_primary`` widens the set from the stacked engines to EVERY engine
+    this node owns, primary and distributed head included. Only the boot sweep,
+    which runs before this process has launched anything, may widen it: a sweep
+    that runs after a launch would remove the engine we just started.
+    """
+    prefixes = ([_PRIMARY_ENGINE_NAME, _HEAD_ENGINE_PREFIX] if include_primary
+                else [_STACKED_ENGINE_PREFIX])
+    out = []
+    for prefix in prefixes:
+        out += ["--filter", f"name={prefix}"]
+    return out
+
+
+def _engine_container_ids(include_primary: bool) -> list:
+    """Ids of this node's engine containers the daemon still knows about.
+
+    ``check_output`` rather than ``run`` on purpose: this is the poll seam, and
+    tests that fake ``run`` positionally (stop, rm, run) must not be shifted by
+    it. Only a line that looks like a container id counts, so a generic fake
+    answer cannot read as "still present".
     """
     import subprocess
     try:
         out = subprocess.check_output(
-            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
+            ["docker", "ps", "-aq", *_engine_name_filters(include_primary)],
             text=True, timeout=20, stderr=subprocess.DEVNULL)
     except Exception:
         return []
     return [line.strip() for line in out.splitlines() if _CONTAINER_ID_RE.match(line.strip())]
+
+
+def _engine_container_names(include_primary: bool) -> list:
+    """Names of this node's surviving engine containers, for the timeout log.
+
+    A sweep that gives up has to say WHICH container is still there, or the next
+    person has only a count to go on.
+    """
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["docker", "ps", "-a", "--format", "{{.Names}}",
+             *_engine_name_filters(include_primary)],
+            text=True, timeout=20, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _orphan_engine_ids() -> list:
+    """Stacked-engine poll seam. Kept zero-arg: tests fake it by name."""
+    return _engine_container_ids(include_primary=False)
+
+
+def _remove_engine_containers(include_primary: bool) -> list:
+    """``docker rm -f`` this node's engine containers. Returns the ids removed."""
+    import subprocess
+    ps = subprocess.run(
+        ["docker", "ps", "-aq", *_engine_name_filters(include_primary)],
+        capture_output=True, text=True, timeout=20)
+    ids = [i for i in ps.stdout.split() if i]
+    if ids:
+        subprocess.run(["docker", "rm", "-f", *ids],
+                       capture_output=True, text=True, timeout=60)
+    return ids
 
 
 async def _sweep_orphan_engine_containers() -> None:
@@ -673,38 +939,108 @@ async def _sweep_orphan_engine_containers() -> None:
 
     Stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive the
     orchestrator restart, but the in-memory manager does not, so a surviving
-    suffixed container is an orphan the replay is about to relaunch. Remove
-    them first or the relaunch's `--name` collides (Conflict). The primary
-    `ainode-vllm-node-solo` (no suffix) is owned/pre-cleaned by the boot engine.
+    suffixed container is an orphan the replay is about to relaunch. Remove them
+    first or the relaunch's `--name` collides (Conflict), and WAIT for the removal:
+    `--rm` containers are deleted asynchronously, so `rm -f` returns while the
+    daemon is still working and a `docker run --name` in that gap conflicts (every
+    engine on the 0.5.8 roll, #80).
+
+    Deliberately stacked-only. The primary and the head are swept by
+    :func:`sweep_engines_before_boot`, which runs before this process has launched
+    anything; widening the filter here would let a late sweep remove the primary
+    this boot just started.
     """
-    # Orphan sweep: stacked vLLM containers (ainode-vllm-node-solo-<port>) outlive
-    # the orchestrator restart, but the in-memory manager does not — so a surviving
-    # suffixed container is an orphan the replay is about to relaunch. Remove them
-    # first or the relaunch's `--name` collides (Conflict). The primary
-    # `ainode-vllm-node-solo` (no suffix) is owned/pre-cleaned by the boot engine.
     try:
-        import subprocess
-        ps = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", "name=ainode-vllm-node-solo-"],
-            capture_output=True, text=True, timeout=20)
-        ids = [i for i in ps.stdout.split() if i]
-        if ids:
-            subprocess.run(["docker", "rm", "-f", *ids],
-                           capture_output=True, text=True, timeout=60)
-            # `--rm` containers are removed asynchronously: `rm -f` returns while
-            # the daemon is still deleting, and a relaunch that reuses the name
-            # in that gap fails with Conflict (every engine on the 0.5.8 roll).
-            # Poll until the filter comes back empty, bounded so a stuck daemon
-            # cannot hold boot; the relaunch then fails loudly on its own.
-            for _ in range(int(_ORPHAN_CLEAR_TIMEOUT_S / _ORPHAN_CLEAR_POLL_S)):
-                if not _orphan_engine_ids():
-                    break
-                await asyncio.sleep(_ORPHAN_CLEAR_POLL_S)
-            else:
-                logger.warning("orphan engine containers still present after %.0fs; "
-                               "replay continues", _ORPHAN_CLEAR_TIMEOUT_S)
+        ids = _remove_engine_containers(include_primary=False)
+        if not ids:
+            return
+        for _ in range(int(_ORPHAN_CLEAR_TIMEOUT_S / _ORPHAN_CLEAR_POLL_S)):
+            if not _orphan_engine_ids():
+                logger.info("orphan sweep removed %d stacked engine container(s)", len(ids))
+                return
+            await asyncio.sleep(_ORPHAN_CLEAR_POLL_S)
+        logger.warning("orphan engine containers still present after %.0fs (%s); "
+                       "replay continues", _ORPHAN_CLEAR_TIMEOUT_S,
+                       ", ".join(_engine_container_names(False)) or "names unavailable")
     except Exception:
         logger.exception("orphan container sweep failed")
+
+
+# One sweep per process, and only before the first launch. `ainode start` sweeps
+# synchronously before it launches the boot primary; the replay's own sweep is the
+# belt-and-braces for a boot that did not go through the CLI, and a no-op once the
+# CLI has swept.
+_BOOT_SWEEP_DONE = False
+
+
+def _claim_boot_sweep() -> bool:
+    """True for the first caller only; closes the pre-launch sweep window.
+
+    Claimed BEFORE the work, not after: a second caller must not sweep a second
+    time even if the first one failed, because by then an engine may be up.
+    """
+    global _BOOT_SWEEP_DONE
+    if _BOOT_SWEEP_DONE:
+        return False
+    _BOOT_SWEEP_DONE = True
+    return True
+
+
+def sweep_engines_before_boot() -> list:
+    """Free EVERY engine container this node owns, before anything launches.
+
+    Engine containers are siblings spawned through docker.sock, so they survive
+    the orchestrator restart that `ainode update` performs. On the 0.5.11 roll the
+    old stacked engine was only reaped 14 s AFTER the new primary had started, so
+    the primary profiled against a node that still had the previous model resident
+    and both engines then under-sized their KV caches (#96). The fix is ordering:
+    remove them, wait for the daemon to finish (names gone means the container and
+    its process are gone), and only then launch.
+
+    Synchronous by design -- it runs in `ainode start` before the event loop
+    exists. Bounded by ``_ORPHAN_CLEAR_TIMEOUT_S``: a stuck container is logged by
+    name and boot continues rather than hanging forever. Returns the ids removed.
+    """
+    if not _claim_boot_sweep():
+        return []
+    try:
+        ids = _remove_engine_containers(include_primary=True)
+    except Exception:
+        logger.exception("pre-launch engine sweep failed")
+        return []
+    if not ids:
+        return []
+    deadline = time.monotonic() + _ORPHAN_CLEAR_TIMEOUT_S
+    while True:
+        still = _engine_container_ids(include_primary=True)
+        if not still:
+            logger.info("pre-launch sweep freed %d engine container(s) from the "
+                        "previous run", len(ids))
+            return ids
+        if time.monotonic() >= deadline:
+            logger.warning("pre-launch sweep: %d engine container(s) still present "
+                           "after %.0fs (%s); launching anyway", len(still),
+                           _ORPHAN_CLEAR_TIMEOUT_S,
+                           ", ".join(_engine_container_names(True)) or "names unavailable")
+            return ids
+        time.sleep(_ORPHAN_CLEAR_POLL_S)
+
+
+async def ensure_startup_sweep() -> None:
+    """The replay's half of the pre-launch sweep: stacked orphans, once per process.
+
+    A no-op when `ainode start` already swept (the normal boot). Awaited BEFORE the
+    replay launches anything, and before it waits on the boot primary, so no engine
+    of a previous life is still holding memory while a new one profiles.
+    """
+    if not _claim_boot_sweep():
+        return
+    await _sweep_orphan_engine_containers()
+
+
+# How long the replay lets the node settle before it touches anything: the web
+# server and discovery come up first so the UI can show what is happening.
+_REPLAY_SETTLE_SECONDS = 10.0
 
 
 async def replay_instances_on_startup(app) -> None:
@@ -712,19 +1048,42 @@ async def replay_instances_on_startup(app) -> None:
     restart brings every previously-loaded model back with no manual step. The
     boot engine claims the primary (config.model); this replays the stacked rest.
 
-    Loads are SERIALIZED — the boot primary must serve before the first stack, and
-    each stacked model must bind before the next — because concurrent vLLM loads on
-    a unified-memory node race for memory and one gets OOM-killed."""
+    THE ORDER IS THE CONTRACT (#96):
+
+    1. sweep every engine container this node owns from a previous life, and wait
+       for the daemon to finish removing them (`ainode start` does this before it
+       launches the boot primary; this is the belt-and-braces),
+    2. let the boot primary bind, retrying it once if it died on the way up,
+    3. launch the stacked instances one at a time, each waiting for the one before
+       it to bind, all of it under the node's launch slot so a UI load cannot cut
+       in.
+
+    vLLM sizes its KV cache from what is free when it profiles, so an engine that
+    profiles next to a still-loading neighbour -- or next to an old engine nobody
+    has reaped yet -- under-provisions its cache and dies in engine init. A launch
+    that fails after its one retry does not block the rest: it logs and the replay
+    moves on to the next model.
+    """
     config = app.get("config")
     if config is None:
         return
     entries = load_instance_manifest()
+    await asyncio.sleep(_REPLAY_SETTLE_SECONDS)
+
+    # Sweep BEFORE anything launches, and wait for it -- even with nothing to
+    # replay, an engine from a previous life must not be left holding memory.
+    await ensure_startup_sweep()
     if not entries:
         return
-    await asyncio.sleep(10)
 
-    await _sweep_orphan_engine_containers()
+    # One launch at a time on this node, and the replay outranks nobody: it queues
+    # rather than refusing, because boot has nobody to report a refusal to.
+    async with launch_slot("startup replay", wait=WAIT_FOREVER):
+        await _replay_serialized(app, config, entries)
 
+
+async def _replay_serialized(app, config, entries) -> None:
+    """Boot primary, then one stacked instance at a time. Slot already held."""
     # Wait for the boot primary to actually serve before stacking on top of it.
     # Retry once if it died on the way up — otherwise the node comes back with
     # its main model silently missing.
@@ -764,6 +1123,12 @@ async def replay_instances_on_startup(app) -> None:
                                                             persist=False).get("ok"))))
                 await _ensure_serving(app, res["api_port"], relaunch, f"replay {m}",
                                       backend=inst.backend if inst is not None else None)
+            else:
+                # One model failing is not the next model's problem: say why and
+                # carry on down the manifest.
+                logger.error("replay load failed for %s: %s", m,
+                             (res or {}).get("error") if isinstance(res, dict)
+                             else "launch returned nothing")
         except Exception:
             logger.exception("replay load failed for %s", m)
 
@@ -866,41 +1231,61 @@ async def handle_model_load(request: web.Request) -> web.Response:
                 pass
 
     # --- Distributed auto-shard path (Ray/TP) — singleton engine, unchanged ----
+    # Under the node's launch slot: one engine profiles at a time (#96). The slot
+    # is handed to a background bind watch once the launch is away, so the next
+    # caller is refused (409) until this engine serves.
     if sharding_config is not None:
-        if engine is None:
-            # Lazy-create via get_backend (honors engine_backend=nvidia, not the
-            # legacy host-venv VLLMEngine) for a node booted without an engine.
+        label = f"distributed load {model}"
+        try:
+            await acquire_launch_slot(label)
+        except LaunchBusy as busy:
+            refused = launch_busy_error(busy)
+            return web.json_response({"error": refused["error"]},
+                                     status=refused["status"])
+        handed_off = False
+        try:
+            if engine is None:
+                # Lazy-create via get_backend (honors engine_backend=nvidia, not the
+                # legacy host-venv VLLMEngine) for a node booted without an engine.
+                try:
+                    if config is None:
+                        return web.json_response({"error": "Engine not initialized"},
+                                                 status=503)
+                    from ainode.engine.backends import get_backend
+                    engine = get_backend(config)
+                    request.app["engine"] = engine
+                except Exception as exc:
+                    return web.json_response({"error": f"Engine unavailable: {exc}"},
+                                             status=503)
+            if config is not None and getattr(config, "model", None) != model:
+                config.model = model
+                try:
+                    config.save()
+                except Exception:
+                    pass
             try:
-                if config is None:
-                    return web.json_response({"error": "Engine not initialized"}, status=503)
-                from ainode.engine.backends import get_backend
-                engine = get_backend(config)
-                request.app["engine"] = engine
-            except Exception as exc:
-                return web.json_response({"error": f"Engine unavailable: {exc}"}, status=503)
-        if config is not None and getattr(config, "model", None) != model:
-            config.model = model
-            try:
-                config.save()
+                if engine.is_running():
+                    engine.stop()
             except Exception:
                 pass
-        try:
-            if engine.is_running():
-                engine.stop()
-        except Exception:
-            pass
-        try:
-            success = engine.launch_distributed(sharding_config)
-        except Exception as exc:
-            _clear_model_claim()
-            return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
-        if not success:
-            _clear_model_claim()
-            return web.json_response({"error": "Failed to launch engine"}, status=500)
-        return web.json_response({
-            "status": "launching", "model": model,
-            "distributed": True, "plan": sharding_config.to_dict(),
-        })
+            try:
+                success = engine.launch_distributed(sharding_config)
+            except Exception as exc:
+                _clear_model_claim()
+                return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
+            if not success:
+                _clear_model_claim()
+                return web.json_response({"error": "Failed to launch engine"}, status=500)
+            asyncio.get_event_loop().create_task(hold_launch_slot_until_bound(
+                request.app, getattr(config, "api_port", 8000), engine, label))
+            handed_off = True
+            return web.json_response({
+                "status": "launching", "model": model,
+                "distributed": True, "plan": sharding_config.to_dict(),
+            })
+        finally:
+            if not handed_off:
+                release_launch_slot()
 
     # --- Solo path: APPEND an instance via the InstanceManager ------------------
     # A solo load no longer REPLACES the running model. Each model stacks (own
@@ -909,7 +1294,10 @@ async def handle_model_load(request: web.Request) -> web.Response:
     if config is None:
         return web.json_response({"error": "Engine not initialized"}, status=503)
 
-    result = append_solo_instance(request.app, model, gmu, overrides=overrides)
+    # Serialized through the node's launch slot, which is held until this engine
+    # binds: a second load 2 s behind this one would profile against memory this
+    # one has not finished reserving (#96). A refused load comes back 409.
+    result = await launch_solo_serialized(request.app, model, gmu, overrides=overrides)
     if not result.get("ok"):
         return web.json_response({"error": result.get("error")},
                                  status=result.get("status", 500))

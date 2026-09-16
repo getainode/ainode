@@ -103,6 +103,9 @@ class EugrBackend(EngineBackend):
         # Epoch seconds of the last line this engine printed: proof of life for
         # the startup replay's bind wait (see EngineBackend.last_log_activity).
         self._last_log_activity: Optional[float] = None
+        # Epoch seconds when this backend last issued a launch: the bind wait
+        # reports the ENGINE's life from it, not the wait's own age (#96).
+        self._launched_at: Optional[float] = None
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file: Path = LOGS_DIR / "vllm.log"
         self._distributed_log: Path = LOGS_DIR / "distributed.log"
@@ -138,6 +141,9 @@ class EugrBackend(EngineBackend):
         env = self._build_env()
 
         logger.info("Starting solo vLLM: %s", " ".join(cmd))
+        # Stamp before the launch, so an engine that dies during weight load is
+        # reported with the time it was actually alive (#96).
+        self._launched_at = time.time()
         try:
             self._process = subprocess.Popen(
                 cmd,
@@ -209,6 +215,8 @@ class EugrBackend(EngineBackend):
             self._tp_size(),
             len(self.config.peer_ips),
         )
+        # Stamp the launch for the bind wait (see EngineBackend.launched_at).
+        self._launched_at = time.time()
         self._process = subprocess.Popen(
             cmd,
             env=env,
@@ -278,6 +286,7 @@ class EugrBackend(EngineBackend):
                 logger.exception("eugr launch-cluster.sh stop failed")
 
         self._ready = False
+        self._launched_at = None
 
     def wait_ready(self, timeout: float = 300.0) -> bool:
         """Poll ``/v1/models`` on the API port until 2xx or timeout."""
@@ -351,6 +360,11 @@ class EugrBackend(EngineBackend):
             if self.config.distributed_mode == "head"
             else self._log_file
         )
+
+    @property
+    def launched_at(self) -> Optional[float]:
+        """Epoch seconds of this backend's last launch (see base class)."""
+        return self._launched_at
 
     @property
     def last_log_activity(self) -> Optional[float]:

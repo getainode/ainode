@@ -50,6 +50,9 @@ def start_harness(monkeypatch):
     )
     monkeypatch.setattr("ainode.core.gpu.detect_gpu", lambda: None)
     monkeypatch.setattr("ainode.models.api_routes.consume_start_clean", lambda: False)
+    # cmd_start sweeps this node's engine containers before it launches anything
+    # (#96); this harness has no docker and no engines to free.
+    monkeypatch.setattr("ainode.models.api_routes.sweep_engines_before_boot", lambda: [])
     monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
 
     def fake_get_backend(config, on_ready=None, instance_id=""):
