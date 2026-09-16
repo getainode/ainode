@@ -891,7 +891,7 @@ def test_flash_next_catalog_entry_is_complete():
     # What an operator has to know before pressing launch.
     assert "6B active" in info.description
     assert "TWO GB10 nodes" in info.description
-    assert "vLLM 0.29 or newer" in info.description
+    assert "vLLM nightly newer than 2026-09-03" in info.description
     assert "MTP" in info.description
     assert "strongest coding model" in info.description
 

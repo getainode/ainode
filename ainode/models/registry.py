@@ -446,7 +446,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "precision (NVFP4 routed experts, FP8 elsewhere, modelopt). MTP "
             "speculative decoding is NOT enabled here: it wants "
             "--enable-expert-parallel, which hangs on this hardware, so it stays a "
-            "follow-up. Not yet served end to end on the fleet."
+            "follow-up. Served end to end on Spark-2 + Spark-3 on 2026-09-16 from an AINode-downloaded copy (36 min to ready, 26.6 tok/s single-stream without MTP)."
         ),
         quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=145,
         family="qwen", params_b=125.0,
