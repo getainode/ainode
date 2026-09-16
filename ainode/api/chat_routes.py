@@ -470,6 +470,20 @@ async def handle_model_card(request: web.Request) -> web.Response:
 # these requests.
 _MULTIMODAL_PARTS = ("image_url", "input_audio", "video_url", "file")
 
+# The same thing said in the Anthropic Messages API, which the proxy forwards on
+# /v1/messages: a picture is ``{"type": "image", "source": {...}}`` and a PDF is
+# ``{"type": "document", ...}``, so none of the OpenAI part names above ever
+# appears in one of those bodies. Matched on the block ``type`` only: an OpenAI
+# part never carries a bare ``image`` key, and matching one would misread some
+# other shape as media.
+_ANTHROPIC_MEDIA_BLOCKS = ("image", "document")
+
+#: How far to look for media inside nested content. An Anthropic ``tool_result``
+#: carries its own block list and an image is allowed to be one of them, so one
+#: level of nesting is real; a few more cost nothing and stop a hand-built body
+#: from hiding an image from the router.
+_MEDIA_NEST_DEPTH = 3
+
 # vLLM's refusal when the modality is capped at zero on this instance: "At most
 # 0 image(s) may be provided in one prompt. (parameter=image)". Matched on the
 # stable middle of the sentence so the count, the modality word and the
@@ -482,28 +496,38 @@ def caps_cache(app) -> dict:
     return app.setdefault("chat_caps_cache", {})
 
 
-def is_multimodal_request(body: dict) -> bool:
-    """True when a chat-completions body carries an image, audio, video or file part.
+def _content_has_media(content, depth: int = 0) -> bool:
+    """True when this content list holds a media part, in either protocol."""
+    if not isinstance(content, list) or depth > _MEDIA_NEST_DEPTH:
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get("type") or "")
+        if part_type in _MULTIMODAL_PARTS or part_type in _ANTHROPIC_MEDIA_BLOCKS:
+            return True
+        if any(key in part for key in _MULTIMODAL_PARTS):
+            return True
+        if _content_has_media(part.get("content"), depth + 1):
+            return True
+    return False
 
-    Tolerant of both shapes clients send: a typed part
-    (``{"type": "image_url", "image_url": {...}}``) and one that only carries
-    the key.
+
+def is_multimodal_request(body: dict) -> bool:
+    """True when a request body carries an image, audio, video or file part.
+
+    Reads both protocols the proxy forwards, because both route on the same
+    capability: a chat-completions ``image_url`` part and an Anthropic Messages
+    ``image`` block are the same routing question asked twice. Tolerant of both
+    chat shapes clients send (a typed part
+    ``{"type": "image_url", "image_url": {...}}``, and one that only carries the
+    key) and of media nested inside a tool result.
     """
     if not isinstance(body, dict):
         return False
     for message in (body.get("messages") or []):
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if str(part.get("type") or "") in _MULTIMODAL_PARTS:
-                return True
-            if any(key in part for key in _MULTIMODAL_PARTS):
-                return True
+        if isinstance(message, dict) and _content_has_media(message.get("content")):
+            return True
     return False
 
 

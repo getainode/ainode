@@ -53,6 +53,7 @@ GX10) and any NVIDIA GPU box. It ships as **one container** that bundles:
 
 - A modern web UI (chat, cluster topology, server console, downloads, training)
 - An OpenAI-compatible API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`)
+  and the Anthropic Messages API (`/v1/messages`), both routed fleet-wide by model id
 - A GB10-patched vLLM with Ray for cross-node tensor/pipeline parallel
 - UDP node discovery for automatic clustering
 - NFS-shared model storage so you download once and use everywhere

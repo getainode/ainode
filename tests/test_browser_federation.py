@@ -120,6 +120,7 @@ def test_proxy_fails_over_past_ghost(monkeypatch):
     class _R:
         method = "POST"
         path = "/v1/completions"
+        path_qs = "/v1/completions"
         headers = {}
         def __init__(self): self.app = app
         async def read(self): return b'{"model":"M","prompt":"hi"}'

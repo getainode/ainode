@@ -180,7 +180,8 @@ ENDPOINT_CATALOG = {
         {"method": "POST", "path": "/v1/embeddings", "description": "Generate embeddings — OpenAI-compatible, served in-process via sentence-transformers"},
     ],
     "anthropic": [
-        {"method": "POST", "path": "/v1/messages", "description": "Anthropic Messages API", "status": "planned"},
+        {"method": "POST", "path": "/v1/messages", "description": "Anthropic Messages API, forwarded to the node serving the requested model"},
+        {"method": "POST", "path": "/v1/messages/count_tokens", "description": "Token count for a Messages body (Anthropic)"},
     ],
 }
 

@@ -176,6 +176,15 @@ def create_app(
     app.router.add_get("/v1/models", handle_v1_models)
     app.router.add_post("/v1/chat/completions", proxy_to_vllm)
     app.router.add_post("/v1/completions", proxy_to_vllm)
+    # The Anthropic Messages API. vLLM serves it natively alongside the OpenAI
+    # paths, so a client that speaks it (Claude Code) can be pointed at the fleet
+    # endpoint instead of one engine's port, which it could not be while :3000
+    # answered 404 here. Deliberately the SAME handler: the body's `model` picks
+    # the node, an `{"type": "image"}` block orders candidates by capability, a
+    # ghost node fails over and an SSE answer streams through, all of it code that
+    # already existed and none of it protocol-specific.
+    app.router.add_post("/v1/messages", proxy_to_vllm)
+    app.router.add_post("/v1/messages/count_tokens", proxy_to_vllm)
 
     # Chat view: the per-instance model card + the capability probe. Registered
     # BEFORE the model routes because aiohttp resolves in registration order and
@@ -1033,8 +1042,11 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
 
     start_time = time.time()
     last_err = None
+    # path_qs, not path: Claude Code posts to `/v1/messages?beta=true`, and a
+    # proxy that drops a caller's query string is guessing on the caller's behalf.
+    target = request.path_qs
     for host, port in candidates:
-        vllm_url = f"http://{host}:{port}{request.path}"
+        vllm_url = f"http://{host}:{port}{target}"
         try:
             async with session.request(request.method, vllm_url, **kwargs) as upstream:
                 is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")

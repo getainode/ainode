@@ -84,6 +84,12 @@
 - **Next action:** per-model `extra_vllm_args` passthrough + per-instance engine-image override in config/launch path; then serve Nemotron-3.5-Lightning through AINode (dogfood rule). Official recipe: HF model card, "1x DGX Spark (GB10)".
 - **Proof of closure:** Nemotron 3.5 Lightning + DSpark launched from the AINode UI on spark4, visible in the dashboard, using the card recipe flags.
 
+## [ainode] Harness bench: a parent-directory `CLAUDE.md` still reaches the `claude` harness
+- **Filed:** 2026-09-16, while adding the `claude` adapter (`ainode/bench/harness/adapters/claude.py`).
+- **State:** `CLAUDE_CONFIG_DIR` isolates the operator's profile (settings, hooks, MCP servers, sessions, credentials), and that is verified. It does not stop Claude Code discovering a `CLAUDE.md` in a **parent** of the working directory. Measured against a fake Messages endpoint: a marker string in a parent `CLAUDE.md` arrived in the request body. The default work dir is a fresh temp dir, so a normal run is clean; `--work-dir` pointed into a checkout that has a `CLAUDE.md` above it puts that file inside the measurement. pi is guarded against exactly this with `--no-context-files`; Claude Code has no equivalent per-run flag.
+- **Next action:** evaluate `claude --bare` (documented as skipping CLAUDE.md auto-discovery, hooks, auto-memory, keychain reads) as the bench invocation. It also turns off skills and plugin sync, so it has to be verified end to end against a model on the fleet before it replaces the pinned argv: the current argv is the one with a 6/6 measurement behind it.
+- **Proof of closure:** a bench run with a `CLAUDE.md` in a parent of `--work-dir` whose request body does not contain that file, with the isogram score unchanged from the verified run.
+
 ## [dell-r750] Second A40 DEFECTIVE — RMA in progress (2026-07-21)
 - **Owner:** Richard (Jason sent him the evidence bundle 2026-07-21 evening). Card fails init via BOTH GSP (`0x62:0x65:2416`) and non-GSP (`0x25:0xffff:1480`) paths in validated slot 2 @ x16 with correct SIG_PWR_0 power; survived-cold-boot-unchanged; iDRAC reads PN/serial as N/A; BAR1 stuck at 256MB vs twin's 64GB. Verdict: dead firmware storage. Source: eBay item 187541687374.
 - **Next action:** Richard files the eBay return; photograph physical serial sticker before shipping.

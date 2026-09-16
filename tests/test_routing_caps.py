@@ -109,14 +109,15 @@ def _app(cluster, session=None, caps=None, node_name="Spark-1-DGX"):
     return app
 
 
-def _proxy(app, body):
+def _proxy(app, body, path="/v1/chat/completions"):
     class _R:
         method = "POST"
-        path = "/v1/chat/completions"
         headers: dict = {}
 
         def __init__(self):
             self.app = app
+            self.path = path
+            self.path_qs = path
 
         async def read(self):
             return json.dumps(body).encode()
@@ -130,6 +131,14 @@ def _image_body():
     return {"model": MODEL, "messages": [{"role": "user", "content": [
         {"type": "text", "text": "what is this"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]}
+
+
+def _anthropic_image_body():
+    """The same request in the Messages API's spelling, which /v1/messages carries."""
+    return {"model": MODEL, "max_tokens": 64, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                     "data": "AAAA"}}]}]}
 
 
 def _two_nodes():
@@ -162,6 +171,38 @@ def test_detects_a_part_that_carries_only_the_key():
     body = {"model": MODEL, "messages": [{"role": "user", "content": [
         {"image_url": {"url": "data:image/png;base64,AAAA"}}]}]}
     assert is_multimodal_request(body) is True
+
+
+def test_detects_an_anthropic_image_block():
+    """The Messages API spells a picture differently and routes the same way."""
+    assert is_multimodal_request(_anthropic_image_body()) is True
+
+
+def test_detects_an_anthropic_document_block():
+    body = {"model": MODEL, "max_tokens": 64, "messages": [{"role": "user", "content": [
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                        "data": "AAAA"}}]}]}
+    assert is_multimodal_request(body) is True
+
+
+def test_detects_an_image_inside_an_anthropic_tool_result():
+    """A tool_result carries its own block list, and an image is allowed in it."""
+    body = {"model": MODEL, "max_tokens": 64, "messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "text", "text": "here"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "AAAA"}}]}]}]}
+    assert is_multimodal_request(body) is True
+
+
+def test_an_anthropic_text_only_request_is_not_multimodal():
+    body = {"model": MODEL, "max_tokens": 64, "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "hmm"},
+                                          {"type": "text", "text": "hello"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                      "content": [{"type": "text", "text": "ok"}]}]}]}
+    assert is_multimodal_request(body) is False
 
 
 def test_a_text_request_is_not_multimodal():
@@ -213,6 +254,19 @@ def test_an_image_skips_the_local_text_only_instance():
     status, _ = _proxy(app, _image_body())
     assert status == 200
     assert session.tried == ["http://10.100.0.15:8000/v1/chat/completions"]
+
+
+def test_an_anthropic_image_skips_the_text_only_instance_too():
+    """The capability rule is the proxy's, not the OpenAI path's: /v1/messages
+    gets the same ordering, on the Messages API's own block shape."""
+    session = _Session({"10.100.0.15": (200, {"type": "message"})})
+    app = _app(_two_nodes(), session=session, caps={
+        ("spark1", 8000, MODEL): {"vision": False},
+        ("spark3", 8000, MODEL): {"vision": True},
+    })
+    status, _ = _proxy(app, _anthropic_image_body(), path="/v1/messages")
+    assert status == 200
+    assert session.tried == ["http://10.100.0.15:8000/v1/messages"]
 
 
 def test_a_text_request_keeps_the_local_first_order():
