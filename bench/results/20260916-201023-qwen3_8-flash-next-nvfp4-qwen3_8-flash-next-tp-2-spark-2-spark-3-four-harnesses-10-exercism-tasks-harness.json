@@ -10,8 +10,8 @@
   "context": 262144,
   "license": "Apache 2.0",
   "vision": false,
-  "arch": "dense",
-  "active_b": 125.0
+  "arch": "moe",
+  "active_b": 6.0
  },
  "placement": {
   "engine": "vllm",

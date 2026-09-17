@@ -10,8 +10,8 @@
   "context": 1048576,
   "license": "MIT",
   "vision": false,
-  "arch": "dense",
-  "active_b": 284.0
+  "arch": "moe",
+  "active_b": 13.0
  },
  "placement": {
   "engine": "vllm",
