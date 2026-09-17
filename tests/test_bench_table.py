@@ -216,3 +216,49 @@ def test_check_detects_stale_harness_table(tmp_path):
     readme.write_text(text)
     assert check() == 1
 
+
+def test_bench_record_shape_follows_the_catalog():
+    """A record whose model id matches a curated catalog entry must state the
+    shape the catalog states, so a record written before the catalog carried
+    `active_params_b` / `arch` can never drift back to the "dense, with
+    `active_b` equal to `params_b`" guess it started with.
+
+    Shape is not a measurement, so it is a property of the model, and the catalog
+    is the source of truth for it. The three harness records under bench/results/
+    that predate those catalog fields are locked to what the catalog says: moe
+    with 13B active for the DeepSeek V4 Flash entry, 6B active for the
+    Qwen3.8-Flash-Next entry. Every record that matches an entry is checked, so
+    reverting any of them to `arch: "dense"` fails this test.
+    """
+    from ainode.models.registry import CURATED_CLUSTER_MODELS
+
+    entry_by_repo = {
+        info.hf_repo: info
+        for info in CURATED_CLUSTER_MODELS.values()
+        if info.hf_repo
+    }
+
+    results = REPO / "bench" / "results"
+    seen = 0
+    for path in sorted(results.glob("*.json")):
+        record = json.loads(path.read_text())
+        model_id = (record.get("model") or {}).get("id")
+        info = entry_by_repo.get(model_id)
+        if not info:
+            continue
+        seen += 1
+
+        model = record["model"]
+        assert model.get("arch") == info.arch, (
+            f"{path.name}: record arch {model.get('arch')!r} does not match the "
+            f"catalog entry {info.id!r}, which states {info.arch!r}"
+        )
+        if info.active_params_b is not None:
+            assert model.get("active_b") == info.active_params_b, (
+                f"{path.name}: record active_b {model.get('active_b')!r} does not "
+                f"match the catalog entry {info.id!r}, which states "
+                f"{info.active_params_b!r}"
+            )
+
+    assert seen >= 3, "expected the guard to cover the locked harness records"
+
