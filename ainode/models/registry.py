@@ -469,7 +469,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=145,
         family="qwen", params_b=125.0,
         active_params_b=6.0, arch="moe",
-        proven_tp=2, verified=False, recommended=False, curated=True,
+        proven_tp=2, verified=True, recommended=True, curated=True,
         context_length=262144, license="Apache 2.0",
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],
