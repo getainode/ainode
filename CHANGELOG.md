@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.20] - 2026-09-17
+
+Engine activity as the liveness signal, ranks kept in step through autotune, OpenCode in the harness bench, catalog shapes in every record.
+
 ### Added
 - **`ainode-bench harness --claude-effort <level>` sets the reasoning effort Claude Code runs with** ([#127](https://github.com/getainode/ainode/issues/127)). Claude Code sends effort "high" by default, and a served chat template does not have to accept that value: Qwen3.8-Flash-Next takes only xhigh, medium and low, so every request came back `API Error: 400 Unexpected reasoning effort high`, the harness crashed in about 0.3 s per attempt and the model scored 0/10 on a suite the other three harnesses were passing. The same ten tasks then scored 8/10 and 10/10 at medium. The level is appended to the claude argv as `--effort <level>` and nothing else about the invocation moves; unset stays the default and sends nothing, so every number already recorded (Ornith, Qwen3.8 27B) keeps its meaning. It is written down where a reader will find it: the run's `settings` as `claude_effort` and the claude block's `options` as `effort`, both absent when the flag was not used, because a run with the agent's own default is a different statement from a null. Docs: the `claude` section of `bench/harness/README.md`.
 
