@@ -8,7 +8,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Qwen3.8-Flash-Next is marked verified and recommended.** With #136 it launches from the catalog on the Spark pair in 11 minutes, repeatably; speed and harness records are in the set. Autotune off costs about 6 percent of single-stream decode (24.9 vs 26.6 tok/s).
 
 ---
 

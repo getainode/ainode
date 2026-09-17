@@ -989,8 +989,8 @@ def test_flash_next_catalog_entry_is_complete():
     assert info.quantization == "NVFP4 (mixed, FP8 PLE)"
     assert info.format == "safetensors"
     assert info.proven_tp == 2
-    assert info.verified is False        # not served end to end on the fleet yet
-    assert info.recommended is False     # flips with verified, once proven
+    assert info.verified is True        # not served end to end on the fleet yet
+    assert info.recommended is True     # flips with verified, once proven
     assert info.curated is True
     assert info.distributed_executor == "mp"
     assert info.engine_image == FLASH_IMAGE
