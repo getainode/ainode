@@ -231,8 +231,8 @@ generalise to the runner.
 One task on one model is a working adapter, not a score. Read those columns as "this
 adapter reaches the endpoint and the model can do the task" and nothing more: these
 are single observations, the harnesses were not run under identical conditions, and
-opencode's startup alone was separately timed at about 18 s, which is longer than its
-whole run above. `claude`'s number is not comparable with the other four at all: a
+opencode's startup alone was separately timed at about 18 s, which is most of its
+26 s above. `claude`'s number is not comparable with the other four at all: a
 different model answered it, on a different day. Startup overhead is real and it is
 inside `mean_wall_s` (opencode loads every installed skill; dsh installs its profile
 on first use), so a comparison worth making comes out of a full run with the caveats
