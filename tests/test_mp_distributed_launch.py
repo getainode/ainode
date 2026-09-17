@@ -689,6 +689,138 @@ def test_peer_transfer_falls_back_to_the_hub_entry_without_a_flat_download(tmp_p
     assert f"tar -C {PEER_CACHE}/hub -xf -" in payload
 
 
+# ---------------------------------------------------------------------------
+# Kernel-cache seeding: the peer starts warmup from where the head already is
+# ---------------------------------------------------------------------------
+
+JIT_REL = ".vllm-jit"
+JIT_ENV = {"VLLM_CACHE_ROOT": f"{HF_CACHE_MOUNT}/{JIT_REL}"}
+PEER_JIT = f"{PEER_CACHE}/{JIT_REL}"
+
+
+def _jit_head_cache(tmp_path, *names: str) -> str:
+    """A head HF cache whose ``.vllm-jit`` root holds ``names``, and its path.
+
+    That root is where a recipe points ``VLLM_CACHE_ROOT`` (inside the one
+    directory AINode mounts on every node), so the same container path is this
+    host dir on the head and ``PEER_JIT`` on a peer.
+    """
+    root = tmp_path / "hf-cache" / JIT_REL
+    for name in names:
+        (root / name).mkdir(parents=True)
+    return str(tmp_path / "hf-cache")
+
+
+def _boom(cmd, **kwargs):
+    raise AssertionError(f"should not have run anything: {cmd}")
+
+
+def test_mp_peer_launch_seeds_the_kernel_cache_before_the_peer_starts(tmp_path, monkeypatch):
+    """Every rank JITs its own kernels, so a cold peer compiles for half an hour
+    while the head waits in a collective and gloo kills the pair (#134). The head
+    ships what it has, per child of the cache root, before the peer launches."""
+    models_dir = _downloaded(tmp_path, monkeypatch)
+    hf = _jit_head_cache(tmp_path, "flashinfer_autotune_cache", "torch_compile_cache")
+    b = _backend(_mp_config(models_dir=models_dir, hf_cache_dir=hf,
+                            extra_env=dict(JIT_ENV)))
+    calls: List[List[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "ssh" and "test -d" in cmd[-1]:
+            return _FakeCompleted(stdout="missing\n")
+        return _FakeCompleted(returncode=0)
+
+    fabric, hca = _nccl_free()
+    with fabric, hca, mock.patch(
+        "ainode.engine.backends.nvidia.shutil.which", return_value="/usr/bin/rsync"
+    ), mock.patch(
+        "ainode.engine.backends.nvidia.subprocess.run", side_effect=fake_run
+    ):
+        b._ssh_launch_mp_worker(peer_ip="10.100.0.13", head_ip="10.100.0.11",
+                                node_rank=1, nnodes=2)
+
+    sent = {c[-2]: c[-1] for c in calls if c and c[0] == "rsync"}
+    head_jit = f"{tmp_path}/hf-cache/{JIT_REL}"
+    for name in ("flashinfer_autotune_cache", "torch_compile_cache"):
+        assert sent[f"{head_jit}/{name}/"] == f"ubuntu@10.100.0.13:{PEER_JIT}/{name}/"
+    # The weights still go, and to the model store, not the cache root.
+    assert sent[f"{models_dir}/{DSPARK_SLUG}/"] == \
+        f"ubuntu@10.100.0.13:{PEER_MODELS}/{DSPARK_SLUG}/"
+    # And all of it lands BEFORE the peer's container is started.
+    launch = [i for i, c in enumerate(calls) if c and c[0] == "ssh" and "docker rm -f" in c[-1]]
+    assert launch == [len(calls) - 1], calls
+
+
+def test_kernel_cache_transfer_skips_the_subtree_the_peer_already_has(tmp_path):
+    """One probe per child, and only the missing one is sent: the real peer had
+    torch compile output already and was missing only the autotune directory."""
+    b = _backend(_mp_config(hf_cache_dir=_jit_head_cache(
+        tmp_path, "flashinfer_autotune_cache", "torch_compile_cache"),
+        extra_env=dict(JIT_ENV)))
+    calls: List[List[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "test -d" in cmd[-1] and "flashinfer_autotune_cache" in cmd[-1]:
+            return _FakeCompleted(stdout="missing\n")
+        return _FakeCompleted(stdout="present\n")
+
+    with mock.patch(
+        "ainode.engine.backends.nvidia.shutil.which", return_value="/usr/bin/rsync"
+    ), mock.patch("ainode.engine.backends.nvidia.subprocess.run", side_effect=fake_run):
+        b._ensure_peer_has_jit_cache("10.100.0.13", PEER_CACHE)
+
+    probes = [c for c in calls if c and c[0] == "ssh" and "test -d" in c[-1]]
+    assert sorted(c[-1].split()[2] for c in probes) == [   # "test -d <path> && ..."
+        f"{PEER_JIT}/flashinfer_autotune_cache", f"{PEER_JIT}/torch_compile_cache",
+    ]
+    rsyncs = [c for c in calls if c and c[0] == "rsync"]
+    assert len(rsyncs) == 1
+    assert rsyncs[0][-1] == f"ubuntu@10.100.0.13:{PEER_JIT}/flashinfer_autotune_cache/"
+
+
+def test_kernel_cache_transfer_needs_a_recipe_cache_root_inside_the_mount(tmp_path):
+    """No ``VLLM_CACHE_ROOT``, or one outside the HF cache mount, means there is
+    no per-node path to map and nothing is shipped (nor probed)."""
+    hf = _jit_head_cache(tmp_path, "flashinfer_autotune_cache")
+    for env in ({}, {"VLLM_CACHE_ROOT": "/vllm-cache"}, {"VLLM_CACHE_ROOT": ""}):
+        b = _backend(_mp_config(hf_cache_dir=hf, extra_env=dict(env)))
+        with mock.patch("ainode.engine.backends.nvidia.subprocess.run", side_effect=_boom):
+            b._ensure_peer_has_jit_cache("10.100.0.13", PEER_CACHE)
+
+
+def test_kernel_cache_transfer_is_a_no_op_when_the_head_has_no_cache_yet(tmp_path):
+    b = _backend(_mp_config(hf_cache_dir=str(tmp_path / "hf-cache"),
+                            extra_env=dict(JIT_ENV)))
+    with mock.patch("ainode.engine.backends.nvidia.subprocess.run", side_effect=_boom):
+        b._ensure_peer_has_jit_cache("10.100.0.13", PEER_CACHE)
+
+
+def test_a_kernel_cache_that_will_not_copy_does_not_fail_the_launch(tmp_path, caplog):
+    """A missing cache costs minutes; a launch refused over a cache costs the
+    model. So a failed transfer is a warning, and the next child still goes."""
+    b = _backend(_mp_config(hf_cache_dir=_jit_head_cache(
+        tmp_path, "flashinfer_autotune_cache", "triton"), extra_env=dict(JIT_ENV)))
+    calls: List[List[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "ssh" and "test -d" in cmd[-1]:
+            return _FakeCompleted(stdout="missing\n")
+        if cmd[0] == "rsync" and "flashinfer_autotune_cache" in cmd[-1]:
+            return _FakeCompleted(returncode=23, stderr="no space left on device")
+        return _FakeCompleted(returncode=0)
+
+    with caplog.at_level("WARNING"), mock.patch(
+        "ainode.engine.backends.nvidia.shutil.which", return_value="/usr/bin/rsync"
+    ), mock.patch("ainode.engine.backends.nvidia.subprocess.run", side_effect=fake_run):
+        b._ensure_peer_has_jit_cache("10.100.0.13", PEER_CACHE)
+
+    assert "flashinfer_autotune_cache" in caplog.text
+    assert any(c[0] == "rsync" and c[-1].endswith("/triton/") for c in calls)
+
+
 def test_a_recipe_supplied_served_model_name_is_not_duplicated(tmp_path, monkeypatch):
     # vLLM errors on a duplicate flag, so a recipe that names the served id keeps
     # its value and we emit nothing, the same rule as every other serve flag.
@@ -885,8 +1017,26 @@ def test_flash_next_catalog_entry_is_complete():
     for deferred in ("--enable-expert-parallel", "--speculative-config",
                      "--speculative_config"):
         assert deferred not in info.extra_vllm_args, deferred
-    # A stock vllm/vllm-openai image needs no PATH/HF_HOME surgery.
-    assert info.extra_env == {} and info.extra_volumes == []
+    # A stock vllm/vllm-openai image needs no PATH/HF_HOME surgery, but its JIT
+    # caches default to $HOME inside the container and die with it, so the recipe
+    # parks them in the mount every node has (#134). No host path, no volume.
+    assert info.extra_volumes == []
+    assert set(info.extra_env) == {
+        "VLLM_CACHE_ROOT", "FLASHINFER_WORKSPACE_BASE", "TORCHINDUCTOR_CACHE_DIR",
+        "TRITON_CACHE_DIR", "TORCH_EXTENSIONS_DIR",
+    }
+    for key, value in info.extra_env.items():
+        assert value.startswith(f"{HF_CACHE_MOUNT}/.vllm-jit"), key
+    # AINode derives the fabric env per node; a recipe must not pin it.
+    for derived in ("NCCL_IB_HCA", "NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME",
+                    "TP_SOCKET_IFNAME", "VLLM_HOST_IP"):
+        assert derived not in info.extra_env, derived
+
+    # Kernel warmup used to kill the pair: autotune off, collective floor raised.
+    assert "--no-enable-flashinfer-autotune" in info.extra_vllm_args
+    assert "--enable-flashinfer-autotune" not in info.extra_vllm_args
+    assert _after(info.extra_vllm_args, "--cpu-distributed-timeout-seconds") == "5400"
+    assert _after(info.extra_vllm_args, "--distributed-timeout-seconds") == "5400"
 
     # What an operator has to know before pressing launch.
     assert "6B active" in info.description
@@ -908,7 +1058,9 @@ def test_flash_next_recipe_reaches_the_launch_config():
     assert recipe["max_model_len"] == 262144
     assert recipe["trust_remote_code"] is True
     assert recipe["gpu_memory_utilization"] == 0.85
-    assert "extra_env" not in recipe
+    # The JIT cache roots have to reach the launch config, or the head's cache
+    # does not persist and _ensure_peer_has_jit_cache has nothing to ship (#134).
+    assert recipe["extra_env"]["VLLM_CACHE_ROOT"] == f"{HF_CACHE_MOUNT}/.vllm-jit"
 
 
 def test_rendered_flash_next_commands_serve_the_ainode_download(tmp_path, monkeypatch):
@@ -946,6 +1098,50 @@ def test_rendered_flash_next_commands_serve_the_ainode_download(tmp_path, monkey
         assert "VLLM_ATTENTION_BACKEND" not in joined
     assert "--headless" not in " ".join(head)
     assert " ".join(peer).endswith("--headless")
+
+
+def test_rendered_flash_next_commands_keep_the_ranks_in_step_through_warmup(tmp_path, monkeypatch):
+    """Both ranks render the same warmup contract (#134): no FlashInfer autotune,
+    a collective floor above the worst warmup measured, and JIT caches that
+    persist inside the mount instead of dying with the container."""
+    from ainode.models.api_routes import RECIPE_CONFIG_KEYS, catalog_recipe
+
+    models_dir = _downloaded(tmp_path, monkeypatch, FLASH_REPO)
+    recipe = catalog_recipe(FLASH_REPO)
+    cfg_kwargs = {k: recipe[k] for k in RECIPE_CONFIG_KEYS if k in recipe}
+    config = _mp_config(model=FLASH_REPO, models_dir=models_dir,
+                        gpu_memory_utilization=recipe["gpu_memory_utilization"],
+                        **cfg_kwargs)
+    head, peer = _head_cmd(config), _peer_cmd(config)
+
+    for argv, rank in ((head, "0"), (peer, "1")):
+        joined = " ".join(argv)
+        assert f"--node-rank {rank}" in joined
+        # The off form of KernelConfig.enable_flashinfer_autotune, and nothing
+        # that would turn it back on.
+        assert "--no-enable-flashinfer-autotune" in argv
+        assert "--enable-flashinfer-autotune" not in argv
+        # gloo's default is 1800 s, under the 48 min worst warmup on this pair.
+        assert "--cpu-distributed-timeout-seconds 5400" in joined
+        assert "--distributed-timeout-seconds 5400" in joined
+        assert f"-e VLLM_CACHE_ROOT={HF_CACHE_MOUNT}/.vllm-jit" in joined
+        assert f"-e FLASHINFER_WORKSPACE_BASE={HF_CACHE_MOUNT}/.vllm-jit/flashinfer" in joined
+        assert f"-e TRITON_CACHE_DIR={HF_CACHE_MOUNT}/.vllm-jit/triton" in joined
+
+
+def test_the_deepseek_entry_keeps_its_own_autotune_and_timeout_settings():
+    """DeepSeek V4 Flash tunes in minutes and is proven as it stands, so none of
+    the Flash-Next warmup flags leak onto it. It does take part in the cache
+    seeding, purely because its recipe already parks VLLM_CACHE_ROOT in the
+    mount (test_deepseek_recipe_env_points_hf_and_the_jit_caches_at_the_mount)."""
+    from ainode.models.registry import CURATED_CLUSTER_MODELS
+
+    info = CURATED_CLUSTER_MODELS[DSPARK_ID]
+    assert "--enable-flashinfer-autotune" in info.extra_vllm_args
+    for flag in ("--no-enable-flashinfer-autotune",
+                 "--cpu-distributed-timeout-seconds",
+                 "--distributed-timeout-seconds"):
+        assert flag not in info.extra_vllm_args, flag
 
 
 # ---------------------------------------------------------------------------

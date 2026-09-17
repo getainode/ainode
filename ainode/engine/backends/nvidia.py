@@ -1905,6 +1905,10 @@ class NvidiaBackend(EngineBackend):
         peer_hf_cache = self._peer_hf_cache()
         peer_models_dir = self._peer_models_dir()
         self._ensure_peer_has_model(peer_ip, peer_hf_cache, peer_models_dir)
+        # Weights are not the only thing a cold peer lacks: every rank JITs its
+        # own kernels, and a peer compiling from scratch while the head waits in
+        # a collective is what killed the Flash-Next pair (#134).
+        self._ensure_peer_has_jit_cache(peer_ip, peer_hf_cache)
         worker_name = self._worker_container_name(peer_ip)
         docker_cmd = self._build_mp_docker_cmd(
             container_name=worker_name,
@@ -2009,6 +2013,74 @@ class NvidiaBackend(EngineBackend):
             peer_ip=peer_ip, name=model_dir, head_parent=head_hub,
             peer_parent=peer_hf_cache.rstrip("/") + "/hub",
         )
+
+    def _jit_cache_mount_relpath(self) -> str:
+        """The recipe's ``VLLM_CACHE_ROOT`` as a path relative to
+        ``HF_CACHE_MOUNT``, or "" when there is nothing shippable.
+
+        A recipe parks its compiled-kernel caches INSIDE the HF cache mount on
+        purpose (``registry._DSPARK_JIT_ROOT``): that is the one directory AINode
+        mounts on every node, so a single container path is a different host
+        directory per node and we can map the head's to a peer's. A recipe that
+        leaves ``VLLM_CACHE_ROOT`` unset, or points it outside the mount, has no
+        persisted cache to ship and gets "".
+        """
+        extra_env = getattr(self.config, "extra_env", None) or {}
+        root = str(extra_env.get("VLLM_CACHE_ROOT", "") or "").strip().rstrip("/")
+        mount = HF_CACHE_MOUNT.rstrip("/")
+        if not root or not root.startswith(mount + "/"):
+            return ""
+        return root[len(mount) + 1:].strip("/")
+
+    def _ensure_peer_has_jit_cache(self, peer_ip: str, peer_hf_cache: str) -> None:
+        """Seed a peer's compiled-kernel cache from the head's before it launches.
+
+        Kernel warmup runs per rank. A peer whose cache is cold compiles every
+        FlashInfer/torch kernel from source while the head, warm from an earlier
+        launch, is already waiting for it inside a collective: on
+        Qwen3.8-Flash-Next the peer's first ``trtllm::fused_moe::gemm1`` profile
+        sat until gloo's 1800 s default timeout fired and took the whole launch
+        down (#134). Shipping the head's subtree first makes both ranks start
+        from the same place. Each child of the cache root is its own transfer and
+        each is skipped when the peer already has it, so a peer missing only one
+        directory is sent only that one.
+
+        The FlashInfer AUTOTUNE json in there is belt-and-braces, not the
+        mechanism: on this vLLM line only rank 0 reads that file and broadcasts
+        its bytes to the other ranks
+        (``model_executor/warmup/kernel_warmup.py::flashinfer_autotune``), so a
+        peer-side copy of it is never read. What a peer does read off its own
+        disk is the JIT'd kernels around it (the FlashInfer workspace, the
+        torch.compile / inductor / triton output), which is what the stall is
+        made of.
+
+        Best effort in the strongest sense: a cache that will not copy is logged
+        and the launch continues. A missing cache costs minutes; a launch refused
+        over a cache costs the model.
+        """
+        rel = self._jit_cache_mount_relpath()
+        if not rel:
+            return
+        head_root = Path(self._head_hf_cache()) / rel
+        if not head_root.is_dir():
+            return  # nothing compiled or tuned on the head yet
+        peer_root = f"{peer_hf_cache.rstrip('/')}/{rel}"
+        try:
+            names = sorted(child.name for child in head_root.iterdir() if child.is_dir())
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.warning("Cannot read the head's kernel cache %s: %s", head_root, exc)
+            return
+        for name in names:
+            try:
+                self._distribute_dir_to_peer(
+                    peer_ip=peer_ip, name=name,
+                    head_parent=str(head_root), peer_parent=peer_root,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not seed kernel cache %s/%s on %s (%s); the peer will "
+                    "compile it itself", peer_root, name, peer_ip, exc,
+                )
 
     def _distribute_dir_to_peer(self, *, peer_ip: str, name: str,
                                 head_parent: str, peer_parent: str) -> None:

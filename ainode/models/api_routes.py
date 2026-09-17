@@ -580,7 +580,7 @@ _GPU_RELEASE_SECONDS = 30.0
 # Used when no NodeConfig is reachable (a config written by an older release, or
 # a caller that passes a bare dict). Mirrors the NodeConfig defaults.
 _DEFAULT_BIND_LOG_SILENCE_SECONDS = 300.0
-_DEFAULT_BIND_CEILING_SECONDS = 1800.0
+_DEFAULT_BIND_CEILING_SECONDS = 3600.0
 
 
 async def _port_serving(port: int) -> bool:

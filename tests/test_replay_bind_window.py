@@ -288,8 +288,10 @@ async def test_the_knobs_come_from_nodeconfig(monkeypatch):
     # (#112). Anything shorter than this is still a kill switch on a real wedge
     # check, anything longer wastes minutes of boot on a dead engine.
     assert cfg.engine_bind_log_silence_seconds == 300
-    assert cfg.engine_bind_ceiling_seconds == 1800
-    assert api_routes._bind_limits({"config": cfg}) == (300.0, 1800.0)
+    # An hour on the ceiling: a two-node mp launch spends tens of minutes in
+    # kernel warmup and 1800 was killing one still making progress (#134).
+    assert cfg.engine_bind_ceiling_seconds == 3600
+    assert api_routes._bind_limits({"config": cfg}) == (300.0, 3600.0)
     # No config, or a config from before these fields existed.
     assert api_routes._bind_limits({}) == (
         api_routes._DEFAULT_BIND_LOG_SILENCE_SECONDS,

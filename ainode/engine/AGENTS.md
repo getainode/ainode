@@ -56,6 +56,32 @@ the same `_build_vllm_serve_args`, the same peer container names and the same
       (vLLM pulls into each node's cache). No `--served-model-name` either.
     Derive the mount from the target actually chosen, never from a second probe,
     so a mount-path target can never be rendered without its mount.
+  - **Weights are not the only thing the head ships.** Kernel warmup runs per
+    rank, so a peer with a cold compiled-kernel cache JITs from source while the
+    head (warm from an earlier launch) is already waiting for it inside a
+    collective, and the CPU group's default 1800 s timeout declares the pair dead
+    (#134). `_ensure_peer_has_jit_cache` therefore sends the head's
+    `VLLM_CACHE_ROOT` subtree before the peer's container starts: one transfer per
+    child of that root, each skipped when the peer already has it, and every
+    failure a warning rather than a refused launch. It only fires for a recipe
+    whose `VLLM_CACHE_ROOT` is INSIDE `HF_CACHE_MOUNT` (`registry._DSPARK_JIT_ROOT`),
+    because that is the only way one container path maps to a per-node host dir.
+    A recipe that leaves the cache roots unset does not just lose the seeding: its
+    caches live in the container and die with it, so every launch re-JITs on every
+    rank. State them.
+  - **Do not expect a copied FlashInfer autotune cache to be read on a peer.** On
+    this vLLM line only rank 0 reads
+    `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer workspace parent>/<flashinfer workspace>/<sha256 of vllm_config.compute_hash()>/autotune_configs.json`
+    and broadcasts the bytes to every other rank
+    (`model_executor/warmup/kernel_warmup.py::flashinfer_autotune`), which then
+    write them to their own resolved path. The key is the whole `VllmConfig` hash
+    (so any flag change orphans it) and is NOT rank-specific. Seeding a peer is
+    belt-and-braces; the head's cache persisting is what actually matters, and the
+    per-rank win is in the JIT'd kernels around it. When warmup is the problem,
+    reach for `--no-enable-flashinfer-autotune` (the off form of
+    `KernelConfig.enable_flashinfer_autotune`) and
+    `--cpu-distributed-timeout-seconds` / `--distributed-timeout-seconds`, all
+    three recipe-level, as the Flash-Next entry does.
   - A recipe that states `--nnodes`, `--node-rank`, `--master-addr`,
     `--master-port` or `--headless` itself suppresses ours, same rule as every
     other serve flag.
