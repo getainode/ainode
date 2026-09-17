@@ -1115,8 +1115,8 @@ def test_resolve_serving_node_peer_model(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
 
-    web_base, engine_port, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
-    assert web_base == "http://Spark-2:3000"
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == "Spark-2"
     assert engine_port == 8001
     assert warn == ""
 
@@ -1146,8 +1146,8 @@ def test_resolve_serving_node_master_model(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
 
-    web_base, engine_port, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
-    assert web_base == master_base
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == "Spark-1"
     assert engine_port == 8000
     assert warn == ""
 
@@ -1166,8 +1166,8 @@ def test_resolve_serving_node_unloaded_model(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
 
-    web_base, engine_port, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
-    assert web_base == master_base
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == ""
     assert engine_port is None
     assert warn == ""
 
@@ -1183,8 +1183,8 @@ def test_resolve_serving_node_master_unreachable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
 
-    web_base, engine_port, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
-    assert web_base == master_base
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == ""
     assert engine_port is None
     assert "unreadable" in warn
 

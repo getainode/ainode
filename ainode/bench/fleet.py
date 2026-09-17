@@ -128,37 +128,34 @@ def resolve_serving_node(base_url: str, model: str):
     """Which node serves ``model``, from the master's fleet view.
 
     Reads ``/api/server/status`` on the master to find the node that hosts the
-    loaded model, then returns that node's web base URL for placement reads.
-    Returns ``(web_base, engine_port, warn)`` where ``web_base`` is the master
-    when the model is served there, or the peer's own ``:3000`` for a peer.
-    ``engine_port`` is the engine port on that node, or None. When the model
-    cannot be found ``web_base`` is the master and ``warn`` explains the gap.
+    loaded model. Returns ``(node_name, engine_port, gpu_name, warn)``.
+    ``node_name`` is "" when the model is not loaded anywhere; ``warn``
+    explains an unreadable master. The caller keeps describing the fleet
+    through the master: a peer's own web port is only reachable over the
+    cluster fabric, which the bench CLI usually is not on, so the record's
+    placement is corrected by name rather than by re-addressing the request.
     """
     base = base_url.rstrip("/")
-
     ss = get_json(f"{base}/api/server/status")
     if ss.get("_error"):
-        return base_url, None, f"master /api/server/status unreadable: {ss['_error']}"
-
-    target_host = None
-    target_port = None
+        return "", None, "", f"master /api/server/status unreadable: {ss['_error']}"
+    node_name = ""
+    engine_port = None
     for m in (ss.get("loaded_models") or []):
         if m.get("id") == model:
-            target_host = m.get("node_hostname") or ""
-            target_port = m.get("port") or 8000
+            node_name = m.get("node_hostname") or ""
+            engine_port = m.get("port") or 8000
             break
-
-    if not target_host:
-        return base_url, None, ""
-
-    # If the model is served on the master, use the given base as-is.
-    st = get_json(f"{base}/api/status")
-    master_name = (st.get("node_name") or "") if not st.get("_error") else ""
-    if master_name and target_host == master_name:
-        return base_url, target_port, ""
-
-    # Peer node: build its web base (port 3000).
-    return f"http://{target_host}:3000", target_port, ""
+    if not node_name:
+        return "", None, "", ""
+    gpu_name = ""
+    nodes = get_json(f"{base}/api/nodes")
+    if not nodes.get("_error"):
+        for n in (nodes.get("nodes") if isinstance(nodes, dict) else nodes) or []:
+            if n.get("node_name") == node_name:
+                gpu_name = n.get("gpu_name") or ""
+                break
+    return node_name, engine_port, gpu_name, ""
 
 
 # ---------------------------------------------------------------- HTTP describe (CLI)

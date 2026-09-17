@@ -234,11 +234,15 @@ def main(argv=None, out_dir=None) -> int:
     base = ainode_base(args.endpoint, args.ainode)
     from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
-    node_base, engine_port, resolve_warn = resolve_serving_node(base, args.model)
-    model_block, placement, _node_id, warnings = describe_via_http(node_base, node_base,
-                                                                   args.model)
-    if engine_port:
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base, args.model)
+    model_block, placement, _node_id, warnings = describe_via_http(base, base, args.model)
+    if node_name:
+        # The fleet view names the serving node; the master's own description
+        # would otherwise stamp the master as the placement.
+        placement["node"] = node_name
         placement["port"] = engine_port
+        if gpu_name:
+            placement["gpu"] = gpu_name
     if resolve_warn:
         warnings = [resolve_warn] + list(warnings)
     print(f"  node    : {placement.get('node', 'unknown')}  "
