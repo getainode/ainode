@@ -499,7 +499,46 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "--reasoning-parser", "qwen3",
             "--tool-call-parser", "qwen3_coder",
             "--enable-auto-tool-choice",
+            # --- Keeping the two ranks in step through kernel warmup (#134) ---
+            # FlashInfer autotune is OFF for this entry. It runs per rank inside
+            # kernel_warmup and tuned 856 profiles here: 35 min on the head even
+            # with cache hits, and on a cold peer a first
+            # trtllm::fused_moe::gemm1 profile that sat for 1800 s until gloo
+            # timed out and killed the pair. The switch is real, not guessed:
+            # KernelConfig.enable_flashinfer_autotune is registered with
+            # argparse.BooleanOptionalAction, so --no-<name> is its off form
+            # (vLLM af1c014 engine/arg_utils.py), and kernel_warmup.py skips the
+            # whole phase when it is False. THE COST: the fused MoE and fp4
+            # GEMMs run FlashInfer's heuristic tactic instead of a measured one,
+            # so decode is slower than the 26.6 tok/s of the one launch that got
+            # through autotune. A launch that finishes beats a faster one that
+            # does not.
+            "--no-enable-flashinfer-autotune",
+            # And a floor under the collectives either way, because warmup is
+            # long here with or without autotune. The CPU (gloo) group is what
+            # world.barrier() and any per-profile sync use, and PyTorch's default
+            # for it is 1800 s -- under the 48 min worst warmup measured on this
+            # pair. The device (NCCL) group gets the same floor, where the default
+            # is lower still. The tradeoff is accepted knowingly: a genuine hang
+            # now takes 90 min to declare, which is the right trade for a launch
+            # that was being declared dead while it was still working.
+            "--cpu-distributed-timeout-seconds", "5400",
+            "--distributed-timeout-seconds", "5400",
         ],
+        # A stock vllm/vllm-openai image needs no PATH or HF_HOME surgery, but its
+        # compiled-kernel caches default to $HOME INSIDE the container and die
+        # with it, so every launch re-JITs and re-tunes from cold on every rank --
+        # the condition that makes the ranks drift apart (#134). Park them in the
+        # one directory AINode mounts on every node, same as the DeepSeek recipe,
+        # so they persist per node and the head's copy can be shipped to a peer
+        # before it launches (nvidia.py::_ensure_peer_has_jit_cache).
+        extra_env={
+            "VLLM_CACHE_ROOT": _DSPARK_JIT_ROOT,
+            "FLASHINFER_WORKSPACE_BASE": f"{_DSPARK_JIT_ROOT}/flashinfer",
+            "TORCHINDUCTOR_CACHE_DIR": f"{_DSPARK_JIT_ROOT}/torchinductor",
+            "TRITON_CACHE_DIR": f"{_DSPARK_JIT_ROOT}/triton",
+            "TORCH_EXTENSIONS_DIR": f"{_DSPARK_JIT_ROOT}/torch_extensions",
+        },
     ),
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and

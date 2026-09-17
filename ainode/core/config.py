@@ -139,8 +139,14 @@ class NodeConfig:
     # engine_bind_ceiling_seconds: absolute cap on one bind wait, so an engine
     # that is wedged but still chatty cannot hold boot open forever. Generous on
     # purpose: the slowest bind measured on a GB10 (27B NVFP4, autotune + graph
-    # capture) was about 12 minutes.
-    engine_bind_ceiling_seconds: int = 1800
+    # capture) was about 12 minutes, and a multi-node mp launch is far slower
+    # still -- Qwen3.8-Flash-Next on the Spark pair took 36 minutes to ready on
+    # the one launch that survived, with 48 minutes spent in kernel warmup on the
+    # ones that did not (#134). At 1800 the ceiling was killing a launch that was
+    # still making progress, which is the failure this knob exists to avoid. This
+    # is the last resort, not the working limit: an engine doing no work at all is
+    # already dead in five minutes by the knob above.
+    engine_bind_ceiling_seconds: int = 3600
 
     # Cluster
     cluster_enabled: bool = True
