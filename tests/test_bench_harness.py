@@ -1043,7 +1043,7 @@ def test_opencode_isolates_its_state_per_run(tmp_path):
     assert all(v.startswith(str(tmp_path / "s")) for v in env.values())
     # OPENCODE_CONFIG_DIR overrides the XDG search, so the overlay has to name it
     # too or an exported one (Orca sets one) puts somebody's plugins in the run.
-    assert env["OPENCODE_CONFIG_DIR"] == str(env["XDG_CONFIG_HOME"] + "/opencode")
+    assert env["OPENCODE_CONFIG_DIR"] == str(pathlib.Path(env["XDG_CONFIG_HOME"]) / "opencode")
 
 
 def test_opencode_runs_in_the_task_directory_not_the_callers(tmp_path):
