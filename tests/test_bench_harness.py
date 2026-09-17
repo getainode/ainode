@@ -270,10 +270,14 @@ def test_pi_only_moves_home_when_the_config_was_redirected(tmp_path, monkeypatch
 
 def test_opencode_command_and_project_config(tmp_path):
     req = _request(tmp_path)
-    # --auto because there is no TTY to approve the write, and --format json because
-    # without it two verified runs produced no output at all until the timeout.
+    # --dir because opencode otherwise takes the project directory from the
+    # inherited PWD rather than its cwd (#118), --auto because there is no TTY to
+    # approve the write, and --format json because without it two verified runs
+    # produced no output at all until the timeout.
     assert OpencodeAdapter().command(req) == [
-        "opencode", "run", "--pure", "--auto", "--format", "json",
+        "opencode", "run", "--dir", str(req.workdir),
+        "--print-logs", "--log-level", "ERROR",
+        "--pure", "--auto", "--format", "json",
         "-m", f"{PROVIDER}/{MODEL}", req.prompt,
     ]
     assert OpencodeAdapter().needs_git is True
@@ -1034,5 +1038,46 @@ def test_opencode_isolates_its_state_per_run(tmp_path):
     req = HarnessRequest(workdir=tmp_path / "w", scratch=tmp_path / "s", prompt="p", entry="x.py",
                          endpoint="http://e/v1", model="m")
     env = OpencodeAdapter().env(req)
-    assert set(env) == {"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
+    assert set(env) == {"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+                        "XDG_STATE_HOME", "OPENCODE_CONFIG_DIR"}
     assert all(v.startswith(str(tmp_path / "s")) for v in env.values())
+    # OPENCODE_CONFIG_DIR overrides the XDG search, so the overlay has to name it
+    # too or an exported one (Orca sets one) puts somebody's plugins in the run.
+    assert env["OPENCODE_CONFIG_DIR"] == str(pathlib.Path(env["XDG_CONFIG_HOME"]) / "opencode")
+
+
+def test_opencode_runs_in_the_task_directory_not_the_callers(tmp_path):
+    """#118: the project directory is stated, not inferred from the environment.
+
+    OpenCode resolved it from the inherited PWD, which is the directory the bench
+    was started from, and then could not see the run's own provider config.
+    """
+    from ainode.bench.harness.adapters.opencode import OpencodeAdapter
+    from ainode.bench.harness.adapters import HarnessRequest
+    req = HarnessRequest(workdir=tmp_path / "w", scratch=tmp_path / "s", prompt="p",
+                         entry="x.py", endpoint="http://e/v1", model="m")
+    command = OpencodeAdapter().command(req)
+    assert command[command.index("--dir") + 1] == str(req.workdir)
+    # And the config it has to find is in exactly that directory.
+    assert OpencodeAdapter().config(req)[0].path == req.workdir / "opencode.json"
+
+
+def test_launch_points_pwd_at_the_working_directory(tmp_path):
+    """A subprocess launched with cwd= still inherits the caller's PWD (#118)."""
+    import os as _os
+    import sys as _sys
+    from ainode.bench.harness.adapters import _launch
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    env = dict(_os.environ)
+    env["PWD"] = str(tmp_path / "somewhere-else")
+    env["OLDPWD"] = str(tmp_path / "older-still")
+    script = ("import os; print(os.environ.get('PWD')); "
+              "print(os.environ.get('OLDPWD', '<unset>')); print(os.getcwd())")
+    proc = _launch([_sys.executable, "-c", script], cwd=str(workdir), env=env, timeout=30)
+    pwd, oldpwd, cwd = proc.stdout.strip().splitlines()
+    assert pwd == str(workdir)
+    assert oldpwd == "<unset>"
+    assert cwd == str(workdir.resolve())
+    # The caller's own environment is not edited on the way through.
+    assert env["PWD"] == str(tmp_path / "somewhere-else")
