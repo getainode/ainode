@@ -1081,3 +1081,276 @@ def test_launch_points_pwd_at_the_working_directory(tmp_path):
     assert cwd == str(workdir.resolve())
     # The caller's own environment is not edited on the way through.
     assert env["PWD"] == str(tmp_path / "somewhere-else")
+
+
+# ---------------------------------------------------------------- placement resolution
+
+def test_resolve_serving_node_peer_model(tmp_path, monkeypatch):
+    """A model served on a peer resolves to the peer's web base and engine port."""
+    from ainode.bench import fleet as fleet_mod
+
+    master_base = "http://spark-master:3000"
+    fake_server_status = {
+        "loaded_models": [
+            {"id": MODEL, "node_hostname": "Spark-2", "node_id": "node-2",
+             "port": 8001, "ready": True, "type": "llm"},
+            {"id": "other-model", "node_hostname": "Spark-1", "node_id": "node-1",
+             "port": 8000, "ready": True, "type": "llm"},
+        ]
+    }
+    fake_master_status = {
+        "node_id": "node-1", "node_name": "Spark-1", "version": "0.7.0",
+        "model": "other-model",
+    }
+
+    calls = []
+
+    def fake_get_json(url, **kw):
+        calls.append(url)
+        if "/api/server/status" in url:
+            return fake_server_status
+        if "/api/status" in url and "spark-master" in url:
+            return fake_master_status
+        return {"_error": "unexpected call"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == "Spark-2"
+    assert engine_port == 8001
+    assert warn == ""
+
+
+def test_resolve_serving_node_master_model(tmp_path, monkeypatch):
+    """A model served on the master resolves to the same base."""
+    from ainode.bench import fleet as fleet_mod
+
+    master_base = "http://spark-master:3000"
+    fake_server_status = {
+        "loaded_models": [
+            {"id": MODEL, "node_hostname": "Spark-1", "node_id": "node-1",
+             "port": 8000, "ready": True, "type": "llm"},
+        ]
+    }
+    fake_master_status = {
+        "node_id": "node-1", "node_name": "Spark-1", "version": "0.7.0",
+        "model": MODEL,
+    }
+
+    def fake_get_json(url, **kw):
+        if "/api/server/status" in url:
+            return fake_server_status
+        if "/api/status" in url:
+            return fake_master_status
+        return {"_error": "unexpected call"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == "Spark-1"
+    assert engine_port == 8000
+    assert warn == ""
+
+
+def test_resolve_serving_node_unloaded_model(tmp_path, monkeypatch):
+    """An unloaded model returns the master base with no error."""
+    from ainode.bench import fleet as fleet_mod
+
+    master_base = "http://spark-master:3000"
+    fake_server_status = {"loaded_models": []}
+
+    def fake_get_json(url, **kw):
+        if "/api/server/status" in url:
+            return fake_server_status
+        return {"_error": "unexpected call"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == ""
+    assert engine_port is None
+    assert warn == ""
+
+
+def test_resolve_serving_node_master_unreachable(tmp_path, monkeypatch):
+    """When the master cannot be reached, returns the master base with a warning."""
+    from ainode.bench import fleet as fleet_mod
+
+    master_base = "http://spark-master:3000"
+
+    def fake_get_json(url, **kw):
+        return {"_error": "Timeout"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    node_name, engine_port, gpu_name, warn = fleet_mod.resolve_serving_node(master_base, MODEL)
+    assert node_name == ""
+    assert engine_port is None
+    assert "unreadable" in warn
+
+
+def test_harness_placement_shows_peer_node(tmp_path, monkeypatch, capsys):
+    """A model served on a peer yields placement.node equal to the peer's
+    hostname and the peer's engine port in the placement dict."""
+    import json
+    import shutil
+
+    from ainode.bench import fleet as fleet_mod
+    from ainode.bench.harness import cli as cli_mod
+
+    monkeypatch.setattr(shutil, "which", lambda *_a, **_k: sys.executable)
+
+    master_base = "http://spark-master:3000"
+
+    peer_loaded_model = {
+        "id": MODEL, "node_hostname": "Spark-2", "node_id": "node-2",
+        "port": 8001, "ready": True, "type": "llm", "parallel": 1,
+    }
+
+    def fake_get_json(url, **kw):
+        u = url.rstrip("/")
+        if u.endswith("/api/server/status"):
+            return {"loaded_models": [peer_loaded_model]}
+        if u.endswith("/api/status"):
+            if "Spark-2" in u:
+                return {"node_id": "node-2", "node_name": "Spark-2",
+                        "version": "0.7.0", "gpu": {"name": "NVIDIA GB10"},
+                        "model": MODEL}
+            return {"node_id": "node-1", "node_name": "Spark-1",
+                    "version": "0.7.0"}
+        if u.endswith("/v1/models"):
+            return {"data": [{"id": MODEL, "max_model_len": 131072}]}
+        if u.endswith("/api/config"):
+            return {"model": MODEL, "engine_image": "vllm/vllm-openai:v0.27.1"}
+        if u.endswith("/api/models"):
+            return {"models": [{"id": MODEL, "hf_repo": MODEL}]}
+        return {"_error": f"unexpected URL: {u}"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    seen = {}
+
+    def fake_suite(tasks, adapters, endpoint, model, **kwargs):
+        seen.update(kwargs)
+        return [_harness_result(a, kwargs.get("claude_effort")) for a in adapters]
+
+    monkeypatch.setattr(cli_mod, "run_suite", fake_suite)
+
+    # mock the endpoint so ainode_base resolves it
+    endpoint = f"{master_base}/v1"
+    code = harness_main(["--endpoint", endpoint, "--model", MODEL,
+                         "--label", "peer-test", "--harness", "aider",
+                         "--only-tasks", "two-fer", "--no-metrics"],
+                        out_dir=tmp_path / "results")
+    assert code == 0
+
+    written = list((tmp_path / "results").glob("*-harness.json"))
+    assert len(written) == 1
+    record = json.loads(written[0].read_text())
+
+    assert record["placement"]["node"] == "Spark-2", \
+        f"expected peer hostname, got {record['placement']['node']}"
+    assert record["placement"].get("port") == 8001, \
+        f"expected peer engine port, got {record['placement'].get('port')}"
+
+
+def test_harness_placement_shows_master_node_when_model_is_local(tmp_path, monkeypatch,
+                                                                capsys):
+    """A model served on the master keeps today's result."""
+    import json
+    import shutil
+
+    from ainode.bench import fleet as fleet_mod
+    from ainode.bench.harness import cli as cli_mod
+
+    monkeypatch.setattr(shutil, "which", lambda *_a, **_k: sys.executable)
+
+    master_base = "http://spark-master:3000"
+
+    def fake_get_json(url, **kw):
+        u = url.rstrip("/")
+        if u.endswith("/api/server/status"):
+            return {
+                "loaded_models": [
+                    {"id": MODEL, "node_hostname": "Spark-1", "node_id": "node-1",
+                     "port": 8000, "ready": True, "type": "llm", "parallel": 1},
+                ]
+            }
+        if u.endswith("/api/status"):
+            return {"node_id": "node-1", "node_name": "Spark-1",
+                    "version": "0.7.0", "gpu": {"name": "NVIDIA GB10"},
+                    "model": MODEL}
+        if u.endswith("/v1/models"):
+            return {"data": [{"id": MODEL, "max_model_len": 131072}]}
+        if u.endswith("/api/config"):
+            return {"model": MODEL, "engine_image": "vllm/vllm-openai:v0.27.1"}
+        if u.endswith("/api/models"):
+            return {"models": [{"id": MODEL, "hf_repo": MODEL}]}
+        return {"_error": f"unexpected URL: {u}"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    def fake_suite(tasks, adapters, endpoint, model, **kwargs):
+        return [_harness_result(a, kwargs.get("claude_effort")) for a in adapters]
+
+    monkeypatch.setattr(cli_mod, "run_suite", fake_suite)
+
+    endpoint = f"{master_base}/v1"
+    code = harness_main(["--endpoint", endpoint, "--model", MODEL,
+                         "--label", "local-test", "--harness", "aider",
+                         "--only-tasks", "two-fer", "--no-metrics"],
+                        out_dir=tmp_path / "results")
+    assert code == 0
+
+    written = list((tmp_path / "results").glob("*-harness.json"))
+    assert len(written) == 1
+    record = json.loads(written[0].read_text())
+
+    assert record["placement"]["node"] == "Spark-1"
+    assert record["placement"].get("port") == 8000
+
+
+def test_harness_placement_shows_warning_for_unloaded_model(tmp_path, monkeypatch,
+                                                           capsys):
+    """An unloaded model produces the existing clear error from describe_via_http."""
+    import shutil
+
+    from ainode.bench import fleet as fleet_mod
+    from ainode.bench.harness import cli as cli_mod
+
+    monkeypatch.setattr(shutil, "which", lambda *_a, **_k: sys.executable)
+
+    master_base = "http://spark-master:3000"
+
+    def fake_get_json(url, **kw):
+        u = url.rstrip("/")
+        if u.endswith("/api/server/status"):
+            return {"loaded_models": []}
+        if u.endswith("/api/status"):
+            return {"node_id": "node-1", "node_name": "Spark-1",
+                    "version": "0.7.0"}
+        if u.endswith("/api/config"):
+            return {"model": "some-other-model"}
+        if u.endswith("/api/models"):
+            return {"models": []}
+        if u.endswith("/v1/models"):
+            return {"data": []}
+        return {"_error": f"unexpected URL: {u}"}
+
+    monkeypatch.setattr(fleet_mod, "get_json", fake_get_json)
+
+    def fake_suite(tasks, adapters, endpoint, model, **kwargs):
+        return [_harness_result(a, kwargs.get("claude_effort")) for a in adapters]
+
+    monkeypatch.setattr(cli_mod, "run_suite", fake_suite)
+
+    endpoint = f"{master_base}/v1"
+    code = harness_main(["--endpoint", endpoint, "--model", MODEL,
+                         "--label", "unloaded-test", "--harness", "aider",
+                         "--only-tasks", "two-fer", "--no-metrics"],
+                        out_dir=tmp_path / "results")
+    assert code == 0
+
+    printed = capsys.readouterr().out
+    # The warning about the model not being served
+    assert "does not report serving" in printed or "unreadable" in printed

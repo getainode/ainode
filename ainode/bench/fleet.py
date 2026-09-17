@@ -122,6 +122,42 @@ def _apply_live_config(pl: dict, cfg: dict) -> None:
         pl["extra_env"] = dict(cfg["extra_env"])
 
 
+# ---------------------------------------------------------------- serving-node resolution (CLI)
+
+def resolve_serving_node(base_url: str, model: str):
+    """Which node serves ``model``, from the master's fleet view.
+
+    Reads ``/api/server/status`` on the master to find the node that hosts the
+    loaded model. Returns ``(node_name, engine_port, gpu_name, warn)``.
+    ``node_name`` is "" when the model is not loaded anywhere; ``warn``
+    explains an unreadable master. The caller keeps describing the fleet
+    through the master: a peer's own web port is only reachable over the
+    cluster fabric, which the bench CLI usually is not on, so the record's
+    placement is corrected by name rather than by re-addressing the request.
+    """
+    base = base_url.rstrip("/")
+    ss = get_json(f"{base}/api/server/status")
+    if ss.get("_error"):
+        return "", None, "", f"master /api/server/status unreadable: {ss['_error']}"
+    node_name = ""
+    engine_port = None
+    for m in (ss.get("loaded_models") or []):
+        if m.get("id") == model:
+            node_name = m.get("node_hostname") or ""
+            engine_port = m.get("port") or 8000
+            break
+    if not node_name:
+        return "", None, "", ""
+    gpu_name = ""
+    nodes = get_json(f"{base}/api/nodes")
+    if not nodes.get("_error"):
+        for n in (nodes.get("nodes") if isinstance(nodes, dict) else nodes) or []:
+            if n.get("node_name") == node_name:
+                gpu_name = n.get("gpu_name") or ""
+                break
+    return node_name, engine_port, gpu_name, ""
+
+
 # ---------------------------------------------------------------- HTTP describe (CLI)
 
 def describe_via_http(ainode, engine_url, model):

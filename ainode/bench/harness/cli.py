@@ -232,10 +232,22 @@ def main(argv=None, out_dir=None) -> int:
                 "--harness; run with --dry-run to see what would have been called")
 
     base = ainode_base(args.endpoint, args.ainode)
-    from ainode.bench.fleet import describe_via_http
+    from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base, args.model)
     model_block, placement, _node_id, warnings = describe_via_http(base, base, args.model)
-    print(f"  node    : {placement.get('node', 'unknown')}  {placement.get('gpu', '')}  "
+    if node_name:
+        # The fleet view names the serving node; the master's own description
+        # would otherwise stamp the master as the placement.
+        placement["node"] = node_name
+        placement["port"] = engine_port
+        if gpu_name:
+            placement["gpu"] = gpu_name
+    if resolve_warn:
+        warnings = [resolve_warn] + list(warnings)
+    print(f"  node    : {placement.get('node', 'unknown')}  "
+          f"engine :{placement.get('port', '?')}  "
+          f"{placement.get('gpu', '')}  "
           f"tp={placement.get('tp', '?')}  ainode {placement.get('ainode', '?')}")
     for warning in warnings:
         print(f"  warn    : {warning}")
