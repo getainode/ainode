@@ -512,7 +512,7 @@ async def test_a_silent_engine_says_silent_and_still_reports_the_life(
                             engine_bind_ceiling_seconds=30)},
             8001, engine.start, "replay b/two", backend=engine)
 
-    assert "never bound on :8001 after 205s (log silent for" in caplog.text
+    assert "never bound on :8001 after 205s (no engine activity or log for" in caplog.text
 
 
 @pytest.mark.asyncio

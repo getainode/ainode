@@ -122,15 +122,20 @@ class NodeConfig:
     # the engine is visibly making progress and gives up only on evidence of
     # death.
     #
-    # engine_bind_log_silence_seconds: how long the engine's log may go quiet
-    # while still counting as alive. vLLM prints its weight-loading progress bar
-    # once per shard: a two-shard checkpoint on a GB10 was quiet for 206 s
-    # between updates (Qwen3.8 27B NVFP4, 2026-09-16), and Nemotron 3.5 on the
-    # GX10 was quiet for 363 s inside FlashInfer autotune and graph capture the
-    # same day, so anything under about ten minutes declares a healthy load
-    # dead. A wedged engine prints nothing at all. Past this gap (container still up, port still closed) the replay
-    # calls the start dead and relaunches once.
-    engine_bind_log_silence_seconds: int = 900
+    # engine_bind_log_silence_seconds: how long the engine may show NO SIGN OF
+    # WORK while still counting as alive. Two signals feed it and either one
+    # resets the clock (#112): the engine container's CPU time advancing
+    # (EngineBackend.activity_mark, the primary signal) and a new log line
+    # (secondary). The log alone was never enough -- vLLM prints nothing through
+    # weight load, torch.compile and FlashInfer autotune, measured quiet for
+    # 206 s (Qwen3.8 27B NVFP4), 363 s (Nemotron 3.5) and once 48 minutes
+    # (autotune), which is what pushed this knob from 120 to 900 s while those
+    # engines were healthy and busy the whole time. A wedged engine does no work
+    # at all, so with activity watched the budget is back to five minutes. Past
+    # this gap (container still up, port still closed, nothing happening) the
+    # replay calls the start dead and relaunches once. The name is kept for
+    # config compatibility.
+    engine_bind_log_silence_seconds: int = 300
     # engine_bind_ceiling_seconds: absolute cap on one bind wait, so an engine
     # that is wedged but still chatty cannot hold boot open forever. Generous on
     # purpose: the slowest bind measured on a GB10 (27B NVFP4, autotune + graph

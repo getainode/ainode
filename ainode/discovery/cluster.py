@@ -40,6 +40,12 @@ class ClusterNode:
     gpu_temp: float = 0.0
     fabric_ip: str = ""  # this node's cluster-fabric IP (BUG D: launch over fabric, not mgmt)
     instances: list = field(default_factory=list)  # Phase 2: distributed instances this node heads
+    # The node's OWN word on its engine, straight from the announcement:
+    # "serving" | "starting" | "stopped" | "member-ready". ``status`` above is
+    # heartbeat health (online/stale/offline) and says nothing about the engine,
+    # which is how /api/nodes came to report engine_ready for a node whose engine
+    # was still loading (#112). Empty for a record built without one.
+    engine_status: str = ""
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -68,6 +74,7 @@ class ClusterNode:
             gpu_temp=getattr(a, "gpu_temp", 0.0),
             fabric_ip=getattr(a, "fabric_ip", "") or "",
             instances=list(getattr(a, "instances", []) or []),
+            engine_status=getattr(a, "status", "") or "",
         )
 
     @classmethod
@@ -95,6 +102,7 @@ class ClusterNode:
             gpu_temp=getattr(announcement, "gpu_temp", 0.0),
             fabric_ip=getattr(announcement, "fabric_ip", "") or "",
             instances=list(getattr(announcement, "instances", []) or []),
+            engine_status=getattr(announcement, "status", "") or "",
         )
 
 

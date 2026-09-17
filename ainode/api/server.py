@@ -430,6 +430,32 @@ async def _engine_serving(backend, loop) -> bool:
         return False
 
 
+async def _engine_port_serving(app, port: int) -> bool:
+    """True iff ``localhost:<port>/v1/models`` answers 200 with a model right now.
+
+    The readiness question ``engine_ready`` claims to answer, asked the cheap way:
+    one localhost GET on the endpoint dashboards and clients actually use. Not
+    ``_engine_serving``, which goes through ``health_check`` and shells out to
+    ``docker inspect`` -- too expensive for the hottest polled endpoint -- and
+    not the engine's latched ``ready`` flag, which reads True before a model is
+    serving and never flips back when one dies.
+    """
+    session: Optional[aiohttp.ClientSession] = app.get("client_session")
+    if session is None:
+        # No HTTP session (a bare app, or shutdown): the managed engine's own
+        # health check is the next best answer.
+        return await _engine_serving(app.get("engine"), asyncio.get_event_loop())
+    try:
+        url = f"http://localhost:{port}/v1/models"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+            if resp.status != 200:
+                return False
+            data = await resp.json()
+            return len(data.get("data", [])) > 0
+    except Exception:
+        return False
+
+
 async def _live_instance_records(manager, loop) -> list:
     """Probe every managed instance; return the records whose engine answers.
 
@@ -704,9 +730,17 @@ async def handle_status(request: web.Request) -> web.Response:
     })
 
 async def handle_nodes(request: web.Request) -> web.Response:
-    """Return the list of known cluster nodes."""
+    """Return the list of known cluster nodes.
+
+    ``engine_ready`` on each row means what it says: that node's engine answers
+    ``/v1/models`` right now. It used to be derived from ``status``, which is
+    HEARTBEAT health (online/stale/offline) and true of any node whose
+    orchestrator is up -- so a node whose engine was still loading weights was
+    published as engine_ready with an empty ``loaded_models`` (#112). The local
+    node answers from a live localhost probe; a peer answers from the engine
+    state it broadcasts, which its own sync loop sets from the same probe.
+    """
     config: NodeConfig = request.app["config"]
-    engine = request.app["engine"]
     cluster: ClusterState = request.app["cluster_state"]
 
     cluster_nodes = cluster.get_nodes(include_offline=False)
@@ -717,11 +751,16 @@ async def handle_nodes(request: web.Request) -> web.Response:
         for n in cluster_nodes:
             status_str = n.status.value if hasattr(n.status, "value") else str(n.status)
             dmode = getattr(n, "distributed_mode", "solo") or "solo"
-            # Members are "ready for work" once discovered, even though they
-            # don't run a local vLLM.
-            ready = status_str in ("online", "serving") or (
-                dmode == "member" and status_str in ("online", "member-ready")
-            )
+            # Members run no local vLLM, so there is no engine port to answer:
+            # they are "ready for work" once discovered.
+            if dmode == "member":
+                ready = True
+            elif n.node_id == local_id:
+                # Our own engine is one localhost probe away, so never answer
+                # from anything latched or announced.
+                ready = await _engine_port_serving(request.app, n.api_port)
+            else:
+                ready = (getattr(n, "engine_status", "") or "").lower() == "serving"
             # Live GPU telemetry: peers come from their broadcast; the local
             # node's ClusterNode is built once at startup, so read it fresh
             # from our own collector here. (metrics fan-out)
@@ -778,11 +817,11 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 ],
             })
     else:
-        # Fallback: return this node
-        engine_ready = False
-        if engine is not None:
-            engine_ready = getattr(engine, "ready", False)
+        # Fallback: return this node. Same rule as above -- a live probe, not the
+        # `ready` latch, which never flips back False when an engine dies and
+        # reads True before one is serving.
         dmode = getattr(config, "distributed_mode", "solo") or "solo"
+        engine_ready = await _engine_port_serving(request.app, config.api_port)
         nodes_list = [{
             "node_id": config.node_id,
             "node_name": config.node_name,
