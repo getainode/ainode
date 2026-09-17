@@ -545,6 +545,120 @@ class NvidiaBackend(EngineBackend):
             return self._launched_at is not None
         return None
 
+    # Activity-probe tuning + state. Class-level defaults so the probe owns all
+    # of its own state (an instance gets its own on first probe).
+    #
+    # _ACTIVITY_CACHE_SECONDS sits just under the bind wait's 3 s poll, so one
+    # poll costs one probe and a caller that asks twice pays once.
+    _ACTIVITY_CACHE_SECONDS = 2.5
+    # A container doing nothing still burns a fraction of a percent. vLLM
+    # loading weights, compiling or autotuning burns a whole core or more.
+    _ACTIVITY_CPU_PERCENT = 5.0
+    _activity_at: Optional[float] = None        # last epoch we saw work happen
+    _activity_probed_at: Optional[float] = None  # monotonic of the last probe
+    _activity_cpu_usage: Optional[float] = None  # last cumulative CPU seconds
+    _activity_cpu_stat: Optional[str] = None     # cgroup cpu.stat path, "" if none
+
+    def activity_mark(self) -> Optional[float]:
+        """See ``EngineBackend.activity_mark``: read from the CONTAINER, not the log.
+
+        Two ways to ask, in order of preference:
+
+        1. **Cumulative CPU time from the container's cgroup**, when this
+           process can see it (``cpu.stat``'s ``usage_usec`` under cgroup v2,
+           ``cpuacct.usage`` under v1). Exact, free, and monotonic: any advance
+           at all is work. Visible when AINode runs on the host; inside the
+           AINode container the cgroup namespace usually hides a sibling's
+           tree, which is what case 2 is for.
+        2. **``docker stats --no-stream``**, which works anywhere the backend
+           can already launch containers (it speaks to the same docker socket).
+           It costs about a second because the daemon samples, hence the cache.
+
+        GPU utilization is deliberately NOT part of this. The pynvml path we
+        have (``ainode/metrics/collector.py``) reads device 0 as a whole, so it
+        cannot say WHICH engine is busy -- a stacked neighbour would vouch for a
+        wedged engine -- and the phases this probe exists for (weight load,
+        graph capture, a profiling forward pass) are exactly when the GPU reads
+        0%. Per-process accounting would change that; whole-device does not.
+        """
+        now = time.monotonic()
+        if (self._activity_probed_at is not None
+                and (now - self._activity_probed_at) < self._ACTIVITY_CACHE_SECONDS):
+            return self._activity_at
+        self._activity_probed_at = now
+        name = self._engine_container_name()
+
+        busy: Optional[bool] = None
+        # 1. cgroup: resolve the path once per backend ("" once ruled out).
+        if self._activity_cpu_stat is None:
+            cid = ""
+            try:
+                out = subprocess.run(["docker", "inspect", "-f", "{{.Id}}", name],
+                                     capture_output=True, text=True, timeout=10)
+                if out.returncode == 0:
+                    cid = out.stdout.strip()
+            except Exception:
+                cid = ""
+            self._activity_cpu_stat = ""
+            if _CONTAINER_ID_RE.match(cid):
+                for candidate in (
+                    Path(f"/sys/fs/cgroup/system.slice/docker-{cid}.scope/cpu.stat"),
+                    Path(f"/sys/fs/cgroup/docker/{cid}/cpu.stat"),
+                    Path(f"/sys/fs/cgroup/cpuacct/docker/{cid}/cpuacct.usage"),
+                ):
+                    if candidate.exists():
+                        self._activity_cpu_stat = str(candidate)
+                        break
+        if self._activity_cpu_stat:
+            usage: Optional[float] = None
+            try:
+                text = Path(self._activity_cpu_stat).read_text()
+                if self._activity_cpu_stat.endswith("cpuacct.usage"):
+                    usage = float(text.strip()) / 1e9          # nanoseconds
+                else:
+                    for line in text.splitlines():
+                        if line.startswith("usage_usec"):
+                            usage = float(line.split()[1]) / 1e6  # microseconds
+                            break
+            except Exception:
+                usage = None
+            if usage is not None:
+                previous = self._activity_cpu_usage
+                self._activity_cpu_usage = usage
+                # Any forward motion is work; a rerun of the same number is not.
+                busy = previous is not None and usage > previous
+            else:
+                # The path went away: a relaunch replaced the container, so the
+                # id in it is stale. Re-resolve on the next probe and answer from
+                # docker stats meanwhile.
+                self._activity_cpu_stat = None
+                self._activity_cpu_usage = None
+
+        # 2. docker stats: a percentage, sampled by the daemon.
+        if busy is None:
+            try:
+                out = subprocess.run(
+                    ["docker", "stats", "--no-stream", "--format", "{{.CPUPerc}}", name],
+                    capture_output=True, text=True, timeout=30,
+                )
+                rows = [r.strip() for r in (out.stdout or "").splitlines() if r.strip()]
+                if out.returncode == 0 and rows:
+                    percent = float(rows[0].rstrip("%").replace(",", "."))
+                    busy = percent >= self._ACTIVITY_CPU_PERCENT
+            except Exception:
+                busy = None
+
+        if busy is None:
+            # Nothing learned this poll (no docker, container gone, junk output).
+            # Report what we last knew rather than inventing silence: the wait's
+            # container-exited check is what decides death.
+            return self._activity_at
+        if busy or self._activity_at is None:
+            # The first successful probe stamps the clock even when idle: it says
+            # "this is where watching started", not "this engine is working".
+            self._activity_at = time.time()
+        return self._activity_at
+
     def health_check(self) -> dict:
         """Mirrors EugrBackend.health_check for dashboard parity."""
         result = {

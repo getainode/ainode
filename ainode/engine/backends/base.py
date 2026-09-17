@@ -137,3 +137,27 @@ class EngineBackend(abc.ABC):
         measures itself, as it always did.
         """
         return None
+
+    def activity_mark(self) -> Optional[float]:
+        """Epoch seconds when this engine last showed ACTIVITY, or None.
+
+        The primary liveness signal for the bind wait, because the log is a
+        weak one: vLLM prints nothing at all through weight load, torch.compile
+        and FlashInfer autotune, so three healthy engines in two days were
+        declared silent (206 s, 363 s and a 48-minute autotune, #112) and the
+        silence budget had to grow to keep up. Work the engine is doing, on the
+        other hand, is visible the whole time.
+
+        Read it from the ENGINE's own container (its CPU time), never from the
+        log and never from a whole-host or whole-GPU reading: the value must be
+        attributable to THIS engine, for the same reason ``last_log_activity``
+        is per-instance (stacked engines on one node would otherwise vouch for
+        each other).
+
+        The returned stamp advances only when activity was observed; a repeated
+        value means "still quiet". Returns None when the backend cannot see its
+        engine's activity, and the wait then falls back to the log alone.
+        Callers run this off the event loop thread: an implementation may shell
+        out, and should cache its answer so one poll costs one probe.
+        """
+        return None

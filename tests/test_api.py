@@ -75,8 +75,9 @@ async def test_nodes(client):
     assert node["node_id"] == "test-node-1"
     assert node["node_name"] == "TestNode"
     assert node["model"] == "test-model"
-    # Local node appears as ONLINE in ClusterState, so engine_ready derives from status
-    assert "engine_ready" in node
+    # engine_ready is the engine's own readiness, not the node's heartbeat (#112):
+    # nothing is serving on this fixture's api_port.
+    assert node["engine_ready"] is False
 
 
 # ---- / (index) -------------------------------------------------------------
@@ -422,3 +423,176 @@ def test_request_ceiling_never_collapses_to_zero():
 def test_app_is_actually_wired_to_the_ceiling(app):
     # Uses the existing fixture app rather than constructing another one.
     assert app._client_max_size == _client_max_bytes(app["config"])
+
+
+# ---- /api/nodes: engine_ready means the engine ANSWERS (#112) ---------------
+#
+# `engine_ready` used to be derived from `status`, which is heartbeat health
+# (online/stale/offline) and true of every node whose orchestrator is up. So
+# Spark-4 was published as engine_ready while its engine was still loading and
+# its loaded_models was empty (2026-09-16). The field now means what it says.
+
+import time  # noqa: E402
+
+from ainode.discovery.broadcast import (  # noqa: E402
+    DiscoveredNode,
+    NodeAnnouncement,
+    NodeStatus,
+)
+from ainode.discovery.cluster import ClusterNode  # noqa: E402
+
+
+def _peer(node_id, engine_status, dmode="solo", model="peer-model"):
+    return ClusterNode(
+        node_id=node_id, node_name=node_id, gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model=model, status=NodeStatus.ONLINE,
+        api_port=8000, web_port=3000, last_seen=time.time(),
+        distributed_mode=dmode, engine_status=engine_status,
+    )
+
+
+async def _row(client, node_id):
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    rows = (await resp.json())["nodes"]
+    return next(r for r in rows if r["node_id"] == node_id)
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_loading_peer_is_online_but_not_engine_ready(client, app):
+    """The #112 report: a heartbeat says the NODE is up, never that its engine
+    is serving."""
+    app["cluster_state"].add_node(_peer("spark-4", "starting"))
+
+    row = await _row(client, "spark-4")
+    assert row["status"] == "online", "the node itself is reachable"
+    assert row["engine_ready"] is False, "its engine is still loading weights"
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_serving_peer_is_engine_ready(client, app):
+    """`serving` is stamped by that node's own sync loop from a live
+    /v1/models probe, so it is the peer's answer to the same question."""
+    app["cluster_state"].add_node(_peer("spark-2", "serving"))
+
+    assert (await _row(client, "spark-2"))["engine_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_stopped_peer_is_not_engine_ready(client, app):
+    app["cluster_state"].add_node(_peer("spark-3", "stopped"))
+
+    assert (await _row(client, "spark-3"))["engine_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_peer_from_an_older_build_is_not_assumed_ready(client, app):
+    """No announced engine state is not evidence of one."""
+    app["cluster_state"].add_node(_peer("old-node", ""))
+
+    assert (await _row(client, "old-node"))["engine_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_member_has_no_engine_port_to_answer(client, app):
+    """A member runs no local vLLM: it is ready for work once discovered."""
+    app["cluster_state"].add_node(_peer("member-1", "member-ready", dmode="member"))
+
+    assert (await _row(client, "member-1"))["engine_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_nodes_the_local_row_comes_from_a_live_probe(client, app, monkeypatch):
+    """Our own engine is one localhost probe away, so nothing latched or
+    announced is trusted for it. The engine's `ready` latch is deliberately left
+    True here: it must not be what the row reports."""
+    from ainode.api import server
+
+    class _LatchedReady:
+        ready = True
+    app["engine"] = _LatchedReady()
+    probed = []
+
+    async def _serving(_app, port):
+        probed.append(port)
+        return True
+
+    monkeypatch.setattr(server, "_engine_port_serving", _serving)
+    assert (await _row(client, "test-node-1"))["engine_ready"] is True
+    assert probed == [app["config"].api_port], "the engine's own port, not 3000"
+
+    async def _not_serving(_app, port):
+        return False
+
+    monkeypatch.setattr(server, "_engine_port_serving", _not_serving)
+    assert (await _row(client, "test-node-1"))["engine_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_local_probe_asks_v1_models_and_needs_a_model():
+    """`engine_ready` is the /v1/models claim: a 200 with an empty list is an
+    engine that is up but serving nothing, which is not ready. A plain dict
+    stands in for the app -- the probe reads only the session off it.
+    """
+    from ainode.api import server
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def json(self):
+            return self._payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Session:
+        def __init__(self, resp):
+            self._resp = resp
+            self.urls = []
+
+        def get(self, url, **_kw):
+            self.urls.append(url)
+            return self._resp
+
+    port = 8123
+    served = {"client_session": _Session(_Resp(200, {"data": [{"id": "m/x"}]}))}
+    assert await server._engine_port_serving(served, port) is True
+    assert served["client_session"].urls == [f"http://localhost:{port}/v1/models"]
+
+    empty = {"client_session": _Session(_Resp(200, {"data": []}))}
+    assert await server._engine_port_serving(empty, port) is False
+
+    down = {"client_session": _Session(_Resp(503, {}))}
+    assert await server._engine_port_serving(down, port) is False
+
+    # No session at all: fall back to the managed engine's health check, and with
+    # no engine either the honest answer is False.
+    assert await server._engine_port_serving({}, port) is False
+
+
+@pytest.mark.asyncio
+async def test_nodes_engine_ready_is_false_with_no_engine_at_all(client):
+    """The fixture app has engine=None and nothing on the api port."""
+    assert (await _row(client, "test-node-1"))["engine_ready"] is False
+
+
+def test_cluster_node_carries_the_announced_engine_state():
+    """The announcement's own status ("serving"/"starting"/...) has to survive
+    into ClusterState: `from_discovered` replaces `status` with heartbeat health,
+    which is what dropped the engine's state on the floor."""
+    ann = NodeAnnouncement(
+        node_id="spark-4", node_name="spark-4", gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model="m/x", status="starting", api_port=8000,
+        web_port=3000,
+    )
+    node = ClusterNode.from_discovered(DiscoveredNode(announcement=ann))
+    assert node.status == NodeStatus.ONLINE, "fresh heartbeat"
+    assert node.engine_status == "starting", "and its engine is still loading"
+
+    local = ClusterNode.from_announcement(ann, NodeStatus.ONLINE)
+    assert local.engine_status == "starting"

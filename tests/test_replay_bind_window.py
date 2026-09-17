@@ -8,10 +8,18 @@ plus CUDA graph capture before it listens, so time-to-bind was about 12 minutes
 and 6 minutes. The fixed 300s bind window expired first, logged "never bound",
 and killed two healthy starts, doubling a 14-minute boot to 28.
 
-The wait now treats an engine as alive while its container is up and its log is
-still advancing, and relaunches only on evidence: container exited, log silent
-past the budget, or the absolute ceiling. The 0.5.5 guarantee (an engine that
-dies on the way up still gets exactly one relaunch) is unchanged.
+The wait now treats an engine as alive while its container is up and it is
+visibly doing something, and relaunches only on evidence: container exited,
+BOTH liveness signals quiet past the budget, or the absolute ceiling. The 0.5.5
+guarantee (an engine that dies on the way up still gets exactly one relaunch) is
+unchanged.
+
+The signals, since #112: the engine container's CPU time advancing
+(``EngineBackend.activity_mark``) is the PRIMARY one, and a new log line is
+secondary. Log silence alone was never evidence of a wedge -- vLLM prints
+nothing through weight load, torch.compile and FlashInfer autotune, measured at
+206 s, 363 s and once 48 minutes -- which is why the budget had grown to 900 s
+and is now back to 300 s.
 """
 
 import inspect
@@ -45,32 +53,46 @@ class _FakeProc:
 
 
 class _FakeEngine:
-    """A fake engine backend: a container that prints, a port that binds late.
+    """A fake engine backend: a container that prints and/or works, a port that
+    binds late.
 
     Exposes exactly the surface the bind wait reads: ``process`` (the attached
-    launch handle) and ``last_log_activity`` (epoch of the last line this engine
-    printed). ``tick`` stands for the passage of one bind poll: a chatty engine
-    prints a progress line, a wedged one does not.
+    launch handle), ``last_log_activity`` (epoch of the last line this engine
+    printed) and ``activity_mark()`` (epoch this engine was last seen burning
+    CPU in its container). ``tick`` stands for the passage of one bind poll: a
+    chatty engine prints a progress line, a busy one advances its CPU clock, a
+    wedged one does neither.
     """
 
-    def __init__(self, binds_after=0, chatty=True, tracks_log=True, alive=True):
+    def __init__(self, binds_after=0, chatty=True, tracks_log=True, alive=True,
+                 busy=False, tracks_activity=True):
         self.process = _FakeProc(None if alive else 1)
         self.binds_after = binds_after
         self.chatty = chatty
         self.tracks_log = tracks_log
+        self.busy = busy
+        self.tracks_activity = tracks_activity
         self.polls = 0
+        self.probes = 0
         self.polls_before_relaunch = None
         self.starts = 0
         self._activity = 1_000.0
+        self._cpu = 1_000.0
 
     @property
     def last_log_activity(self):
         return self._activity if self.tracks_log else None
 
+    def activity_mark(self):
+        self.probes += 1
+        return self._cpu if self.tracks_activity else None
+
     def tick(self):
         self.polls += 1
         if self.chatty:
             self._activity += 1.0
+        if self.busy:
+            self._cpu += 1.0
 
     def serving(self) -> bool:
         return self.polls >= self.binds_after and self.process.poll() is None
@@ -151,7 +173,7 @@ async def test_b_a_silent_engine_is_relaunched_once(monkeypatch, caplog):
 
     assert ok is False
     assert engine.starts == 1, "exactly one relaunch, then give up"
-    assert "log silent for" in caplog.text, "the log must name the cause"
+    assert "no engine activity or log for" in caplog.text, "the log must name the cause"
     assert "never bound on :8001" in caplog.text
 
 
@@ -209,7 +231,8 @@ async def test_an_engine_with_no_progress_signal_relies_on_the_ceiling(monkeypat
     """A backend that publishes no log stamp (the legacy host-venv engine) must
     not be relaunched for saying nothing. Silence is only judged on engines that
     actually report."""
-    engine = _FakeEngine(binds_after=10**9, chatty=False, tracks_log=False)
+    engine = _FakeEngine(binds_after=10**9, chatty=False, tracks_log=False,
+                         tracks_activity=False)
     _wire_port(monkeypatch, engine)
 
     await api_routes._ensure_serving(
@@ -226,7 +249,8 @@ async def test_a_handle_that_reports_nothing_falls_back_to_the_fixed_window(monk
     """A handle with no launch process AND no log stamp gives the wait nothing to
     watch. Staying adaptive there would hold the port open for the whole ceiling
     on an engine we know nothing about, so that case takes the fixed window."""
-    engine = _FakeEngine(binds_after=10**9, chatty=False, tracks_log=False)
+    engine = _FakeEngine(binds_after=10**9, chatty=False, tracks_log=False,
+                         tracks_activity=False)
     engine.process = None
     _wire_port(monkeypatch, engine)
 
@@ -259,9 +283,13 @@ async def test_the_knobs_come_from_nodeconfig(monkeypatch):
     from ainode.core.config import NodeConfig
 
     cfg = NodeConfig()
-    assert cfg.engine_bind_log_silence_seconds == 900
+    # 300 s, not the 900 s this knob had grown to: engine activity is the primary
+    # liveness signal now, so the budget no longer has to cover a quiet autotune
+    # (#112). Anything shorter than this is still a kill switch on a real wedge
+    # check, anything longer wastes minutes of boot on a dead engine.
+    assert cfg.engine_bind_log_silence_seconds == 300
     assert cfg.engine_bind_ceiling_seconds == 1800
-    assert api_routes._bind_limits({"config": cfg}) == (900.0, 1800.0)
+    assert api_routes._bind_limits({"config": cfg}) == (300.0, 1800.0)
     # No config, or a config from before these fields existed.
     assert api_routes._bind_limits({}) == (
         api_routes._DEFAULT_BIND_LOG_SILENCE_SECONDS,
@@ -530,3 +558,334 @@ def test_solo_launch_does_not_follow_when_the_container_never_started(monkeypatc
     monkeypatch.setattr(b, "_stream_logs", lambda proc, target: None)
     assert b.start_solo() is False
     assert [c[:2] for c in calls] == [["docker", "run"]]
+
+
+# ---------------------------------------------------------------------------
+# Engine ACTIVITY is the primary liveness signal; log silence is secondary
+# (#112: three healthy engines were declared silent while loading weights,
+# compiling and autotuning, which is why the budget had grown to 900 s)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_f_a_log_quiet_but_busy_engine_is_never_declared_silent(monkeypatch):
+    """The #112 regression: vLLM says nothing for minutes inside weight load,
+    torch.compile and FlashInfer autotune. Its container's CPU is what says the
+    engine is working, so a quiet log must not spend the single retry."""
+    engine = _FakeEngine(binds_after=60, chatty=False, busy=True)
+    _wire_port(monkeypatch, engine)
+
+    ok = await api_routes._ensure_serving(
+        _app(silence=0.02, ceiling=10.0), 8000, engine.start, "replay quiet-autotune",
+        timeout=OLD_FIXED_WINDOW, backend=engine)
+
+    assert ok is True
+    assert engine.starts == 0, "a busy engine is alive however quiet its log is"
+    # 60 polls against a 0.02 budget: on the log alone the silence clock would
+    # have fired many times over. In production units this is the 48-minute
+    # autotune that the 900 s window existed to cover.
+    assert engine.polls >= 60
+
+
+@pytest.mark.asyncio
+async def test_f2_a_busy_engine_outlasts_a_silence_budget_it_would_have_broken(monkeypatch):
+    """Same case stated as the ratio that matters: the engine stays quiet for
+    many multiples of the budget and is still never declared silent."""
+    engine = _FakeEngine(binds_after=10**9, chatty=False, busy=True)
+    _wire_port(monkeypatch, engine)
+
+    ok, reason, _ = await api_routes._wait_for_bind(
+        _app(silence=0.02, ceiling=0.2), 8000, engine, timeout=300.0)
+
+    assert ok is False
+    assert "ceiling" in reason, "the ceiling stops it, never the silence budget"
+
+
+@pytest.mark.asyncio
+async def test_g_silence_is_declared_only_when_both_signals_are_quiet(monkeypatch):
+    """No log line AND no CPU: that is a wedge, and it is caught inside the
+    budget (300 s in production) instead of waiting out the 1800 s ceiling."""
+    engine = _FakeEngine(binds_after=10**9, chatty=False, busy=False)
+    _wire_port(monkeypatch, engine)
+
+    ok, reason, _ = await api_routes._wait_for_bind(
+        _app(silence=0.02, ceiling=30.0), 8000, engine, timeout=300.0)
+
+    assert ok is False
+    assert "no engine activity or log for" in reason
+    assert engine.probes > 0, "the probe has to actually be asked"
+
+
+@pytest.mark.asyncio
+async def test_g2_a_chatty_engine_with_no_probe_still_counts_as_alive(monkeypatch):
+    """Either signal resets the clock, not both: a backend whose probe cannot see
+    CPU (returns None) keeps the pre-#112 log-driven behaviour."""
+    engine = _FakeEngine(binds_after=40, chatty=True, tracks_activity=False)
+    _wire_port(monkeypatch, engine)
+
+    ok = await api_routes._ensure_serving(
+        _app(silence=0.02, ceiling=10.0), 8000, engine.start, "replay chatty-no-probe",
+        timeout=OLD_FIXED_WINDOW, backend=engine)
+
+    assert ok is True
+    assert engine.starts == 0
+
+
+@pytest.mark.asyncio
+async def test_h_an_exited_container_beats_a_busy_probe(monkeypatch, caplog):
+    """The hard death signal is unchanged and still wins immediately: a container
+    that exited is relaunched on the first poll, whatever the probe last said."""
+    engine = _FakeEngine(binds_after=10**9, chatty=False, busy=True, alive=False)
+    _wire_port(monkeypatch, engine)
+
+    with caplog.at_level(logging.WARNING, logger=api_routes.logger.name):
+        await api_routes._ensure_serving(
+            _app(silence=30.0, ceiling=0.05), 8000, engine.start, "boot primary x",
+            timeout=300.0, backend=engine)
+
+    assert engine.starts == 1
+    assert "container exited" in caplog.text
+    assert engine.polls_before_relaunch <= 2, "death is not waited out"
+
+
+@pytest.mark.asyncio
+async def test_the_probe_is_asked_about_once_per_poll(monkeypatch):
+    """It may shell out to docker, so the wait must not spin on it: one probe per
+    poll, plus the one deciding whether there is anything watchable at all."""
+    engine = _FakeEngine(binds_after=8, chatty=True, busy=True)
+    _wire_port(monkeypatch, engine)
+
+    await api_routes._wait_for_bind(
+        _app(silence=30.0, ceiling=30.0), 8000, engine, timeout=300.0)
+
+    assert engine.probes <= engine.polls + 1
+
+
+@pytest.mark.asyncio
+async def test_activity_reader_ignores_junk_and_raisers():
+    class _Junk:
+        def activity_mark(self):
+            return "busy"
+
+    class _Bool:
+        def activity_mark(self):
+            return True
+
+    class _Raiser:
+        def activity_mark(self):
+            raise OSError("docker is not there")
+
+    assert await api_routes._engine_activity_mark(_Junk()) is None
+    assert await api_routes._engine_activity_mark(_Bool()) is None
+    assert await api_routes._engine_activity_mark(_Raiser()) is None
+    assert await api_routes._engine_activity_mark(object()) is None
+    assert await api_routes._engine_activity_mark(_FakeEngine()) == 1_000.0
+
+
+def test_the_probe_call_stays_off_the_event_loop_thread():
+    """``docker stats --no-stream`` costs about a second; the bind loop runs on
+    the server's event loop during startup and must never block on it."""
+    assert inspect.iscoroutinefunction(api_routes._engine_activity_mark)
+
+
+def test_every_backend_answers_the_activity_question():
+    """Part of the EngineBackend contract, with None as the honest answer for a
+    backend that cannot see its engine's container."""
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends.base import EngineBackend
+    from ainode.engine.backends.eugr import EugrBackend
+    from ainode.engine.backends.nvidia import NvidiaBackend
+
+    assert EngineBackend.activity_mark(object()) is None
+    assert EugrBackend(NodeConfig()).activity_mark() is None  # log-only backend
+    assert callable(NvidiaBackend(NodeConfig()).activity_mark)
+
+
+# ---------------------------------------------------------------------------
+# The probe itself: read the CONTAINER, never the log
+# ---------------------------------------------------------------------------
+
+class _Clock:
+    """Stand-in for ``time`` inside the backend module.
+
+    Wall clock ticks on every read, so a stamp that advanced is distinguishable
+    from one that did not. The monotonic clock stands still, so the probe's own
+    cache is under a test's control (a test asks for "the next poll" by clearing
+    ``_activity_probed_at``) instead of under the wall clock's.
+    """
+
+    def __init__(self):
+        self.wall = 1_000.0
+        self.mono = 5_000.0
+
+    def time(self):
+        self.wall += 1.0
+        return self.wall
+
+    def monotonic(self):
+        return self.mono
+
+    def sleep(self, _seconds):
+        return None
+
+
+def _probe_backend(monkeypatch):
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends import nvidia as nv
+    monkeypatch.setattr(nv, "time", _Clock())
+    b = nv.NvidiaBackend(NodeConfig(engine_backend="nvidia", distributed_mode="solo"))
+    return nv, b
+
+
+def _fake_run(monkeypatch, nv, answers):
+    """Stub ``subprocess.run`` with one canned answer per argv shape, recording
+    calls so the cache can be asserted."""
+    calls = []
+
+    class _Out:
+        def __init__(self, stdout, rc=0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = rc
+
+    def _run(cmd, **kwargs):
+        calls.append(cmd)
+        for key, (stdout, rc) in answers.items():
+            if key in cmd:
+                return _Out(stdout, rc)
+        return _Out("", 1)
+
+    monkeypatch.setattr(nv.subprocess, "run", _run)
+    return calls
+
+
+def test_probe_reads_cpu_percent_from_docker_stats(monkeypatch):
+    """A container over the threshold is working, whatever its log says."""
+    nv, b = _probe_backend(monkeypatch)
+    b._activity_cpu_stat = ""  # no cgroup view from inside the AINode container
+    _fake_run(monkeypatch, nv, {"stats": ("  812.43%\n", 0)})
+
+    first = b.activity_mark()
+    assert first is not None
+    b._activity_probed_at = None  # the next poll
+    assert b.activity_mark() > first, "a busy container advances the mark"
+
+
+def test_probe_leaves_the_mark_alone_when_the_container_is_idle(monkeypatch):
+    """Under the threshold is not work: the mark stands still and the wait's
+    silence clock keeps running toward the verdict."""
+    nv, b = _probe_backend(monkeypatch)
+    b._activity_cpu_stat = ""
+    _fake_run(monkeypatch, nv, {"stats": ("0.04%\n", 0)})
+
+    first = b.activity_mark()   # the first probe stamps "watching started here"
+    b._activity_probed_at = None
+    assert b.activity_mark() == first
+    b._activity_probed_at = None
+    assert b.activity_mark() == first
+
+
+def test_probe_reads_cumulative_cpu_time_from_the_cgroup(monkeypatch, tmp_path):
+    """The preferred path when the cgroup tree is visible: any advance in
+    ``usage_usec`` is work, and it costs no sampling second."""
+    nv, b = _probe_backend(monkeypatch)
+    stat = tmp_path / "cpu.stat"
+    stat.write_text("usage_usec 1000000\nuser_usec 900000\nsystem_usec 100000\n")
+    b._activity_cpu_stat = str(stat)
+    calls = _fake_run(monkeypatch, nv, {})
+
+    first = b.activity_mark()
+    b._activity_probed_at = None
+    same = b.activity_mark()
+    assert same == first, "the same cumulative number is not activity"
+
+    stat.write_text("usage_usec 1400000\nuser_usec 1200000\nsystem_usec 200000\n")
+    b._activity_probed_at = None
+    assert b.activity_mark() > same, "four tenths of a CPU-second of work"
+    assert calls == [], "the cgroup path never shells out"
+
+
+def test_probe_reads_cgroup_v1_cumulative_nanoseconds(monkeypatch, tmp_path):
+    nv, b = _probe_backend(monkeypatch)
+    stat = tmp_path / "cpuacct.usage"
+    stat.write_text("12000000000\n")
+    b._activity_cpu_stat = str(stat)
+    _fake_run(monkeypatch, nv, {})
+
+    first = b.activity_mark()
+    stat.write_text("12500000000\n")
+    b._activity_probed_at = None
+    assert b.activity_mark() > first
+
+
+def test_probe_falls_back_to_docker_stats_when_no_cgroup_is_visible(monkeypatch):
+    """What actually happens inside the AINode container: the sibling engine's
+    cgroup is hidden by the cgroup namespace, so the id resolves and the paths do
+    not exist. One ``docker inspect`` for the id, then stats from then on."""
+    nv, b = _probe_backend(monkeypatch)
+    cid = "a" * 64
+    calls = _fake_run(monkeypatch, nv, {"inspect": (cid + "\n", 0),
+                                        "stats": ("99.9%\n", 0)})
+
+    assert b.activity_mark() is not None
+    assert b._activity_cpu_stat == "", "ruled out, and not re-resolved"
+    assert sum(1 for c in calls if "inspect" in c) == 1
+    b._activity_probed_at = None
+    b.activity_mark()
+    assert sum(1 for c in calls if "inspect" in c) == 1, "resolved once per backend"
+    assert sum(1 for c in calls if "stats" in c) == 2
+
+
+def test_probe_caches_so_one_poll_costs_one_probe(monkeypatch):
+    """The bind wait asks once per 3 s poll; anything asking faster than that
+    must not shell out again."""
+    nv, b = _probe_backend(monkeypatch)
+    b._activity_cpu_stat = ""
+    calls = _fake_run(monkeypatch, nv, {"stats": ("50%\n", 0)})
+
+    first = b.activity_mark()
+    assert b.activity_mark() == first
+    assert b.activity_mark() == first
+    assert sum(1 for c in calls if "stats" in c) == 1
+
+
+def test_probe_reports_what_it_last_knew_when_docker_cannot_answer(monkeypatch):
+    """A failed probe is neither evidence of silence nor evidence of work. The
+    container-exited check is what decides death."""
+    nv, b = _probe_backend(monkeypatch)
+    b._activity_cpu_stat = ""
+    _fake_run(monkeypatch, nv, {"stats": ("", 1)})
+
+    assert b.activity_mark() is None
+    b._activity_probed_at = None
+    _fake_run(monkeypatch, nv, {"stats": ("not a number\n", 0)})
+    assert b.activity_mark() is None
+
+
+def test_probe_asks_about_this_engines_own_container(monkeypatch):
+    """Per-instance, for the same reason last_log_activity is: a busy neighbour
+    must never vouch for a wedged stacked engine."""
+    nv, b = _probe_backend(monkeypatch)
+    b._activity_cpu_stat = ""
+    calls = _fake_run(monkeypatch, nv, {"stats": ("7%\n", 0)})
+    b.activity_mark()
+    assert b._solo_container_name() in calls[-1]
+
+
+def test_probe_re_resolves_a_cgroup_path_a_relaunch_invalidated(monkeypatch, tmp_path):
+    """A relaunch replaces the container, so the id baked into the cached cgroup
+    path is stale. The probe must not go blind on that: it drops the path and
+    answers from docker stats until it can resolve the new one."""
+    nv, b = _probe_backend(monkeypatch)
+    stat = tmp_path / "cpu.stat"
+    stat.write_text("usage_usec 500000\n")
+    b._activity_cpu_stat = str(stat)
+    calls = _fake_run(monkeypatch, nv, {"inspect": ("b" * 64 + "\n", 0),
+                                        "stats": ("300%\n", 0)})
+
+    assert b.activity_mark() is not None
+    stat.unlink()
+    b._activity_probed_at = None
+
+    assert b.activity_mark() is not None, "the engine is still visibly working"
+    assert b._activity_cpu_stat is None, "and the stale path is dropped"
+    assert any("stats" in c for c in calls)

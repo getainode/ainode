@@ -579,7 +579,7 @@ _BIND_POLL_SECONDS = 3.0
 _GPU_RELEASE_SECONDS = 30.0
 # Used when no NodeConfig is reachable (a config written by an older release, or
 # a caller that passes a bare dict). Mirrors the NodeConfig defaults.
-_DEFAULT_BIND_LOG_SILENCE_SECONDS = 900.0
+_DEFAULT_BIND_LOG_SILENCE_SECONDS = 300.0
 _DEFAULT_BIND_CEILING_SECONDS = 1800.0
 
 
@@ -657,6 +657,36 @@ def _engine_log_mark(backend):
     return ts
 
 
+async def _engine_activity_mark(backend):
+    """The engine's last-ACTIVITY stamp, or None if it publishes none.
+
+    See ``EngineBackend.activity_mark``. This is the bind wait's primary proof
+    of life: an engine loading weights, running torch.compile or autotuning
+    FlashInfer prints nothing for minutes but burns CPU the whole time, so the
+    log alone cannot tell that engine from a wedged one (#112).
+
+    The probe may shell out (``docker stats`` costs about a second), so it runs
+    in the executor: the bind loop is on the server's event loop during startup
+    and must not block on docker. A backend that cannot see its engine's
+    activity, or that raises, reads as None and the wait leans on the log.
+    """
+    probe = getattr(backend, "activity_mark", None)
+    if not callable(probe):
+        return None
+
+    def _ask():
+        try:
+            return probe()
+        except Exception:
+            return None
+
+    loop = asyncio.get_event_loop()
+    ts = await loop.run_in_executor(None, _ask)
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return ts
+
+
 def _engine_launch_mark(backend):
     """Epoch seconds when this engine's container was launched, or None.
 
@@ -675,7 +705,12 @@ def _engine_launch_mark(backend):
 
 
 def _bind_limits(app):
-    """(log-silence seconds, ceiling seconds) from NodeConfig, with fallbacks."""
+    """(silence seconds, ceiling seconds) from NodeConfig, with fallbacks.
+
+    The first is how long BOTH liveness signals (engine activity, log) may be
+    quiet before the wait calls the start dead -- not the log alone (#112),
+    which is why the default came back down from 900 s to 300 s.
+    """
     config = app.get("config") if hasattr(app, "get") else None
 
     def _num(name: str, fallback: float) -> float:
@@ -700,11 +735,20 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
     doubling a 14-minute boot to 28.
 
     So when we hold the engine's handle, wait on the ENGINE, not on a clock: it
-    is alive while its container is up and its log is still advancing. Give up
-    only on evidence: the container exited, the log went quiet past the silence
-    budget, or the absolute ceiling hit (a wedged-but-chatty engine must not hold
-    boot open forever). With no handle to watch, or a handle that reports nothing
-    watchable, fall back to the fixed window.
+    is alive while its container is up and it is visibly doing something. Two
+    signals say that, and EITHER one resets the silence clock (#112):
+
+    * ``activity_mark`` -- the container's CPU time advancing. The primary
+      signal, because it holds through the phases that print nothing.
+    * ``last_log_activity`` -- a new log line. Secondary: vLLM goes quiet for
+      minutes inside weight load, torch.compile and FlashInfer autotune (206 s,
+      363 s and one 48-minute autotune measured in two days), so log silence on
+      its own is not evidence of a wedge.
+
+    Give up only on evidence: the container exited, BOTH signals went quiet past
+    the silence budget, or the absolute ceiling hit (a wedged-but-busy engine
+    must not hold boot open forever). With no handle to watch, or a handle that
+    reports nothing watchable, fall back to the fixed window.
 
     The seconds returned are how long the CONTAINER has been alive (from the
     backend's launch stamp when it publishes one), not how long this wait ran --
@@ -721,10 +765,12 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
             return time.monotonic() - began
         return max(0.0, time.time() - launched)
 
-    # No handle, or a handle that publishes neither a launch process nor a log
-    # stamp, gives us nothing to be adaptive about -- so don't hold the port open
-    # for the whole ceiling on it: that is the fixed-window case.
+    # No handle, or a handle that publishes no activity probe, no log stamp and
+    # no launch process, gives us nothing to be adaptive about -- so don't hold
+    # the port open for the whole ceiling on it: that is the fixed-window case.
+    activity = None if backend is None else await _engine_activity_mark(backend)
     if backend is None or (_engine_log_mark(backend) is None
+                           and activity is None
                            and getattr(backend, "process", None) is None):
         ok = await _wait_port_ready(port, timeout=timeout)
         return ok, ("bound" if ok else f"fixed {timeout:.0f}s window expired"), _alive()
@@ -745,9 +791,15 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
         if latest is not None and (mark is None or latest > mark):
             mark = latest
             progress_at = now
+        # The engine's own activity, asked once per poll (the backend caches).
+        # An advance here is proof of life even when the log says nothing.
+        latest_activity = await _engine_activity_mark(backend)
+        if latest_activity is not None and (activity is None or latest_activity > activity):
+            activity = latest_activity
+            progress_at = now
         silent_for = now - progress_at
-        if mark is not None and silent_for >= silence:
-            return False, f"log silent for {silent_for:.0f}s", _alive()
+        if (mark is not None or activity is not None) and silent_for >= silence:
+            return False, f"no engine activity or log for {silent_for:.0f}s", _alive()
         await asyncio.sleep(_BIND_POLL_SECONDS)
 
 
