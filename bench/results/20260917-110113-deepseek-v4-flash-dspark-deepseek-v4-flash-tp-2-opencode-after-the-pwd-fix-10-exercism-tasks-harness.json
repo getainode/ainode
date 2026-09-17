@@ -1,0 +1,458 @@
+{
+ "schema": 1,
+ "stamp": "20260917-110113",
+ "label": "DeepSeek V4 Flash TP=2, opencode after the PWD fix, 10 Exercism tasks",
+ "model": {
+  "id": "fraserprice/DeepSeek-V4-Flash-DSpark",
+  "name": "DeepSeek V4 Flash",
+  "params_b": 284.0,
+  "quant": "FP8",
+  "context": 1048576,
+  "license": "MIT",
+  "vision": false,
+  "arch": "dense",
+  "active_b": 284.0
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-1-DGX",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.19",
+  "tp": 2,
+  "gpus": 2,
+  "stacked_with": [
+   "unsloth/Qwen3.8-27B-NVFP4",
+   "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"
+  ],
+  "engine_image": "vllm-dspark-runtime:dspark-nvfp4-stage-c",
+  "flags": [
+   "--block-size",
+   "256",
+   "--max-num-seqs",
+   "6",
+   "--max-num-batched-tokens",
+   "8192",
+   "--enable-prefix-caching",
+   "--async-scheduling",
+   "--enable-chunked-prefill",
+   "--speculative-config",
+   "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\"}",
+   "--tokenizer-mode",
+   "deepseek_v4",
+   "--tool-call-parser",
+   "deepseek_v4",
+   "--enable-auto-tool-choice",
+   "--reasoning-parser",
+   "deepseek_v4",
+   "--reasoning-config",
+   "{\"reasoning_parser\":\"deepseek_v4\",\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}",
+   "--default-chat-template-kwargs",
+   "{\"thinking\":false}",
+   "--generation-config",
+   "vllm",
+   "--enable-flashinfer-autotune"
+  ],
+  "flags_source": "curated catalog recipe (/api/models); the live container command line was not readable"
+ },
+ "settings": {
+  "attempts": 2,
+  "timeout_s": 600.0,
+  "tasks_requested": null,
+  "harnesses": [
+   "opencode"
+  ],
+  "context_window_declared": 262144,
+  "max_output_tokens_declared": 16384
+ },
+ "harness": {
+  "task_set": {
+   "id": "exercism-python-10",
+   "count": 10,
+   "available": 10,
+   "slugs": [
+    "binary-search",
+    "bob",
+    "hamming",
+    "isogram",
+    "matrix",
+    "raindrops",
+    "robot-name",
+    "run-length-encoding",
+    "two-fer",
+    "word-count"
+   ],
+   "language": "python",
+   "source": {
+    "repo": "https://github.com/exercism/python",
+    "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+    "path": "exercises/practice/<slug>",
+    "license": "MIT",
+    "license_file": "LICENSE-exercism"
+   }
+  },
+  "endpoint": "http://100.122.26.9:3000/v1",
+  "protocol": {
+   "attempts": 2,
+   "timeout_s": 600.0,
+   "second_attempt_sees": "the failing test output"
+  },
+  "runs": [
+   {
+    "harness": "opencode",
+    "version": "1.18.31",
+    "scores": {
+     "tasks": 10,
+     "passed_at_1": 10,
+     "passed_at_2": 10,
+     "pass_at_1": 1.0,
+     "pass_at_2": 1.0,
+     "mean_wall_s": 23.4,
+     "crashes": 0,
+     "timeouts": 0
+    },
+    "tasks": [
+     {
+      "slug": "binary-search",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 31.49,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/binary-search --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<2827 chars>'",
+         "exit_code": 0,
+         "wall_s": 31.49,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...zw\",\"messageID\":\"msg_0af03e20e0013xn9EML3GPdkdP\"}}\n{\"type\":\"text\",\"timestamp\":1789642665563,\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"part\":{\"id\":\"prt_0af03e45a001Aw2LmDRF3B8vjR\",\"messageID\":\"msg_0af03e20e0013xn9EML3GPdkdP\",\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642663002,\"end\":1789642665560}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642665609,\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"part\":{\"id\":\"prt_0af03ee87001Tj5jqsi7NF08qF\",\"reason\":\"tool-calls\",\"snapshot\":\"ba37cb8efa164d08c3d1a92fd3907a725aca6bd0\",\"messageID\":\"msg_0af03e20e0013xn9EML3GPdkdP\",\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"type\":\"step-finish\",\"tokens\":{\"total\":25210,\"input\":25009,\"output\":201,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642666224,\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"part\":{\"id\":\"prt_0af03f0ed001MAN3IU21p5SSP7\",\"messageID\":\"msg_0af03eea1001NccvIU0k3V6vwv\",\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"snapshot\":\"ba37cb8efa164d08c3d1a92fd3907a725aca6bd0\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642667051,\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"part\":{\"id\":\"prt_0af03f0ef001oxbMuMUv2v8eT8\",\"messageID\":\"msg_0af03eea1001NccvIU0k3V6vwv\",\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"type\":\"text\",\"text\":\"Done. Implemented `find(search_list, value)` in `binary_search.py` \u2014 standard binary search returning the index of the value, or raising `ValueError(\\\"value not in array\\\")` if not found.\",\"time\":{\"start\":1789642666223,\"end\":1789642667049}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642667073,\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"part\":{\"id\":\"prt_0af03f43f001DUDXqgt8w53rc1\",\"reason\":\"stop\",\"snapshot\":\"ba37cb8efa164d08c3d1a92fd3907a725aca6bd0\",\"messageID\":\"msg_0af03eea1001NccvIU0k3V6vwv\",\"sessionID\":\"ses_f50fc840bffeqDd3U290OXZPzw\",\"type\":\"step-finish\",\"tokens\":{\"total\":25270,\"input\":25225,\"output\":45,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 11,
+         "output_tail": "...........                                                              [100%]\n11 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "bob",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 22.33,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/bob --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<994 chars>'",
+         "exit_code": 0,
+         "wall_s": 22.33,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...\",\"exists\":true,\"truncated\":false},\"title\":\"bob.py\",\"time\":{\"start\":1789642688953,\"end\":1789642688959}},\"id\":\"prt_0af0449b500178VT0NZKLPfbZD\",\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"messageID\":\"msg_0af043c27001a8j8KU5xzBL3hw\"}}\n{\"type\":\"text\",\"timestamp\":1789642689018,\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"part\":{\"id\":\"prt_0af043e7d001k2f6FQS5ncVzqT\",\"messageID\":\"msg_0af043c27001a8j8KU5xzBL3hw\",\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642686077,\"end\":1789642689016}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642689064,\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"part\":{\"id\":\"prt_0af044a26001XgMi2JvkPbJ0cu\",\"reason\":\"tool-calls\",\"snapshot\":\"89aa8193c6848f1ef727de617361060d554e2f37\",\"messageID\":\"msg_0af043c27001a8j8KU5xzBL3hw\",\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"type\":\"step-finish\",\"tokens\":{\"total\":24702,\"input\":24492,\"output\":210,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642689668,\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"part\":{\"id\":\"prt_0af044c81001yapcXzGtoDH4GN\",\"messageID\":\"msg_0af044a40001fqVQaUoT8CNMJe\",\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"snapshot\":\"89aa8193c6848f1ef727de617361060d554e2f37\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642689733,\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"part\":{\"id\":\"prt_0af044c830017EzEN4eca3uXKd\",\"messageID\":\"msg_0af044a40001fqVQaUoT8CNMJe\",\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"type\":\"text\",\"text\":\"Done.\",\"time\":{\"start\":1789642689667,\"end\":1789642689731}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642689764,\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"part\":{\"id\":\"prt_0af044ce10012G1630y30RkP6E\",\"reason\":\"stop\",\"snapshot\":\"89aa8193c6848f1ef727de617361060d554e2f37\",\"messageID\":\"msg_0af044a40001fqVQaUoT8CNMJe\",\"sessionID\":\"ses_f50fc07c1ffe3FLmG7Ui9TUENd\",\"type\":\"step-finish\",\"tokens\":{\"total\":24720,\"input\":24717,\"output\":3,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 26,
+         "output_tail": "..........................                                               [100%]\n26 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "hamming",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 19.94,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/hamming --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1843 chars>'",
+         "exit_code": 0,
+         "wall_s": 19.94,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 3,
+         "stdout_tail": "...letions\":1},\"truncated\":false},\"title\":\"hamming.py\",\"time\":{\"start\":1789642709196,\"end\":1789642709204}},\"id\":\"prt_0af0498c6001PXGBLxIMVEByuR\",\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"messageID\":\"msg_0af048d2600100vVkFrae0R2kz\"}}\n{\"type\":\"text\",\"timestamp\":1789642709345,\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"part\":{\"id\":\"prt_0af048f8c001NfqSSF9w9tR0KI\",\"messageID\":\"msg_0af048d2600100vVkFrae0R2kz\",\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642706829,\"end\":1789642709342}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642709394,\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"part\":{\"id\":\"prt_0af049990001sTKcUCE5Q3CXKE\",\"reason\":\"tool-calls\",\"snapshot\":\"6f42477495858f58b598ab678d0aef7f7150e59d\",\"messageID\":\"msg_0af048d2600100vVkFrae0R2kz\",\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"type\":\"step-finish\",\"tokens\":{\"total\":24629,\"input\":24442,\"output\":187,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642709963,\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"part\":{\"id\":\"prt_0af049bc60016xtakXP3ZiNu77\",\"messageID\":\"msg_0af0499a900171q76A3FXV897d\",\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"snapshot\":\"6f42477495858f58b598ab678d0aef7f7150e59d\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642710016,\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"part\":{\"id\":\"prt_0af049bc9001gLvHaPS9ppXybD\",\"messageID\":\"msg_0af0499a900171q76A3FXV897d\",\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"type\":\"text\",\"text\":\"Done.\",\"time\":{\"start\":1789642709961,\"end\":1789642710014}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642710049,\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"part\":{\"id\":\"prt_0af049c1e0013FSzO6oGok9AF4\",\"reason\":\"stop\",\"snapshot\":\"6f42477495858f58b598ab678d0aef7f7150e59d\",\"messageID\":\"msg_0af0499a900171q76A3FXV897d\",\"sessionID\":\"ses_f50fbaf0fffeKI8fgOhqHxwrSy\",\"type\":\"step-finish\",\"tokens\":{\"total\":24646,\"input\":24643,\"output\":3,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 9,
+         "output_tail": ".........                                                                [100%]\n9 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 4,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "isogram",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 21.59,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/isogram --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<602 chars>'",
+         "exit_code": 0,
+         "wall_s": 21.59,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...letions\":1},\"truncated\":false},\"title\":\"isogram.py\",\"time\":{\"start\":1789642731261,\"end\":1789642731267}},\"id\":\"prt_0af04eef7001lukkpsxOFwsntz\",\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"messageID\":\"msg_0af04e44a001ivQuwMNDF3THLC\"}}\n{\"type\":\"text\",\"timestamp\":1789642731334,\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"part\":{\"id\":\"prt_0af04e657001kuAC1M94hUnQez\",\"messageID\":\"msg_0af04e44a001ivQuwMNDF3THLC\",\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642729047,\"end\":1789642731332}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642731381,\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"part\":{\"id\":\"prt_0af04ef74001o0c11laaa5SRmx\",\"reason\":\"tool-calls\",\"snapshot\":\"cf402b8734420146fe6787b8a31a08ebae6878a0\",\"messageID\":\"msg_0af04e44a001ivQuwMNDF3THLC\",\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"type\":\"step-finish\",\"tokens\":{\"total\":24535,\"input\":24368,\"output\":167,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642731917,\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"part\":{\"id\":\"prt_0af04f18a001pgM4Lxr5zapV2Z\",\"messageID\":\"msg_0af04ef8d001kPPQGqm6T762gq\",\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"snapshot\":\"cf402b8734420146fe6787b8a31a08ebae6878a0\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642731967,\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"part\":{\"id\":\"prt_0af04f18c001rYdr47ruyRQAre\",\"messageID\":\"msg_0af04ef8d001kPPQGqm6T762gq\",\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"type\":\"text\",\"text\":\"Done.\",\"time\":{\"start\":1789642731916,\"end\":1789642731965}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642732002,\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"part\":{\"id\":\"prt_0af04f1e0001XcQKOE9pflHEbB\",\"reason\":\"stop\",\"snapshot\":\"cf402b8734420146fe6787b8a31a08ebae6878a0\",\"messageID\":\"msg_0af04ef8d001kPPQGqm6T762gq\",\"sessionID\":\"ses_f50fb5fd7ffedfiz5G1n3v04iz\",\"type\":\"step-finish\",\"tokens\":{\"total\":24552,\"input\":24549,\"output\":3,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 14,
+         "output_tail": "..............                                                           [100%]\n14 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "matrix",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 23.24,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/matrix --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1865 chars>'",
+         "exit_code": 0,
+         "wall_s": 23.24,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...5395b001UdIfWGAzhSt95U\"}}\n{\"type\":\"text\",\"timestamp\":1789642753831,\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"part\":{\"id\":\"prt_0af053c6e0014YthaJAYXhK8NO\",\"messageID\":\"msg_0af05395b001UdIfWGAzhSt95U\",\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642751086,\"end\":1789642753828}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642753877,\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"part\":{\"id\":\"prt_0af054753001OO3544mKr6R911\",\"reason\":\"tool-calls\",\"snapshot\":\"b9921ff0f58fe129c5e46ed91cb7d466a8fe11e9\",\"messageID\":\"msg_0af05395b001UdIfWGAzhSt95U\",\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"type\":\"step-finish\",\"tokens\":{\"total\":24960,\"input\":24776,\"output\":184,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642754484,\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"part\":{\"id\":\"prt_0af0549b10016Bk94qqNCEyHv4\",\"messageID\":\"msg_0af0547720015JYvctZEy3sAP9\",\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"snapshot\":\"b9921ff0f58fe129c5e46ed91cb7d466a8fe11e9\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642755608,\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"part\":{\"id\":\"prt_0af0549b3001js3CWqbL8xtbZS\",\"messageID\":\"msg_0af0547720015JYvctZEy3sAP9\",\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"type\":\"text\",\"text\":\"Done. `matrix.py` implements the `Matrix` class with:\\n\\n- `__init__` \u2014 parses the string into a list of lists of ints\\n- `row(index)` \u2014 returns the 1-indexed row\\n- `column(index)` \u2014 returns the 1-indexed column\",\"time\":{\"start\":1789642754483,\"end\":1789642755605}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642755640,\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"part\":{\"id\":\"prt_0af054e360013TIazU5GXH4X8Y\",\"reason\":\"stop\",\"snapshot\":\"b9921ff0f58fe129c5e46ed91cb7d466a8fe11e9\",\"messageID\":\"msg_0af0547720015JYvctZEy3sAP9\",\"sessionID\":\"ses_f50fb09fbffegn7mWEaTnFWCnt\",\"type\":\"step-finish\",\"tokens\":{\"total\":25037,\"input\":24975,\"output\":62,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.22,
+         "passed": true,
+         "tests_passed": 8,
+         "output_tail": "........                                                                 [100%]\n8 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "raindrops",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 21.46,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/raindrops --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<2469 chars>'",
+         "exit_code": 0,
+         "wall_s": 21.46,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...tions\":1},\"truncated\":false},\"title\":\"raindrops.py\",\"time\":{\"start\":1789642776709,\"end\":1789642776715}},\"id\":\"prt_0af05a082001m6ii2az76rnACY\",\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"messageID\":\"msg_0af05951d001skPw7z45txRbYc\"}}\n{\"type\":\"text\",\"timestamp\":1789642776784,\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"part\":{\"id\":\"prt_0af059731001lPu0GHxZohG9pJ\",\"messageID\":\"msg_0af05951d001skPw7z45txRbYc\",\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642774321,\"end\":1789642776782}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642776822,\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"part\":{\"id\":\"prt_0af05a0f4001QoT44qNHKqPaPX\",\"reason\":\"tool-calls\",\"snapshot\":\"168571a35d6971cb5d370395a5544cb34c6cde0c\",\"messageID\":\"msg_0af05951d001skPw7z45txRbYc\",\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"type\":\"step-finish\",\"tokens\":{\"total\":25053,\"input\":24857,\"output\":196,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642777384,\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"part\":{\"id\":\"prt_0af05a326001Jb568e5gUAz8W2\",\"messageID\":\"msg_0af05a10e001VLdg6OJjc6C1Vr\",\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"snapshot\":\"168571a35d6971cb5d370395a5544cb34c6cde0c\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642777422,\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"part\":{\"id\":\"prt_0af05a3270017WZOafCo4sI0vV\",\"messageID\":\"msg_0af05a10e001VLdg6OJjc6C1Vr\",\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"type\":\"text\",\"text\":\"Done.\",\"time\":{\"start\":1789642777383,\"end\":1789642777420}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642777442,\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"part\":{\"id\":\"prt_0af05a360001hqmiKE6VjitNQl\",\"reason\":\"stop\",\"snapshot\":\"168571a35d6971cb5d370395a5544cb34c6cde0c\",\"messageID\":\"msg_0af05a10e001VLdg6OJjc6C1Vr\",\"sessionID\":\"ses_f50faaddbffex9p5yhfgjt9Izt\",\"type\":\"step-finish\",\"tokens\":{\"total\":25070,\"input\":25067,\"output\":3,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.24,
+         "passed": true,
+         "tests_passed": 18,
+         "output_tail": "..................                                                       [100%]\n18 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "robot-name",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 22.96,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/robot-name --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<866 chars>'",
+         "exit_code": 0,
+         "wall_s": 22.96,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...ts\":true,\"truncated\":false},\"title\":\"robot_name.py\",\"time\":{\"start\":1789642799978,\"end\":1789642799985}},\"id\":\"prt_0af05fb64001qrDfLiKmuBOxnG\",\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"messageID\":\"msg_0af05eb85001XZbbWPVeSrr57Q\"}}\n{\"type\":\"text\",\"timestamp\":1789642800048,\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"part\":{\"id\":\"prt_0af05eda7001I2ZABcRINku40W\",\"messageID\":\"msg_0af05eb85001XZbbWPVeSrr57Q\",\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642796455,\"end\":1789642800045}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642800097,\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"part\":{\"id\":\"prt_0af05fbdf001up4XGsZq7Gh5XF\",\"reason\":\"tool-calls\",\"snapshot\":\"887685fac6762d36f34c36a814c88151a80861ad\",\"messageID\":\"msg_0af05eb85001XZbbWPVeSrr57Q\",\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"type\":\"step-finish\",\"tokens\":{\"total\":24658,\"input\":24393,\"output\":265,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642800677,\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"part\":{\"id\":\"prt_0af05fe21001Sko1am29GtOhPm\",\"messageID\":\"msg_0af05fbf8001GGJa6d5d5c9J91\",\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"snapshot\":\"887685fac6762d36f34c36a814c88151a80861ad\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642800732,\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"part\":{\"id\":\"prt_0af05fe24001TjO2Dwkjv1sEp5\",\"messageID\":\"msg_0af05fbf8001GGJa6d5d5c9J91\",\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"type\":\"text\",\"text\":\"Done.\",\"time\":{\"start\":1789642800676,\"end\":1789642800730}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642800758,\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"part\":{\"id\":\"prt_0af05fe74001aK3xqL77urlGKl\",\"reason\":\"stop\",\"snapshot\":\"887685fac6762d36f34c36a814c88151a80861ad\",\"messageID\":\"msg_0af05fbf8001GGJa6d5d5c9J91\",\"sessionID\":\"ses_f50fa5886ffeqxQoaITkdhSodS\",\"type\":\"step-finish\",\"tokens\":{\"total\":24676,\"input\":24673,\"output\":3,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 4,
+         "output_tail": "....                                                                     [100%]\n4 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "run-length-encoding",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 25.94,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/run-length-encoding --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1113 chars>'",
+         "exit_code": 0,
+         "wall_s": 25.94,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...\":{\"id\":\"prt_0af0648aa0014aicsQzLPnm8G8\",\"messageID\":\"msg_0af06463c001OFIg07rtl86rYb\",\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642819754,\"end\":1789642824034}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642824080,\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"part\":{\"id\":\"prt_0af06598e0012yL0ASucTPxOVY\",\"reason\":\"tool-calls\",\"snapshot\":\"5e71533a1d5486b9ad15f0d476fd9f60c41fc1c0\",\"messageID\":\"msg_0af06463c001OFIg07rtl86rYb\",\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"type\":\"step-finish\",\"tokens\":{\"total\":24813,\"input\":24539,\"output\":274,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642824732,\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"part\":{\"id\":\"prt_0af065c19001gdqKVbfJX5zS4r\",\"messageID\":\"msg_0af0659b0001fp79OXx42JM0pZ\",\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"snapshot\":\"5e71533a1d5486b9ad15f0d476fd9f60c41fc1c0\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642826986,\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"part\":{\"id\":\"prt_0af065c1b001xK80fmCsM42Elb\",\"messageID\":\"msg_0af0659b0001fp79OXx42JM0pZ\",\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"type\":\"text\",\"text\":\"Done. `run_length_encoding.py` implements both `encode` and `decode`:\\n\\n- **encode** \u2014 walks the string, counts consecutive identical chars, and writes `<count><char>` (count omitted when 1).\\n- **decode** \u2014 uses regex `(\\\\d*)([A-Za-z ])` to find optional-digit + character pairs and repeats each char the given number of times.\",\"time\":{\"start\":1789642824731,\"end\":1789642826984}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642827021,\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"part\":{\"id\":\"prt_0af06650b001dgoBGPH7Hcbkdi\",\"reason\":\"stop\",\"snapshot\":\"5e71533a1d5486b9ad15f0d476fd9f60c41fc1c0\",\"messageID\":\"msg_0af0659b0001fp79OXx42JM0pZ\",\"sessionID\":\"ses_f50f9fd73ffeVsoO0J1VeYwUB3\",\"type\":\"step-finish\",\"tokens\":{\"total\":24912,\"input\":24828,\"output\":84,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.26,
+         "passed": true,
+         "tests_passed": 13,
+         "output_tail": ".............                                                            [100%]\n13 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "two-fer",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 21.14,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/two-fer --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<821 chars>'",
+         "exit_code": 0,
+         "wall_s": 21.14,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 3,
+         "stdout_tail": "...:\"ses_f50f996b5ffeULSvscc3U4l94a\",\"messageID\":\"msg_0af06a488001A62i0u4QKOebGU\"}}\n{\"type\":\"text\",\"timestamp\":1789642846003,\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"part\":{\"id\":\"prt_0af06a683001eqDiE6Xh2DHoiK\",\"messageID\":\"msg_0af06a488001A62i0u4QKOebGU\",\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642843779,\"end\":1789642846000}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642846054,\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"part\":{\"id\":\"prt_0af06af64001bJcev8mrwyQOlz\",\"reason\":\"tool-calls\",\"snapshot\":\"7254b7180f764b4bcc9cf6ca93601f92c06abb36\",\"messageID\":\"msg_0af06a488001A62i0u4QKOebGU\",\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"type\":\"step-finish\",\"tokens\":{\"total\":24432,\"input\":24263,\"output\":169,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642846664,\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"part\":{\"id\":\"prt_0af06b1c5001Kh67FcA1S7QEVU\",\"messageID\":\"msg_0af06af83001DDJ16LDbxNweaa\",\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"snapshot\":\"7254b7180f764b4bcc9cf6ca93601f92c06abb36\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642847748,\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"part\":{\"id\":\"prt_0af06b1c7001BI9kVveNzQM2Gk\",\"messageID\":\"msg_0af06af83001DDJ16LDbxNweaa\",\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"type\":\"text\",\"text\":\"Done. `two_fer()` accepts an optional name, returns `\\\"One for <name>, one for me.\\\"` when provided and `\\\"One for you, one for me.\\\"` when omitted or empty.\",\"time\":{\"start\":1789642846663,\"end\":1789642847745}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642847773,\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"part\":{\"id\":\"prt_0af06b61b001GTJ3vfncv0z0uZ\",\"reason\":\"stop\",\"snapshot\":\"7254b7180f764b4bcc9cf6ca93601f92c06abb36\",\"messageID\":\"msg_0af06af83001DDJ16LDbxNweaa\",\"sessionID\":\"ses_f50f996b5ffeULSvscc3U4l94a\",\"type\":\"step-finish\",\"tokens\":{\"total\":24491,\"input\":24446,\"output\":45,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.25,
+         "passed": true,
+         "tests_passed": 3,
+         "output_tail": "...                                                                      [100%]\n3 passed in 0.00s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 4,
+       "tokens_generated": 0
+      }
+     },
+     {
+      "slug": "word-count",
+      "passed": true,
+      "passed_at_attempt": 1,
+      "harness_wall_s": 24.01,
+      "crashed": false,
+      "timed_out": false,
+      "attempts": [
+       {
+        "attempt": 1,
+        "harness": {
+         "command": "opencode run --dir /var/folders/fv/lb2jl4ws0yd3s831752tl3kr0000gn/T/ainode-harness-a_78p_28/opencode/word-count --print-logs --log-level ERROR --pure --auto --format json -m ainode-bench/fraserprice/DeepSeek-V4-Flash-DSpark '<1591 chars>'",
+         "exit_code": 0,
+         "wall_s": 24.01,
+         "timed_out": false,
+         "crashed": false,
+         "turns": 4,
+         "stdout_tail": "...,\"part\":{\"id\":\"prt_0af070375001fOQ706FOTLcvgb\",\"messageID\":\"msg_0af070162001wTZB9QaRIzFTW9\",\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"type\":\"text\",\"text\":\"\\n\\n\",\"time\":{\"start\":1789642867573,\"end\":1789642870055}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642870108,\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"part\":{\"id\":\"prt_0af070d5a001kanH3l2Sj20iYE\",\"reason\":\"tool-calls\",\"snapshot\":\"5d57a0823d173044554cafb9fbf754f2393ee59b\",\"messageID\":\"msg_0af070162001wTZB9QaRIzFTW9\",\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"type\":\"step-finish\",\"tokens\":{\"total\":24804,\"input\":24628,\"output\":176,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}\n{\"type\":\"step_start\",\"timestamp\":1789642870659,\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"part\":{\"id\":\"prt_0af070f81001QMbpY1w9AVJEWE\",\"messageID\":\"msg_0af070d76001ocb7fwU3iIneeJ\",\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"snapshot\":\"5d57a0823d173044554cafb9fbf754f2393ee59b\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1789642872931,\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"part\":{\"id\":\"prt_0af070f82001mlV3miwX2VB66J\",\"messageID\":\"msg_0af070d76001ocb7fwU3iIneeJ\",\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"type\":\"text\",\"text\":\"Done. The solution:\\n\\n- Splits on non-alphanumeric/non-apostrophe characters using `re.findall`\\n- Keeps contractions together with `(?:'[a-zA-Z]+)?` so `That's` is one word but `'PASSWORD` \u2192 `password` (the leading apostrophe is punctuation)\\n- Lowercases everything for case insensitivity\\n- Counts occurrences in a dict\",\"time\":{\"start\":1789642870658,\"end\":1789642872929}}}\n{\"type\":\"step_finish\",\"timestamp\":1789642872958,\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"part\":{\"id\":\"prt_0af07187c001lV42caYP6LnJFS\",\"reason\":\"stop\",\"snapshot\":\"5d57a0823d173044554cafb9fbf754f2393ee59b\",\"messageID\":\"msg_0af070d76001ocb7fwU3iIneeJ\",\"sessionID\":\"ses_f50f942a8ffeh6mxwjjJqdf0oR\",\"type\":\"step-finish\",\"tokens\":{\"total\":24904,\"input\":24819,\"output\":85,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}}"
+        },
+        "tests": {
+         "exit_code": 0,
+         "wall_s": 0.23,
+         "passed": true,
+         "tests_passed": 17,
+         "output_tail": ".................                                                        [100%]\n17 passed in 0.01s"
+        }
+       }
+      ],
+      "tokens": {
+       "requests": 5,
+       "tokens_generated": 0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py harness in 238s; nothing loaded, unloaded or restarted.",
+  "The hidden tests are copied into the working directory only after the harness has exited, and removed again before the next attempt.",
+  "pass@2 is cumulative and the second attempt is given the failing test output, which is Aider's polyglot protocol.",
+  "A harness crash or timeout still gets its tests run against whatever it left on disk; crashes and timeouts are counted separately.",
+  "Token counts are AINode's /api/metrics counters differenced over each task's window: they are the node's totals, so any other traffic on the node during the run is inside them.",
+  "Spark-1-DGX does not report serving fraserprice/DeepSeek-V4-Flash-DSpark; placement and telemetry may describe the wrong node",
+  "Supersedes the opencode rows of the 2026-09-16 11:25 four-harness DeepSeek record, which were a host defect (#118): OpenCode located its project from the inherited PWD, not its cwd. With the adapter's --dir and the runner's PWD normalisation (#137) it passes every task on the first attempt."
+ ],
+ "source": "scripts/ainode-bench.py harness"
+}
