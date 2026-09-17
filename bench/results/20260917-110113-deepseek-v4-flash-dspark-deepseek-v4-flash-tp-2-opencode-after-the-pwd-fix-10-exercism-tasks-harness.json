@@ -10,12 +10,12 @@
   "context": 1048576,
   "license": "MIT",
   "vision": false,
-  "arch": "dense",
-  "active_b": 284.0
+  "arch": "moe",
+  "active_b": 13.0
  },
  "placement": {
   "engine": "vllm",
-  "node": "Spark-1-DGX",
+  "node": "Spark-2-DGX",
   "gpu": "NVIDIA GB10",
   "ainode": "0.5.19",
   "tp": 2,
@@ -452,7 +452,8 @@
   "A harness crash or timeout still gets its tests run against whatever it left on disk; crashes and timeouts are counted separately.",
   "Token counts are AINode's /api/metrics counters differenced over each task's window: they are the node's totals, so any other traffic on the node during the run is inside them.",
   "Spark-1-DGX does not report serving fraserprice/DeepSeek-V4-Flash-DSpark; placement and telemetry may describe the wrong node",
-  "Supersedes the opencode rows of the 2026-09-16 11:25 four-harness DeepSeek record, which were a host defect (#118): OpenCode located its project from the inherited PWD, not its cwd. With the adapter's --dir and the runner's PWD normalisation (#137) it passes every task on the first attempt."
+  "Supersedes the opencode rows of the 2026-09-16 11:25 four-harness DeepSeek record, which were a host defect (#118): OpenCode located its project from the inherited PWD, not its cwd. With the adapter's --dir and the runner's PWD normalisation (#137) it passes every task on the first attempt.",
+  "Model shape and placement node corrected by hand: the master ran 0.5.19, which predates the catalog shape fields (#131), and the harness CLI resolved placement from the master instead of the serving node (Spark-2); the CLI bug is being fixed separately."
  ],
  "source": "scripts/ainode-bench.py harness"
 }
