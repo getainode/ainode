@@ -1,20 +1,38 @@
 """opencode - the OpenCode CLI (``opencode-ai``).
 
-Verified end to end on opencode 1.18.31: exit 0 in 16 s, the stub edited, 6/6 hidden
-tests green on ``isogram`` against a model on the fleet, with
+Verified end to end on opencode 1.18.31, by the runner rather than by hand: exit 0 in
+26 s, the stub edited, 6/6 hidden tests green on ``isogram`` against a model on the
+fleet, three consecutive times, with
 
-    opencode run --pure --auto --format json -m "<provider>/<model id>" "<prompt>"
+    opencode run --dir <workdir> --print-logs --log-level ERROR \\
+        --pure --auto --format json -m "<provider>/<model id>" "<prompt>"
 
 in a ``git init``ed directory holding a project-local ``opencode.json``.
 
-Three of those four flags are not optional:
+Four of those flags are not optional:
 
+  * ``--dir <workdir>`` names the directory to run in. **Without it opencode does
+    not use its own working directory**: it resolves the project from the
+    inherited ``PWD``, which a subprocess launched with ``cwd=`` still carries
+    from its parent. From the runner that is wherever the bench was started, so
+    opencode built its session against that directory instead, never saw the
+    run's ``opencode.json``, and died in about 1 s with ``Model not found:
+    ainode-bench/<id>`` reported on stdout as "Unexpected server error. Check
+    server logs for details." By hand the same command passed, because a person
+    ``cd``s in first and ``PWD`` is then right. That is #118, and it is why the
+    other four harnesses were unaffected. ``_launch`` now also sets ``PWD`` to
+    the cwd for every harness; this flag is the explicit half of the same fix.
   * ``--auto`` approves permissions that are not explicitly denied. Without a TTY
     there is nobody to approve the file write, so the run sits until the timeout.
   * ``--format json`` makes it stream NDJSON events on stdout. Without it, two runs
     produced **no output at all** until they timed out, so this is a working
     requirement rather than a preference about parsing.
   * ``--pure`` skips external plugins.
+
+``--print-logs --log-level ERROR`` is diagnostics, not behaviour: the logs go to
+stderr, stdout stays NDJSON, and the record's ``stderr_tail`` then carries the named
+cause instead of the opaque "Unexpected server error" that cost #118 a day. The
+isolated log file opencode writes is empty in exactly the case worth reading.
 
 The provider is a project-local ``opencode.json`` written into the working
 directory: config, not a hint, naming the AINode endpoint as an OpenAI-compatible
@@ -99,16 +117,28 @@ class OpencodeAdapter(HarnessAdapter):
         # of that at the run's own scratch dir so runs never share state and a
         # crashed run cannot poison the next one (it creates the dirs itself).
         xdg = req.scratch / "opencode-xdg"
+        config = xdg / "config"
         return {
             "XDG_DATA_HOME": str(xdg / "data"),
-            "XDG_CONFIG_HOME": str(xdg / "config"),
+            "XDG_CONFIG_HOME": str(config),
             "XDG_CACHE_HOME": str(xdg / "cache"),
             "XDG_STATE_HOME": str(xdg / "state"),
+            # OPENCODE_CONFIG_DIR overrides the XDG search outright, so an
+            # operator's exported value (Orca exports one) walks straight through
+            # the isolation above and puts somebody's config, plugins and agents
+            # inside the measurement. Point it at the run's own empty config dir:
+            # the same isolation rule as DSH_HOME and CLAUDE_CONFIG_DIR.
+            "OPENCODE_CONFIG_DIR": str(config / "opencode"),
         }
 
     def command(self, req: HarnessRequest) -> list[str]:
         return [
             self.binary, "run",
+            # Not optional. See the module docstring and #118: without it opencode
+            # takes the project directory from the inherited PWD, not its cwd.
+            "--dir", str(req.workdir),
+            # Diagnostics only: to stderr, leaving stdout the NDJSON stream.
+            "--print-logs", "--log-level", "ERROR",
             "--pure",
             "--auto",
             "--format", "json",

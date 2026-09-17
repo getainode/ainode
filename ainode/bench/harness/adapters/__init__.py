@@ -263,7 +263,17 @@ def _launch(command: list[str], *, cwd: str, env: dict, timeout: float) -> subpr
     "Unexpected server error" (2026-09-16: 20 of 20 bench runs crashed in 0.8 s
     behind one leftover process). Every launch now starts a new session and the
     whole group is signalled when the run ends, timed out or not.
+
+    ``PWD`` is rewritten to ``cwd``, and a stale ``OLDPWD`` dropped, because
+    changing the child's directory does not change the inherited variable and a
+    tool that trusts it then works in the wrong place. OpenCode read it and
+    built its session against the directory the *bench* was started from, where
+    the run's provider config does not exist, so every invocation from the
+    runner died in about 1 s (#118); the same wrong value reaches whatever shell
+    the other agents spawn for their own tools.
     """
+    env = {**env, "PWD": cwd}
+    env.pop("OLDPWD", None)
     proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:

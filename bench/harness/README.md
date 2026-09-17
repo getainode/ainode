@@ -218,10 +218,15 @@ fleet, hidden tests 6/6 for every one of them.
 | Harness | Version | Verified against | First attempt |
 |---------|---------|------------------|---------------|
 | `aider` | 0.86.2 (PyPI `aider-chat`) | DeepSeek V4 Flash | 10 s |
-| `opencode` | 1.18.31 (`opencode-ai`) | DeepSeek V4 Flash | 16 s |
+| `opencode` | 1.18.31 (`opencode-ai`) | Ornith 1.5 35B A3B | 26 s |
 | `pi` | 0.73.1 (`@mariozechner/pi-coding-agent`) | DeepSeek V4 Flash | 20 s |
 | `dsh` | 0.1.5-rc.1 (`@deepseek-ai/dsh`) | DeepSeek V4 Flash | 34 s |
 | `claude` | 2.1.272 (Claude Code) | Qwen3.8 27B NVFP4 | 294 s, 6 turns |
+
+Every row except `opencode`'s was taken by hand; `opencode`'s was taken by the runner
+itself, three consecutive times (25.5 s, 26.7 s, 26.5 s, no crashes) on 2026-09-17
+after #118, because a by-hand opencode run was exactly the thing that did not
+generalise to the runner.
 
 One task on one model is a working adapter, not a score. Read those columns as "this
 adapter reaches the endpoint and the model can do the task" and nothing more: these
@@ -338,16 +343,35 @@ gets to change what the model was told.
 ### opencode
 
 ```
-opencode run --pure --auto --format json -m ainode-bench/<model id> "<prompt>"
+opencode run --dir <workdir> --print-logs --log-level ERROR \
+    --pure --auto --format json -m ainode-bench/<model id> "<prompt>"
 ```
 
-Three of those flags are working requirements, not preferences:
+Four of those flags are working requirements, not preferences:
 
+- `--dir <workdir>` names the directory to run in. **Without it opencode does not
+  use its own working directory**: it resolves the project from the inherited `PWD`,
+  and a subprocess started with `cwd=` still carries its parent's. From the runner
+  that is wherever the bench was started, so opencode built its session there, never
+  read the `opencode.json` sitting beside the task, and died in about 1 s with
+  `ProviderModelNotFoundError: Model not found: ainode-bench/<id>`, printed on stdout
+  as the unhelpful `{"type":"error",...,"message":"Unexpected server error. Check
+  server logs for details."}`. By hand the same command passed, because a person
+  `cd`s in first and `PWD` is then correct, which is what made
+  [#118](https://github.com/getainode/ainode/issues/118) look intermittent for a day.
+  `_launch` now also sets `PWD` to the cwd for every harness; this flag is the
+  explicit half of the same fix.
 - `--auto` approves permissions that are not explicitly denied. Without a TTY there
   is nobody to approve the file write, so the run sits until the timeout.
 - `--format json` makes it stream NDJSON events on stdout. Without it, two verified
   runs produced **no output at all** until they timed out.
 - `--pure` skips external plugins.
+
+`--print-logs --log-level ERROR` is diagnostics and not behaviour: opencode's logs go
+to stderr, stdout stays the NDJSON stream, and a failure then reaches the record's
+`stderr_tail` with a name on it. The isolated log file opencode writes is empty in
+exactly the case worth reading, and "Unexpected server error" on its own is what #118
+had to work from.
 
 The adapter reads one thing out of that stream: `step_start` events, counted as
 turns. The event schema is upstream's, so a line that does not parse is skipped and
@@ -359,6 +383,15 @@ model entry carries just a name, which is the shape that was verified, so the ru
 declared context window and output cap do not reach opencode; they exist for pi and
 dsh, which will not route without them. OpenCode expects to be inside a git repo, so
 the working directory gets a bare `git init` with no commit and no identity.
+
+**Its state is the run's own, and `OPENCODE_CONFIG_DIR` is the load-bearing part of
+that.** The four XDG variables point at `<scratch>/opencode-xdg/`, which is where
+opencode keeps its SQLite database, logs and snapshots, so runs cannot poison each
+other and the operator's own profile is never read or written. But
+`OPENCODE_CONFIG_DIR` overrides that search outright, and it is a variable people and
+tools export (Orca sets one), so the overlay names it too and points it at the run's
+own empty config directory. Without that line somebody's global config, plugins and
+agents are inside the measurement while every XDG variable says otherwise.
 
 Two things to know before reading its wall clock: startup costs about 18 s because it
 loads every skill under `~/.claude/skills` and `~/.agents/skills` even with `--pure`,
@@ -463,6 +496,12 @@ model in the loop: the tests assert the exact argv and the exact config bytes fo
 every harness, so a flag that moves upstream is a failing test rather than a
 silently wrong benchmark. `run()` is implemented once in the base class and no
 adapter should override it.
+
+Two things the environment will not tell an agent correctly, learned from #118: say
+the working directory in the argv if the tool has a flag for it rather than trusting
+it to read its own cwd (opencode reads `PWD`, which a `cwd=` subprocess inherits from
+its parent), and neutralise any variable that overrides the config search you just
+isolated (`OPENCODE_CONFIG_DIR` beats every `XDG_*` you set).
 
 ## The record
 
