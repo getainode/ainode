@@ -440,7 +440,9 @@ whose needle came back verbatim.
 
 | Model | Placement | Score | Tools (B+G) | Coding (C) | Reasoning (D) | Needle | Date | Run |
 |---|---|---|---|---|---|---|---|---|
-| DeepSeek V4 Flash | Spark-2-DGX, TP=2 | 20/22 | 9/9 | 3/3 | 3/4 | 8k | 2026-09-18 | [DeepSeek TP=2 Spark-2+3, quick](https://github.com/getainode/ainode/blob/main/bench/results/20260918-012459-deepseek-v4-flash-dspark-deepseek-tp-2-spark-2-3-quick-agentic.json) |
+| DeepSeek V4 Flash | Spark-2-DGX, TP=2 | 22/25 | 9/9 | 3/3 | 2/4 | 100k | 2026-09-18 | [DeepSeek TP=2 Spark-2+3, full](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013839-deepseek-v4-flash-dspark-deepseek-tp-2-spark-2-3-full-agentic.json) |
+| Ornith 1.5 35B-A3B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 3/3 | 4/4 | 100k | 2026-09-18 | [Ornith stacked Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013703-ornith-1_5-35b-a3b-nvfp4-ornith-stacked-spark-1-thinking-on-agentic.json) |
+| Qwen3.8 27B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 2/3 | 4/4 | 100k | 2026-09-18 | [Qwen3.8 27B solo Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-020831-qwen3_8-27b-nvfp4-qwen3_8-27b-solo-spark-1-thinking-on-agentic.json) |
 
 <!-- END agentic-bench-table -->
 

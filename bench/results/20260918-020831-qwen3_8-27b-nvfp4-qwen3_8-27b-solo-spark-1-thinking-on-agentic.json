@@ -1,0 +1,374 @@
+{
+ "schema": 1,
+ "stamp": "20260918-020831",
+ "label": "Qwen3.8 27B solo Spark-1, thinking on",
+ "model": {
+  "id": "unsloth/Qwen3.8-27B-NVFP4",
+  "name": "Qwen3.8 27B",
+  "params_b": 27.0,
+  "arch": "dense",
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "Apache 2.0",
+  "vision": true,
+  "active_b": 27.0
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-1-DGX",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.21",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [
+   "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"
+  ],
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "flags": [
+   "--enable-prefix-caching",
+   "--kv-cache-dtype",
+   "auto",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--speculative_config",
+   "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":2}"
+  ],
+  "gpu_memory_utilization": 0.6,
+  "kv_cache_dtype": "fp8",
+  "distributed_mode": "solo",
+  "flags_source": "live node config (/api/config)",
+  "port": 8000
+ },
+ "settings": {
+  "groups": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "E",
+   "F",
+   "V",
+   "G"
+  ],
+  "needle_tokens": [
+   8000,
+   48000,
+   100000
+  ],
+  "quick": false,
+  "temperature": 1.0,
+  "timeout_s": 900,
+  "thinking_switch": "enable_thinking",
+  "probes_requested": 25
+ },
+ "agentic": {
+  "score": {
+   "pass": 24,
+   "total": 25
+  },
+  "groups": {
+   "A": {
+    "pass": 4,
+    "total": 4
+   },
+   "B": {
+    "pass": 4,
+    "total": 4
+   },
+   "C": {
+    "pass": 2,
+    "total": 3
+   },
+   "D": {
+    "pass": 4,
+    "total": 4
+   },
+   "E": {
+    "pass": 3,
+    "total": 3
+   },
+   "F": {
+    "pass": 1,
+    "total": 1
+   },
+   "V": {
+    "pass": 1,
+    "total": 1
+   },
+   "G": {
+    "pass": 5,
+    "total": 5
+   }
+  },
+  "endpoint": "http://100.122.26.9:3000/v1",
+  "protocol": {
+   "groups": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "V",
+    "G"
+   ],
+   "needle_tokens": [
+    8000,
+    48000,
+    100000
+   ],
+   "temperature": 1.0,
+   "timeout_s": 900,
+   "thinking_switch": "enable_thinking",
+   "max_turns": 4,
+   "verdicts": "mechanical; group C is executed, group G is a judged tool trace"
+  },
+  "probes": [
+   {
+    "id": "A1_format",
+    "group": "A",
+    "pass": true,
+    "wall_s": 43.84,
+    "completion_tokens": 230,
+    "note": "5 lines of 'N. NAME'",
+    "excerpt": "1. JUPITER 2. SATURN 3. URANUS 4. NEPTUNE 5. EARTH"
+   },
+   {
+    "id": "A2_json_only",
+    "group": "A",
+    "pass": true,
+    "wall_s": 21.63,
+    "completion_tokens": 275,
+    "note": "three keys, landlocked true",
+    "excerpt": "{ \"city\": \"Vienna\", \"population_millions\": 1.9, \"landlocked\": true }"
+   },
+   {
+    "id": "A3_constraints",
+    "group": "A",
+    "pass": true,
+    "wall_s": 82.54,
+    "completion_tokens": 1025,
+    "note": "no z, no 'the', 3 full stops",
+    "excerpt": "Pedals spin a crank, and a chain sends force to a rear wheel. Gears adjust that force, letting a rider climb steep slopes. Turning bars steer front tires, while balanced weight keeps a bike steady."
+   },
+   {
+    "id": "A4_persona",
+    "group": "A",
+    "pass": true,
+    "wall_s": 17.69,
+    "completion_tokens": 188,
+    "note": "stayed in character",
+    "excerpt": "Avast ye! A mutex be a special mechanism for making sure only one thread or process can enter a critical piece of work at a time. If another one tries to go in while it is locked, it must wait its turn, so the shared data or resource stays safe from races and confusion. Arr!"
+   },
+   {
+    "id": "B1_tool_single",
+    "group": "B",
+    "pass": true,
+    "wall_s": 5.06,
+    "completion_tokens": 60,
+    "note": "get_weather({\"city\": \"Tokyo\", \"unit\": \"c\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B2_tool_parallel",
+    "group": "B",
+    "pass": true,
+    "wall_s": 11.63,
+    "completion_tokens": 184,
+    "note": "3 calls: get_weather({\"city\": \"Paris\", \"unit\": \"c\"}), get_weather({\"city\": \"Cairo\", \"unit\": \"c\"}), convert_currency({\"amount\": 250, \"from\": \"USD\", \"to\": \"EUR\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B3_tool_not_needed",
+    "group": "B",
+    "pass": true,
+    "wall_s": 29.61,
+    "completion_tokens": 370,
+    "note": "answered without a tool",
+    "excerpt": "Crisp leaves drift slowly, golden light rests on branches\u2014 wind whispers farewell."
+   },
+   {
+    "id": "B4_tool_roundtrip",
+    "group": "B",
+    "pass": true,
+    "wall_s": 8.08,
+    "completion_tokens": 100,
+    "note": "used the tool result",
+    "excerpt": "The weather in Tokyo is currently 31\u00b0C with thunderstorms. \ud83c\udf29\ufe0f"
+   },
+   {
+    "id": "C1_ttl_cache",
+    "group": "C",
+    "pass": false,
+    "wall_s": 900.02,
+    "completion_tokens": null,
+    "note": "TimeoutError: timed out",
+    "excerpt": ""
+   },
+   {
+    "id": "C2_intervals",
+    "group": "C",
+    "pass": true,
+    "wall_s": 121.56,
+    "completion_tokens": 1573,
+    "note": "hidden asserts passed",
+    "excerpt": "```python def merge_intervals(intervals): if not intervals: return [] normalized = [] for start, end in intervals: if start > end: start, end = end, start normalized.append([start, end]) normalized.sort(key=lambda x: (x[0], x[1])) merged = [] for start, end in normalized: if not merged or start > me..."
+   },
+   {
+    "id": "C3_bugfix",
+    "group": "C",
+    "pass": true,
+    "wall_s": 187.87,
+    "completion_tokens": 2211,
+    "note": "hidden asserts passed",
+    "excerpt": "```python def top_k_words(text, k): import re from collections import Counter if k <= 0: return [] words = re.findall(r\"[a-z]+\", text.lower()) counts = Counter(words) return sorted(counts, key=lambda word: (-counts[word], word))[:k] ```"
+   },
+   {
+    "id": "D1_decimal",
+    "group": "D",
+    "pass": true,
+    "wall_s": 5.93,
+    "completion_tokens": 79,
+    "note": "said 9.9",
+    "excerpt": "9.9"
+   },
+   {
+    "id": "D2_strawberry",
+    "group": "D",
+    "pass": true,
+    "wall_s": 9.69,
+    "completion_tokens": 141,
+    "note": "said 3",
+    "excerpt": "3"
+   },
+   {
+    "id": "D3_sisters",
+    "group": "D",
+    "pass": true,
+    "wall_s": 7.38,
+    "completion_tokens": 84,
+    "note": "said 2",
+    "excerpt": "2"
+   },
+   {
+    "id": "D4_knights",
+    "group": "D",
+    "pass": true,
+    "wall_s": 24.23,
+    "completion_tokens": 310,
+    "note": "said A=Knight, B=Knave",
+    "excerpt": "A=Knight, B=Knave"
+   },
+   {
+    "id": "E_needle_8000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 14.39,
+    "completion_tokens": 101,
+    "note": "found the password; prompt_tokens=6088",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "E_needle_48000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 62.36,
+    "completion_tokens": 90,
+    "note": "found the password; prompt_tokens=36088",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "E_needle_100000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 152.96,
+    "completion_tokens": 129,
+    "note": "found the password; prompt_tokens=75088",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "F1_thinking_off",
+    "group": "F",
+    "pass": true,
+    "wall_s": 1.02,
+    "completion_tokens": 4,
+    "note": "answered with no reasoning channel",
+    "excerpt": "391"
+   },
+   {
+    "id": "V1_vision",
+    "group": "V",
+    "pass": true,
+    "wall_s": 7.02,
+    "completion_tokens": 60,
+    "note": "said red",
+    "excerpt": "Red"
+   },
+   {
+    "id": "G1_tool_chain",
+    "group": "G",
+    "pass": true,
+    "wall_s": 12.4,
+    "completion_tokens": 148,
+    "note": "list_files -> read_file -> read_file; answered 137",
+    "excerpt": "137"
+   },
+   {
+    "id": "G2_tool_error",
+    "group": "G",
+    "pass": true,
+    "wall_s": 9.55,
+    "completion_tokens": 123,
+    "note": "called the tool with 'San Francisco' on the first call",
+    "excerpt": "The current temperature in San Francisco is **18\u00b0C**, with foggy conditions."
+   },
+   {
+    "id": "G3_arg_schema",
+    "group": "G",
+    "pass": true,
+    "wall_s": 11.31,
+    "completion_tokens": 154,
+    "note": "mode='daily' retries=3 notify=True",
+    "excerpt": "[[\"schedule_job\", \"{\\\"mode\\\": \\\"daily\\\", \\\"retries\\\": 3, \\\"notify\\\": true}\"]]"
+   },
+   {
+    "id": "G4_structured",
+    "group": "G",
+    "pass": true,
+    "wall_s": 15.49,
+    "completion_tokens": 140,
+    "note": "four keys, right types, severity=2 [json_schema]",
+    "excerpt": "{ \"title\": \"Login service returned 500s for 20 minutes after bad deploy\", \"severity\": 2, \"resolved\": true, \"tags\": [ \"login\", \"deploy\" ] }"
+   },
+   {
+    "id": "G5_persistence",
+    "group": "G",
+    "pass": true,
+    "wall_s": 27.55,
+    "completion_tokens": 308,
+    "note": "all 4 turns ended with DONE",
+    "excerpt": "You first asked, \u201cWhat is the capital of France?\u201d DONE"
+   }
+  ],
+  "needle": {
+   "8000": true,
+   "48000": true,
+   "100000": true
+  },
+  "thinking_off_supported": true,
+  "vision_supported": true,
+  "structured_output_mode": "json_schema"
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py agentic in 1791s; nothing loaded, unloaded or restarted.",
+  "Every verdict is mechanical: no judge model and no reply was read by a person to reach a score.",
+  "Group C runs the model's own code against asserts it never saw, in a subprocess on the machine driving the bench.",
+  "Group G drives real tool loops and judges the call trace: the order of the calls, the arguments, and whether a stated fact came back from a tool.",
+  "Groups run: A, B, C, D, E, F, V, G. A group that did not run is absent from the score rather than counted as zero.",
+  "Probe(s) that failed on a transport or server error rather than on the answer: C1_ttl_cache."
+ ],
+ "source": "scripts/ainode-bench.py agentic"
+}

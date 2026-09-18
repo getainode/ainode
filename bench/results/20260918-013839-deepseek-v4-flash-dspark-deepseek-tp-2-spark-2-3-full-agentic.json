@@ -1,0 +1,387 @@
+{
+ "schema": 1,
+ "stamp": "20260918-013839",
+ "label": "DeepSeek TP=2 Spark-2+3, full",
+ "model": {
+  "id": "fraserprice/DeepSeek-V4-Flash-DSpark",
+  "name": "DeepSeek V4 Flash",
+  "params_b": 284.0,
+  "active_b": 13.0,
+  "arch": "moe",
+  "quant": "FP8",
+  "context": 1048576,
+  "license": "MIT",
+  "vision": false
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-2-DGX",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.21",
+  "tp": 2,
+  "gpus": 2,
+  "stacked_with": [
+   "unsloth/Qwen3.8-27B-NVFP4",
+   "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"
+  ],
+  "engine_image": "vllm-dspark-runtime:dspark-nvfp4-stage-c",
+  "flags": [
+   "--block-size",
+   "256",
+   "--max-num-seqs",
+   "6",
+   "--max-num-batched-tokens",
+   "8192",
+   "--enable-prefix-caching",
+   "--async-scheduling",
+   "--enable-chunked-prefill",
+   "--speculative-config",
+   "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\"}",
+   "--tokenizer-mode",
+   "deepseek_v4",
+   "--tool-call-parser",
+   "deepseek_v4",
+   "--enable-auto-tool-choice",
+   "--reasoning-parser",
+   "deepseek_v4",
+   "--reasoning-config",
+   "{\"reasoning_parser\":\"deepseek_v4\",\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}",
+   "--default-chat-template-kwargs",
+   "{\"thinking\":false}",
+   "--generation-config",
+   "vllm",
+   "--enable-flashinfer-autotune"
+  ],
+  "flags_source": "curated catalog recipe (/api/models); the live container command line was not readable",
+  "port": 8000
+ },
+ "settings": {
+  "groups": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "E",
+   "F",
+   "V",
+   "G"
+  ],
+  "needle_tokens": [
+   8000,
+   48000,
+   100000
+  ],
+  "quick": false,
+  "temperature": 1.0,
+  "timeout_s": 900,
+  "thinking_switch": "enable_thinking",
+  "probes_requested": 25
+ },
+ "agentic": {
+  "score": {
+   "pass": 22,
+   "total": 25
+  },
+  "groups": {
+   "A": {
+    "pass": 4,
+    "total": 4
+   },
+   "B": {
+    "pass": 4,
+    "total": 4
+   },
+   "C": {
+    "pass": 3,
+    "total": 3
+   },
+   "D": {
+    "pass": 2,
+    "total": 4
+   },
+   "E": {
+    "pass": 3,
+    "total": 3
+   },
+   "F": {
+    "pass": 1,
+    "total": 1
+   },
+   "V": {
+    "pass": 0,
+    "total": 1
+   },
+   "G": {
+    "pass": 5,
+    "total": 5
+   }
+  },
+  "endpoint": "http://100.122.26.9:3000/v1",
+  "protocol": {
+   "groups": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "V",
+    "G"
+   ],
+   "needle_tokens": [
+    8000,
+    48000,
+    100000
+   ],
+   "temperature": 1.0,
+   "timeout_s": 900,
+   "thinking_switch": "enable_thinking",
+   "max_turns": 4,
+   "verdicts": "mechanical; group C is executed, group G is a judged tool trace"
+  },
+  "probes": [
+   {
+    "id": "A1_format",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.59,
+    "completion_tokens": 28,
+    "note": "5 lines of 'N. NAME'",
+    "excerpt": "1. JUPITER 2. SATURN 3. URANUS 4. NEPTUNE 5. EARTH"
+   },
+   {
+    "id": "A2_json_only",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.62,
+    "completion_tokens": 25,
+    "note": "three keys, landlocked true",
+    "excerpt": "{\"city\": \"Vienna\", \"population_millions\": 2.0, \"landlocked\": true}"
+   },
+   {
+    "id": "A3_constraints",
+    "group": "A",
+    "pass": true,
+    "wall_s": 1.78,
+    "completion_tokens": 36,
+    "note": "no z, no 'the', 3 full stops",
+    "excerpt": "Pedals turn a chain, which rotates a rear wheel. Handlebars control a front wheel for steering direction. Rubber tires and wheel spokes transfer human power into forward motion."
+   },
+   {
+    "id": "A4_persona",
+    "group": "A",
+    "pass": true,
+    "wall_s": 2.01,
+    "completion_tokens": 90,
+    "note": "stayed in character",
+    "excerpt": "A mutex, short for \"mutual exclusion,\" is a synchronization primitive used in concurrent programming to prevent multiple threads or processes from accessing a shared resource simultaneously. When a thread locks a mutex, it gains exclusive access to the protected resource, and any other thread attemp..."
+   },
+   {
+    "id": "B1_tool_single",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.04,
+    "completion_tokens": 61,
+    "note": "get_weather({\"city\": \"Tokyo\", \"unit\": \"c\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B2_tool_parallel",
+    "group": "B",
+    "pass": true,
+    "wall_s": 2.72,
+    "completion_tokens": 188,
+    "note": "3 calls: get_weather({\"city\": \"Paris\", \"unit\": \"c\"}), get_weather({\"city\": \"Cairo\", \"unit\": \"c\"}), convert_currency({\"amount\": 250, \"from\": \"USD\", \"to\": \"EUR\"})",
+    "excerpt": "I'll start by getting the weather for both cities and converting the currency simultaneously."
+   },
+   {
+    "id": "B3_tool_not_needed",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.09,
+    "completion_tokens": 25,
+    "note": "answered without a tool",
+    "excerpt": "Crimson leaves descend, Whisper winds hint at winter's chill\u2014 Autumn's twilight fades."
+   },
+   {
+    "id": "B4_tool_roundtrip",
+    "group": "B",
+    "pass": true,
+    "wall_s": 2.24,
+    "completion_tokens": 91,
+    "note": "used the tool result",
+    "excerpt": "The weather in Tokyo is currently **31\u00b0C** with **thunderstorms**. Pack an umbrella if you're heading out! \u26c8\ufe0f"
+   },
+   {
+    "id": "C1_ttl_cache",
+    "group": "C",
+    "pass": true,
+    "wall_s": 6.79,
+    "completion_tokens": 430,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import time from collections import OrderedDict class TTLCache: def __init__(self, capacity, ttl, clock=time.time): self.capacity = capacity self.ttl = ttl self.clock = clock self.cache = OrderedDict() self.timestamps = OrderedDict() def _is_expired(self, key): if key in self.timestamps: r..."
+   },
+   {
+    "id": "C2_intervals",
+    "group": "C",
+    "pass": true,
+    "wall_s": 7.9,
+    "completion_tokens": 451,
+    "note": "hidden asserts passed",
+    "excerpt": "```python def merge_intervals(intervals): \"\"\" Merges all overlapping or touching intervals. Parameters: intervals (list of list): Each sublist is [start, end] with start <= end. Returns: list of list: Merged intervals sorted by start time. \"\"\" if not intervals: return [] # Sort intervals by start ti..."
+   },
+   {
+    "id": "C3_bugfix",
+    "group": "C",
+    "pass": true,
+    "wall_s": 1.3,
+    "completion_tokens": 79,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import re from collections import Counter def top_k_words(text, k): words = re.findall(r'[a-zA-Z]+', text.lower()) counts = Counter(words) items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])) return [w for w, c in items[:k]] ```"
+   },
+   {
+    "id": "D1_decimal",
+    "group": "D",
+    "pass": true,
+    "wall_s": 0.25,
+    "completion_tokens": 4,
+    "note": "said 9.9",
+    "excerpt": "9.9"
+   },
+   {
+    "id": "D2_strawberry",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.34,
+    "completion_tokens": 2,
+    "note": "wanted 3",
+    "excerpt": "2"
+   },
+   {
+    "id": "D3_sisters",
+    "group": "D",
+    "pass": true,
+    "wall_s": 2.5,
+    "completion_tokens": 103,
+    "note": "said 2",
+    "excerpt": "Let's break it down: - Alice is one sister. - She has 1 sister, meaning there is one more sister besides Alice. - So total sisters in the family = Alice + that 1 sister = 2 sisters. Now, Alice's brother is one of the 4 brothers. That brother has: - Alice as a sister - The other sister as a sister So..."
+   },
+   {
+    "id": "D4_knights",
+    "group": "D",
+    "pass": false,
+    "wall_s": 4.98,
+    "completion_tokens": 250,
+    "note": "wanted A=Knight, B=Knave",
+    "excerpt": "We know: - Knights always tell the truth. - Knaves always lie. Let's test possibilities. **Case 1: A is a knight.** Then A tells the truth: \"B is a knave.\" So B is a knave. Now, B (knave) says: \"A and I are the same type.\" If B is a knave, this statement is false, meaning A and B are *not* the same ..."
+   },
+   {
+    "id": "E_needle_8000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 0.45,
+    "completion_tokens": 9,
+    "note": "found the password; prompt_tokens=6038",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "E_needle_48000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 18.57,
+    "completion_tokens": 9,
+    "note": "found the password; prompt_tokens=36038",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "E_needle_100000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 31.8,
+    "completion_tokens": 9,
+    "note": "found the password; prompt_tokens=75038",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "F1_thinking_off",
+    "group": "F",
+    "pass": true,
+    "wall_s": 0.27,
+    "completion_tokens": 2,
+    "note": "answered with no reasoning channel",
+    "excerpt": "391"
+   },
+   {
+    "id": "V1_vision",
+    "group": "V",
+    "pass": false,
+    "wall_s": 0.07,
+    "completion_tokens": null,
+    "note": "the server refused the image (HTTP 400): HTTP 400: {\"error\":{\"message\":\"/root/.cache/huggingface/hub/models--fraserprice--DeepSeek-V4-Flash-DSpark/snapshots/8bbae7df04e6e3de72fd93614ea076e4948021cb is not a multimodal model\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}",
+    "excerpt": ""
+   },
+   {
+    "id": "G1_tool_chain",
+    "group": "G",
+    "pass": true,
+    "wall_s": 2.07,
+    "completion_tokens": 75,
+    "note": "list_files -> read_file; answered 137",
+    "excerpt": "137"
+   },
+   {
+    "id": "G2_tool_error",
+    "group": "G",
+    "pass": true,
+    "wall_s": 1.99,
+    "completion_tokens": 91,
+    "note": "called the tool with 'San Francisco' on the first call",
+    "excerpt": "The current temperature in **San Francisco** is **18\u00b0C** with foggy conditions."
+   },
+   {
+    "id": "G3_arg_schema",
+    "group": "G",
+    "pass": true,
+    "wall_s": 1.39,
+    "completion_tokens": 80,
+    "note": "mode='daily' retries=3 notify=True",
+    "excerpt": "[[\"schedule_job\", \"{\\\"mode\\\": \\\"daily\\\", \\\"retries\\\": 3, \\\"notify\\\": true}\"]]"
+   },
+   {
+    "id": "G4_structured",
+    "group": "G",
+    "pass": true,
+    "wall_s": 0.94,
+    "completion_tokens": 48,
+    "note": "four keys, right types, severity=2 [json_schema]",
+    "excerpt": "{ \"title\": \"Login service returned 500s for twenty minutes after a bad deploy\", \"severity\": 2, \"resolved\": true, \"tags\": [\"login\", \"deploy\"] }"
+   },
+   {
+    "id": "G5_persistence",
+    "group": "G",
+    "pass": true,
+    "wall_s": 2.17,
+    "completion_tokens": 60,
+    "note": "all 4 turns ended with DONE",
+    "excerpt": "You asked: \"What is the capital of France?\" DONE"
+   }
+  ],
+  "needle": {
+   "8000": true,
+   "48000": true,
+   "100000": true
+  },
+  "thinking_off_supported": true,
+  "vision_supported": false,
+  "structured_output_mode": "json_schema"
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py agentic in 96s; nothing loaded, unloaded or restarted.",
+  "Every verdict is mechanical: no judge model and no reply was read by a person to reach a score.",
+  "Group C runs the model's own code against asserts it never saw, in a subprocess on the machine driving the bench.",
+  "Group G drives real tool loops and judges the call trace: the order of the calls, the arguments, and whether a stated fact came back from a tool.",
+  "Groups run: A, B, C, D, E, F, V, G. A group that did not run is absent from the score rather than counted as zero.",
+  "Spark-1-DGX does not report serving fraserprice/DeepSeek-V4-Flash-DSpark; placement and telemetry may describe the wrong node"
+ ],
+ "source": "scripts/ainode-bench.py agentic"
+}

@@ -1,0 +1,373 @@
+{
+ "schema": 1,
+ "stamp": "20260918-013703",
+ "label": "Ornith stacked Spark-1, thinking on",
+ "model": {
+  "id": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "name": "Ornith 1.5 35B-A3B",
+  "params_b": 35.0,
+  "active_b": 3.0,
+  "arch": "moe",
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "MIT",
+  "vision": false
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-1-DGX",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.21",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [
+   "unsloth/Qwen3.8-27B-NVFP4"
+  ],
+  "engine_image": "vllm/vllm-openai:v0.27.1",
+  "flags": [
+   "--enable-prefix-caching",
+   "--kv-cache-dtype",
+   "auto",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--limit-mm-per-prompt",
+   "{\"image\":0,\"video\":0}",
+   "--speculative_config",
+   "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":2}"
+  ],
+  "flags_source": "curated catalog recipe (/api/models); the live container command line was not readable",
+  "port": 8001
+ },
+ "settings": {
+  "groups": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "E",
+   "F",
+   "V",
+   "G"
+  ],
+  "needle_tokens": [
+   8000,
+   48000,
+   100000
+  ],
+  "quick": false,
+  "temperature": 1.0,
+  "timeout_s": 900,
+  "thinking_switch": "enable_thinking",
+  "probes_requested": 25
+ },
+ "agentic": {
+  "score": {
+   "pass": 24,
+   "total": 25
+  },
+  "groups": {
+   "A": {
+    "pass": 4,
+    "total": 4
+   },
+   "B": {
+    "pass": 4,
+    "total": 4
+   },
+   "C": {
+    "pass": 3,
+    "total": 3
+   },
+   "D": {
+    "pass": 4,
+    "total": 4
+   },
+   "E": {
+    "pass": 3,
+    "total": 3
+   },
+   "F": {
+    "pass": 1,
+    "total": 1
+   },
+   "V": {
+    "pass": 0,
+    "total": 1
+   },
+   "G": {
+    "pass": 5,
+    "total": 5
+   }
+  },
+  "endpoint": "http://100.122.26.9:3000/v1",
+  "protocol": {
+   "groups": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "V",
+    "G"
+   ],
+   "needle_tokens": [
+    8000,
+    48000,
+    100000
+   ],
+   "temperature": 1.0,
+   "timeout_s": 900,
+   "thinking_switch": "enable_thinking",
+   "max_turns": 4,
+   "verdicts": "mechanical; group C is executed, group G is a judged tool trace"
+  },
+  "probes": [
+   {
+    "id": "A1_format",
+    "group": "A",
+    "pass": true,
+    "wall_s": 13.74,
+    "completion_tokens": 281,
+    "note": "5 lines of 'N. NAME'",
+    "excerpt": "1. JUPITER 2. SATURN 3. URANUS 4. NEPTUNE 5. EARTH"
+   },
+   {
+    "id": "A2_json_only",
+    "group": "A",
+    "pass": true,
+    "wall_s": 3.32,
+    "completion_tokens": 204,
+    "note": "three keys, landlocked true",
+    "excerpt": "{\"city\": \"Vienna\", \"population_millions\": 1.9, \"landlocked\": true}"
+   },
+   {
+    "id": "A3_constraints",
+    "group": "A",
+    "pass": true,
+    "wall_s": 23.09,
+    "completion_tokens": 1112,
+    "note": "no z, no 'the', 3 full stops",
+    "excerpt": "A rider sits on a seat and presses pedals with their feet. Pedals link to a chain that spins a rear cog, driving that wheel forward. Turning handlebars steers a front wheel, and hand levers press brakes to slow down."
+   },
+   {
+    "id": "A4_persona",
+    "group": "A",
+    "pass": true,
+    "wall_s": 10.27,
+    "completion_tokens": 397,
+    "note": "stayed in character",
+    "excerpt": "Ahoy there, ye pesky landlubber! I'll not be swervin' from me duties just 'cause ye fancy a bit of trickery on the high seas. A shanty's a shanty, and this pirate'll answer with his pirate voice till the day he walks the plank! Now, about this \"mutex\" ye ask of \u2014 gather 'round, mates: A mutex be lik..."
+   },
+   {
+    "id": "B1_tool_single",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.77,
+    "completion_tokens": 66,
+    "note": "get_weather({\"city\": \"Tokyo\", \"unit\": \"c\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B2_tool_parallel",
+    "group": "B",
+    "pass": true,
+    "wall_s": 3.78,
+    "completion_tokens": 192,
+    "note": "3 calls: get_weather({\"city\": \"Paris\", \"unit\": \"c\"}), get_weather({\"city\": \"Cairo\", \"unit\": \"c\"}), convert_currency({\"amount\": 250, \"from\": \"USD\", \"to\": \"EUR\"})",
+    "excerpt": "I'll get the weather for both cities and convert the currency for you."
+   },
+   {
+    "id": "B3_tool_not_needed",
+    "group": "B",
+    "pass": true,
+    "wall_s": 7.16,
+    "completion_tokens": 317,
+    "note": "answered without a tool",
+    "excerpt": "Golden leaves descend, drifting gently on the breeze\u2014 earth prepares for sleep."
+   },
+   {
+    "id": "B4_tool_roundtrip",
+    "group": "B",
+    "pass": true,
+    "wall_s": 2.72,
+    "completion_tokens": 108,
+    "note": "used the tool result",
+    "excerpt": "The weather in Tokyo right now is **31\u00b0C** with thunderstorms. \u26c8\ufe0f"
+   },
+   {
+    "id": "C1_ttl_cache",
+    "group": "C",
+    "pass": true,
+    "wall_s": 187.94,
+    "completion_tokens": 7480,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import time from collections import OrderedDict class TTLCache: \"\"\"Least-recently-used cache with per-item TTL expiration. ``clock`` is a zero-arg callable returning the current time in seconds. It defaults to :func:`time.time` and can be replaced by tests, e.g. ``cache.clock = lambda: now..."
+   },
+   {
+    "id": "C2_intervals",
+    "group": "C",
+    "pass": true,
+    "wall_s": 90.28,
+    "completion_tokens": 2540,
+    "note": "hidden asserts passed",
+    "excerpt": "```python def merge_intervals(intervals): \"\"\"Merge overlapping or touching [start, end] intervals. Returns a sorted list of merged [start, end] lists.\"\"\" merged = [] for start, end in sorted(intervals, key=lambda x: x[0]): if merged and start <= merged[-1][1]: # overlapping or touching merged[-1][1]..."
+   },
+   {
+    "id": "C3_bugfix",
+    "group": "C",
+    "pass": true,
+    "wall_s": 19.59,
+    "completion_tokens": 1000,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import re from collections import Counter def top_k_words(text, k): words = re.findall(r'[a-z]+', text.lower()) counts = Counter(words) items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])) return [w for w, c in items[:k]] ``` The two bugs were: 1. **Case-insensitivity**: The rege..."
+   },
+   {
+    "id": "D1_decimal",
+    "group": "D",
+    "pass": true,
+    "wall_s": 3.65,
+    "completion_tokens": 183,
+    "note": "said 9.9",
+    "excerpt": "9.9"
+   },
+   {
+    "id": "D2_strawberry",
+    "group": "D",
+    "pass": true,
+    "wall_s": 1.77,
+    "completion_tokens": 88,
+    "note": "said 3",
+    "excerpt": "3"
+   },
+   {
+    "id": "D3_sisters",
+    "group": "D",
+    "pass": true,
+    "wall_s": 4.28,
+    "completion_tokens": 207,
+    "note": "said 2",
+    "excerpt": "**2** Alice is a girl, so the family has: - Girls: Alice + 1 sister = **2 girls** - Boys: **4 brothers** Alice's brother's sisters are all the girls in the family (Alice and her sister), so he has **2 sisters**."
+   },
+   {
+    "id": "D4_knights",
+    "group": "D",
+    "pass": true,
+    "wall_s": 11.71,
+    "completion_tokens": 602,
+    "note": "said A=Knight, B=Knave",
+    "excerpt": "## Setting Up the Problem Let me test both possibilities for A. **Case 1: Assume A is a knight** - A tells the truth, so B is a knave (from A's statement). - B is a knave, so B lies about \"A and I are the same type.\" - A is a knight, B is a knave \u2192 they are **different** types, so B's statement is *..."
+   },
+   {
+    "id": "E_needle_8000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 5.02,
+    "completion_tokens": 77,
+    "note": "found the password; prompt_tokens=6046",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "E_needle_48000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 23.83,
+    "completion_tokens": 107,
+    "note": "found the password; prompt_tokens=36046",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "E_needle_100000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 59.09,
+    "completion_tokens": 89,
+    "note": "found the password; prompt_tokens=75046",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "F1_thinking_off",
+    "group": "F",
+    "pass": true,
+    "wall_s": 0.32,
+    "completion_tokens": 4,
+    "note": "answered with no reasoning channel",
+    "excerpt": "391"
+   },
+   {
+    "id": "V1_vision",
+    "group": "V",
+    "pass": false,
+    "wall_s": 0.2,
+    "completion_tokens": null,
+    "note": "the server refused the image (HTTP 400): HTTP 400: {\"error\": {\"message\": \"'ornith-ai/Ornith-1.5-35B-A3B-NVFP4' is loaded but no instance accepts images: tried Spark-1-DGX. Relaunch one of those instances without the modality capped (--limit-mm-per-prompt), or load the model on a node that serves it with vision.\", \"type\": \"invalid_request_error\", \"pa",
+    "excerpt": ""
+   },
+   {
+    "id": "G1_tool_chain",
+    "group": "G",
+    "pass": true,
+    "wall_s": 6.56,
+    "completion_tokens": 283,
+    "note": "list_files -> read_file -> read_file -> read_file; answered 137",
+    "excerpt": "137"
+   },
+   {
+    "id": "G2_tool_error",
+    "group": "G",
+    "pass": true,
+    "wall_s": 4.28,
+    "completion_tokens": 176,
+    "note": "called the tool with 'San Francisco' on the first call",
+    "excerpt": "The current temperature in San Francisco is **18\u00b0C**, with foggy conditions. \ud83c\udf2b\ufe0f"
+   },
+   {
+    "id": "G3_arg_schema",
+    "group": "G",
+    "pass": true,
+    "wall_s": 3.05,
+    "completion_tokens": 151,
+    "note": "mode='daily' retries=3 notify=True",
+    "excerpt": "[[\"schedule_job\", \"{\\\"mode\\\": \\\"daily\\\", \\\"retries\\\": 3, \\\"notify\\\": true}\"]]"
+   },
+   {
+    "id": "G4_structured",
+    "group": "G",
+    "pass": true,
+    "wall_s": 25.74,
+    "completion_tokens": 224,
+    "note": "four keys, right types, severity=2 [json_schema]",
+    "excerpt": "{ \"title\": \"Login service returned 500s for twenty minutes after a bad deploy\", \"severity\": 2, \"resolved\": true, \"tags\": [ \"login\", \"deploy\" ] }"
+   },
+   {
+    "id": "G5_persistence",
+    "group": "G",
+    "pass": true,
+    "wall_s": 7.0,
+    "completion_tokens": 268,
+    "note": "all 4 turns ended with DONE",
+    "excerpt": "You first asked me, \"What is the capital of France?\" DONE"
+   }
+  ],
+  "needle": {
+   "8000": true,
+   "48000": true,
+   "100000": true
+  },
+  "thinking_off_supported": true,
+  "vision_supported": false,
+  "structured_output_mode": "json_schema"
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py agentic in 520s; nothing loaded, unloaded or restarted.",
+  "Every verdict is mechanical: no judge model and no reply was read by a person to reach a score.",
+  "Group C runs the model's own code against asserts it never saw, in a subprocess on the machine driving the bench.",
+  "Group G drives real tool loops and judges the call trace: the order of the calls, the arguments, and whether a stated fact came back from a tool.",
+  "Groups run: A, B, C, D, E, F, V, G. A group that did not run is absent from the score rather than counted as zero.",
+  "Spark-1-DGX does not report serving ornith-ai/Ornith-1.5-35B-A3B-NVFP4; placement and telemetry may describe the wrong node"
+ ],
+ "source": "scripts/ainode-bench.py agentic"
+}
