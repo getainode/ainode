@@ -1,4 +1,3 @@
-import sys
 """``scripts/ainode-bench.py harness ...`` - the command line for the harness bench.
 
 A subcommand rather than a second script, because it is the same question as the
@@ -16,6 +15,7 @@ task and harness, and touches nothing: no subprocess, no config write, no reques
 """
 from __future__ import annotations
 
+import sys
 import argparse
 import json
 import pathlib

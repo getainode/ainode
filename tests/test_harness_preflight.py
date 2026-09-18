@@ -8,7 +8,7 @@ import pytest
 
 from ainode.bench.harness import runner
 from ainode.bench.harness.runner import (
-    NO_PYTEST, TestEnvironmentError, preflight_test_interpreter, run_tests,
+    NO_PYTEST, HiddenTestsUnavailable, preflight_test_interpreter, run_tests,
 )
 
 
@@ -41,7 +41,7 @@ def test_run_tests_stops_the_bench_when_pytest_is_missing(monkeypatch, tmp_path)
                                            stderr=f"/usr/bin/python3: {NO_PYTEST}\n")
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     task = _task(tmp_path)
-    with pytest.raises(TestEnvironmentError, match="bob"):
+    with pytest.raises(HiddenTestsUnavailable, match="bob"):
         run_tests(task, tmp_path)
 
 

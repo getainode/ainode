@@ -158,7 +158,7 @@ def resolve_test_command(task: Task) -> list[str]:
     return cmd
 
 
-class TestEnvironmentError(RuntimeError):
+class HiddenTestsUnavailable(RuntimeError):
     """The hidden tests could not run at all, so no verdict is a verdict.
 
     Raised instead of recording a failure: on 2026-09-17 a Nemotron run scored dsh
@@ -205,7 +205,7 @@ def run_tests(task: Task, workdir: pathlib.Path, timeout: float = TEST_TIMEOUT) 
     text = (proc.stdout or "") + (proc.stderr or "")
     if NO_PYTEST in text:
         # The interpreter, not the code under test, failed. Stop the bench.
-        raise TestEnvironmentError(
+        raise HiddenTestsUnavailable(
             f"hidden tests could not run for {task.slug}: {text.strip()[-200:]}")
     return TestResult(exit_code=proc.returncode, wall_s=time.monotonic() - start,
                       output=text, output_tail=tail(text),
