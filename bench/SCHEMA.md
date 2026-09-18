@@ -222,3 +222,103 @@ Rules specific to this block, all load-bearing:
   part of the result rather than a footnote.
 - `completion_tokens` is the server's `usage` for that probe, summed over turns for
   the multi-turn probes (B4, G1, G2, G5), and `null` when the server reported none.
+
+## The `decide` block
+
+A decision-bench run (`scripts/ainode-bench.py decide`, docs in
+`bench/decide/README.md`) writes the same record with a top-level `decide` block and
+**no `results` block**, for the same reason the two blocks above have none: it scored
+typed decisions against labels and took no throughput. `scripts/render-bench-table.py`
+keeps a record shaped like that out of the README's tok/s table and gives it a row in
+the "Decision runs" table instead.
+
+The `model` block is whatever answered: for the hosted backend that is the version the
+API reported (`jev-1.13.0`), not the alias that was asked for (`jev-latest`, which is
+in `settings.model_requested`), and its placement is the one honest string there is
+for a service with no node of ours behind it.
+
+```json
+{
+  "schema": 1, "stamp": "20260918-041500",
+  "label": "jev-latest, 110 items",
+  "model": { "id": "jev-1.13.0", "name": "jev-1.13.0", "vendor": "typesafe.ai" },
+  "placement": { "node": "typesafe.ai hosted" },
+  "settings": {
+    "backend": "jev", "endpoint": "https://api.typesafe.ai/v1/systemone",
+    "model_requested": "jev-latest",
+    "items_file": "bench/decide/items.json", "item_set": "decide-110",
+    "items": 110, "sets": ["route", "triage", "urgency", "pr_safe", "fact"],
+    "concurrency": 8, "timeout_s": 120
+  },
+  "decide": {
+    "backend": "jev",
+    "endpoint": "https://api.typesafe.ai/v1/systemone",
+    "model_reported": "jev-1.13.0",
+    "item_set": { "id": "decide-110", "version": 1, "file": "items.json",
+                  "count": 110,
+                  "sets": {"route": 30, "triage": 20, "urgency": 20,
+                           "pr_safe": 20, "fact": 20} },
+    "protocol": { "backend": "jev", "endpoint": "...", "timeout_s": 120,
+                  "input_usd_per_mtok": 0.042, "output_usd_per_mtok": 0.0,
+                  "concurrency": 8, "bins": 5, "thresholds": ["0.8", "0.9"],
+                  "confidence": "the probability the backend put on the answer it gave; ...",
+                  "brier": "one term, on the labeled option's probability" },
+    "overall": {
+      "n": 110, "answered": 110, "errors": 0,
+      "accuracy": 0.964, "brier": 0.024, "ece": 0.059,
+      "bins": [ { "lo": 0.8, "hi": 1.0, "count": 97, "accuracy": 1.0,
+                  "confidence": 0.993 } ],
+      "thresholds": { "0.9": { "kept": 104, "wrong": 2, "abstained": 6,
+                               "no_confidence": 0 } },
+      "tokens": { "in": 38214, "out": 4620 }, "cost_usd": 0.001605,
+      "p50_ms": 290, "p95_ms": 412
+    },
+    "sets": { "route": { "...": "the same block, over that set's items" } },
+    "rows": [
+      { "id": "route-01", "set": "route", "kind": "choice", "label": "code",
+        "answer": "code", "correct": true, "p_answer": 1.0, "p_label": 1.0,
+        "distribution": {"code": 1.0, "chat": 0.0, "vision": 0.0,
+                         "long_document": 0.0},
+        "wall_ms": 310, "server_latency_ms": null,
+        "tokens_in": 385, "tokens_out": 46, "error": null }
+    ]
+  },
+  "notes": ["..."],
+  "source": "scripts/ainode-bench.py decide"
+}
+```
+
+Rules specific to this block, all load-bearing:
+
+- **Accuracy is the weakest number in it.** The failure mode automation cares about is
+  a wrong answer at high confidence, which is what `brier`, `ece` with its `bins`, and
+  `thresholds` measure. A wrong answer at 0.95 gets acted on; a wrong answer at 0.45
+  is an abstention.
+- `p_answer` is the probability the backend put on **its own answer** and `p_label` the
+  probability it put on the **labeled** one. Both come from `distribution` when the
+  backend returned one and from its reported confidence when it did not; both are
+  `null` when it reported neither, and such a row is in the accuracy, out of the
+  calibration numbers, and counted in `thresholds.*.no_confidence`.
+- `brier` is one term, `(1 - p_label)^2`, averaged over the rows that carried a
+  probability. It is not the multiclass sum.
+- `ece` is the weighted gap between `accuracy` and `confidence` over `bins`, five bins
+  on `p_answer`. `bins` keeps its five entries whatever ran, with `count: 0` and null
+  accuracy for an empty one.
+- `thresholds` counts answers, not items: `kept` survived the gate, `wrong` is how many
+  of those disagree with the label, `abstained` fell below it, and `no_confidence` is
+  the answers that could not be gated either way. `kept + abstained + no_confidence`
+  is `answered`, and `wrong` is a subset of `kept`.
+- `errors` counts items that failed on transport or an unreadable response. They are in
+  `n`, out of `answered`, and listed by id in the record's notes, because "the server
+  refused" and "the model was wrong" are different findings.
+- `cost_usd` is the backend's posted rate over the tokens it reported: `0` for a local
+  backend, because nobody bills per token for our own hardware and the electricity is
+  not a number this record measured.
+- `rows` is in item order, one per item, and carries no state text: the state is in
+  `bench/decide/items.json` under the same `id`, and `item_set.id` plus
+  `item_set.version` say which version of that file produced these numbers. Two
+  records are only comparable over the same `item_set.id`.
+- A set left out by `--sets` is absent from `decide.sets` rather than scored zero, and
+  `settings.sets` records what was asked for.
+- No API key is ever in the record. Not in `settings`, not in `protocol`, not in a
+  note.
