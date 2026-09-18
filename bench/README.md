@@ -3,7 +3,7 @@
 What an AINode-served model actually does on the hardware in front of us, as
 opposed to what a model card says.
 
-Two benches live here, and they answer different questions:
+Three benches live here, and they answer different questions:
 
 - **Throughput** (this file): TTFT, decode rate, prefill scaling, concurrency,
   reasoning tax. How fast the model generates.
@@ -13,9 +13,20 @@ Two benches live here, and they answer different questions:
   what it generates works. Run it with
   `python3 scripts/ainode-bench.py harness --endpoint http://<node>:3000/v1
   --model <id> --harness aider --tasks 10 --label <label>`, and always with
-  `--dry-run` first. Both write one schema-1 JSON into `bench/results/`; a harness
-  record carries a `harness` block instead of `results` and is skipped by the
-  README's tok/s table.
+  `--dry-run` first.
+- **Agentic rubric** (`bench/agentic/README.md`): 25 probes with mechanical
+  verdicts over the parts an agent loop is made of. Formats, tool calls (one,
+  three at once, none when none is needed), executed code, reasoning traps, a
+  needle at three prompt sizes, the thinking switch, vision, and a group G of
+  multi-turn agentic work: a dependent tool loop, recovery from a tool error,
+  argument schema fidelity, structured output, and a system rule over four turns.
+  Run it with `python3 scripts/ainode-bench.py agentic --endpoint
+  http://<node>:3000/v1 --ainode http://<node>:3000 --model <id> --label <label>
+  --quick`.
+
+All three write one schema-1 JSON into `bench/results/`. A harness record carries
+a `harness` block and an agentic record an `agentic` block instead of `results`,
+and both are skipped by the README's tok/s table in favour of their own.
 
 The rest of this file is the throughput bench. Two ways to run it, one measurement:
 
