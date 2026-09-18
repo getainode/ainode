@@ -366,16 +366,26 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description=(
             "Compact agentic model (4B, dense, BF16) with a hybrid attention stack: one "
             "full-attention layer for every three sliding-window layers, head-wise "
-            "output gating, native 1M-token context. Built for coding agents (the card "
-            "claims 44.4 on SWE-Bench Pro) and integrated with Claude Code, Codex and "
-            "dsh. vLLM has no in-tree implementation: the engine image below is the "
-            "stock vLLM 0.27.1 image plus the vendor's out-of-tree plugin "
-            "(github.com/XHToken/Spark-plugin), which registers the architecture and "
-            "the spark25 tool-call parser. Small enough to stack beside any other model."
+            "output gating, native 1M-token context. vLLM has no in-tree implementation: "
+            "the engine image below is the stock vLLM 0.27.1 image plus the vendor's "
+            "out-of-tree plugin (github.com/XHToken/Spark-plugin), which registers the "
+            "architecture and the spark25 tool-call parser. Proven on a GB10 stacked "
+            "beside Nemotron: ready in 6 min, tool calls parse, thinking switch works. "
+            "BF16 is bandwidth-bound at about 18 tok/s single-stream, and thinking is "
+            "verbose, so harness tasks run long (dsh 6/10 then 9/10 at 690 s mean; "
+            "agentic rubric 19/25 with every tool probe passed, needle only to 8k). "
+            "Small enough to stack beside any other model; a quantized build is the "
+            "obvious next step."
         ),
         quantization=None, min_memory_gb=14, family="spark", params_b=4.0,
         arch="dense",
-        proven_tp=1, verified=False, curated=True,
+        proven_tp=1, verified=True, curated=True,
+        verified_on="2026-09-18",
+        verified_record=(
+            "20260918-143104-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-harness.json"
+        ),
+        # Stacked on Spark-4 beside Nemotron at 0.70, timed 2026-09-18 (ledger 5.7 min).
+        typical_ready_minutes=6.0,
         context_length=1048576, license="Apache-2.0", recommended=False,
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],
