@@ -173,6 +173,9 @@
           <select id="launch-model" class="form-select">
             <option>— SELECT MODEL —</option>
           </select>
+          <!-- How long this model has taken to reach READY, measured. Hidden
+               when neither the node's ledger nor the catalog has a number. -->
+          <div class="launch-load-time" id="launch-load-time" style="display:none"></div>
           <label class="form-label">Sharding</label>
           <div class="pill-group" id="sharding-pills">
             <button class="pill active" data-value="tensor">Tensor</button>

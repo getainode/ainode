@@ -468,6 +468,98 @@ def test_fleet_keeps_the_instance_record_for_a_primary_listed_twice():
     assert body["serving"]["tensor_parallel_size"] == 2
 
 
+# ------------------------------------------------------------- load times --
+#
+# "How long does this model take to load?" The card answers it from two places:
+# the catalog's typical_ready_minutes seed and this node's own launch-time ledger,
+# with the ledger preferred wherever it has an entry. Ledger mechanics are tested
+# in tests/test_launch_times.py; these are the card's side of it.
+
+@pytest.fixture
+def no_ledger(monkeypatch, tmp_path):
+    """An empty AINODE_HOME, so a card test never reads the operator's ledger."""
+    monkeypatch.setattr("ainode.core.config.AINODE_HOME", tmp_path)
+    return tmp_path
+
+
+def test_the_card_reports_the_catalog_seed_when_this_node_has_no_measurement(no_ledger):
+    model = "unsloth/Qwen3.8-27B-NVFP4"
+    cluster = _cluster([_node("spark1", "Spark-1-DGX", model=model)])
+    session = FakeSession({"http://localhost:8000/v1/models": _engine_models(model)})
+
+    _, body = _card(_app(cluster, session=session), model=model)
+
+    lt = body["load_time"]
+    assert lt["typical_ready_minutes"] == 12.0
+    assert lt["last_ready_minutes"] is None
+    assert lt["last_ready_on"] is None
+    assert (lt["minutes"], lt["minutes_source"]) == (12.0, "catalog")
+
+
+def test_the_card_prefers_this_node_s_own_measurement_over_the_seed(no_ledger):
+    from ainode.models import api_routes
+
+    model = "unsloth/Qwen3.8-27B-NVFP4"
+    api_routes.append_launch_time({
+        "model": model, "node_id": "spark1", "node_name": "Spark-1-DGX",
+        "api_port": 8000, "stacked": False, "tensor_parallel_size": 1,
+        "engine_image": "vllm/vllm-openai:v0.27.1", "seconds_to_ready": 812.0,
+        "stamp": "2026-09-16T11:02:03Z", "outcome": "ready"})
+    cluster = _cluster([_node("spark1", "Spark-1-DGX", model=model)])
+    session = FakeSession({"http://localhost:8000/v1/models": _engine_models(model)})
+
+    _, body = _card(_app(cluster, session=session), model=model)
+
+    lt = body["load_time"]
+    assert lt["typical_ready_minutes"] == 12.0      # the seed is still reported
+    assert lt["last_ready_minutes"] == 13.5
+    assert lt["last_ready_on"]["node_name"] == "Spark-1-DGX"
+    assert lt["last_ready_on"]["date"] == "2026-09-16"
+    assert (lt["minutes"], lt["minutes_source"]) == (13.5, "ledger")
+
+
+def test_a_model_outside_the_catalog_has_a_load_time_block_with_nothing_in_it(no_ledger):
+    """Never guessed from the weight size: no seed and no measurement means the
+    card says nothing, and the rail shows no row."""
+    model = "somebody/Unknown-7B"
+    cluster = _cluster([_node("spark1", "Spark-1-DGX", model=model)])
+    session = FakeSession({"http://localhost:8000/v1/models": _engine_models(model)})
+
+    _, body = _card(_app(cluster, session=session), model=model)
+
+    assert body["catalog"] is None
+    assert body["load_time"] == {"typical_ready_minutes": None,
+                                 "last_ready_minutes": None,
+                                 "last_ready_on": None,
+                                 "minutes": None, "minutes_source": None}
+
+
+def test_the_card_carries_the_provenance_behind_the_verified_chip(no_ledger):
+    """The chip has said "catalog verified" with nothing behind it. Now the card
+    hands over the date and the record, and an entry from before the bench existed
+    is reported as verified with neither rather than dressed up with a date."""
+    tested = "unsloth/Qwen3.8-27B-NVFP4"
+    older = "QuantTrio/Qwen3.5-9B-AWQ"
+    cluster = _cluster([_node("spark1", "Spark-1-DGX", model=tested, instances=[
+        {"model": older, "api_port": 8001, "status": "serving"}])])
+    session = FakeSession({
+        "http://localhost:8000/v1/models": _engine_models(tested),
+        "http://localhost:8001/v1/models": _engine_models(older),
+    })
+    app = _app(cluster, session=session)
+
+    _, proved = _card(app, model=tested)
+    assert proved["catalog"]["verified"] is True
+    assert proved["catalog"]["verified_on"] == "2026-08-15"
+    assert proved["catalog"]["verified_record"] == \
+        "20260815-000000-qwen3_8-27b-nvfp4-mtp-vision.json"
+
+    _, legacy = _card(app, model=older)
+    assert legacy["catalog"]["verified"] is True
+    assert legacy["catalog"]["verified_on"] is None
+    assert legacy["catalog"]["verified_record"] is None
+
+
 # ----------------------------------------------------------- chat view UI --
 
 def test_chat_view_markup_carries_the_card_and_the_controls():

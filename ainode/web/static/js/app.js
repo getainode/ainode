@@ -48,6 +48,9 @@ const AINode = {
     chatReasoningSeen: {},    // instance key -> reasoning OBSERVED (never probed)
     chatSettings: { system: '', temperature: 0.7, maxTokens: 2048, thinking: true },
     chatCardCollapsed: false,
+    // repo/id -> {typical_ready_minutes, last_ready_minutes, last_ready_on} from
+    // /api/models, so the launch panel can say how long a model takes to come up.
+    launchLoadTimes: {},
   },
 
   // ========================================================================
@@ -1111,9 +1114,23 @@ const AINode = {
         }
       });
 
+      // Load times, keyed the way the option values are, so picking a model can
+      // say how long it has taken to come up here. Both halves can be absent.
+      self.state.launchLoadTimes = {};
+      ready.forEach(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (!repo) return;
+        self.state.launchLoadTimes[repo] = {
+          typical_ready_minutes: m.typical_ready_minutes,
+          last_ready_minutes: m.last_ready_minutes,
+          last_ready_on: m.last_ready_on,
+        };
+      });
+
       var cv = select.value;
       if (ready.length === 0) {
         select.innerHTML = '<option value="">-- No models downloaded --</option>';
+        self.renderLaunchLoadTime();
         return;
       }
       select.innerHTML = '<option value="">-- SELECT MODEL --</option>' +
@@ -1131,10 +1148,12 @@ const AINode = {
             + glyph + self.esc(label) + sizeNote + verifiedMark + '</option>';
         }).join('');
       if (cv) select.value = cv;
+      self.renderLaunchLoadTime();
       // Picking a model auto-recommends sharding + nodes from its size and the
       // free memory on each node.
       select.onchange = function () {
         var opt = select.options[select.selectedIndex];
+        self.renderLaunchLoadTime();
         if (!opt || !opt.value) return;
         self.recommendLaunch({
           proven_tp: parseInt(opt.getAttribute('data-proven-tp') || '0', 10),
@@ -1143,6 +1162,44 @@ const AINode = {
         });
       };
     });
+  },
+
+  // How long a launch takes is a real question with a real answer on this
+  // hardware (12 minutes for a 27B on a GB10), and until now the only trace of it
+  // was a log line. The node's own ledger wins over the catalog seed wherever it
+  // has an entry: it knows which node, whether the model was stacked, and when.
+  // Returns '' when nothing was ever measured; the caller then shows nothing,
+  // because a number guessed off the weight size is worse than silence.
+  loadTimeLine(m) {
+    if (!m) return '';
+    var last = m.last_ready_minutes;
+    if (typeof last === 'number' && last > 0) {
+      var on = m.last_ready_on || {};
+      var txt = 'Typical load: about ' + this.roundMinutes(last) + ' min';
+      if (on.node_name) txt += (on.stacked ? ' stacked on ' : ' on ') + on.node_name;
+      if (on.date) txt += ', measured ' + on.date;
+      return txt;
+    }
+    var typical = m.typical_ready_minutes;
+    if (typeof typical === 'number' && typical > 0) {
+      return 'Typical load: about ' + this.roundMinutes(typical) + ' min';
+    }
+    return '';
+  },
+
+  // Whole minutes past 10, one decimal below it: "about 12 min", "about 7.5 min".
+  roundMinutes(v) {
+    return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10);
+  },
+
+  renderLaunchLoadTime() {
+    var el = document.getElementById('launch-load-time');
+    if (!el) return;
+    var select = document.getElementById('launch-model');
+    var repo = select ? select.value : '';
+    var line = this.loadTimeLine((this.state.launchLoadTimes || {})[repo]);
+    el.textContent = line;
+    el.style.display = line ? '' : 'none';
   },
 
   async launchInstance() {
@@ -1657,6 +1714,7 @@ const AINode = {
 
     var hw = card.hardware || {}, sv = card.serving || {}, ci = card.instance || {};
     var cat = card.catalog;
+    var lt = card.load_time || {};
 
     var rows = function (pairs) {
       var out = pairs.filter(function (p) {
@@ -1697,6 +1755,12 @@ const AINode = {
       ['Engine image', sv.engine_image
         ? '<span class="mc-mono">' + this.esc(sv.engine_image) + '</span>' : null],
       ['Speculative', this.specLabel(sv)],
+      // Measured, never the catalog seed: this row is what THIS node's ledger
+      // recorded the last time it brought the model up, so it is absent on a node
+      // that has not (a peer's instance, a fresh install).
+      ['Loaded in', (typeof lt.last_ready_minutes === 'number')
+        ? this.roundMinutes(lt.last_ready_minutes) + ' min' : null,
+        (lt.last_ready_on && lt.last_ready_on.date) || 'measured'],
     ]);
     // Engine flags come from a per-instance config snapshot. A peer that does
     // not publish one leaves them unknown, and unknown is shown as absent here
@@ -1711,7 +1775,11 @@ const AINode = {
       '<div class="mc-badges">' +
       '<span class="mc-tag' + (ci.local ? ' local' : '') + '">' +
       this.esc(ci.node_name || inst.node_name) + '</span>' +
-      (cat && cat.verified ? '<span class="mc-tag ok">catalog verified</span>' : '') +
+      (cat && cat.verified
+        ? '<span class="mc-tag ok" title="' + this.esc(cat.verified_on
+          ? 'Tested on AINode ' + cat.verified_on + ', see bench record'
+          : 'Marked verified before the bench existed') +
+        '">catalog verified</span>' : '') +
       '</div>';
     if (card.hf_url) {
       html += '<a class="mc-hf" href="' + this.esc(card.hf_url) + '" target="_blank" rel="noopener">' +
