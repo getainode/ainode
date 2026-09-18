@@ -279,14 +279,16 @@ def test_the_launch_panel_has_a_place_for_the_load_time():
 def test_the_launch_line_says_the_measured_node_and_date_when_it_has_them():
     from ainode.web.serve import STATIC_DIR
     js = (STATIC_DIR / "js" / "app.js").read_text()
-    assert "loadTimeLine(m) {" in js
+    # The second argument arrived with the live loading line (0.5.22): the same
+    # function answers both questions, so no surface can drift from another.
+    assert "loadTimeLine(m, progress) {" in js
     assert "'Typical load: about '" in js
     assert "', measured '" in js
     assert "' stacked on '" in js
     # Nothing measured, nothing said: no estimate off the weight size. Two bare
     # returns, one for no entry at all and one for an entry with neither number,
     # and the function ends on one of them.
-    body = js.split("loadTimeLine(m) {", 1)[1].split("\n  },", 1)[0]
+    body = js.split("loadTimeLine(m, progress) {", 1)[1].split("\n  },", 1)[0]
     assert body.count("return '';") == 2
     assert body.rstrip().endswith("return '';")
 

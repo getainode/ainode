@@ -47,6 +47,7 @@ from ainode.api.server_routes import (
     init_server_state,
 )
 from ainode.api.chat_routes import (
+    catalog_entry,
     instance_caps_index,
     is_multimodal_limit_error,
     is_multimodal_request,
@@ -320,6 +321,10 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         distributed_peers=distributed_peers,
         fabric_ip=fabric_ip,
         instances=(_head_instances(config) if (distributed_mode == "head" and engine_ready) else []),
+        # The timing half of the load-progress fields needs the app (one shared
+        # fallback stamp), so the cluster sync loop fills those in on its next
+        # tick. The phase is free here and is what a peer reads first.
+        load_phase=engine_load_phase(engine, engine_ready),
     )
 
 
@@ -531,6 +536,18 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                         else ("starting" if engine_proc_alive else "stopped")
                     )
 
+                # Live load progress on the wire, so a peer loading a model is
+                # drawn as loading on the master's dashboard rather than as a
+                # node that is simply not ready. Same numbers /api/status serves
+                # locally, from the same helpers, timed on this node's clock.
+                load_phase = engine_load_phase(engine, engine_serving)
+                updates["load_phase"] = load_phase
+                progress = await load_progress_payload(
+                    app, engine, load_phase, config.model or "")
+                updates["load_started_at"] = progress["load_started_at"]
+                updates["load_elapsed_seconds"] = progress["load_elapsed_seconds"]
+                updates["expected_ready_minutes"] = progress["expected_ready_minutes"]
+
                 # Advertise distributed instance metadata once the head's
                 # sharded engine is serving — the UI uses this to render
                 # "DISTRIBUTED TP=N across X nodes".
@@ -650,6 +667,178 @@ async def handle_health(_request: web.Request) -> web.Response:
     """Simple liveness probe."""
     return web.json_response({"status": "ok"})
 
+# -- Live load progress: how far into a launch this node is right now ---------
+#
+# The launch-time ledger (models/api_routes.py) answers "how long did this model
+# take LAST time". It cannot say anything about the load happening right now,
+# and a load on this hardware runs for minutes: the interface used to show a
+# fixed percent per phase, which stands still for twelve minutes and reads as a
+# hang. These three fields are everything a client needs to draw an honest bar
+# and to say "taking longer than usual": when the load started, how long it has
+# been going, and how long it is expected to take.
+#
+# ONE key holds the API-layer fallback start stamp, so there is one place that
+# records it and one place that clears it.
+_LOAD_START_KEY = "load_start_fallback"
+
+# Phases where no load is in flight. Both ends of a launch land here (a load
+# that reached ready, a node with no engine), and both clear the stamp so the
+# next launch times itself from scratch.
+_LOAD_SETTLED_PHASES = ("", "idle", "ready")
+
+
+def engine_load_phase(engine, engine_ready: bool) -> str:
+    """Coarse load phase for this node: the live readiness probe wins.
+
+    idle | starting | loading_weights | distributed_init | profiling | ready.
+    The engine's own ``_ready`` latch can miss vLLM's startup log marker and
+    stay False on a model that is actually serving, so a probe that says serving
+    reports ready whatever the backend thinks.
+    """
+    if engine_ready:
+        return "ready"
+    if engine is None:
+        return "idle"
+    return str(getattr(engine, "load_phase", "idle") or "idle")
+
+
+def _forget_load_start(app) -> None:
+    """Drop the fallback stamp once a load has settled."""
+    try:
+        if app.get(_LOAD_START_KEY) is not None:
+            app[_LOAD_START_KEY] = None
+    except Exception:  # pragma: no cover - a mapping that refuses writes
+        pass
+
+
+def load_started_at(app, engine, load_phase: str,
+                    *, now: Optional[float] = None) -> Optional[float]:
+    """Epoch seconds the current load started, or None when nothing is loading.
+
+    The backend's ``launched_at`` is the real answer: stamped when the container
+    starts, cleared in ``stop()``, so elapsed time survives a browser reload and
+    every client sees the same number. It is None for the mp distributed shape
+    until the head stamps it (and for any backend that launches no container of
+    its own), so a phase past idle with no stamp gets one from here instead,
+    recorded on the app where every reader shares it. A load that is late to
+    stamp is therefore reported a poll late, never as "no load at all".
+    """
+    phase = (load_phase or "idle").strip()
+    if phase in _LOAD_SETTLED_PHASES:
+        _forget_load_start(app)
+        return None
+    stamped = getattr(engine, "launched_at", None) if engine is not None else None
+    if isinstance(stamped, (int, float)) and not isinstance(stamped, bool) and stamped > 0:
+        return float(stamped)
+    try:
+        existing = app.get(_LOAD_START_KEY)
+    except Exception:  # pragma: no cover - a mapping that refuses reads
+        existing = None
+    if isinstance(existing, (int, float)) and not isinstance(existing, bool) and existing > 0:
+        return float(existing)
+    started = float(now if now is not None else time.time())
+    try:
+        app[_LOAD_START_KEY] = started
+    except Exception:  # pragma: no cover - a mapping that refuses writes
+        pass
+    return started
+
+
+def expected_ready_minutes(model: str, hf_repo: str = "") -> Optional[float]:
+    """Minutes this model is expected to need to come up here, or None.
+
+    This node's own ledger first (what it actually did last time, on this
+    hardware, at this parallelism), then the catalog's ``typical_ready_minutes``
+    seed, then None. Never a figure derived from the weight size: a guess the UI
+    then draws a progress bar from is worse than drawing no bar.
+
+    Reads the small ledger file, so callers on the event loop go through
+    ``load_progress_payload``.
+    """
+    m = (model or "").strip()
+    if not m:
+        return None
+    try:
+        from ainode.models.api_routes import last_ready_launch
+
+        hit = last_ready_launch(m, hf_repo or "")
+    except Exception:  # pragma: no cover - a ledger read must not fail a status read
+        hit = None
+    if hit is not None:
+        secs = hit.get("seconds_to_ready")
+        if isinstance(secs, (int, float)) and not isinstance(secs, bool) and secs > 0:
+            return round(float(secs) / 60.0, 1)
+    info = catalog_entry(m) or (catalog_entry(hf_repo) if hf_repo else None)
+    typical = getattr(info, "typical_ready_minutes", None) if info is not None else None
+    if isinstance(typical, (int, float)) and not isinstance(typical, bool) and typical > 0:
+        return float(typical)
+    return None
+
+
+def load_progress_fields(app, engine, load_phase: str, model: str,
+                         *, hf_repo: str = "", now: Optional[float] = None) -> dict:
+    """The three live-load fields for one node. Blocking (reads the ledger).
+
+    All three are None whenever nothing is loading, so a client can read null as
+    "no bar to draw" without a special case per surface.
+    """
+    started = load_started_at(app, engine, load_phase, now=now)
+    if started is None:
+        return {"load_started_at": None, "load_elapsed_seconds": None,
+                "expected_ready_minutes": None}
+    stamp = float(now if now is not None else time.time())
+    return {
+        "load_started_at": round(started, 3),
+        "load_elapsed_seconds": round(max(0.0, stamp - started), 1),
+        "expected_ready_minutes": expected_ready_minutes(model, hf_repo),
+    }
+
+
+async def load_progress_payload(app, engine, load_phase: str, model: str,
+                                *, hf_repo: str = "") -> dict:
+    """``load_progress_fields`` with its ledger read off the event loop.
+
+    An idle node answers on the loop: there is no ledger read to offload when
+    nothing is loading, and /api/status is polled every few seconds.
+    """
+    if (load_phase or "idle").strip() in _LOAD_SETTLED_PHASES:
+        return load_progress_fields(app, engine, load_phase, model, hf_repo=hf_repo)
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: load_progress_fields(app, engine, load_phase, model, hf_repo=hf_repo),
+        )
+    except Exception:  # pragma: no cover - never fail a status read on this
+        logger.exception("could not read the load progress for %s", model)
+        return {"load_started_at": None, "load_elapsed_seconds": None,
+                "expected_ready_minutes": None}
+
+
+def peer_load_progress(node) -> dict:
+    """The three live-load fields a PEER announced, passed through as it said them.
+
+    Elapsed is the peer's own arithmetic on the peer's own clock, which is the
+    honest number here: the two nodes do not share a clock, so subtracting a
+    remote ``load_started_at`` from our own would report skew as progress. It is
+    at most one broadcast interval stale, and the browser adds the time since
+    the poll on top of it.
+    """
+    started = getattr(node, "load_started_at", None)
+    if not isinstance(started, (int, float)) or isinstance(started, bool) or started <= 0:
+        return {"load_started_at": None, "load_elapsed_seconds": None,
+                "expected_ready_minutes": None}
+    elapsed = getattr(node, "load_elapsed_seconds", None)
+    expected = getattr(node, "expected_ready_minutes", None)
+    return {
+        "load_started_at": float(started),
+        "load_elapsed_seconds": (float(elapsed) if isinstance(elapsed, (int, float))
+                                 and not isinstance(elapsed, bool) else None),
+        "expected_ready_minutes": (float(expected) if isinstance(expected, (int, float))
+                                   and not isinstance(expected, bool) else None),
+    }
+
+
 async def handle_status(request: web.Request) -> web.Response:
     """Return rich node status."""
     config: NodeConfig = request.app["config"]
@@ -706,19 +895,30 @@ async def handle_status(request: web.Request) -> web.Response:
     master = cluster.get_master()
     effective_role = cluster.get_cluster_role_for(config.node_id) if config.node_id else "worker"
 
+    # The model being loaded is the ENGINE's own config wherever there is one: a
+    # load started through /api/engine/set-model runs ahead of config.model.
+    phase = engine_load_phase(engine, engine_ready)
+    loading_model = str(getattr(getattr(engine, "config", None), "model", "")
+                        or config.model or "")
+    progress = await load_progress_payload(request.app, engine, phase, loading_model)
+
     return web.json_response({
         "node_id": config.node_id,
         "node_name": config.node_name,
         "model": config.model,
         "gpu": gpu_info,
         "engine_ready": engine_ready,
-        # Coarse engine load phase for the UI launching card (3c):
-        # idle | starting | loading_weights | distributed_init | profiling | ready
-        # Truthful phase: the live /v1/models probe above is the reliable
-        # readiness signal — the engine's _ready latch can miss the vLLM startup
-        # log marker and stay False on a model that is actually serving. Report
-        # 'ready' when the probe says serving; else the engine's coarse phase.
-        "load_phase": ("ready" if engine_ready else (getattr(engine, "load_phase", "idle") if engine is not None else "idle")),
+        # Coarse engine load phase for the UI launching card (3c), derived from
+        # the live /v1/models probe above rather than the engine's own latch:
+        # see engine_load_phase.
+        "load_phase": phase,
+        # How far into the launch this node is. The browser cannot time a load it
+        # did not watch start (a page opened mid-launch, or a second browser), so
+        # the clock comes from here and the page only ticks between polls. All
+        # three are null when nothing is loading.
+        "load_started_at": progress["load_started_at"],
+        "load_elapsed_seconds": progress["load_elapsed_seconds"],
+        "expected_ready_minutes": progress["expected_ready_minutes"],
         "uptime": round(time.time() - start_time, 1),
         "version": __version__,
         "powered_by": "ainode.dev",
@@ -761,6 +961,18 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 ready = await _engine_port_serving(request.app, n.api_port)
             else:
                 ready = (getattr(n, "engine_status", "") or "").lower() == "serving"
+            # Live load progress per node, so an instance loading on ANOTHER node
+            # shows as loading on this dashboard instead of just "not ready". Our
+            # own row is timed here; a peer's row is what the peer announced (see
+            # peer_load_progress for why its own arithmetic is the honest one).
+            if n.node_id == local_id:
+                load_phase = engine_load_phase(request.app.get("engine"), ready)
+                load_progress = await load_progress_payload(
+                    request.app, request.app.get("engine"), load_phase,
+                    n.model or config.model or "")
+            else:
+                load_phase = str(getattr(n, "load_phase", "") or "")
+                load_progress = peer_load_progress(n)
             # Live GPU telemetry: peers come from their broadcast; the local
             # node's ClusterNode is built once at startup, so read it fresh
             # from our own collector here. (metrics fan-out)
@@ -797,6 +1009,10 @@ async def handle_nodes(request: web.Request) -> web.Response:
                 "gpu_temp": round(temp),
                 "status": status_str,
                 "engine_ready": ready,
+                "load_phase": load_phase,
+                "load_started_at": load_progress["load_started_at"],
+                "load_elapsed_seconds": load_progress["load_elapsed_seconds"],
+                "expected_ready_minutes": load_progress["expected_ready_minutes"],
                 "distributed_mode": dmode,
                 "distributed_instance_id": getattr(n, "distributed_instance_id", None),
                 "distributed_peers": list(getattr(n, "distributed_peers", []) or []),
@@ -822,6 +1038,10 @@ async def handle_nodes(request: web.Request) -> web.Response:
         # reads True before one is serving.
         dmode = getattr(config, "distributed_mode", "solo") or "solo"
         engine_ready = await _engine_port_serving(request.app, config.api_port)
+        engine = request.app.get("engine")
+        load_phase = engine_load_phase(engine, engine_ready)
+        load_progress = await load_progress_payload(
+            request.app, engine, load_phase, config.model or "")
         nodes_list = [{
             "node_id": config.node_id,
             "node_name": config.node_name,
@@ -830,6 +1050,10 @@ async def handle_nodes(request: web.Request) -> web.Response:
             "web_port": config.web_port,
             "model": config.model,
             "engine_ready": engine_ready or dmode == "member",
+            "load_phase": load_phase,
+            "load_started_at": load_progress["load_started_at"],
+            "load_elapsed_seconds": load_progress["load_elapsed_seconds"],
+            "expected_ready_minutes": load_progress["expected_ready_minutes"],
             "distributed_mode": dmode,
         }]
     return web.json_response({"nodes": nodes_list})

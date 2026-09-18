@@ -46,6 +46,14 @@ class ClusterNode:
     # which is how /api/nodes came to report engine_ready for a node whose engine
     # was still loading (#112). Empty for a record built without one.
     engine_status: str = ""
+    # Live load progress the node announced (see NodeAnnouncement): how far into
+    # a launch it is, so the master can draw a real progress bar for a model
+    # loading somewhere else. None on a node that is not loading and on a peer
+    # too old to send them.
+    load_phase: str = ""
+    load_started_at: Optional[float] = None
+    load_elapsed_seconds: Optional[float] = None
+    expected_ready_minutes: Optional[float] = None
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -75,6 +83,10 @@ class ClusterNode:
             fabric_ip=getattr(a, "fabric_ip", "") or "",
             instances=list(getattr(a, "instances", []) or []),
             engine_status=getattr(a, "status", "") or "",
+            load_phase=getattr(a, "load_phase", "") or "",
+            load_started_at=getattr(a, "load_started_at", None),
+            load_elapsed_seconds=getattr(a, "load_elapsed_seconds", None),
+            expected_ready_minutes=getattr(a, "expected_ready_minutes", None),
         )
 
     @classmethod
@@ -103,6 +115,10 @@ class ClusterNode:
             fabric_ip=getattr(announcement, "fabric_ip", "") or "",
             instances=list(getattr(announcement, "instances", []) or []),
             engine_status=getattr(announcement, "status", "") or "",
+            load_phase=getattr(announcement, "load_phase", "") or "",
+            load_started_at=getattr(announcement, "load_started_at", None),
+            load_elapsed_seconds=getattr(announcement, "load_elapsed_seconds", None),
+            expected_ready_minutes=getattr(announcement, "expected_ready_minutes", None),
         )
 
 

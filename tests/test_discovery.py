@@ -54,6 +54,10 @@ class TestNodeAnnouncement:
             "gpu_memory_used_mb", "gpu_memory_total_mb", "gpu_utilization", "gpu_temp",
             "fabric_ip",
             "instances",  # Phase 2: distributed instances this node heads
+            # Live load progress, so a model loading on this node is drawn as
+            # loading (elapsed, expected, slow) on every other node's dashboard.
+            "load_phase", "load_started_at", "load_elapsed_seconds",
+            "expected_ready_minutes",
         }
         assert set(data.keys()) == expected_keys
 
