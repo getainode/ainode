@@ -3,7 +3,7 @@
 What an AINode-served model actually does on the hardware in front of us, as
 opposed to what a model card says.
 
-Three benches live here, and they answer different questions:
+Four benches live here, and they answer different questions:
 
 - **Throughput** (this file): TTFT, decode rate, prefill scaling, concurrency,
   reasoning tax. How fast the model generates.
@@ -23,10 +23,21 @@ Three benches live here, and they answer different questions:
   Run it with `python3 scripts/ainode-bench.py agentic --endpoint
   http://<node>:3000/v1 --ainode http://<node>:3000 --model <id> --label <label>
   --quick`.
+- **Decision** (`bench/decide/README.md`): accuracy, Brier score, calibration error
+  with its reliability table, wrong answers surviving a 0.8 and a 0.9 confidence
+  gate, latency and cost, over 110 labeled typed decisions (route a request, triage
+  a ticket, is it urgent, is this diff safe to merge, is this statement true).
+  Whether a decision it makes can be trusted by code that acts on the answer, which
+  is a question about its confidence more than about its accuracy. Three backends:
+  AINode's `POST /v1/decide`, any OpenAI-compatible engine through the lettered
+  chat fallback, and TypeSafe AI's hosted Jev for comparison. Run it with
+  `python3 scripts/ainode-bench.py decide --backend chat --endpoint
+  http://<node>:3000/v1 --ainode http://<node>:3000 --model <id> --label <label>`.
 
-All three write one schema-1 JSON into `bench/results/`. A harness record carries
-a `harness` block and an agentic record an `agentic` block instead of `results`,
-and both are skipped by the README's tok/s table in favour of their own.
+All four write one schema-1 JSON into `bench/results/`. A harness record carries
+a `harness` block, an agentic record an `agentic` block and a decision record a
+`decide` block instead of `results`, and all three are skipped by the README's tok/s
+table in favour of their own.
 
 The rest of this file is the throughput bench. Two ways to run it, one measurement:
 

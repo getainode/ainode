@@ -35,9 +35,10 @@ def build_parser():
         prog="ainode-bench",
         description="measure what a spec sheet does not, on an AINode-served model",
         epilog="subcommands: `ainode-bench harness --help` measures a model driving "
-               "a coding agent to passing tests instead of its throughput, and "
+               "a coding agent to passing tests instead of its throughput, "
                "`ainode-bench agentic --help` scores it on the agentic capability "
-               "rubric")
+               "rubric, and `ainode-bench decide --help` measures how well a backend "
+               "makes typed decisions (accuracy, calibration, latency, cost)")
     p.add_argument("--url", help="engine or AINode proxy base, e.g. http://host:8000")
     p.add_argument("--model", help="model id exactly as served")
     p.add_argument("--ainode", default="", help="AINode web base, e.g. http://host:3000 "
@@ -58,10 +59,11 @@ def build_parser():
 
 
 def main(argv=None, out_dir=None):
-    # Two subcommands, dispatched before argparse sees them, so every existing flag
+    # Three subcommands, dispatched before argparse sees them, so every existing flag
     # keeps working exactly as documented. `harness` measures a different thing
-    # (a model driving a coding agent to passing tests) and `agentic` a third one
-    # (the capability rubric); each has its own parser under its own package.
+    # (a model driving a coding agent to passing tests), `agentic` a third one
+    # (the capability rubric) and `decide` a fourth (typed decisions: accuracy,
+    # calibration, latency, cost); each has its own parser under its own package.
     # Everything else is the throughput bench.
     words = list(sys.argv[1:]) if argv is None else list(argv)
     if words and words[0] == "harness":
@@ -72,6 +74,10 @@ def main(argv=None, out_dir=None):
         from ainode.bench.agentic.cli import main as agentic_main
 
         return agentic_main(words[1:], out_dir=out_dir)
+    if words and words[0] == "decide":
+        from ainode.bench.decide.cli import main as decide_main
+
+        return decide_main(words[1:], out_dir=out_dir)
 
     p = build_parser()
     a = p.parse_args(argv)
