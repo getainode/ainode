@@ -136,3 +136,89 @@ Rules specific to this block, all load-bearing:
 - `context_window_declared` / `max_output_tokens_declared` are what two of the
   harnesses had to be told before they would route; they are declared inputs, not
   properties of the served model.
+
+## The `agentic` block
+
+An agentic-rubric run (`scripts/ainode-bench.py agentic`, docs in
+`bench/agentic/README.md`) writes the same record with a top-level `agentic` block
+and **no `results` block**, for the same reason the harness block has none: it scored
+a capability rubric and took no throughput. `scripts/render-bench-table.py` keeps a
+record shaped like that out of the README's tok/s table and gives it a row in the
+"Agentic rubric runs" table instead. A run that measured both puts both blocks in one
+file and gets a row in both.
+
+This block replaces the hand-typed `rubric` block above it. That one carried a score
+somebody typed from a scratch script and a reader could not check; this one carries
+every probe, its verdict, its note and an excerpt of the reply. The three older
+records keep their `rubric` block as a historical claim, and the README's Rubric
+column still renders it.
+
+```json
+{
+  "schema": 1, "stamp": "20260917-214000",
+  "label": "DeepSeek TP=2 Spark-2+3, quick",
+  "model": { "...": "as above" },
+  "placement": { "...": "as above" },
+  "settings": {
+    "groups": ["A", "B", "C", "D", "E", "F", "G"],
+    "needle_tokens": [8000], "quick": true, "temperature": 1.0,
+    "timeout_s": 900, "thinking_switch": "enable_thinking", "probes_requested": 21
+  },
+  "agentic": {
+    "score": { "pass": 19, "total": 21 },
+    "groups": { "A": {"pass": 4, "total": 4}, "B": {"pass": 4, "total": 4},
+                "C": {"pass": 3, "total": 3}, "D": {"pass": 4, "total": 4},
+                "E": {"pass": 1, "total": 1}, "F": {"pass": 1, "total": 1},
+                "G": {"pass": 2, "total": 5} },
+    "endpoint": "http://100.122.26.9:3000/v1",
+    "protocol": { "groups": ["A", "..."], "needle_tokens": [8000],
+                  "temperature": 1.0, "timeout_s": 900,
+                  "thinking_switch": "enable_thinking", "max_turns": 4,
+                  "verdicts": "mechanical; group C is executed, group G is a judged tool trace" },
+    "probes": [
+      { "id": "G1_tool_chain", "group": "G", "pass": true, "wall_s": 12.4,
+        "completion_tokens": 310,
+        "note": "list_files -> read_file -> read_file; answered 137",
+        "excerpt": "137" }
+    ],
+    "needle": { "8000": true },
+    "thinking_off_supported": true,
+    "vision_supported": null,
+    "structured_output_mode": "json_schema"
+  },
+  "notes": ["..."],
+  "source": "scripts/ainode-bench.py agentic"
+}
+```
+
+Rules specific to this block, all load-bearing:
+
+- **Every verdict is mechanical.** No judge model and no human reading. Group C's
+  `pass` is a subprocess exit: the reply's code block is run against asserts the
+  model never saw, and `PASS` on stdout is the verdict. Group G's `pass` is the call
+  trace: the order of the calls, the types of the arguments, and whether a number in
+  the final answer came back from a tool. G2 in particular fails a reply that states a
+  temperature no tool returned, whatever else the model did.
+- `score` counts only probes that **ran**. A group left out by `--groups` or
+  `--quick` is absent from `groups` rather than scored zero, which is why `settings`
+  records what was asked for and `agentic.protocol.groups` records what ran.
+- `probes` is in run order, one entry per probe, and `note` is the checker's own
+  reason. A probe that failed on a transport or server error says so in `note`
+  (`HTTP 400: ...`), and the record's notes list those ids separately: "the server
+  refused" and "the model got it wrong" are different findings.
+- `excerpt` is the reply flattened to one line and capped at 300 characters. It is
+  there so a surprising verdict can be read, not so the record holds the generation.
+- `needle` maps each requested prompt size to whether the password came back
+  verbatim. The size is the **ask** (0.75 words per token); the probe's note carries
+  the `prompt_tokens` the server actually counted, which is the fact.
+- `thinking_off_supported` / `vision_supported` are `true`/`false` for a probe that
+  ran and `null` for one that did not. `false` means it ran and the model did not
+  comply (still reasoned with the switch off, or refused the image); `null` is not a
+  claim about the model at all.
+- `structured_output_mode` is `json_schema` when the server accepted a named schema,
+  `json_object` when it answered 400 to that and the weaker mode was used instead,
+  `unsupported` when it refused both, and absent when G4 did not run. A pass under
+  `json_object` is a weaker statement than a pass under `json_schema`, so the mode is
+  part of the result rather than a footnote.
+- `completion_tokens` is the server's `usage` for that probe, summed over turns for
+  the multi-turn probes (B4, G1, G2, G5), and `null` when the server reported none.
