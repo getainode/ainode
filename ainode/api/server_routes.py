@@ -183,6 +183,9 @@ ENDPOINT_CATALOG = {
         {"method": "POST", "path": "/v1/messages", "description": "Anthropic Messages API, forwarded to the node serving the requested model"},
         {"method": "POST", "path": "/v1/messages/count_tokens", "description": "Token count for a Messages body (Anthropic)"},
     ],
+    "ainode": [
+        {"method": "POST", "path": "/v1/decide", "description": "Typed questions in, calibrated probabilities out: every question answered at once by the node serving the model"},
+    ],
 }
 
 

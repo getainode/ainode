@@ -54,6 +54,8 @@ GX10) and any NVIDIA GPU box. It ships as **one container** that bundles:
 - A modern web UI (chat, cluster topology, server console, downloads, training)
 - An OpenAI-compatible API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`)
   and the Anthropic Messages API (`/v1/messages`), both routed fleet-wide by model id
+- A decision endpoint (`/v1/decide`): typed questions in, calibrated
+  probabilities out, every question answered in one request
 - A GB10-patched vLLM with Ray for cross-node tensor/pipeline parallel
 - UDP node discovery for automatic clustering
 - NFS-shared model storage so you download once and use everywhere
@@ -704,6 +706,85 @@ print(resp.choices[0].message.content)
 
 Works with Open WebUI, LiteLLM, LangChain, llama.cpp clients, and
 anything else that speaks OpenAI.
+
+### Decisions: `POST /v1/decide`
+
+A decision endpoint rather than a chat one. You hand over a state, an optional
+block of domain guidance and a dict of independent multiple-choice questions.
+Every question is asked at once against whatever model the node or fleet has
+loaded, and each answer comes back with the probability the model put on it plus
+the full distribution over that question's options.
+
+Each question becomes one chat completion whose output is grammar-constrained
+(vLLM's `structured_outputs: {"choice": [...]}`) to a single lettered label, with
+`logprobs` on and thinking off. The probability is a softmax over the first
+generated token's logprobs restricted to those labels, renormalized. The shared
+state goes in front of the question so every call in a request has the same
+prompt prefix and the engine's prefix cache prefills it once.
+
+Request:
+
+```json
+{
+  "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "state": "any string, or any JSON object (serialized compactly for you)",
+  "instructions": "optional domain guidance, appended to the system prompt",
+  "questions": {
+    "category":    {"question": "Which queue?", "options": ["billing", "bug", "spam"]},
+    "needs_human": {"question": "Does this need a human?", "type": "boolean"},
+    "urgency":     {"question": "How urgent?", "type": "score", "min": 1, "max": 5}
+  }
+}
+```
+
+`type: "boolean"` is sugar for `["yes", "no"]` and `type: "score"` for
+`["1", ... "5"]` (or whatever `min`/`max` you give). A question takes 2 to 255
+options, all distinct strings. `model` is optional and defaults to the node's
+loaded model, or to the fleet's only model if this node has none.
+
+Response:
+
+```json
+{
+  "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "node": "Spark-Ornith",
+  "latency_ms": 541.3,
+  "decisions": {
+    "category": {
+      "answer": "bug",
+      "confidence": 0.999331,
+      "distribution": {"billing": 8.7e-05, "bug": 0.999331, "spam": 0.00014},
+      "latency_ms": 540.7
+    }
+  },
+  "usage": {"prompt_tokens": 567, "completion_tokens": 6, "calls": 3}
+}
+```
+
+Probabilities are keyed by your option strings, not by the letters used to
+constrain the engine. A `200` always carries every question: a bad shape is a
+`400` naming what is wrong, and an engine that cannot answer is a `503`. If the
+engine returns no logprobs, `distribution` is `null`, `confidence` is `1.0` and
+the entry carries `"note": "no logprobs from engine"`.
+
+```bash
+curl -s http://localhost:3000/v1/decide -H 'Content-Type: application/json' -d '{
+  "state": {"subject": "Invoice PDF download returns 500 since Tuesday", "plan": "pro"},
+  "instructions": "B2B SaaS support queue. Revenue-blocking regressions outrank cosmetic bugs.",
+  "questions": {
+    "category":    {"question": "Which queue should this go to?",
+                    "options": ["billing", "bug", "feature request", "account access", "spam"]},
+    "urgency":     {"question": "How urgent is this, 1 lowest and 5 highest?",
+                    "type": "score", "min": 1, "max": 5},
+    "needs_human": {"question": "Does this need a human to reply?", "type": "boolean"}
+  }
+}'
+```
+
+Caveat past 26 options: labels continue `AA`, `AB`, and so on. When the
+tokenizer does not give a two-letter label its own token, that label's mass is
+its first letter's token mass, which the single-letter label of the same letter
+also claims. Read such a pair as jointly calibrated.
 
 ### Metrics — `/metrics` (Prometheus) and `/api/metrics` (JSON)
 

@@ -6355,6 +6355,7 @@ const AINode = {
     html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'openai' ? ' active' : '') + '" data-tab="openai">OpenAI-compatible</button>';
     html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'lmstudio' ? ' active' : '') + '" data-tab="lmstudio">LM Studio API</button>';
     html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'anthropic' ? ' active' : '') + '" data-tab="anthropic">Anthropic-compatible</button>';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'ainode' ? ' active' : '') + '" data-tab="ainode">AINode</button>';
     html += '  </div>';
     html += '  <div class="server-endpoints-list" id="server-endpoints-list">';
     html += this._renderEndpointRows(primaryUrl);

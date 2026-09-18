@@ -56,6 +56,7 @@ from ainode.api.chat_routes import (
     record_vision_unsupported,
     register_chat_routes,
 )
+from ainode.api.decide import handle_decide
 from ainode.bench.api_routes import register_bench_routes
 
 from ainode import __version__
@@ -186,6 +187,12 @@ def create_app(
     # already existed and none of it protocol-specific.
     app.router.add_post("/v1/messages", proxy_to_vllm)
     app.router.add_post("/v1/messages/count_tokens", proxy_to_vllm)
+    # The decision endpoint. NOT a forwarded path and deliberately not on
+    # proxy_to_vllm: it composes N grammar-constrained chat completions of its
+    # own out of one request, so there is no caller body to forward. It routes
+    # with the proxy's own `_routing_candidates` and the shared client session,
+    # so a head still reaches the node serving the requested model.
+    app.router.add_post("/v1/decide", handle_decide)
 
     # Chat view: the per-instance model card + the capability probe. Registered
     # BEFORE the model routes because aiohttp resolves in registration order and
