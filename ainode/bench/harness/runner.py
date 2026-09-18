@@ -33,6 +33,7 @@ import re
 import shutil
 import statistics
 import subprocess
+from typing import Optional
 import sys
 import tempfile
 import time
@@ -157,6 +158,37 @@ def resolve_test_command(task: Task) -> list[str]:
     return cmd
 
 
+class HiddenTestsUnavailable(RuntimeError):
+    """The hidden tests could not run at all, so no verdict is a verdict.
+
+    Raised instead of recording a failure: on 2026-09-17 a Nemotron run scored dsh
+    0/10 because the bench interpreter lost pytest for an hour (a global pip
+    change under it) while the agent's code was correct. A bench that turns a
+    missing test runner into ten model failures is worse than one that stops.
+    """
+
+
+NO_PYTEST = "No module named pytest"
+
+
+def preflight_test_interpreter(executable: str = sys.executable) -> Optional[str]:
+    """The reason the test interpreter cannot run pytest, or None when it can.
+
+    Run once before the first task so a bench never starts on an interpreter
+    that would fail every verdict the same way.
+    """
+    try:
+        proc = subprocess.run([executable, "-c", "import pytest"],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"{executable} could not run: {type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        return (f"{executable} cannot import pytest; install it for that interpreter "
+                f"or run the bench from a venv that has it "
+                f"({(proc.stderr or '').strip().splitlines()[-1:] or ['no output']}[-1])")
+    return None
+
+
 def run_tests(task: Task, workdir: pathlib.Path, timeout: float = TEST_TIMEOUT) -> TestResult:
     command = resolve_test_command(task)
     start = time.monotonic()
@@ -171,6 +203,10 @@ def run_tests(task: Task, workdir: pathlib.Path, timeout: float = TEST_TIMEOUT) 
         return TestResult(exit_code=None, wall_s=time.monotonic() - start,
                           output_tail=f"{type(exc).__name__}: {exc}")
     text = (proc.stdout or "") + (proc.stderr or "")
+    if NO_PYTEST in text:
+        # The interpreter, not the code under test, failed. Stop the bench.
+        raise HiddenTestsUnavailable(
+            f"hidden tests could not run for {task.slug}: {text.strip()[-200:]}")
     return TestResult(exit_code=proc.returncode, wall_s=time.monotonic() - start,
                       output=text, output_tail=tail(text),
                       **parse_pytest_counts(text))

@@ -15,6 +15,7 @@ task and harness, and touches nothing: no subprocess, no config write, no reques
 """
 from __future__ import annotations
 
+import sys
 import argparse
 import json
 import pathlib
@@ -30,6 +31,7 @@ from ainode.bench.harness.adapters import (
     HarnessRequest,
 )
 from ainode.bench.harness.runner import (
+    preflight_test_interpreter,
     DEFAULT_ATTEMPTS,
     DEFAULT_TIMEOUT,
     SOURCE,
@@ -178,6 +180,11 @@ def dry_run(tasks, adapters, args, out=print) -> int:
 def main(argv=None, out_dir=None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
+    if not args.dry_run and not getattr(args, "list_harnesses", False):
+        reason = preflight_test_interpreter()
+        if reason:
+            print(f"error: {reason}", file=sys.stderr)
+            return 2
     out_dir = pathlib.Path(out_dir) if out_dir else pathlib.Path.cwd() / "bench" / "results"
     registry = adapters_mod.registry()
 
