@@ -16,7 +16,7 @@
   "placement": {
     "engine": "vllm",
     "max_model_len": 262144,
-    "node": "Spark-1-DGX",
+    "node": "Spark-4-GX10",
     "gpu": "NVIDIA GB10",
     "ainode": "0.5.23",
     "tp": 1,
