@@ -1,0 +1,169 @@
+{
+  "schema": 1,
+  "stamp": "20260918-155217",
+  "label": "Spark-4 stacked beside Nemotron, BF16",
+  "model": {
+    "id": "XHToken/Spark-X2.5-4B",
+    "name": "Spark-X2.5 4B",
+    "params_b": 4.0,
+    "active_b": null,
+    "arch": "dense",
+    "quant": "BF16",
+    "context": 1048576,
+    "license": "Apache-2.0",
+    "vision": false
+  },
+  "placement": {
+    "engine": "vllm",
+    "max_model_len": 262144,
+    "node": "Spark-1-DGX",
+    "gpu": "NVIDIA GB10",
+    "ainode": "0.5.23",
+    "tp": 1,
+    "gpus": 1,
+    "stacked_with": [
+      "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+    ]
+  },
+  "settings": {
+    "thinking": null,
+    "max_tokens": 200,
+    "temperature": null,
+    "sustained_tokens": 1500,
+    "reasoning_tokens": 600,
+    "depths_requested": [
+      4000,
+      16000,
+      32000,
+      64000,
+      120000
+    ],
+    "streams_requested": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "chars_per_token_probe": 5.16
+  },
+  "results": {
+    "single_stream": {
+      "decode_tok_s": 18.85,
+      "gen_tokens": 200,
+      "ttft_ms": 123,
+      "prompt_tokens": 84
+    },
+    "prefill": [
+      {
+        "ttft_ms": 1344,
+        "prompt_tokens": 3975,
+        "prefill_tok_s": 2956.9,
+        "decode_tok_s": 18.61
+      },
+      {
+        "ttft_ms": 5947,
+        "prompt_tokens": 15826,
+        "prefill_tok_s": 2661.0,
+        "decode_tok_s": 18.15
+      },
+      {
+        "ttft_ms": 14029,
+        "prompt_tokens": 31575,
+        "prefill_tok_s": 2250.6,
+        "decode_tok_s": 17.63
+      },
+      {
+        "ttft_ms": 36701,
+        "prompt_tokens": 63077,
+        "prefill_tok_s": 1718.7,
+        "decode_tok_s": 16.72
+      },
+      {
+        "ttft_ms": 98000,
+        "prompt_tokens": 118274,
+        "prefill_tok_s": 1206.9,
+        "decode_tok_s": 15.43
+      }
+    ],
+    "sustained": {
+      "decode_tok_s": 18.75,
+      "gen_tokens": 1500,
+      "wall_s": 80.087,
+      "ttft_ms": 128
+    },
+    "concurrency": [
+      {
+        "streams": 1,
+        "aggregate_tok_s": 18.7,
+        "ok": 1,
+        "failed": 0,
+        "wall_s": 10.7,
+        "per_stream_tok_s": 18.8,
+        "median_ttft_ms": 123
+      },
+      {
+        "streams": 2,
+        "aggregate_tok_s": 38.1,
+        "ok": 2,
+        "failed": 0,
+        "wall_s": 10.5,
+        "per_stream_tok_s": 19.3,
+        "median_ttft_ms": 171
+      },
+      {
+        "streams": 4,
+        "aggregate_tok_s": 75.9,
+        "ok": 4,
+        "failed": 0,
+        "wall_s": 10.54,
+        "per_stream_tok_s": 19.2,
+        "median_ttft_ms": 166
+      },
+      {
+        "streams": 8,
+        "aggregate_tok_s": 148.0,
+        "ok": 8,
+        "failed": 0,
+        "wall_s": 10.81,
+        "per_stream_tok_s": 19.0,
+        "median_ttft_ms": 328
+      },
+      {
+        "streams": 16,
+        "aggregate_tok_s": 283.8,
+        "ok": 16,
+        "failed": 0,
+        "wall_s": 11.27,
+        "per_stream_tok_s": 18.4,
+        "median_ttft_ms": 441
+      }
+    ],
+    "reasoning_tax": {
+      "thinking_off_wall_s": 25.362,
+      "thinking_off_tokens": 476,
+      "thinking_on_wall_s": 31.968,
+      "thinking_on_tokens": 600,
+      "tax_x": 1.26
+    },
+    "telemetry": {
+      "gpu_mem_used_gb": 120.5,
+      "gpu_mem_total_gb": 121.7,
+      "gpu_util_pct": 0,
+      "temp_c": 38,
+      "samples": 191,
+      "reading": "peak observed over the run; sampled from /api/nodes",
+      "gpu_util_pct_at_start": 0,
+      "temp_c_at_start": 38
+    }
+  },
+  "notes": [
+    "Measured by scripts/ainode-bench.py in 416s; nothing loaded, unloaded or restarted.",
+    "prefill_tok_s is prompt_tokens/TTFT, a floor: TTFT includes queueing, and the OpenAI API exposes no internal prefill timing.",
+    "Thinking-on hit the 600-token cap, so the reasoning tax is a floor: the answer had not finished.",
+    "GPU utilisation read 0% on every sample: AINode reports no utilisation for a GB10 unified-memory GPU, so read it as unread rather than idle. Memory and temperature are real reads.",
+    "Spark-1-DGX does not report serving XHToken/Spark-X2.5-4B; placement and telemetry may describe the wrong node",
+    "XHToken/Spark-X2.5-4B is not in the AINode catalog; fill model metadata (params_b, license, context) by hand"
+  ],
+  "source": "scripts/ainode-bench.py"
+}
