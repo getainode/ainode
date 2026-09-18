@@ -363,6 +363,10 @@ number.
 | Qwen3.8-Flash-Next | claude 2.1.272 (Claude Code) | 8/10 | 10/10 | 46.1 | Spark-1-DGX, TP=2 | 2026-09-16 | [Flash-Next TP=2, Claude Code harness effort medium, 10 Exercism tasks](https://github.com/getainode/ainode/blob/main/bench/results/20260916-205159-qwen3_8-flash-next-nvfp4-flash-next-tp-2-claude-code-harness-effort-medium-10-exercism-tasks-harness.json) |
 | Qwen3.8-Flash-Next | dsh 0.1.5-rc.1 | 10/10 | 10/10 | 96.2 | Spark-1-DGX, TP=2 | 2026-09-16 | [Qwen3.8-Flash-Next TP=2 Spark-2+Spark-3, four harnesses, 10 Exercism tasks](https://github.com/getainode/ainode/blob/main/bench/results/20260916-201023-qwen3_8-flash-next-nvfp4-qwen3_8-flash-next-tp-2-spark-2-spark-3-four-harnesses-10-exercism-tasks-harness.json) |
 | Qwen3.8-Flash-Next | pi | 10/10 | 10/10 | 139.6 | Spark-1-DGX, TP=2 | 2026-09-16 | [Qwen3.8-Flash-Next TP=2 Spark-2+Spark-3, four harnesses, 10 Exercism tasks](https://github.com/getainode/ainode/blob/main/bench/results/20260916-201023-qwen3_8-flash-next-nvfp4-qwen3_8-flash-next-tp-2-spark-2-spark-3-four-harnesses-10-exercism-tasks-harness.json) |
+| Spark-X2.5 4B | aider aider 0.86.2 | 3/10 | 6/10 | 923.4 | Spark-4-GX10, TP=1 | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-143104-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-harness.json) |
+| Spark-X2.5 4B | claude 2.1.274 (Claude Code) | 4/10 | 7/10 | 636.7 | Spark-4-GX10, TP=1 | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-143104-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-harness.json) |
+| Spark-X2.5 4B | dsh 0.1.5-rc.1 | 6/10 | 9/10 | 689.6 | Spark-4-GX10, TP=1 | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-143104-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-harness.json) |
+| Spark-X2.5 4B | pi 0.73.1 | 3/10 | 7/10 | 574.8 | Spark-4-GX10, TP=1 | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-143104-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-harness.json) |
 
 <!-- END harness-bench-table -->
 
@@ -449,6 +453,7 @@ whose needle came back verbatim.
 | DeepSeek V4 Flash | Spark-2-DGX, TP=2 | 22/25 | 9/9 | 3/3 | 2/4 | 100k | 2026-09-18 | [DeepSeek TP=2 Spark-2+3, full](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013839-deepseek-v4-flash-dspark-deepseek-tp-2-spark-2-3-full-agentic.json) |
 | Ornith 1.5 35B-A3B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 3/3 | 4/4 | 100k | 2026-09-18 | [Ornith stacked Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013703-ornith-1_5-35b-a3b-nvfp4-ornith-stacked-spark-1-thinking-on-agentic.json) |
 | Qwen3.8 27B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 2/3 | 4/4 | 100k | 2026-09-18 | [Qwen3.8 27B solo Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-020831-qwen3_8-27b-nvfp4-qwen3_8-27b-solo-spark-1-thinking-on-agentic.json) |
+| Spark-X2.5 4B | Spark-4-GX10, TP=1 | 19/25 | 9/9 | 1/3 | 4/4 | 48k | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-151444-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-agentic.json) |
 
 <!-- END agentic-bench-table -->
 

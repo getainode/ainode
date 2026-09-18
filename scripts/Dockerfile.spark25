@@ -1,0 +1,19 @@
+# Engine image for XHToken/Spark-X2.5 models: stock vLLM plus the vendor's
+# out-of-tree plugin (github.com/XHToken/Spark-plugin), which registers the
+# Spark2_5ForCausalLM architecture and the spark25 tool-call parser. vLLM has
+# no in-tree implementation of this architecture as of 0.29.
+#
+# Build on the node that will serve it (arm64, the image is not published):
+#   git clone https://github.com/XHToken/Spark-plugin /tmp/spark25-build/Spark-plugin
+#   cp scripts/Dockerfile.spark25 /tmp/spark25-build/Dockerfile
+#   cd /tmp/spark25-build && docker build -t ainode-spark25:v0.27.1 .
+#
+# The plugin is vendored from a vLLM commit between 0.27.1 and 0.28.0; it
+# imports cleanly on 0.27.1, 0.28.0, 0.29.0 and the 0.29.1 nightly (checked
+# 2026-09-17), so the base tag can follow the fleet default.
+FROM vllm/vllm-openai:v0.27.1
+COPY Spark-plugin /tmp/plug
+RUN python3 -m pip install --no-deps /tmp/plug \
+    && python3 -m pip install "openai>=2.25.0" \
+    && rm -rf /tmp/plug \
+    && python3 -c "import vllm_spark2_5_plugin.spark2_5"
