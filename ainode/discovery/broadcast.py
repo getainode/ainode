@@ -1,6 +1,7 @@
 """UDP broadcast-based node discovery for automatic clustering."""
 
 import json
+import logging
 import socket
 import asyncio
 import time
@@ -19,6 +20,15 @@ class NodeStatus(str, Enum):
 # Thresholds in seconds
 ONLINE_THRESHOLD = 15.0
 STALE_THRESHOLD = 30.0
+
+logger = logging.getLogger(__name__)
+
+# The listener reads one datagram of this size. An announcement that outgrows it
+# is TRUNCATED on arrival, so it fails to parse and the node silently vanishes
+# from every peer's cluster view. Sender-side check below, and a test pins that a
+# fully populated announcement still fits, because this payload has grown field
+# by field (telemetry, instances, load progress) and nothing else would notice.
+MAX_ANNOUNCEMENT_BYTES = 4096
 
 
 @dataclass
@@ -68,6 +78,18 @@ class NodeAnnouncement:
     # legacy distributed_instance_id/distributed_peers, but a list so a head can
     # run more than one. from_json drops unknown keys → older peers stay OK.
     instances: List[dict] = field(default_factory=list)
+    # Live load progress, so a model coming up on THIS node can be drawn as
+    # loading (elapsed, expected, "taking longer than usual") on any other
+    # node's dashboard, not just as "not ready yet". ``status`` already says
+    # starting vs serving; these say how far in and how long it should take.
+    # All empty/None when nothing is loading, and on a peer too old to send
+    # them, which every reader treats the same way: no bar to draw.
+    load_phase: str = ""
+    load_started_at: Optional[float] = None
+    # The loading node's OWN arithmetic: the cluster shares no clock, so a
+    # reader must not subtract a remote start stamp from its own now().
+    load_elapsed_seconds: Optional[float] = None
+    expected_ready_minutes: Optional[float] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -126,6 +148,7 @@ class BroadcastSender:
         self.metrics_provider = metrics_provider
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._warned_oversize = False
 
     async def start(self):
         """Start the broadcast loop."""
@@ -171,6 +194,15 @@ class BroadcastSender:
                         except Exception:
                             pass
                     data = self.announcement.to_json().encode()
+                    if len(data) > MAX_ANNOUNCEMENT_BYTES and not self._warned_oversize:
+                        # Once per process: peers are dropping us and nothing
+                        # else in the system can tell you why.
+                        self._warned_oversize = True
+                        logger.warning(
+                            "discovery announcement is %d bytes, past the %d-byte "
+                            "listener buffer: peers cannot parse it and will drop "
+                            "this node. Shrink what the announcement carries.",
+                            len(data), MAX_ANNOUNCEMENT_BYTES)
                     sock.sendto(data, ("<broadcast>", self.discovery_port))
                 except Exception:
                     pass
@@ -264,7 +296,8 @@ class BroadcastListener:
                     # recvfrom exposes the sender's (ip, port) — we persist
                     # the IP on DiscoveredNode so the head can use it as the
                     # authoritative address for SSH + Ray bootstrap.
-                    data, addr = await loop.run_in_executor(None, lambda: sock.recvfrom(4096))
+                    data, addr = await loop.run_in_executor(
+                        None, lambda: sock.recvfrom(MAX_ANNOUNCEMENT_BYTES))
                     announcement = NodeAnnouncement.from_json(data.decode())
                     peer_ip = addr[0] if addr else None
                     self._process_announcement(announcement, peer_ip=peer_ip)

@@ -1624,6 +1624,71 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
 }
 
 /* ============================================================
+   LIVE LOAD PROGRESS
+   One bar, three surfaces: the instance chip, the catalog card and the
+   launch panel. Thin and quiet, and amber only once a load has passed 1.5x
+   its expected time, which is the one moment it should pull the eye.
+   ============================================================ */
+.load-progress {
+  height: 4px;
+  background: rgba(118, 185, 0, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.load-progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--nvidia-green);
+  box-shadow: 0 0 6px var(--nvidia-green-glow);
+  transition: width 0.9s linear;
+}
+
+.load-progress.slow .load-progress-fill {
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber-glow);
+}
+
+/* The chip label is sentence case while it is live: the uppercase treatment
+   turns "3:12 of about 12 min" into noise. */
+.instance-card .instance-status.loading-live {
+  text-transform: none;
+  letter-spacing: 0.2px;
+  font-weight: 600;
+  color: var(--nvidia-green-bright);
+}
+
+.instance-card .instance-status.loading-live.slow,
+.download-card-loading-text.slow,
+.launch-load-time .load-progress-text.slow,
+.md-loading-text.slow {
+  color: var(--amber);
+}
+
+.instance-card .instance-progress {
+  margin-top: 10px;
+}
+
+.download-card-loading,
+.md-loading {
+  margin-top: 8px;
+}
+
+.download-card-loading-text,
+.md-loading-text {
+  font-size: 12px;
+  color: var(--nvidia-green-bright);
+  letter-spacing: 0.2px;
+}
+
+.launch-load-time .load-progress {
+  margin-top: 6px;
+}
+
+/* ============================================================
    PROGRESS BARS
    ============================================================ */
 .progress-bar {

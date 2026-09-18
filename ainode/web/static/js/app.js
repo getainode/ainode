@@ -24,6 +24,9 @@ const AINode = {
     wizardState: null,
     pollInterval: null,
     metricsInterval: null,
+    // The load bar advances between polls (see loadProgress), so it ticks once a
+    // second off the numbers the last poll brought. Not a second poll.
+    loadTickInterval: null,
     abortController: null,
     shardingStatus: null,
     currentView: 'dashboard',
@@ -331,8 +334,14 @@ const AINode = {
       this.fetchJSON('/api/cluster/resources'),
       this.fetchJSON('/v1/models'),   // federated fleet union (F1) — every node's model
     ]);
+    // When these numbers landed. loadProgress adds the time since, so a load is
+    // timed on the SERVER's clock and the browser only fills the gap between
+    // polls (the two clocks are not the same, and a peer's is a third one).
+    var receivedAt = Date.now();
     this.state.status = results[0];
+    if (this.state.status) this.state.status._receivedAtMs = receivedAt;
     this.state.nodes = results[1]?.nodes || [];
+    this.state.nodes.forEach(function (n) { n._receivedAtMs = receivedAt; });
     this.state.shardingStatus = results[2];
     this.state.clusterResources = results[3];
     // Fleet-wide loaded models: ids from the federated /v1/models union, so the
@@ -425,6 +434,9 @@ const AINode = {
     this.state.pollInterval = setInterval(function () { self.refresh(); }, 5000);
     // Metrics every 3s
     this.state.metricsInterval = setInterval(function () { self.pollMetrics(); }, 3000);
+    // Live load progress every 1s, locally: no request, just the clock moving on
+    // the last payload. Every poll reconciles it with the server.
+    this.state.loadTickInterval = setInterval(function () { self.tickLoadProgress(); }, 1000);
     // Version check every 30 minutes
     this.checkVersion();
     this.state.versionInterval = setInterval(function () { self.checkVersion(); }, 30 * 60 * 1000);
@@ -712,6 +724,206 @@ const AINode = {
   },
 
   // ========================================================================
+  //  LOAD PROGRESS: one place for the math, three surfaces read it
+  // ========================================================================
+  //
+  // A load on this hardware runs for minutes (about 12 for a 27B NVFP4 on a
+  // GB10), and the interface used to show a fixed percent per phase: a bar that
+  // stands still for twelve minutes reads as a hang. The server now says when
+  // the load started, how long it has been going and how long it should take
+  // (/api/status, and the same three fields per node on /api/nodes), and
+  // everything below is arithmetic on those.
+
+  // Coarse phase -> [label, floor percent]. The floor is what the phase alone is
+  // worth: a bar must not sit at nothing while weights are moving, and must not
+  // walk backwards when a load beats its expected time.
+  LOAD_PHASES: {
+    idle: ['starting', 8], starting: ['starting', 12],
+    loading_weights: ['loading weights', 40],
+    distributed_init: ['connecting nodes', 62],
+    profiling: ['profiling', 84], ready: ['ready', 100],
+  },
+
+  // The pure one. In: a status-shaped payload (this node's /api/status, or one
+  // /api/nodes row, local or peer) and a clock. Out: everything the three
+  // surfaces draw.
+  //
+  // Elapsed is the SERVER's load_elapsed_seconds plus the time since that
+  // payload arrived, never a remote start stamp subtracted from the browser's
+  // clock: the browser, the head and a peer do not share one, and skew would be
+  // drawn as progress. load_started_at is the fallback, and it is what makes a
+  // page opened mid-load show the right elapsed time on its first paint.
+  loadProgress(status, nowMs) {
+    var phase = (status && status.load_phase) || 'idle';
+    var info = this.LOAD_PHASES[phase] || ['starting', 10];
+    var out = { phase: phase, label: info[0], percent: info[1], slow: false,
+                loading: false, elapsedSeconds: null, expectedSeconds: null };
+    if (!status) return out;
+    var now = (typeof nowMs === 'number') ? nowMs : Date.now();
+    var served = status.load_elapsed_seconds;
+    var started = status.load_started_at;
+    var elapsed = null;
+    if (typeof served === 'number') {
+      var at = status._receivedAtMs;
+      elapsed = served + ((typeof at === 'number') ? Math.max(0, (now - at) / 1000) : 0);
+    } else if (typeof started === 'number') {
+      elapsed = Math.max(0, now / 1000 - started);
+    }
+    // No start stamp is the server saying nothing is loading, which is not the
+    // same claim as zero seconds in.
+    if (elapsed === null || typeof started !== 'number' || phase === 'ready') return out;
+    out.loading = true;
+    out.elapsedSeconds = elapsed;
+    var expected = status.expected_ready_minutes;
+    if (typeof expected === 'number' && expected > 0) {
+      out.expectedSeconds = expected * 60;
+      // Capped at 95: the last few percent belong to the engine answering, not
+      // to an estimate running out.
+      out.percent = Math.max(info[1],
+        Math.min(95, Math.round(100 * elapsed / out.expectedSeconds)));
+      out.slow = elapsed > 1.5 * out.expectedSeconds;
+    }
+    return out;
+  },
+
+  // m:ss, and h:mm:ss once a load has been going an hour (a 405B does).
+  clockText(seconds) {
+    var s = Math.max(0, Math.round(seconds || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var pad = function (v) { return v < 10 ? '0' + v : String(v); };
+    return h > 0 ? h + ':' + pad(m) + ':' + pad(sec) : m + ':' + pad(sec);
+  },
+
+  aboutMinutes(seconds) {
+    return 'about ' + this.roundMinutes(seconds / 60) + ' min';
+  },
+
+  // The instance chip: "loading weights · 3:12 of about 12 min". Falls back to
+  // the phase and its floor percent when the server has no timing for this one
+  // (a peer running an older build).
+  chipLoadLabel(prog) {
+    if (!prog.loading) return prog.label.toUpperCase() + ' · ' + prog.percent + '%';
+    var txt = prog.label + ' · ' + this.clockText(prog.elapsedSeconds);
+    txt += prog.expectedSeconds ? ' of ' + this.aboutMinutes(prog.expectedSeconds) : ' elapsed';
+    if (prog.slow) txt += ' · taking longer than usual';
+    return txt;
+  },
+
+  // The card and panel line: "Loading… 3:12 elapsed · typically about 12 min".
+  loadingLine(prog) {
+    if (!prog || !prog.loading) return '';
+    var txt = 'Loading… ' + this.clockText(prog.elapsedSeconds) + ' elapsed';
+    if (prog.expectedSeconds) txt += ' · typically ' + this.aboutMinutes(prog.expectedSeconds);
+    if (prog.slow) txt += ' · taking longer than usual';
+    return txt;
+  },
+
+  // Every live element carries the key of the thing it is timing, so the
+  // one-second tick can re-read the same source the render used:
+  // 'local' = this node's /api/status · 'node:<id>' = one /api/nodes row ·
+  // 'model:<repo>' = whichever node is loading that model.
+  loadBarHtml(key, prog, cls) {
+    return '<div class="load-progress' + (prog.slow ? ' slow' : '') +
+      (cls ? ' ' + cls : '') + '" data-load-key="' + this.esc(key) +
+      '" data-load-style="bar">' +
+      '<span class="load-progress-fill" style="width:' + prog.percent + '%"></span></div>';
+  },
+
+  loadTextHtml(key, prog, style, cls) {
+    var text = (style === 'chip') ? this.chipLoadLabel(prog) : this.loadingLine(prog);
+    return '<span class="' + (cls || 'load-progress-text') + (prog.slow ? ' slow' : '') +
+      '" data-load-key="' + this.esc(key) + '" data-load-style="' + style + '">' +
+      this.esc(text) + '</span>';
+  },
+
+  loadSourceFor(key) {
+    if (!key) return null;
+    if (key === 'local') return this.state.status;
+    if (key.indexOf('node:') === 0) {
+      var id = key.slice(5);
+      var hit = (this.state.nodes || []).filter(function (n) { return n.node_id === id; })[0];
+      return hit || this.state.status;
+    }
+    if (key.indexOf('model:') === 0) {
+      return this.loadingSources()[key.slice(6).toLowerCase()] || null;
+    }
+    return null;
+  },
+
+  // model id (lowercased) -> the node payload loading it. This node's status
+  // first, then every node row, so a model loading on a PEER is found too and
+  // the catalog card says so on the master's screen.
+  loadingSources() {
+    var out = {};
+    var self = this;
+    var now = Date.now();
+    var add = function (model, src) {
+      if (!model || !src) return;
+      var k = String(model).toLowerCase();
+      if (out[k]) return;
+      if (self.loadProgress(src, now).loading) out[k] = src;
+    };
+    add(this.state.status && this.state.status.model, this.state.status);
+    (this.state.nodes || []).forEach(function (n) { add(n.model, n); });
+    return out;
+  },
+
+  // The instance chip's own read. A chip is only drawn for an instance that is
+  // NOT ready, and a node whose PRIMARY engine is up reports phase 'ready' while
+  // a stacked instance on it is still coming up: echoing that back as READY 100%
+  // would be a claim about the wrong engine, so it falls back to the starting
+  // floor. Used by the render and by the tick, so both say the same thing.
+  chipProgress(key, nowMs) {
+    var prog = this.loadProgress(this.loadSourceFor(key), nowMs);
+    if (!prog.loading && prog.phase === 'ready') {
+      return { phase: 'starting', label: this.LOAD_PHASES.starting[0],
+               percent: this.LOAD_PHASES.starting[1], slow: false, loading: false,
+               elapsedSeconds: null, expectedSeconds: null };
+    }
+    return prog;
+  },
+
+  // Live progress for one model id or repo. Not loading anywhere: a non-loading
+  // answer, which every caller renders as nothing.
+  modelLoadProgress(model, nowMs) {
+    var src = model ? this.loadingSources()[String(model).toLowerCase()] : null;
+    return this.loadProgress(src, nowMs);
+  },
+
+  // One tick a second over whatever live elements are on the page. No extra
+  // polling: the numbers come from the last poll and advance locally between
+  // them, and every poll reconciles them.
+  tickLoadProgress() {
+    var els = document.querySelectorAll('[data-load-key]');
+    if (!els.length) return;
+    var self = this;
+    var now = Date.now();
+    var cache = {};
+    els.forEach(function (el) {
+      var key = el.getAttribute('data-load-key');
+      // An instance chip (its label, and the bar under it) reads through
+      // chipProgress; every other surface reads the payload as it stands.
+      var chip = el.getAttribute('data-load-style') === 'chip' ||
+        el.classList.contains('instance-progress');
+      var ck = key + (chip ? '#chip' : '');
+      if (!(ck in cache)) {
+        cache[ck] = chip ? self.chipProgress(key, now)
+          : self.loadProgress(self.loadSourceFor(key), now);
+      }
+      var prog = cache[ck];
+      el.classList.toggle('slow', !!prog.slow);
+      if (el.getAttribute('data-load-style') === 'bar') {
+        var fill = el.querySelector('.load-progress-fill');
+        if (fill) fill.style.width = prog.percent + '%';
+      } else if (el.getAttribute('data-load-style') === 'chip') {
+        el.textContent = self.chipLoadLabel(prog);
+      } else {
+        el.textContent = self.loadingLine(prog);
+      }
+    });
+  },
+
+  // ========================================================================
   //  RIGHT PANEL — INSTANCES
   // ========================================================================
 
@@ -721,14 +933,7 @@ const AINode = {
     var self = this;
     var s = this.state.status;
     var live = !!(s && s.engine_ready);
-    var phase = (s && s.load_phase) || 'idle';
-    // Coarse phase → [label, percent] for the launching card (3c).
-    var PHASE_INFO = {
-      idle: ['starting', 8], starting: ['starting', 12],
-      loading_weights: ['loading weights', 40],
-      distributed_init: ['connecting nodes', 62],
-      profiling: ['profiling', 84], ready: ['ready', 100],
-    };
+    var now = Date.now();
     var instances = [];
 
     // Distributed instance (authoritative from /api/cluster/resources) —
@@ -742,6 +947,8 @@ const AINode = {
       instances.push({
         model: di.model,
         strategy: 'distributed',
+        // Which payload times this one: the head is us.
+        loadKey: 'local',
         tp_size: di.tensor_parallel_size,
         nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
         status: live ? 'READY' : 'STARTING',
@@ -769,6 +976,9 @@ const AINode = {
           instances.push({
             model: modelName,
             strategy: 'single',
+            // Timed by the node it runs on, so an instance coming up on a PEER
+            // shows that peer's elapsed time here and not this node's.
+            loadKey: 'node:' + (n.node_id || ''),
             nodes: [host],
             status: n.engine_ready ? 'READY' : 'STARTING',
             badge: 'SINGLE',
@@ -788,6 +998,9 @@ const AINode = {
         instances.push({
           model: im,
           strategy: 'stacked',
+          // Node-level timing: the node publishes one load phase, for whichever
+          // engine it is bringing up.
+          loadKey: 'node:' + (n.node_id || ''),
           nodes: [host + (inst.api_port ? ':' + inst.api_port : '')],
           // Use the stacked instance's OWN status, not the node's primary
           // readiness. n.engine_ready reflects the PRIMARY engine (and for the
@@ -812,6 +1025,7 @@ const AINode = {
         instances.push({
           model: sh.model,
           strategy: sh.strategy || 'pipeline',
+          loadKey: 'local',
           nodes: shardNodes,
           status: live ? 'READY' : 'STARTING',
           badge: (sh.strategy || 'pipeline').toUpperCase(),
@@ -829,6 +1043,7 @@ const AINode = {
       instances.push({
         model: s.model,
         strategy: 'launching',
+        loadKey: 'local',
         nodes: [s.node_id || 'local'],
         status: 'STARTING',
         badge: 'LAUNCHING',
@@ -843,23 +1058,24 @@ const AINode = {
     container.innerHTML = instances.map(function (inst, idx) {
       var nodeList = inst.nodes.map(function (n) { return self.esc(n); }).join(', ');
       var badgeClass = inst.strategy === 'distributed' ? 'distributed' : 'single';
+      // A launch in flight gets the real numbers: elapsed against expected, and
+      // the bar under the text. A fixed percent per phase stood still for the
+      // whole twelve minutes and read as a hang.
+      var prog = (inst.status === 'READY') ? null : self.chipProgress(inst.loadKey, now);
+      var statusHtml = (inst.status === 'READY')
+        ? '<span class="instance-status ready">READY</span>'
+        : self.loadTextHtml(inst.loadKey, prog, 'chip',
+            'instance-status starting' + (prog.loading ? ' loading-live' : ''));
+      var barHtml = prog ? self.loadBarHtml(inst.loadKey, prog, 'instance-progress') : '';
       return '<div class="instance-card" data-idx="' + idx + '">' +
         '<div class="instance-model">' + self.esc(inst.model) + '</div>' +
         '<div class="instance-meta">' +
         '<span class="instance-strategy ' + badgeClass + '">' + self.esc(inst.badge || inst.strategy) + '</span>' +
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
-        '<div class="instance-footer">' +
-        (inst.status === 'READY'
-          ? '<span class="instance-status ready">READY</span>'
-          : (function () {
-              var pi = PHASE_INFO[phase] || ['starting', 10];
-              return '<span class="instance-status starting">' + self.esc(pi[0].toUpperCase()) + ' · ' + pi[1] + '%</span>' +
-                '<span style="display:inline-block;width:90px;height:5px;background:#1f2a1f;border-radius:3px;margin:0 8px;vertical-align:middle;overflow:hidden">' +
-                '<span style="display:block;height:100%;width:' + pi[1] + '%;background:#76c043;transition:width .4s"></span></span>';
-            })()) +
+        '<div class="instance-footer">' + statusHtml +
         '<button class="instance-delete" data-model="' + self.esc(inst.model) + '">UNLOAD</button>' +
-        '</div>' +
+        '</div>' + barHtml +
         '</div>';
     }).join('');
 
@@ -1170,7 +1386,12 @@ const AINode = {
   // has an entry: it knows which node, whether the model was stacked, and when.
   // Returns '' when nothing was ever measured; the caller then shows nothing,
   // because a number guessed off the weight size is worse than silence.
-  loadTimeLine(m) {
+  loadTimeLine(m, progress) {
+    // While it is loading, the live line replaces the typical one on every
+    // surface: the question stops being "how long does this take" and becomes
+    // "how much longer". Checked before the entry, because a model with nothing
+    // measured and no seed still has an elapsed time worth showing.
+    if (progress && progress.loading) return this.loadingLine(progress);
     if (!m) return '';
     var last = m.last_ready_minutes;
     if (typeof last === 'number' && last > 0) {
@@ -1197,9 +1418,21 @@ const AINode = {
     if (!el) return;
     var select = document.getElementById('launch-model');
     var repo = select ? select.value : '';
-    var line = this.loadTimeLine((this.state.launchLoadTimes || {})[repo]);
-    el.textContent = line;
-    el.style.display = line ? '' : 'none';
+    // Right after LAUNCH is clicked, this is the same model the server starts
+    // reporting a load for, so the typical line turns into the live one on the
+    // next poll and back again when the engine is up.
+    var prog = this.modelLoadProgress(repo);
+    var line = this.loadTimeLine((this.state.launchLoadTimes || {})[repo], prog);
+    if (!line) {
+      el.innerHTML = '';
+      el.style.display = 'none';
+      return;
+    }
+    var key = 'model:' + repo;
+    el.innerHTML = prog.loading
+      ? this.loadTextHtml(key, prog, 'line') + this.loadBarHtml(key, prog, 'launch-progress')
+      : this.esc(line);
+    el.style.display = '';
   },
 
   async launchInstance() {
@@ -3177,11 +3410,18 @@ const AINode = {
         '<div class="md-meta-pair"><span class="md-meta-label">License</span><span class="md-meta-value">' + self.esc(license) + '</span></div>' +
       '</div>';
 
-    var primaryCta = isLoaded
-      ? '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>'
-      : isDownloaded
-        ? '<button class="btn-nvidia md-cta" id="md-launch" data-hf-repo="' + self.esc(repo) + '">▶ Launch Model</button>'
-        : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
+    // Loading right now, here or on a peer: Launch is the one control that must
+    // not be clickable (a second launch of the same model is refused by the node
+    // anyway, with a 409 nobody can read), and the live line says why.
+    var prog = this.modelLoadProgress(repo);
+    var loadKey = 'model:' + repo;
+    var primaryCta = prog.loading
+      ? '<button class="btn-nvidia md-cta" id="md-launch" disabled>Loading…</button>'
+      : isLoaded
+        ? '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>'
+        : isDownloaded
+          ? '<button class="btn-nvidia md-cta" id="md-launch" data-hf-repo="' + self.esc(repo) + '">▶ Launch Model</button>'
+          : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
 
     var modal = document.createElement('div');
     modal.id = 'model-detail-modal';
@@ -3205,8 +3445,13 @@ const AINode = {
         (m.description || m.desc ? '<div class="md-description">' + self.esc(m.description || m.desc) + '</div>' : '') +
         metaRow +
         (caps ? '<div class="md-capabilities"><span class="md-section-label">Capabilities</span><div class="md-cap-list">' + caps + '</div></div>' : '') +
+        (prog.loading
+          ? '<div class="md-loading">' +
+            self.loadTextHtml(loadKey, prog, 'line', 'md-loading-text') +
+            self.loadBarHtml(loadKey, prog, 'md-progress') + '</div>'
+          : '') +
         '<div class="md-footer">' +
-          '<div class="md-footer-status">' + (isLoaded ? '● Model loaded and ready' : isDownloaded ? '◉ Downloaded — click Launch to run' : '○ Not yet downloaded') + '</div>' +
+          '<div class="md-footer-status">' + (prog.loading ? '◐ Coming up now' : isLoaded ? '● Model loaded and ready' : isDownloaded ? '◉ Downloaded, click Launch to run' : '○ Not yet downloaded') + '</div>' +
           primaryCta +
         '</div>' +
       '</div>';
@@ -3238,7 +3483,7 @@ const AINode = {
 
     // Launch downloaded model (set as active model + restart engine)
     var launchBtn = modal.querySelector('#md-launch');
-    if (launchBtn) {
+    if (launchBtn && !launchBtn.disabled) {
       launchBtn.addEventListener('click', function () {
         launchBtn.disabled = true;
         launchBtn.textContent = 'Launching...';
@@ -3590,9 +3835,23 @@ const AINode = {
     installed.sort(bySize);
     knownGood.sort(bySize);
 
+    var nowMs = Date.now();
+
     function cardHtml(model) {
       var isLoaded = loaded.includes(model.slug) || loaded.includes(model.id);
       var onDisk = isOnDisk(model);
+      // This model coming up right now, on this node or a peer: the card says so
+      // with the same line and bar the chip and the launch panel draw, and the
+      // controls that would start a second launch of it are disabled while it is
+      // in flight.
+      var repoKey = model.hf_repo || model.id;
+      var prog = self.modelLoadProgress(repoKey, nowMs);
+      var loadKey = 'model:' + repoKey;
+      var loadingRow = prog.loading
+        ? '<div class="download-card-loading">' +
+          self.loadTextHtml(loadKey, prog, 'line', 'download-card-loading-text') +
+          self.loadBarHtml(loadKey, prog, 'download-card-progress') + '</div>'
+        : '';
       var fits = gpuMem >= (model.minMem || model.sizeGb);
       var fitBadge = self.placementBadge(model);
       var statusBadge = isLoaded ?
@@ -3611,7 +3870,9 @@ const AINode = {
       var shardBtn = '';
       var needsCluster = !fits || (model.proven_tp || 1) > 1;
       if (needsCluster && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb && !onDisk) {
-        shardBtn = '<button class="btn-sm downloads-shard-btn" data-model-id="' + self.esc(model.id) + '">Shard Across Cluster</button>';
+        shardBtn = '<button class="btn-sm downloads-shard-btn"' + (prog.loading ? ' disabled' : '') +
+          ' data-model-id="' + self.esc(model.id) + '">' +
+          (prog.loading ? 'Loading…' : 'Shard Across Cluster') + '</button>';
       }
       var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(model.hf_repo || model.id) + '">Details</button>';
       return '<div class="download-card" data-model-id="' + self.esc(model.hf_repo || model.id) + '">' +
@@ -3623,6 +3884,7 @@ const AINode = {
         '</div>' +
         '<div class="download-card-repo">' + self.esc(model.hf_repo || model.id) + '</div>' +
         '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
+        loadingRow +
         '</div>' +
         '<div class="download-card-actions">' + detailsBtn + actionBtn + shardBtn + '</div>' +
         '</div>' +
