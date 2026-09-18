@@ -12,6 +12,16 @@ _Nothing yet._
 
 ---
 
+## [0.5.22] - 2026-09-18
+
+A loading model looks like it is loading; an agentic rubric joins the bench.
+
+### Added
+- **The interface shows a loading model as loading, with elapsed and expected time.** While an instance comes up, the instance chip, the catalog card and the launch panel show the phase, the elapsed time and the expected time ("loading weights, 3:12 of about 12 min"), a progress bar, and "taking longer than usual" once a load runs past one and a half times its expectation. The expectation comes from the launch-time ledger first (this model on this node) and the catalog's `typical_ready_minutes` second. `/api/status` and every `/api/nodes` row now carry `load_started_at`, `load_elapsed_seconds` and `expected_ready_minutes`; the discovery announcement carries them too, so a model loading on a peer draws the same bar on the master. The announcement has a stated byte ceiling now (`MAX_ANNOUNCEMENT_BYTES`), checked by a test, because the listener reads one datagram and an oversized payload used to make a node vanish silently. (#146)
+- **`ainode-bench agentic`: a fresh-agent rubric with mechanical verdicts.** Twenty-four probes in eight groups: instruction precision, tool calling (single, parallel, not needed, round trip), executed coding, reasoning traps, needle in 8k/48k/100k prompts, thinking off, vision, and a new agentic group: a list-then-read tool loop with a decoy file, tool error recovery that fails on a fabricated answer, argument schema fidelity, structured output, and a system rule held over four turns. Records carry an `agentic` block (documented in `bench/SCHEMA.md`) and the README gains an "Agentic rubric runs" table with the same drift guard as the other two. First record: DeepSeek V4 Flash, 20/22, all five agentic probes passed. (#147)
+
+---
+
 ## [0.5.21] - 2026-09-17
 
 Load times in the interface; verification provenance in the catalog; Flash-Next verified.
