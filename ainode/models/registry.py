@@ -79,6 +79,20 @@ class ModelInfo:
     # actually served it on this hardware (drives the picker default + a ✓ badge).
     proven_tp: int = 0
     verified: bool = False
+    # Provenance for that flag. ``verified=True`` on its own says nothing a reader
+    # can check, so a flip to True comes with the date it was proven (ISO
+    # YYYY-MM-DD) and the bench record that proves it (a filename under
+    # bench/results/). An entry marked verified before the bench existed keeps
+    # both empty, which is how the UI tells "tested, here is the record" from
+    # "somebody said so once".
+    verified_on: str = ""
+    verified_record: str = ""
+    # Roughly how long this model takes to reach READY on this hardware, in
+    # minutes, from launches we actually timed. Not a measurement of one run and
+    # not a promise: the number a user needs before they click LAUNCH and wait.
+    # None on an entry nobody has launched. A node's own launch-times ledger
+    # (<AINODE_HOME>/launch-times.json) beats this seed wherever it has an entry.
+    typical_ready_minutes: Optional[float] = None
     # True for our hand-picked CURATED_CLUSTER_MODELS — drives the "Catalog"
     # (known-good to grab) list, separate from on-disk / HF-sweep entries.
     curated: bool = False
@@ -239,6 +253,10 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         quantization="NVFP4", min_memory_gb=32, family="ornith", params_b=35.0,
         active_params_b=3.0, arch="moe",
         proven_tp=1, verified=True, curated=True,
+        verified_on="2026-09-13",
+        verified_record="20260913-130400-ornith-1_5-35b-a3b-nvfp4-text-only-mtp.json",
+        # Stacked on Spark-1 beside the 27B, timed 2026-09-16.
+        typical_ready_minutes=12.0,
         context_length=262144, license="MIT", recommended=True,
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],
@@ -278,6 +296,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         quantization="NVFP4", min_memory_gb=30, family="nemotron", params_b=30.0,
         active_params_b=3.0, arch="moe",
         proven_tp=1, verified=True, curated=True,
+        verified_on="2026-09-13",
+        verified_record=(
+            "20260913-141115-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-smoke.json"),
+        # Solo on Spark-4 (GX10), timed 2026-09-13.
+        typical_ready_minutes=10.0,
         context_length=1048576, license="OpenMDW-1.1", recommended=True,
         format="safetensors", capabilities=["tool_use", "reasoning", "code"],
         engine_image="vllm/vllm-openai:v0.27.1",
@@ -310,6 +333,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         quantization="NVFP4", min_memory_gb=32, family="qwen", params_b=27.0,
         arch="dense",
         proven_tp=1, verified=True, curated=True,
+        verified_on="2026-08-15",
+        verified_record="20260815-000000-qwen3_8-27b-nvfp4-mtp-vision.json",
+        # Solo on a GB10, timed 2026-09-13: 3.5 min of weights, then torch.compile
+        # and the FlashInfer fp4_gemm autotune pass, which is the rest of it.
+        typical_ready_minutes=12.0,
         context_length=262144, license="Apache 2.0", recommended=True,
         format="safetensors",
         capabilities=["vision", "tool_use", "reasoning", "code", "multilingual"],
@@ -347,6 +375,10 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         quantization="FP8", min_memory_gb=175, family="deepseek", params_b=284.0,
         active_params_b=13.0, arch="moe",
         proven_tp=2, verified=True,
+        verified_on="2026-09-16",
+        verified_record="20260916-033415-deepseek-v4-flash-dspark-fp8-tp2-mp.json",
+        # TP=2 across two GB10s on the custom DSpark image, timed 2026-09-16.
+        typical_ready_minutes=7.0,
         context_length=1048576, license="MIT", recommended=True, curated=True,
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],
@@ -470,6 +502,12 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         family="qwen", params_b=125.0,
         active_params_b=6.0, arch="moe",
         proven_tp=2, verified=True, recommended=True, curated=True,
+        verified_on="2026-09-16",
+        verified_record=(
+            "20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json"),
+        # TP=2 across Spark-2 + Spark-3 with autotune off, timed 2026-09-16. The
+        # 36 min in the description above was the one launch that ran autotune.
+        typical_ready_minutes=11.0,
         context_length=262144, license="Apache 2.0",
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],
@@ -543,7 +581,10 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and
     # stack several per node. proven_tp=1 (no distribution). verified=True is set
-    # ONLY after a real completion was observed on the cluster.
+    # ONLY after a real completion was observed on the cluster, and a flip to True
+    # now carries verified_on + verified_record with it (root AGENTS.md). The
+    # entries below predate the bench, which is why they say so instead of naming
+    # a record.
     "qwen3.5-9b-awq": ModelInfo(
         id="qwen3.5-9b-awq",
         name="Qwen3.5 9B (AWQ-4bit)",
@@ -552,6 +593,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description="Fast dense 9B, AWQ-4bit (awq_marlin). ~19 tok/s single-stream on one GB10. Great default chat model.",
         quantization="AWQ", min_memory_gb=14, family="qwen", params_b=9.0,
         arch="dense",
+        # verified before the bench existed; no record
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
@@ -563,6 +605,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description="Tiny dense 4B, AWQ-4bit. ~15 tok/s single-stream (dense AWQ is dequant-bound on GB10, not size-bound — the MoE is the fast pick). Lowest memory / highest QPS for batched routes.",
         quantization="AWQ", min_memory_gb=6, family="qwen", params_b=4.0,
         arch="dense",
+        # verified before the bench existed; no record
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", format="awq",
     ),
@@ -574,6 +617,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description="MoE (3B active/token), AWQ-4bit. ~27 tok/s single-stream on one GB10 — fast decode AND large-model quality. The flagship single-node model.",
         quantization="AWQ", min_memory_gb=28, family="qwen", params_b=35.0,
         active_params_b=3.0, arch="moe",
+        # verified before the bench existed; no record
         proven_tp=1, verified=True,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
@@ -585,6 +629,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description="Dense 8B, Blackwell-native NVFP4 — ~18 tok/s single-stream on one GB10 (dense is bandwidth-bound). Solid general-purpose chat model, light enough to stack.",
         quantization="NVFP4", min_memory_gb=8, family="llama", params_b=8.0,
         arch="dense",
+        # verified before the bench existed; no record
         proven_tp=1, verified=True,
         context_length=131072, license="Llama 3.1", recommended=True, format="nvfp4",
     ),
@@ -597,6 +642,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description="NVIDIA's distilled hybrid (mamba+attention) MoE, 3B active. Blackwell-native NVFP4 — ~32 tok/s single-stream on one GB10 (eager-on; the ~60 t/s Spark forum reports need CUDA graphs/eager-off). Fast daily driver, great for stacking.",
         quantization="NVFP4", min_memory_gb=22, family="nemotron", params_b=30.0,
         active_params_b=3.0, arch="moe",
+        # verified before the bench existed; no record
         proven_tp=1, verified=True,
         context_length=131072, license="NVIDIA Open Model", recommended=True, format="nvfp4",
     ),
@@ -620,6 +666,8 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         quantization="NVFP4", min_memory_gb=275, family="qwen", params_b=235.0,
         active_params_b=22.0, arch="moe",
         proven_tp=4, verified=True,
+        verified_on="2026-06-17",
+        verified_record="20260617-000000-qwen3-235b-a22b-nvfp4-tp4-frontier-moe.json",
         context_length=262144, license="Apache 2.0", recommended=True, format="nvfp4",
     ),
     "qwen3.5-397b-a17b-nvfp4": ModelInfo(
@@ -663,6 +711,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         description="Dense 70B, NVFP4. Fits TP=2; bandwidth-bound single-stream on GB10.",
         quantization="NVFP4", min_memory_gb=88, family="llama", params_b=70.0,
         arch="dense",
+        # verified before the bench existed; no record
         proven_tp=2, verified=True,
         context_length=131072, license="Llama 3.3", recommended=True, format="nvfp4",
     ),

@@ -27,6 +27,7 @@ live here: one cache, read by the badge and by routing.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Optional
@@ -280,6 +281,43 @@ def catalog_entry(model: str):
     return None
 
 
+async def load_time_block(model: str, info) -> dict:
+    """How long this model takes to come up: the catalog seed and this node's own
+    last measurement, with the ledger preferred over the seed.
+
+    The seed (``typical_ready_minutes``) is a rounded figure from launches we
+    timed on this class of hardware; the ledger is what THIS node did last time,
+    which is the better answer whenever it exists: it knows the node, whether the
+    model was stacked, and the date. Both can be absent, and then the UI says
+    nothing rather than guessing from the weight size.
+
+    The ledger read touches the disk, so it goes to the executor like the rest of
+    this handler's off-box work.
+    """
+    typical = getattr(info, "typical_ready_minutes", None) if info is not None else None
+    hf_repo = getattr(info, "hf_repo", "") if info is not None else ""
+    catalog_id = getattr(info, "id", "") if info is not None else ""
+    summary = {"last_ready_minutes": None, "last_ready_on": None}
+    try:
+        from ainode.models.api_routes import launch_time_summary
+
+        loop = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(
+            None, lambda: launch_time_summary(model, hf_repo or catalog_id))
+    except Exception:  # pragma: no cover - a ledger read must not fail the card
+        logger.exception("chat card: could not read the launch-time ledger")
+    measured = summary.get("last_ready_minutes")
+    return {
+        "typical_ready_minutes": typical,
+        "last_ready_minutes": measured,
+        "last_ready_on": summary.get("last_ready_on"),
+        # The one to show, and where it came from.
+        "minutes": measured if measured is not None else typical,
+        "minutes_source": ("ledger" if measured is not None
+                           else ("catalog" if typical is not None else None)),
+    }
+
+
 def _quant_from_model_id(model: str) -> Optional[str]:
     """Quantization named in the model id itself (…-NVFP4, …-AWQ).
 
@@ -397,6 +435,8 @@ async def handle_model_card(request: web.Request) -> web.Response:
     if not hf_repo and _REPO_RE.match(model):
         hf_repo, hf_source = model, "model_id"
 
+    load_time = await load_time_block(model, info)
+
     nodes = _instance_nodes(record, entry)
     tp = (record or {}).get("tensor_parallel_size")
     gpu_count = len(nodes) if nodes else (tp if tp and tp > 1 else None)
@@ -444,7 +484,14 @@ async def handle_model_card(request: web.Request) -> web.Response:
             "context_length": getattr(info, "context_length", None) or None,
             "capabilities": list(getattr(info, "capabilities", None) or []) or None,
             "verified": bool(getattr(info, "verified", False)),
+            # Provenance for that flag: the date it was proven and the bench
+            # record that proves it. Empty on an entry marked verified before the
+            # bench existed, which the UI says out loud rather than dressing up.
+            "verified_on": getattr(info, "verified_on", "") or None,
+            "verified_record": getattr(info, "verified_record", "") or None,
+            "typical_ready_minutes": getattr(info, "typical_ready_minutes", None),
         },
+        "load_time": load_time,
         "hf_repo": hf_repo,
         "hf_url": f"https://huggingface.co/{hf_repo}" if hf_repo else None,
         "hf_source": hf_source,

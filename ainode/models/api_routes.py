@@ -257,6 +257,199 @@ def load_instance_manifest() -> list:
         return []
 
 
+# -- Launch-time ledger (how long this model took to come up here) -----------
+#
+# The only trace a launch used to leave was one log line ("<label> bound on
+# :<port> after <N>s"), which nothing reads and no browser can see, so the
+# interface could not answer the first question a user asks about a 27B on a
+# GB10: how long is this going to take? Each bind wait now appends its verdict
+# to a small JSON file beside the instance manifest, same shape of storage (one
+# file under AINODE_HOME, no DB).
+#
+# FAILURES are recorded too, with the reason. A ledger holding only the launches
+# that worked would quietly describe a model that never comes up as a model that
+# comes up fast, and the point of writing this down is that it is honest about
+# this node.
+#
+# Capped at the last _LAUNCH_TIMES_CAP entries: this is a rolling record for the
+# UI, not history. History is `bench/results/`.
+
+_LAUNCH_TIMES_CAP = 200
+
+
+def _launch_times_path() -> Path:
+    from ainode.core.config import AINODE_HOME
+    return Path(AINODE_HOME) / "launch-times.json"
+
+
+def read_launch_times() -> list:
+    """Every ledger entry on this node, oldest first. No file / junk file -> []."""
+    try:
+        p = _launch_times_path()
+        if not p.exists():
+            return []
+        entries = json.loads(p.read_text()).get("launches", []) or []
+        return [e for e in entries if isinstance(e, dict)]
+    except Exception:
+        return []
+
+
+def append_launch_time(entry: dict) -> None:
+    """Append one launch verdict, keeping only the last _LAUNCH_TIMES_CAP.
+
+    Blocking (a read and a write): every caller on the event loop goes through
+    ``record_launch_time``, which offloads it. Never raises: a bookkeeping file
+    must not be able to fail a launch.
+    """
+    try:
+        entries = read_launch_times()
+        entries.append(entry)
+        if len(entries) > _LAUNCH_TIMES_CAP:
+            entries = entries[-_LAUNCH_TIMES_CAP:]
+        p = _launch_times_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"launches": entries}))
+    except Exception:
+        pass
+
+
+def _instance_tp(app, port: int):
+    """Tensor-parallel size of the instance on ``port``, when a record says so."""
+    manager = app.get("instances") if hasattr(app, "get") else None
+    if manager is None:
+        return None
+    try:
+        for inst in manager.instances():
+            if getattr(inst.record, "api_port", None) == port:
+                return getattr(inst.record, "tensor_parallel_size", None)
+    except Exception:
+        return None
+    return None
+
+
+def launch_time_entry(app, port: int, backend, *, seconds: float, outcome: str,
+                      reason: str = "") -> Optional[dict]:
+    """The ledger row for one bind verdict, or None when there is nothing honest
+    to write.
+
+    The model is the engine's OWN config, not the wait's label: a label is
+    display text ("boot primary a/one") and the ledger is looked up by model id.
+    A wait with no engine config and no matching node config cannot name a model,
+    so it records nothing rather than a row keyed on "".
+    """
+    cfg = getattr(backend, "config", None)
+    node_cfg = app.get("config") if hasattr(app, "get") else None
+    model = str(getattr(cfg, "model", "") or "").strip()
+    if not model and node_cfg is not None and getattr(node_cfg, "api_port", None) == port:
+        model = str(getattr(node_cfg, "model", "") or "").strip()
+    if not model:
+        return None
+    node_port = getattr(node_cfg, "api_port", None)
+    src = cfg if cfg is not None else node_cfg
+    entry = {
+        "model": model,
+        "node_id": getattr(src, "node_id", None) or getattr(node_cfg, "node_id", None),
+        "node_name": (getattr(src, "node_name", None)
+                      or getattr(node_cfg, "node_name", None)),
+        "api_port": port,
+        # A stacked instance is one on a port other than the node's own: the
+        # primary keeps config.api_port, every stacked load gets an allocated one.
+        "stacked": bool(node_port and port != node_port),
+        "tensor_parallel_size": _instance_tp(app, port),
+        "engine_image": getattr(src, "engine_image", "") or "",
+        "seconds_to_ready": round(float(seconds), 1),
+        "stamp": _utc_stamp(),
+        "outcome": outcome,
+    }
+    if reason:
+        entry["reason"] = reason
+    return entry
+
+
+def _utc_stamp() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def record_launch_time(app, port: int, backend, *, seconds: float,
+                             outcome: str, reason: str = "") -> None:
+    """Append a bind verdict to the ledger, off the event loop.
+
+    The write is a read + a write of a small file, and this runs on the server's
+    loop during boot replay, so it goes to the executor like every other file
+    write on this path.
+    """
+    entry = launch_time_entry(app, port, backend, seconds=seconds,
+                              outcome=outcome, reason=reason)
+    if entry is None:
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, append_launch_time, entry)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not record the launch time for %s", entry.get("model"))
+
+
+def last_ready_launch(model: str, hf_repo: str = "", entries=None) -> Optional[dict]:
+    """The most recent ledger entry where this model actually reached READY.
+
+    Matched on the ledger's model string against BOTH the catalog id and the HF
+    repo, because the engine is launched with the repo id while the catalog (and
+    the launch dropdown) may ask by either.
+    """
+    wanted = {str(x).strip().lower() for x in (model, hf_repo) if str(x or "").strip()}
+    if not wanted:
+        return None
+    rows = read_launch_times() if entries is None else entries
+    for entry in reversed(list(rows)):
+        if entry.get("outcome") != "ready":
+            continue
+        if str(entry.get("model") or "").strip().lower() in wanted:
+            return entry
+    return None
+
+
+def launch_time_summary(model: str, hf_repo: str = "", entries=None) -> dict:
+    """``last_ready_minutes`` + ``last_ready_on`` for a model, from this ledger.
+
+    Both are None when this node has never brought the model up, which is what
+    lets the UI fall back to the catalog's ``typical_ready_minutes`` seed and say
+    nothing at all when there is neither.
+    """
+    hit = last_ready_launch(model, hf_repo, entries)
+    if hit is None:
+        return {"last_ready_minutes": None, "last_ready_on": None}
+    secs = hit.get("seconds_to_ready")
+    minutes = (round(float(secs) / 60.0, 1)
+               if isinstance(secs, (int, float)) and not isinstance(secs, bool) else None)
+    stamp = str(hit.get("stamp") or "")
+    return {
+        "last_ready_minutes": minutes,
+        "last_ready_on": {
+            "node_name": hit.get("node_name") or hit.get("node_id") or None,
+            "stacked": bool(hit.get("stacked")),
+            "date": stamp[:10] or None,
+            "tensor_parallel_size": hit.get("tensor_parallel_size"),
+        },
+    }
+
+
+def annotate_launch_times(entries: list) -> list:
+    """Add this node's measured load times to catalog dicts, in place.
+
+    Used by GET /api/models, which is what the launch dropdown reads. One ledger
+    read for the whole list, not one per model.
+    """
+    ledger = read_launch_times()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry.update(launch_time_summary(entry.get("id") or "",
+                                         entry.get("hf_repo") or "",
+                                         entries=ledger))
+    return entries
+
+
 _OVERRIDE_KEYS = ("served_model_name", "max_model_len", "kv_cache_dtype",
                   "kv_cache_dtype_explicit", "quantization", "trust_remote_code",
                   "extra_vllm_args", "engine_image", "extra_env", "extra_volumes")
@@ -755,7 +948,22 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
     the two differ by however late the wait started, which is what made a 47 s
     life read as "after 0s" (#96). The silence budget and the ceiling still measure
     the wait: they bound how long boot is held open, not the engine's life.
+
+    Every verdict this returns, bound or not, is appended to the node's
+    launch-time ledger, the only place a load time is written down where the
+    interface can read it back afterwards (see ``record_launch_time``).
     """
+    bound, reason, alive = await _bind_wait(app, port, backend, timeout)
+    await record_launch_time(app, port, backend, seconds=alive,
+                             outcome="ready" if bound else "failed",
+                             reason="" if bound else reason)
+    return bound, reason, alive
+
+
+async def _bind_wait(app, port: int, backend, timeout: float = 300.0):
+    """The wait itself. The contract, the signals and the verdicts are documented
+    on ``_wait_for_bind``, which is the entry point every caller uses and which
+    records the verdict in the ledger."""
     launched = _engine_launch_mark(backend)
     began = time.monotonic()
 
@@ -1502,10 +1710,22 @@ async def handle_model_unload(request: web.Request) -> web.Response:
 
 
 async def handle_list_models(request: web.Request) -> web.Response:
-    """GET /api/models -- list the dynamic catalog with download status."""
+    """GET /api/models -- list the dynamic catalog with download status.
+
+    Each entry also carries what this node measured the last time it brought the
+    model up (``last_ready_minutes`` / ``last_ready_on``) alongside the catalog's
+    ``typical_ready_minutes`` seed, because this is the list the launch dropdown
+    reads and "how long will this take" is the question it has to answer before
+    anybody clicks LAUNCH. The ledger is read once for the whole list, in the same
+    executor call as the catalog scan.
+    """
     manager: ModelManager = request.app["model_manager"]
     loop = asyncio.get_event_loop()
-    models = await loop.run_in_executor(None, manager.list_available)
+
+    def _listing():
+        return annotate_launch_times(manager.list_available())
+
+    models = await loop.run_in_executor(None, _listing)
     return web.json_response({"models": models, "count": len(models)})
 
 

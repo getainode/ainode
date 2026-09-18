@@ -1032,6 +1032,16 @@ h4.chat-h { font-size: 14px; color: var(--nvidia-green); }
   margin-bottom: 6px;
 }
 
+/* Measured load time under the model choice. Same type as the launch hint, but
+   quiet: no rule, no fill, no colour of its own. */
+.launch-load-time {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin: 6px 0 2px 0;
+  letter-spacing: 0.2px;
+}
+
 .launch-hint {
   font-size: 11px;
   line-height: 1.45;
