@@ -12,6 +12,16 @@ _Nothing yet._
 
 ---
 
+## [0.5.23] - 2026-09-18
+
+Typed decisions from the fleet, and a bench that scores them on calibration.
+
+### Added
+- **`POST /v1/decide`: typed questions in, probabilities out.** Post a state (text or JSON), an optional instruction, and a map of questions (a list of options, a boolean, or a score range) and get every answer back at once with a probability per option, a confidence, and per-question latency. Each question is one constrained chat completion (vLLM's `structured_outputs` choice grammar, thinking off, temperature 0) run concurrently against the same state prefix, with the distribution read from the first token's logprobs. Routes by model across the fleet like every other `/v1` path. This is the local counterpart of the hosted "System One" interface TypeSafe AI introduced with Jev: the shape is worth having on private hardware even when the calibration is not theirs yet. (#150)
+- **`ainode-bench decide`: a decision bench scored on calibration, not accuracy.** 110 labeled items in five sets (fleet routing, support triage, urgency, PR safety, facts), three backends (`ainode` via `/v1/decide`, `chat` via lettered choices and logprobs on any OpenAI-compatible engine, `jev` via TypeSafe's hosted API), and metrics that matter for automation: accuracy, Brier, expected calibration error with a reliability table, and how many wrong answers survive a 0.8 or 0.9 confidence gate. First records: Jev and Ornith both score 96.4 percent on the same items; every Jev miss sits below 0.66 confidence and none survive a 0.9 gate, while two of Ornith's misses sail through at 0.96 and 0.98. README gains a "Decision runs" table under the same drift guard. (#151)
+
+---
+
 ## [0.5.22] - 2026-09-18
 
 A loading model looks like it is loading; an agentic rubric joins the bench.
