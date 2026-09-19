@@ -1,0 +1,180 @@
+{
+ "schema": 1,
+ "stamp": "20260919-040456",
+ "label": "Pollux V100 solo, onecat src-full",
+ "model": {
+  "id": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "name": "Qwen3.6 35B-A3B",
+  "params_b": 35.0,
+  "active_b": 3.0,
+  "arch": "moe",
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "Apache-2.0",
+  "vision": false
+ },
+ "placement": {
+  "engine": "vllm",
+  "max_model_len": 65536,
+  "node": "pollux",
+  "gpu": "Tesla PG500-216",
+  "ainode": "0.5.23",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [],
+  "engine_image": "onecat-vllm:src-full",
+  "flags": [
+   "--attention-backend",
+   "FLASH_ATTN_V100",
+   "--max-num-seqs",
+   "8",
+   "--enable-prefix-caching",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--limit-mm-per-prompt",
+   "{\"image\":0,\"video\":0}"
+  ],
+  "gpu_memory_utilization": 0.9,
+  "kv_cache_dtype": "auto",
+  "distributed_mode": "solo",
+  "flags_source": "live node config (/api/config)"
+ },
+ "settings": {
+  "thinking": null,
+  "max_tokens": 200,
+  "temperature": null,
+  "sustained_tokens": 1500,
+  "reasoning_tokens": 600,
+  "depths_requested": [
+   4000,
+   16000,
+   32000,
+   64000,
+   120000
+  ],
+  "streams_requested": [
+   1,
+   2,
+   4,
+   8,
+   16
+  ],
+  "chars_per_token_probe": 5.32
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 97.37,
+   "gen_tokens": 200,
+   "ttft_ms": 217,
+   "prompt_tokens": 80
+  },
+  "prefill": [
+   {
+    "ttft_ms": 1171,
+    "prompt_tokens": 4014,
+    "prefill_tok_s": 3428.4,
+    "decode_tok_s": 94.42
+   },
+   {
+    "ttft_ms": 6373,
+    "prompt_tokens": 15840,
+    "prefill_tok_s": 2485.4,
+    "decode_tok_s": 87.96
+   },
+   {
+    "ttft_ms": 17289,
+    "prompt_tokens": 31606,
+    "prefill_tok_s": 1828.1,
+    "decode_tok_s": 76.6
+   },
+   {
+    "ttft_ms": 53660,
+    "prompt_tokens": 63215,
+    "prefill_tok_s": 1178.1,
+    "decode_tok_s": 66.18
+   }
+  ],
+  "sustained": {
+   "decode_tok_s": 95.6,
+   "gen_tokens": 1500,
+   "wall_s": 15.92,
+   "ttft_ms": 240
+  },
+  "concurrency": [
+   {
+    "streams": 1,
+    "aggregate_tok_s": 88.3,
+    "ok": 1,
+    "failed": 0,
+    "wall_s": 2.26,
+    "per_stream_tok_s": 97.4,
+    "median_ttft_ms": 221
+   },
+   {
+    "streams": 2,
+    "aggregate_tok_s": 126.8,
+    "ok": 2,
+    "failed": 0,
+    "wall_s": 3.16,
+    "per_stream_tok_s": 72.1,
+    "median_ttft_ms": 390
+   },
+   {
+    "streams": 4,
+    "aggregate_tok_s": 214.2,
+    "ok": 4,
+    "failed": 0,
+    "wall_s": 3.72,
+    "per_stream_tok_s": 60.1,
+    "median_ttft_ms": 405
+   },
+   {
+    "streams": 8,
+    "aggregate_tok_s": 339.8,
+    "ok": 8,
+    "failed": 0,
+    "wall_s": 4.69,
+    "per_stream_tok_s": 46.9,
+    "median_ttft_ms": 436
+   },
+   {
+    "streams": 16,
+    "aggregate_tok_s": 343.9,
+    "ok": 16,
+    "failed": 0,
+    "wall_s": 9.31,
+    "per_stream_tok_s": 46.8,
+    "median_ttft_ms": 2748
+   }
+  ],
+  "reasoning_tax": {
+   "thinking_off_wall_s": 6.45,
+   "thinking_off_tokens": 600,
+   "thinking_on_wall_s": 6.585,
+   "thinking_on_tokens": 600,
+   "tax_x": 1.02
+  },
+  "telemetry": {
+   "gpu_mem_used_gb": 30.4,
+   "gpu_mem_total_gb": 32.0,
+   "gpu_util_pct": 100,
+   "temp_c": 46,
+   "samples": 67,
+   "reading": "peak observed over the run; sampled from /api/nodes",
+   "gpu_util_pct_at_start": 0,
+   "temp_c_at_start": 28
+  }
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py in 144s; nothing loaded, unloaded or restarted.",
+  "prefill_tok_s is prompt_tokens/TTFT, a floor: TTFT includes queueing, and the OpenAI API exposes no internal prefill timing.",
+  "Thinking-on hit the 600-token cap, so the reasoning tax is a floor: the answer had not finished.",
+  "The 120000-token prefill depth is absent rather than zero: it is past the 65536-token window this recipe serves, and the engine answered 400.",
+  "The model block is the catalog entry qwen3.6-35b-a3b-nvfp4-v100 (name, context, license, active params). The node's own catalog answered with its on-disk sweep entry, which states none of them.",
+  "Filename slugged by hand: the speed run writes the label verbatim into it (#158), so a label with spaces and a comma lands as a filename the other sections would not have produced."
+ ],
+ "source": "scripts/ainode-bench.py"
+}

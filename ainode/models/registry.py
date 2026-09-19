@@ -405,6 +405,75 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         # 8 GB of weights plus a long KV cache fit comfortably in 0.12 of a GB10.
         recommended_gmu=0.12,
     ),
+    "qwen3.6-35b-a3b-nvfp4-v100": ModelInfo(
+        id="qwen3.6-35b-a3b-nvfp4-v100",
+        name="Qwen3.6 35B-A3B (NVFP4, V100)",
+        hf_repo="nvidia/Qwen3.6-35B-A3B-NVFP4",
+        size_gb=23.5,
+        description=(
+            "Qwen3.5-MoE (35B total, 3B active/token, modelopt NVFP4) on a single "
+            "Tesla V100 32 GB, which is the point of this entry: Volta (SM70) was "
+            "dropped from mainline vLLM in 0.20, so the engine image below is NOT a "
+            "registry image. It is the 1Cat-vLLM fork built locally with SM70 "
+            "kernels; Castor holds the exported tarball "
+            "(/home/sem/onecat-vllm-src-full.tar.gz) and the build script "
+            "(/home/sem/build-onecat-src.sh), and loading that export is the way to "
+            "get it onto a node, because building it takes about a day. Its "
+            "ENTRYPOINT is [\"vllm\"] with the binary at /opt/venv/bin/vllm. Served "
+            "text-only: the checkpoint carries a vision tower and the two "
+            "--limit-mm-per-prompt zeros keep it out of the 32 GB budget. Measured on "
+            "pollux (Dell C4130, one V100 32 GB) 2026-09-19: ready in 432 s, 30.4 of "
+            "32 GB used, 88.7 tok/s single-stream with thinking off at first launch "
+            "and 97 tok/s in the bench record below, 344 tok/s across 16 streams, "
+            "decode still 66 tok/s at 63K prompt tokens. 20/22 on the quick agentic "
+            "rubric with every tool probe, every executed-code probe and all five "
+            "agentic probes passed. This is the single-V100 chat lane from the "
+            "Titanium Lab plan: the one recipe that puts a frontier-shaped MoE on "
+            "Volta hardware at interactive speed."
+        ),
+        quantization="NVFP4", min_memory_gb=30, family="qwen", params_b=35.0,
+        active_params_b=3.0, arch="moe",
+        proven_tp=1, verified=True, recommended=False, curated=True,
+        verified_on="2026-09-19",
+        verified_record=(
+            "20260919-040456-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-onecat-src-full.json"
+        ),
+        # Solo on pollux (one V100 32 GB), timed 2026-09-19: 432 s to ready.
+        typical_ready_minutes=7.5,
+        context_length=262144, license="Apache-2.0",
+        format="safetensors",
+        capabilities=["tool_use", "reasoning", "code"],
+        # Local build, not on any registry: the 1Cat-vLLM fork with SM70/Volta
+        # kernels (mainline vLLM dropped Volta in 0.20). Load the exported tarball
+        # from Castor rather than rebuilding; the build is a day long.
+        engine_image="onecat-vllm:src-full",
+        # The checkpoint bakes calibrated fp8 KV scales and this is a Volta card
+        # with no fp8 path, so state auto rather than inheriting an fp8 default.
+        kv_cache_dtype="auto",
+        # First launch's setting. 131072 is Castor's TP=4 number and is untested at
+        # TP=1, so it is not what this entry promises.
+        max_model_len=65536,
+        trust_remote_code=True,
+        recommended_gmu=0.90,
+        extra_vllm_args=[
+            # Volta has no FlashAttention-2/3 and no FlashInfer: the fork ships a
+            # V100-specific backend and it has to be named, or the engine picks one
+            # that will not build on SM70.
+            "--attention-backend", "FLASH_ATTN_V100",
+            # 32 GB total, so the KV budget is small; 8 concurrent sequences is what
+            # fits beside 23.5 GB of weights at 64K.
+            "--max-num-seqs", "8",
+            "--enable-prefix-caching",
+            "--reasoning-parser", "qwen3",
+            # Template emits <tool_call><function=..><parameter=..>, same as the
+            # Ornith and Qwen3.8 entries, so qwen3_coder is the parser that parses.
+            "--tool-call-parser", "qwen3_coder",
+            "--enable-auto-tool-choice",
+            # Text-only: the vision tower's warmup does not fit in 32 GB beside the
+            # weights. Drop these two args on a card with headroom.
+            "--limit-mm-per-prompt", '{"image":0,"video":0}',
+        ],
+    ),
     "deepseek-v4-flash-dspark": ModelInfo(
         id="deepseek-v4-flash-dspark",
         name="DeepSeek V4 Flash (DSpark, FP8)",
