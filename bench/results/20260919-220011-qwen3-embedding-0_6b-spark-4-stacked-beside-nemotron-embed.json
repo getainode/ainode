@@ -1,0 +1,166 @@
+{
+ "schema": 1,
+ "stamp": "20260919-220011",
+ "label": "Spark-4 stacked beside Nemotron",
+ "model": {
+  "id": "Qwen/Qwen3-Embedding-0.6B",
+  "name": "Qwen3 Embedding 0.6B",
+  "params_b": 0.6,
+  "vision": false,
+  "arch": "dense",
+  "active_b": 0.6
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-4-GX10",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.24",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [
+   "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+  ],
+  "port": 8001
+ },
+ "settings": {
+  "endpoint": "http://100.72.9.84:8001/v1",
+  "model_requested": "Qwen/Qwen3-Embedding-0.6B",
+  "corpus": "embed-50",
+  "corpus_version": 1,
+  "latency_texts": 50,
+  "batches": [
+   1,
+   16,
+   64
+  ],
+  "texts_per_batch": 64,
+  "timeout_s": 60
+ },
+ "embed": {
+  "endpoint": "http://100.72.9.84:8001/v1",
+  "model_reported": "Qwen/Qwen3-Embedding-0.6B",
+  "dimensions": 1024,
+  "corpus": {
+   "id": "embed-50",
+   "version": 1,
+   "latency_texts": 50,
+   "pairs_id": "pairs-6",
+   "pairs": 6,
+   "related_pairs": 3,
+   "source": "ainode/bench/embed/corpus.py"
+  },
+  "protocol": {
+   "path": "POST /v1/embeddings",
+   "endpoint": "http://100.72.9.84:8001/v1",
+   "model_requested": "Qwen/Qwen3-Embedding-0.6B",
+   "timeout_s": 60.0,
+   "body": "model and input only; no encoding_format, no dimensions, no truncation hint, so every default is the engine's own"
+  },
+  "latency": {
+   "n": 50,
+   "answered": 50,
+   "errors": 0,
+   "p50_ms": 71.59,
+   "p95_ms": 76.2,
+   "min_ms": 68.94,
+   "max_ms": 236.71,
+   "mean_ms": 75.93,
+   "transport_floor_ms": 32.07
+  },
+  "throughput": [
+   {
+    "batch": 1,
+    "requests": 64,
+    "texts": 64,
+    "errors": 0,
+    "seconds": 4.607,
+    "texts_per_s": 13.89,
+    "tokens": 704,
+    "tokens_per_s": 152.8
+   },
+   {
+    "batch": 16,
+    "requests": 4,
+    "texts": 64,
+    "errors": 0,
+    "seconds": 0.669,
+    "texts_per_s": 95.63,
+    "tokens": 772,
+    "tokens_per_s": 1153.5
+   },
+   {
+    "batch": 64,
+    "requests": 1,
+    "texts": 64,
+    "errors": 0,
+    "seconds": 0.284,
+    "texts_per_s": 225.48,
+    "tokens": 834,
+    "tokens_per_s": 2938.4
+   }
+  ],
+  "quality": {
+   "pairs": [
+    {
+     "id": "rel-1",
+     "related": true,
+     "a": "How do I restart the AINode service?",
+     "b": "What is the command to restart AINode?",
+     "cosine": 0.938295
+    },
+    {
+     "id": "rel-2",
+     "related": true,
+     "a": "The GPU ran out of memory while the engine was starting.",
+     "b": "The engine died with a CUDA out-of-memory error during launch.",
+     "cosine": 0.82146
+    },
+    {
+     "id": "rel-3",
+     "related": true,
+     "a": "Cats sleep for most of the day.",
+     "b": "Domestic cats spend the majority of their time asleep.",
+     "cosine": 0.891379
+    },
+    {
+     "id": "unrel-1",
+     "related": false,
+     "a": "The GPU ran out of memory while the engine was starting.",
+     "b": "Cats sleep for most of the day.",
+     "cosine": 0.136801
+    },
+    {
+     "id": "unrel-2",
+     "related": false,
+     "a": "How do I restart the AINode service?",
+     "b": "Add two cups of flour and a pinch of salt.",
+     "cosine": 0.320991
+    },
+    {
+     "id": "unrel-3",
+     "related": false,
+     "a": "Tensor parallelism splits one layer across several GPUs.",
+     "b": "She bought a ticket to the opera for Friday evening.",
+     "cosine": 0.216865
+    }
+   ],
+   "related_min": 0.82146,
+   "unrelated_max": 0.320991,
+   "margin": 0.500469,
+   "ordered": true
+  },
+  "errors": [],
+  "seconds": 9.7
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py embed in 10s against http://100.72.9.84:8001/v1; nothing was loaded, unloaded or restarted, and the run adds real load to whatever else that node is serving.",
+  "Latency is 50 single-text requests sent one at a time, so p50 and p95 describe a request with the engine to itself rather than a queue this bench created.",
+  "Those figures are end to end from wherever the bench ran, and transport_floor_ms is the measured floor: 32.07 ms for a GET /v1/models over the same link, which embeds nothing. Subtract it to read the engine's own time; a run driven from the node itself would report a floor near zero.",
+  "Throughput is texts and tokens over the wall time of the whole sweep at each batch size, 50 texts wrapped to fill every batch rather than one text repeated, which would measure the prefix cache instead of the engine.",
+  "Tokens per second comes from usage.prompt_tokens as the engine reported it, not from a tokenizer run here; a response that reported no usage leaves the figure absent rather than zero.",
+  "The quality check passed: the lowest of the 3 related pairs (0.82146) scores above the highest of the 3 unrelated ones (0.320991), a margin of 0.500469. It is a sanity check on whether the vectors mean anything, not a retrieval benchmark: six hand-written pairs say nothing about recall on a real corpus, and MTEB is where that question belongs.",
+  "At batch 64 the engine returned 225.48 texts/s and 2938.4 tokens/s; batch 1 is in the same table, and the gap between them is what an indexer gains by batching.",
+  "Spark-4-GX10 does not report serving Qwen/Qwen3-Embedding-0.6B; placement and telemetry may describe the wrong node"
+ ],
+ "source": "scripts/ainode-bench.py embed"
+}

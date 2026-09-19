@@ -627,6 +627,36 @@ def _persist_primary_overrides(config, gmu, overrides) -> None:
         setattr(config, k, v)
 
 
+def _will_own_primary_port(manager, config, existing) -> bool:
+    """Will this load end up on the node's OWN api_port, i.e. be the primary?
+
+    The InstanceManager is not the only thing that can hold that port, and assuming
+    it was is the bug this exists to close. A node that HEADS a distributed launch
+    runs its head engine in a container on ``config.api_port``, and that launch is
+    deliberately never written to ``instances.json`` (a distributed shape is not
+    auto-replayed), so after a `systemctl restart` the head keeps serving while the
+    manager starts empty. Counting instances alone then called the next
+    ``POST /api/models/load`` the PRIMARY: it answered ``{"api_port": 8001,
+    "stacked": false}`` (``allocate_port`` had already skipped the busy 8000), and
+    then overwrote ``config.model``, flipped ``distributed_mode`` back to "solo" and
+    dropped ``peer_ips``. The node stopped advertising the model its head container
+    was still serving, so the master's federated ``/v1/models`` and its routing lost
+    a live distributed engine.
+
+    So the question is asked about the port instead, which is the same definition of
+    "stacked" the node's own ``/api/models`` listing already uses (``port !=
+    node_port``): a load is the primary only when the primary port is actually free
+    for it to take. ``existing`` holding that port is a reload of the primary and
+    stays one.
+    """
+    node_port = getattr(config, "api_port", 0) or 0
+    if not node_port:
+        return True  # no api_port to own; nothing to protect either
+    if existing is not None and existing.record.api_port == node_port:
+        return True
+    return manager.port_free(node_port)
+
+
 def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: bool = True) -> dict:
     """APPEND a solo instance through the InstanceManager — the shared core of the
     /api/models/load solo path AND the startup replay. Returns a plain dict (no
@@ -661,7 +691,7 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
     # (if any) is replaced — i.e. reloading the sole instance, or the very first
     # load. Reloading a stacked model while the primary is up is NOT primary.
     others = [i for i in manager.instances() if i.record.instance_id != _existing_id()]
-    is_primary = len(others) == 0
+    is_primary = len(others) == 0 and _will_own_primary_port(manager, config, existing)
 
     # Stacked-load admission control (unified-memory safety). A 2nd+ model on a
     # busy node with the node default gpu_memory_utilization (0.5) can push total

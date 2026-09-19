@@ -267,6 +267,34 @@ def _head_instances(config) -> list:
     ).to_dict()]
 
 
+def announced_instances(config, live_records, dmode: str, engine_serving: bool) -> list:
+    """The `instances` list this node broadcasts: its managed ones AND its head.
+
+    The head of a distributed launch is an instance like any other as far as the
+    master is concerned: it has to be routable by model id and drawn as DISTRIBUTED
+    TP=N across head plus peers. It used to be synthesised only when the
+    InstanceManager was EMPTY, so the first stacked model loaded beside a head made
+    the head vanish from the announcement: the peer was drawn as an empty node, the
+    head instance as SINGLE, and the master's fleet view lost a live distributed
+    engine (#162). The head is also absent from the manager altogether after a
+    restart, because a distributed launch is deliberately kept out of
+    ``instances.json`` and never replayed.
+
+    So the two sources are merged rather than chosen between, keyed on the port a
+    node can only have one engine on. A manager record wins where both describe the
+    same port, because that one carries the launch's real peer set and executor
+    instead of the shape reconstructed from config.
+    """
+    out = [record.to_dict() for record in (live_records or [])]
+    if dmode != "head" or not engine_serving:
+        return out
+    ports = {entry.get("api_port") for entry in out}
+    for entry in _head_instances(config):
+        if entry.get("api_port") not in ports:
+            out.append(entry)
+    return out
+
+
 def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     """Create a NodeAnnouncement from current node state."""
     gpu: Optional[GPUInfo] = detect_gpu()
@@ -570,17 +598,15 @@ async def _cluster_sync_loop(app: web.Application) -> None:
                     updates["distributed_instance_id"] = None
                     updates["distributed_peers"] = []
                 manager = app.get("instances")
+                live_records = []
                 if manager is not None and not manager.is_empty():
                     # Only advertise instances whose engine actually answers — a dead
                     # stacked instance drops out of the broadcast within one cycle —
                     # and flip each live record's status to `serving` so the UI stops
                     # showing a phantom `starting` progress bar (F3).
                     live_records = await _live_instance_records(manager, loop)
-                    updates["instances"] = [r.to_dict() for r in live_records]
-                else:
-                    updates["instances"] = (
-                        _head_instances(config) if (dmode == "head" and engine_serving) else []
-                    )
+                updates["instances"] = announced_instances(
+                    config, live_records, dmode, engine_serving)
                 if sender:
                     sender.update_announcement(**updates)
                     # Keep the app-level announcement in sync so /api/status sees fresh values

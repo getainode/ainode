@@ -177,7 +177,7 @@ ENDPOINT_CATALOG = {
         {"method": "GET", "path": "/v1/models", "description": "List models (OpenAI-compatible)"},
         {"method": "POST", "path": "/v1/chat/completions", "description": "Chat completions (OpenAI)"},
         {"method": "POST", "path": "/v1/completions", "description": "Text completions (OpenAI)"},
-        {"method": "POST", "path": "/v1/embeddings", "description": "Generate embeddings — OpenAI-compatible, served in-process via sentence-transformers"},
+        {"method": "POST", "path": "/v1/embeddings", "description": "Generate embeddings (OpenAI-compatible): routed by model id to the node serving it, or in-process via sentence-transformers when no node does"},
     ],
     "anthropic": [
         {"method": "POST", "path": "/v1/messages", "description": "Anthropic Messages API, forwarded to the node serving the requested model"},
@@ -220,6 +220,39 @@ def _local_parallel(app, model: str, port: int) -> int:
         if peers:
             return 1 + len(peers)
     return 1
+
+
+#: What a served instance is for, and what it can answer. An embedding model is
+#: an ordinary stacked vLLM instance on this hardware (same image, `--runner
+#: pooling`), so nothing about how it was launched distinguishes it from a chat
+#: engine: the curated catalog entry's `capabilities` is the only place that
+#: knowledge lives, and the browser reads `type` to keep the model out of the chat
+#: picker (`app.js::refreshChatFleet`) and out of the card's chat controls.
+_LLM_KIND = ("llm", ("chat", "completions"))
+_EMBED_KIND = ("embed", ("embeddings",))
+
+
+def serving_kind(model: str) -> tuple[str, list]:
+    """``(type, capabilities)`` for a model id the fleet is serving.
+
+    Read from the curated catalog rather than probed: vLLM's ``/v1/models`` says
+    nothing about which runner is behind an id, and a pooling instance answers a
+    chat completion with a 400 nobody can act on. A model the catalog does not
+    describe is reported as a chat engine, which is what every instance was before
+    embeddings could be served this way.
+    """
+    try:
+        from ainode.models.registry import CURATED_CLUSTER_MODELS, FALLBACK_CATALOG
+
+        for table in (CURATED_CLUSTER_MODELS, FALLBACK_CATALOG):
+            for cid, info in (table or {}).items():
+                if model in (getattr(info, "hf_repo", ""), cid):
+                    caps = list(getattr(info, "capabilities", None) or [])
+                    kind = _EMBED_KIND if "embedding" in caps else _LLM_KIND
+                    return kind[0], list(kind[1])
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("failed to read the catalog for %s", model)
+    return _LLM_KIND[0], list(_LLM_KIND[1])
 
 
 def _remote_parallel(node, model: str, port: int) -> int:
@@ -265,6 +298,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
     local_models = await _probe_loaded_models(session, primary_port)
     loaded_models: list[dict] = []
     for mid in local_models:
+        kind, caps = serving_kind(mid)
         loaded_models.append({
             "id": mid,
             "node_hostname": config.node_name or "local",
@@ -272,12 +306,12 @@ async def handle_server_status(request: web.Request) -> web.Response:
             "port": primary_port,
             "ready": True,
             "ejectable": True,
-            "type": "llm",
+            "type": kind,
             "format": "SafeTensors",
             "quantization": None,
             "size_bytes": 0,
             "parallel": _local_parallel(request.app, mid, primary_port),
-            "capabilities": ["chat", "completions"],
+            "capabilities": caps,
             "loaded_at": start_time,
         })
 
@@ -302,6 +336,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                 # views and routing agree. The row stays ejectable either way so
                 # a dead instance can still be cleaned up from the UI.
                 stacked_live = await _probe_loaded_models(session, rec.api_port)
+                kind, caps = serving_kind(rec.model)
                 loaded_models.append({
                     "id": rec.model,
                     "node_hostname": config.node_name or "local",
@@ -309,12 +344,12 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     "port": rec.api_port,
                     "ready": bool(stacked_live),
                     "ejectable": True,
-                    "type": "llm",
+                    "type": kind,
                     "format": "SafeTensors",
                     "quantization": None,
                     "size_bytes": 0,
                     "parallel": instance_parallel(rec),
-                    "capabilities": ["chat", "completions"],
+                    "capabilities": caps,
                     "loaded_at": start_time,
                 })
         except Exception:
@@ -359,6 +394,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                 # Remote instances can't be ejected from here — the eject
                 # endpoint only targets this node's local InstanceManager.
                 if m.model:
+                    kind, caps = serving_kind(m.model)
                     loaded_models.append({
                         "id": m.model,
                         "node_hostname": m.node_name,
@@ -366,12 +402,12 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "port": member_port,
                         "ready": True,  # model is only broadcast once serving
                         "ejectable": False,
-                        "type": "llm",
+                        "type": kind,
                         "format": "SafeTensors",
                         "quantization": None,
                         "size_bytes": 0,
                         "parallel": _remote_parallel(m, m.model, member_port),
-                        "capabilities": ["chat", "completions"],
+                        "capabilities": caps,
                         "loaded_at": getattr(m, "last_seen", start_time),
                     })
                 # Remote STACKED instances (ports 8001+) carried on the peer's
@@ -385,6 +421,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     inst_port = inst.get("api_port") or member_port
                     if im == m.model and inst_port == member_port:
                         continue  # primary already added above
+                    kind, caps = serving_kind(im)
                     loaded_models.append({
                         "id": im,
                         "node_hostname": m.node_name,
@@ -392,12 +429,12 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "port": inst_port,
                         "ready": inst.get("status") == "serving",
                         "ejectable": False,
-                        "type": "llm",
+                        "type": kind,
                         "format": "SafeTensors",
                         "quantization": None,
                         "size_bytes": 0,
                         "parallel": instance_parallel(inst),
-                        "capabilities": ["chat", "completions"],
+                        "capabilities": caps,
                         "loaded_at": getattr(m, "last_seen", start_time),
                     })
         except Exception:

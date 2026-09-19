@@ -99,8 +99,13 @@ class ModelInfo:
     created_at: str = ""
     downloads: int = 0
     likes: int = 0
-    # Capabilities — inferred from HF tags or model ID
-    capabilities: list = None  # ["vision", "tool_use", "reasoning", "code", "multilingual"]
+    # Capabilities, inferred from HF tags or model ID, except "embedding", which
+    # is only ever stated by a curated entry: it is not a feature added on top of
+    # chat but the whole of what the model does, and the interface reads it to draw
+    # an Embedding chip instead of chat controls and to keep the entry out of the
+    # chat model picker.
+    capabilities: list = None  # ["vision", "tool_use", "reasoning", "code",
+    #                             "multilingual", "embedding"]
     architecture: str = ""
     format: str = ""  # "safetensors", "gguf", "awq", etc.
     # ---- Launch recipe (proven config, applied automatically on load) --------
@@ -473,6 +478,60 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             # weights. Drop these two args on a card with headroom.
             "--limit-mm-per-prompt", '{"image":0,"video":0}',
         ],
+    ),
+    "qwen3-embedding-0.6b": ModelInfo(
+        id="qwen3-embedding-0.6b",
+        name="Qwen3 Embedding 0.6B",
+        hf_repo="Qwen/Qwen3-Embedding-0.6B",
+        size_gb=1.2,
+        description=(
+            "1024-dimensional embeddings, 32k context, multilingual. Served by "
+            "vLLM's pooling runner on the same engine image as everything else, so "
+            "it stacks beside any chat model at 6 percent of a GB10 and needs no "
+            "second runtime, no second container and no CPU library in the AINode "
+            "image. POST /v1/embeddings on ANY node routes to it by model id, the "
+            "same way a chat completion routes, so one instance serves the whole "
+            "fleet. Measured on Spark-4 2026-09-19 stacked beside Nemotron 3.5 "
+            "Lightning: ready in 87 s, 1024 dims, 71.6 ms p50 for a single short "
+            "text end to end over a tailnet whose own floor is 32 ms, and 13.9, "
+            "95.6 and 225.5 texts/s at batches of 1, 16 and 64 (2938 tokens/s at "
+            "64). The quality check passed with room to spare: the closest "
+            "unrelated pair scores 0.32 and the weakest related pair 0.82."
+        ),
+        quantization=None, min_memory_gb=4, family="qwen", params_b=0.6,
+        arch="dense",
+        proven_tp=1, verified=True, recommended=True, curated=True,
+        verified_on="2026-09-19",
+        verified_record=(
+            "20260919-220011-qwen3-embedding-0_6b-spark-4-stacked-beside-nemotron-embed.json"
+        ),
+        # Stacked on Spark-4 beside Nemotron at 0.06, timed 2026-09-19 (ledger
+        # 86.7 s; the same launch took 77.9 s on Spark-2).
+        typical_ready_minutes=1.5,
+        context_length=32768, license="Apache-2.0",
+        format="safetensors",
+        # The one capability that is not a chat capability: the interface reads
+        # this to draw an Embedding chip instead of chat controls, and to keep the
+        # entry out of the chat model picker.
+        capabilities=["embedding"],
+        # Fleet default image on purpose: the proven launch ran on the node's own
+        # engine image, and `--runner pooling` has been in vLLM since the --task
+        # flag was retired, so nothing here needs a pinned newer build.
+        # 32k is the card's number; 8192 is what the proven launch served, and a
+        # window this entry has not been measured at is not what it promises.
+        max_model_len=8192,
+        extra_vllm_args=[
+            # Pooling, not generate: this checkpoint has no LM head to sample
+            # from, and the default runner refuses to serve it.
+            "--runner", "pooling",
+            # 64 texts in one request is the batch the throughput number is taken
+            # at, so the engine has to accept that many sequences at once.
+            "--max-num-seqs", "64",
+            "--enable-prefix-caching",
+        ],
+        # 1.2 GB of weights and no KV cache worth the name: 6 percent of a GB10 is
+        # enough, which is what makes this a model you leave running.
+        recommended_gmu=0.06,
     ),
     "deepseek-v4-flash-dspark": ModelInfo(
         id="deepseek-v4-flash-dspark",

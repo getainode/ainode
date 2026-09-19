@@ -322,3 +322,103 @@ Rules specific to this block, all load-bearing:
   `settings.sets` records what was asked for.
 - No API key is ever in the record. Not in `settings`, not in `protocol`, not in a
   note.
+
+## The `embed` block
+
+An embedding-bench run (`scripts/ainode-bench.py embed`) writes the same record with a
+top-level `embed` block and **no `results` block**, for the reason the three above have
+none: the model it measured generates no tokens at all, so a tok/s figure would be
+meaningless even as a zero. `scripts/render-bench-table.py` keeps a record shaped like
+that out of the README's throughput table and gives it a row in the "Embedding runs"
+table instead.
+
+The `endpoint` is part of the measurement and not a footnote. The same instance
+measured straight at its engine port and through an AINode node's `:3000/v1` are two
+different numbers, because the second one includes the fleet routing hop, which is why
+the table is keyed on the pair.
+
+```json
+{
+  "schema": 1, "stamp": "20260919-220011",
+  "label": "Spark-4 stacked beside Nemotron",
+  "model": { "id": "Qwen/Qwen3-Embedding-0.6B", "name": "Qwen3 Embedding 0.6B",
+             "params_b": 0.6, "arch": "dense", "vision": false },
+  "placement": { "node": "Spark-4-GX10", "gpu": "NVIDIA GB10", "gpus": 1, "tp": 1,
+                 "port": 8001, "engine": "vllm", "ainode": "0.5.24",
+                 "stacked_with": ["nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"] },
+  "settings": {
+    "endpoint": "http://100.72.9.84:8001/v1",
+    "model_requested": "Qwen/Qwen3-Embedding-0.6B",
+    "corpus": "embed-50", "corpus_version": 1, "latency_texts": 50,
+    "batches": [1, 16, 64], "texts_per_batch": 64, "timeout_s": 60
+  },
+  "embed": {
+    "endpoint": "http://100.72.9.84:8001/v1",
+    "model_reported": "Qwen/Qwen3-Embedding-0.6B",
+    "dimensions": 1024,
+    "corpus": { "id": "embed-50", "version": 1, "latency_texts": 50,
+                "pairs_id": "pairs-6", "pairs": 6, "related_pairs": 3,
+                "source": "ainode/bench/embed/corpus.py" },
+    "protocol": { "path": "POST /v1/embeddings", "endpoint": "...",
+                  "model_requested": "...", "timeout_s": 60,
+                  "body": "model and input only; no encoding_format, ..." },
+    "latency": { "n": 50, "answered": 50, "errors": 0,
+                 "p50_ms": 71.59, "p95_ms": 76.2, "min_ms": 68.94,
+                 "max_ms": 236.71, "mean_ms": 75.93, "transport_floor_ms": 32.07 },
+    "throughput": [
+      { "batch": 64, "requests": 1, "texts": 64, "errors": 0, "seconds": 0.284,
+        "texts_per_s": 225.48, "tokens": 834, "tokens_per_s": 2938.4 }
+    ],
+    "quality": {
+      "pairs": [ { "id": "rel-1", "related": true, "a": "...", "b": "...",
+                   "cosine": 0.938286 } ],
+      "related_min": 0.82146, "unrelated_max": 0.320991,
+      "margin": 0.500469, "ordered": true
+    },
+    "errors": [], "seconds": 8.6
+  },
+  "notes": ["..."],
+  "source": "scripts/ainode-bench.py embed"
+}
+```
+
+Rules specific to this block, all load-bearing:
+
+- `dimensions` is read off the first answered response, never off a model card. It is
+  what every index downstream has to be built for, and a checkpoint served through the
+  wrong pooling mode has been known to return a different width than its card says.
+- **`latency` is end to end from wherever the bench ran, and `transport_floor_ms` says
+  how much of that was the wire.** The floor is the median of five `GET /v1/models`
+  calls over the same link, a request that embeds nothing. At these latencies it is not
+  a detail: a p50 of 71 ms with a 32 ms floor is a very different engine from a p50 of
+  71 ms with a 2 ms floor, and the number alone cannot tell them apart. It is a
+  measurement, not a correction: nothing is subtracted anywhere in the record.
+- `latency` is one text per request, sent one at a time, so the percentiles describe a
+  request that had the engine to itself rather than a queue this bench created. `n`
+  counts the requests made and `answered` the ones that came back, so a percentile is
+  never quietly taken over a smaller set than the header implies. Percentiles are
+  interpolated, not nearest-rank.
+- `throughput` is one row per batch size, each row over the **same** number of texts
+  (`settings.texts_per_batch`), so the rows compare directly: 64 requests at batch 1,
+  4 at batch 16, 1 at batch 64. The texts wrap around the corpus rather than repeating
+  one string, which would measure the prefix cache instead of the engine. `seconds` is
+  the wall time of the whole sweep at that size, gaps between requests included,
+  because that is the time a caller waits.
+- `tokens` and `tokens_per_s` come from `usage.prompt_tokens` as the engine reported
+  it, never from a tokenizer run by the bench. A sweep where no response carried a
+  usage block reports both as `null` rather than zero.
+- **`quality` is a sanity check and the record says so in its notes.** `ordered` is
+  true only when the LOWEST related pair's cosine is above the HIGHEST unrelated one's,
+  which is a stronger statement than any per-pair threshold and encodes no number about
+  the checkpoint; `margin` is the gap, negative when the check fails. Cosine is computed
+  here rather than trusting the engine to have normalised. Six hand-written pairs say
+  nothing about recall on a real corpus and this is not presented as a retrieval
+  benchmark: it catches an engine returning well-formed vectors that mean nothing.
+- A run that could not score every pair reports `ordered: null`, not `false`: nothing
+  was measured, so nothing failed.
+- `corpus.id` plus `corpus.version` say which texts produced these numbers. Two records
+  are only comparable over the same pair, the same rule `decide.item_set` lives by.
+- `errors` lists the requests that failed on transport or an unreadable response, and
+  they are counted out of every percentile and rate in the block and named in the notes,
+  because "the server refused" and "the vectors were bad" are different findings.
+- No API key is ever in the record. Not in `settings`, not in `protocol`, not in a note.
