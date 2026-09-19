@@ -2703,6 +2703,19 @@ select {
   box-shadow: 0 0 10px var(--nvidia-green-glow);
 }
 
+/* Embedding: not a feature on top of chat, so it reads as its own kind of
+   model rather than another chat capability. */
+.cap-embedding {
+  background: rgba(236, 132, 44, 0.12);
+  color: #f0a05a;
+  border: 1px solid rgba(236, 132, 44, 0.35);
+  font-family: var(--font-mono);
+}
+.cap-embedding:hover {
+  background: rgba(236, 132, 44, 0.2);
+  box-shadow: 0 0 10px rgba(236, 132, 44, 0.3);
+}
+
 /* Card info icon */
 .card-info-icon {
   color: var(--text-muted);
@@ -2957,6 +2970,15 @@ select {
   font-size: 14px;
   letter-spacing: 0.3px;
   border-radius: var(--radius-lg);
+}
+
+/* Where the CTA would be on an embedding model's card: there is no chat to open,
+   so the footer states the path it serves instead of offering a dead button. */
+.md-cta-note {
+  padding: 12px 24px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: #f0a05a;
 }
 
 /* Downloads queue — persistent panel at top of downloads view */

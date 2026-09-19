@@ -432,3 +432,178 @@ def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
     a = mgr.by_model("model-A")
     assert a is not None and a.backend.stopped is False
     assert mgr.by_model("model-B") is None
+
+
+# ------------------------------- stacking beside a DISTRIBUTED head ---------
+#
+# Found on Spark-2 loading an embedding model beside DeepSeek V4 Flash. The node
+# HEADS that model at TP=2 (its engine container on :8000, Spark-3 as its peer), and
+# a distributed launch is deliberately never written to instances.json, so after a
+# `systemctl restart ainode` the head keeps serving while the InstanceManager starts
+# empty. `is_primary` was `len(others) == 0` over that empty manager, so the next
+# POST /api/models/load called itself the PRIMARY: it answered {"api_port": 8001,
+# "stacked": false} (allocate_port had already skipped the busy 8000, which is the
+# contradiction), then overwrote config.model with the new model, flipped
+# distributed_mode back to "solo" and dropped peer_ips. The node stopped advertising
+# the model its head container was still serving, and the master's federated
+# /v1/models and its routing lost a live distributed engine.
+
+
+def _head_app(monkeypatch, *, manager_empty=True, port_busy=True):
+    """A node heading a TP=2 launch on :8000, as it looks after a restart.
+
+    `port_busy` is the fake backend reporting the primary port held: the head's
+    engine container has it, and nothing in this process knows about that container.
+    """
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="spark2", api_port=8000)
+    cfg.model = "fraserprice/DeepSeek-V4-Flash-DSpark"
+    cfg.distributed_mode = "head"
+    cfg.peer_ips = ["10.100.0.13"]
+    cfg.distributed_executor = "mp"
+    cfg.save = lambda: None
+
+    mgr = InstanceManager(base_port=8000)
+    if not manager_empty:
+        # The same node BEFORE a restart: the head launch is in the manager too.
+        head = _FakeBackend(cfg, "")
+        head.started = True
+        mgr.add(InstanceRecord(instance_id="spark2:head", model=cfg.model,
+                               head_node_id="spark2", peer_ips=list(cfg.peer_ips),
+                               api_port=8000, tensor_parallel_size=2,
+                               status="serving", distributed_executor="mp"), head)
+
+    held = {8000} if port_busy else set()
+    monkeypatch.setattr(InstanceManager, "_port_bindable",
+                        staticmethod(lambda port, host="0.0.0.0": port not in held))
+
+    return {"engine": None, "instances": mgr, "config": cfg,
+            "cluster_state": ClusterState(), "ray_autostart_state": None}
+
+
+def test_a_load_beside_a_distributed_head_is_stacked_not_primary(monkeypatch, tmp_path):
+    """The whole bug in one test: the answer says stacked, and the head's config is
+    left exactly as it was."""
+    import ainode.models.api_routes as mr
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    app = _head_app(monkeypatch)
+    cfg = app["config"]
+
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06)
+
+    assert out["ok"] is True
+    assert (out["api_port"], out["stacked"]) == (8001, True)
+    # The head is untouched: still the primary model, still a head, still its peer.
+    assert cfg.model == "fraserprice/DeepSeek-V4-Flash-DSpark"
+    assert cfg.distributed_mode == "head"
+    assert cfg.peer_ips == ["10.100.0.13"]
+    assert app["engine"] is None      # never repointed at the stacked backend
+    # And the new model IS in the manifest, on its own port.
+    saved = mr.load_instance_manifest()
+    assert [e["model"] for e in saved] == ["Qwen/Qwen3-Embedding-0.6B"]
+    assert saved[0]["gpu_memory_utilization"] == 0.06
+    ports = {i.record.model: i.record.api_port for i in app["instances"].instances()}
+    assert ports == {"Qwen/Qwen3-Embedding-0.6B": 8001}
+
+
+def test_a_stacked_load_beside_a_head_still_has_to_state_its_gmu(monkeypatch):
+    """The admission gate now applies to this case, which it did not before: a second
+    engine inheriting the node default (0.5) beside a TP=2 head is how a GB10 gets
+    pushed past its unified memory and taken down."""
+    import ainode.models.api_routes as mr
+
+    out = mr.append_solo_instance(_head_app(monkeypatch),
+                                  "Qwen/Qwen3-Embedding-0.6B", None)
+    assert out["ok"] is False and out["status"] == 400
+    assert "gpu_memory_utilization" in out["error"]
+
+
+def test_a_failed_load_beside_a_head_does_not_clear_the_heads_model(monkeypatch):
+    """`_clear()` blanks config.model so the router stops advertising a ghost. It must
+    only ever blank the PRIMARY's, and the primary here is the head."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+
+    app = _head_app(monkeypatch)
+    cfg = app["config"]
+
+    def dead_backend(cfg_, instance_id="", on_ready=None):
+        backend = _FakeBackend(cfg_, instance_id)
+        backend.start = lambda: False
+        return backend
+
+    monkeypatch.setattr(backends_mod, "get_backend", dead_backend)
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06,
+                                  persist=False)
+    assert out["ok"] is False
+    assert cfg.model == "fraserprice/DeepSeek-V4-Flash-DSpark"
+    assert cfg.distributed_mode == "head"
+
+
+def test_the_same_node_before_a_restart_behaves_identically(monkeypatch, tmp_path):
+    """With the head IN the manager, `len(others)` already said stacked. The port rule
+    has to agree with it, or the fix would have swapped one wrong answer for another."""
+    import ainode.models.api_routes as mr
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    app = _head_app(monkeypatch, manager_empty=False)
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06)
+    assert (out["api_port"], out["stacked"]) == (8001, True)
+    assert app["config"].distributed_mode == "head"
+
+
+def test_a_free_primary_port_is_still_a_primary_load(monkeypatch, tmp_path):
+    """The other direction, so the fix cannot make every first load stacked: an empty
+    node with nothing on :8000 loads its primary exactly as before."""
+    import ainode.models.api_routes as mr
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    app = _head_app(monkeypatch, port_busy=False)
+    cfg = app["config"]
+    cfg.model = None
+    cfg.distributed_mode = "solo"
+    cfg.peer_ips = []
+
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06)
+    assert (out["api_port"], out["stacked"]) == (8000, False)
+    assert cfg.model == "Qwen/Qwen3-Embedding-0.6B"
+    assert app["engine"] is not None
+
+
+def test_reloading_the_primary_stays_a_primary_load(monkeypatch, tmp_path):
+    """A reload of the instance that HOLDS the primary port is a primary load, even
+    though the port reads busy while its own engine is still up."""
+    import ainode.models.api_routes as mr
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    _patch_backend(monkeypatch)
+    # The port is busy while the primary's engine is up and free once it is stopped,
+    # which is what a container releasing its port looks like.
+    held = {8000}
+    monkeypatch.setattr(InstanceManager, "_port_bindable",
+                        staticmethod(lambda port, host="0.0.0.0": port not in held))
+
+    cfg = NodeConfig(node_id="spark1", api_port=8000)
+    cfg.model = "model-A"
+    cfg.save = lambda: None
+    primary = _FakeBackend(cfg, "")
+    primary.started = True
+    primary.stop = lambda: held.discard(8000)
+    mgr = InstanceManager(base_port=8000)
+    mgr.add(InstanceRecord(instance_id="spark1:model-A", model="model-A",
+                           head_node_id="spark1", peer_ips=[], api_port=8000,
+                           tensor_parallel_size=1, status="serving"), primary)
+    app = {"engine": primary, "instances": mgr, "config": cfg,
+           "cluster_state": ClusterState(), "ray_autostart_state": None}
+
+    out = mr.append_solo_instance(app, "model-A", 0.4)
+    assert (out["api_port"], out["stacked"]) == (8000, False)
+    assert held == set()                    # the old container released the port
+    assert app["engine"] is not primary     # and app["engine"] follows the new one
+    assert cfg.model == "model-A"

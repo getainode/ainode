@@ -148,3 +148,58 @@ def test_the_catalog_cache_round_trips_the_new_fields():
            if k not in ("verified_on", "verified_record", "typical_ready_minutes")}
     stale = ModelInfo(**old)
     assert stale.verified_on == "" and stale.typical_ready_minutes is None
+
+
+# ------------------------------------------------- the embedding entry ------
+#
+# The one catalog entry whose capability is not a chat capability. It is checked
+# here rather than in a file of its own because everything worth pinning about it is
+# provenance: the record behind its verified flag, and the recipe that record was
+# taken on.
+
+def test_the_embedding_entry_states_the_recipe_its_record_was_taken_on():
+    """Nothing here is guessable and the launch fails without it: a pooling runner
+    (the checkpoint has no LM head to sample from), a batch the engine will accept,
+    and a gmu small enough to stack beside a chat model on the same GB10."""
+    info = CURATED_CLUSTER_MODELS["qwen3-embedding-0.6b"]
+    assert info.hf_repo == "Qwen/Qwen3-Embedding-0.6B"
+    assert info.capabilities == ["embedding"]
+    assert info.extra_vllm_args == ["--runner", "pooling",
+                                    "--max-num-seqs", "64",
+                                    "--enable-prefix-caching"]
+    assert info.recommended_gmu == 0.06
+    assert info.max_model_len == 8192
+    # Fleet default image on purpose: the proven launch ran on the node's own engine
+    # image, and stating a pinned one here would be a claim no record backs.
+    assert info.engine_image == ""
+    assert info.curated and info.recommended
+    assert info.typical_ready_minutes == 1.5
+
+
+def test_the_embedding_entry_is_verified_by_an_embed_bench_record():
+    """Its record is an `embed` record, not a throughput one: the model generates no
+    tokens, so there is no tok/s for one to contain."""
+    import json
+
+    info = CURATED_CLUSTER_MODELS["qwen3-embedding-0.6b"]
+    assert info.verified and info.verified_on == "2026-09-19"
+    record = RESULTS / info.verified_record
+    assert record.exists()
+    data = json.loads(record.read_text())
+    assert data["model"]["id"] == info.hf_repo
+    assert "embed" in data and "results" not in data
+    assert data["embed"]["dimensions"] == 1024
+    assert data["embed"]["quality"]["ordered"] is True
+
+
+def test_embedding_is_the_only_capability_an_entry_may_carry_alone():
+    """A catalog entry marked `embedding` must not also claim chat capabilities: the
+    interface reads that one word to hide the chat controls and to keep the model out
+    of the chat picker, so a mixed list would put a dead "Use in New Chat" button on
+    the card."""
+    chat_caps = {"tool_use", "reasoning", "code", "vision"}
+    for model_id, info in _all_entries().items():
+        caps = set(info.capabilities or [])
+        if "embedding" in caps:
+            assert not (caps & chat_caps), (
+                f"{model_id} claims embedding and {sorted(caps & chat_caps)}")

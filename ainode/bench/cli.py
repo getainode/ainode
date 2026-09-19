@@ -37,8 +37,10 @@ def build_parser():
         epilog="subcommands: `ainode-bench harness --help` measures a model driving "
                "a coding agent to passing tests instead of its throughput, "
                "`ainode-bench agentic --help` scores it on the agentic capability "
-               "rubric, and `ainode-bench decide --help` measures how well a backend "
-               "makes typed decisions (accuracy, calibration, latency, cost)")
+               "rubric, `ainode-bench decide --help` measures how well a backend "
+               "makes typed decisions (accuracy, calibration, latency, cost), and "
+               "`ainode-bench embed --help` measures an embedding model (dimensions, "
+               "latency, throughput by batch size, pair ordering)")
     p.add_argument("--url", help="engine or AINode proxy base, e.g. http://host:8000")
     p.add_argument("--model", help="model id exactly as served")
     p.add_argument("--ainode", default="", help="AINode web base, e.g. http://host:3000 "
@@ -59,12 +61,13 @@ def build_parser():
 
 
 def main(argv=None, out_dir=None):
-    # Three subcommands, dispatched before argparse sees them, so every existing flag
+    # Four subcommands, dispatched before argparse sees them, so every existing flag
     # keeps working exactly as documented. `harness` measures a different thing
     # (a model driving a coding agent to passing tests), `agentic` a third one
-    # (the capability rubric) and `decide` a fourth (typed decisions: accuracy,
-    # calibration, latency, cost); each has its own parser under its own package.
-    # Everything else is the throughput bench.
+    # (the capability rubric), `decide` a fourth (typed decisions: accuracy,
+    # calibration, latency, cost) and `embed` a fifth (an embedding model:
+    # dimensions, latency, throughput by batch size, pair ordering); each has its own
+    # parser under its own package. Everything else is the throughput bench.
     words = list(sys.argv[1:]) if argv is None else list(argv)
     if words and words[0] == "harness":
         from ainode.bench.harness.cli import main as harness_main
@@ -78,6 +81,10 @@ def main(argv=None, out_dir=None):
         from ainode.bench.decide.cli import main as decide_main
 
         return decide_main(words[1:], out_dir=out_dir)
+    if words and words[0] == "embed":
+        from ainode.bench.embed.cli import main as embed_main
+
+        return embed_main(words[1:], out_dir=out_dir)
 
     p = build_parser()
     a = p.parse_args(argv)

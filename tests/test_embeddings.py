@@ -214,8 +214,12 @@ async def test_embedding_routes_v1_embeddings_batch(client):
 async def test_embedding_routes_v1_embeddings_validates_body(client):
     resp = await client.post("/v1/embeddings", json={"input": "hi"})
     assert resp.status == 400
+    # A model the fleet does not serve, so this is the in-process path's own
+    # validation. The node's own `model` ("x") now routes to the engine port
+    # instead, and the shape of `input` is that engine's business there.
     resp = await client.post(
-        "/v1/embeddings", json={"model": "x", "input": [1, 2, 3]}
+        "/v1/embeddings",
+        json={"model": "sentence-transformers/all-MiniLM-L6-v2", "input": [1, 2, 3]},
     )
     assert resp.status == 400
 

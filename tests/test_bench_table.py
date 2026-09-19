@@ -262,3 +262,132 @@ def test_bench_record_shape_follows_the_catalog():
 
     assert seen >= 3, "expected the guard to cover the locked harness records"
 
+
+# ------------------------------------------------------- the embedding table --
+
+def _embed_record(stamp="20260101-000003", label="emb", name="Emb",
+                  endpoint="http://n:8001/v1", ordered=True, margin=0.5):
+    return {
+        "schema": 1, "stamp": stamp, "label": label,
+        "model": {"id": "q/emb", "name": name, "params_b": 0.6, "arch": "dense"},
+        "placement": {"node": "Spark-9", "gpus": 1, "tp": 1, "port": 8001},
+        "embed": {
+            "endpoint": endpoint, "dimensions": 1024,
+            "latency": {"n": 50, "answered": 50, "errors": 0, "p50_ms": 71.59,
+                        "p95_ms": 76.2, "transport_floor_ms": 32.07},
+            "throughput": [
+                {"batch": 1, "requests": 64, "texts": 64, "seconds": 4.6,
+                 "texts_per_s": 13.89, "tokens": 704, "tokens_per_s": 152.8},
+                {"batch": 64, "requests": 1, "texts": 64, "seconds": 0.28,
+                 "texts_per_s": 225.48, "tokens": 834, "tokens_per_s": 2938.4},
+            ],
+            "quality": {"pairs": [], "related_min": 0.82, "unrelated_max": 0.32,
+                        "margin": margin, "ordered": ordered},
+            "errors": [],
+        },
+    }
+
+
+def test_an_embed_record_renders_a_row_in_its_own_table(tmp_path):
+    m = _module()
+    _write(tmp_path, "20260101-000003-embed.json", _embed_record())
+    table = m.render_embed_table(m.load_runs(tmp_path))
+    lines = table.splitlines()
+    assert len(lines) == 3  # header + rule + one row
+    assert "| Emb | Spark-9, TP=1 | 1024 | 72 | 225 | 2938 | yes (+0.50) |" in table
+    assert "2026-01-01" in table
+    assert "20260101-000003-embed.json" in table
+
+
+def test_an_embed_record_is_kept_out_of_the_other_three_tables(tmp_path):
+    """It generates no tokens, so every column of the speed table would be blank and
+    the tok/s ones meaningless. Same rule the harness, agentic and decide records
+    live by."""
+    m = _module()
+    _write(tmp_path, "20260101-000003-embed.json", _embed_record())
+    runs = m.load_runs(tmp_path)
+    assert m.is_embed_run(runs[0]) is True
+    assert m.throughput_runs(runs) == []
+    assert "20260101-000003-embed.json" not in m.render_harness_table(runs)
+    assert "20260101-000003-embed.json" not in m.render_agentic_table(runs)
+    assert "20260101-000003-embed.json" not in m.render_decide_table(runs)
+
+
+def test_the_embed_columns_read_the_batch_64_row_for_both_rates(tmp_path):
+    """Texts/s and Tokens/s from two different batch sizes would look like one
+    measurement and be neither, so both come off the same row."""
+    m = _module()
+    record = _embed_record()
+    record["embed"]["throughput"] = [record["embed"]["throughput"][0]]  # batch 1 only
+    _write(tmp_path, "20260101-000003-embed.json", record)
+    table = m.render_embed_table(m.load_runs(tmp_path))
+    assert "| not measured | not measured |" in table
+
+
+def test_a_failed_pair_ordering_is_shouted_and_a_missing_one_is_not_a_failure(tmp_path):
+    m = _module()
+    _write(tmp_path, "a-embed.json", _embed_record(stamp="20260101-000004",
+                                                   ordered=False, margin=-0.04))
+    row = [ln for ln in m.render_embed_table(m.load_runs(tmp_path)).splitlines()
+           if "Emb" in ln][0]
+    assert "NO (-0.04)" in row
+
+    record = _embed_record(stamp="20260101-000005")
+    record["embed"]["quality"]["ordered"] = None
+    assert m.fmt_pairs_ordered(record["embed"]) == "not measured"
+
+
+def test_the_same_model_at_two_endpoints_is_two_rows(tmp_path):
+    """Straight at the engine and through the fleet router are two measurements of
+    one instance, and the difference between them is the routing hop."""
+    m = _module()
+    _write(tmp_path, "a-embed.json", _embed_record(stamp="20260101-000006",
+                                                   endpoint="http://n:8001/v1"))
+    _write(tmp_path, "b-embed.json", _embed_record(stamp="20260101-000007",
+                                                   endpoint="http://n:3000/v1"))
+    assert len(m.dedup_embed_runs(m.load_runs(tmp_path))) == 2
+    assert len(m.render_embed_table(m.load_runs(tmp_path)).splitlines()) == 4
+
+
+def test_a_later_embed_record_wins_for_the_same_model_and_endpoint(tmp_path):
+    m = _module()
+    _write(tmp_path, "old-embed.json", _embed_record(stamp="20260101-000001",
+                                                     label="old"))
+    _write(tmp_path, "new-embed.json", _embed_record(stamp="20260102-000001",
+                                                     label="new"))
+    table = m.render_embed_table(m.load_runs(tmp_path))
+    assert "[new]" in table and "[old]" not in table
+
+
+def test_check_detects_a_stale_embedding_table(tmp_path):
+    """--check covers the fifth table too: edit the README's dims and it fails."""
+    results = tmp_path / "results"
+    results.mkdir()
+    _write(results, "throughput.json", {
+        "schema": 1, "stamp": "20260101-000001", "label": "thr",
+        "model": {"id": "x/y", "name": "Thr", "params_b": 7, "active_b": 7,
+                  "arch": "dense"},
+        "placement": {"node": "N", "gpus": 1, "tp": 1},
+        "results": {"single_stream": {"decode_tok_s": 10.0}},
+    })
+    _write(results, "embed.json", _embed_record())
+
+    readme = tmp_path / "README.md"
+    m = _module()
+    runs = m.load_runs(results)
+    readme.write_text(
+        "# Bench\n\n"
+        f"{m.BEGIN}\n\n{m.render_table(runs)}\n\n{m.END}\n\n"
+        f"{m.EMBED_BEGIN}\n\n{m.render_embed_table(runs)}\n\n{m.EMBED_END}\n"
+    )
+
+    def check():
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--check", "--results", str(results),
+             "--readme", str(readme)],
+            capture_output=True, text=True, cwd=REPO)
+        return proc.returncode
+
+    assert check() == 0
+    readme.write_text(readme.read_text().replace("| 1024 |", "| 768 |"))
+    assert check() == 1

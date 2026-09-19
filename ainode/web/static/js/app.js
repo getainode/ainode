@@ -3336,6 +3336,11 @@ const AINode = {
       reasoning:    { label: 'Reasoning',    icon: '🧠', cls: 'cap-reasoning' },
       code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
       multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
+      // Not a feature layered on chat but the whole of what the model does: an
+      // entry carrying it is served by vLLM's pooling runner and answers
+      // /v1/embeddings only, which is why the card hides the chat controls for
+      // one and the chat picker never lists it.
+      embedding:    { label: 'Embedding',    icon: '≣',  cls: 'cap-embedding' },
     };
     var self = this;
     var repo = model.hf_repo || model.id;
@@ -3385,11 +3390,16 @@ const AINode = {
       reasoning:    { label: 'Reasoning',    icon: '🧠', cls: 'cap-reasoning' },
       code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
       multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
+      embedding:    { label: 'Embedding',    icon: '≣',  cls: 'cap-embedding' },
     };
     var caps = (m.capabilities || []).map(function (c) {
       var d = capDefs[c]; if (!d) return '';
       return '<span class="cap-badge large ' + d.cls + '"><span class="cap-badge-icon">' + d.icon + '</span>' + d.label + '</span>';
     }).join('');
+    // An embedding model answers /v1/embeddings and nothing else, so "Use in New
+    // Chat" would open a chat against an engine that 400s every message. The card
+    // says where the vectors are instead.
+    var isEmbedding = (m.capabilities || []).indexOf('embedding') !== -1;
 
     var sizeStr = m.size_gb ? '~' + Math.round(m.size_gb) + ' GB' : (m.size || 'size unknown');
     var downloadsStr = m.downloads ? self.formatNumber(m.downloads) : '—';
@@ -3418,7 +3428,9 @@ const AINode = {
     var primaryCta = prog.loading
       ? '<button class="btn-nvidia md-cta" id="md-launch" disabled>Loading…</button>'
       : isLoaded
-        ? '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>'
+        ? (isEmbedding
+            ? '<span class="md-cta-note">Serving POST /v1/embeddings</span>'
+            : '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>')
         : isDownloaded
           ? '<button class="btn-nvidia md-cta" id="md-launch" data-hf-repo="' + self.esc(repo) + '">▶ Launch Model</button>'
           : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';

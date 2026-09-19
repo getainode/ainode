@@ -75,6 +75,18 @@ class InstanceManager:
         except OSError:
             return False
 
+    def port_free(self, port: int) -> bool:
+        """True when nothing claims ``port``: no instance here, nothing on the host.
+
+        The public form of the probe ``allocate_port`` runs, for a caller that needs
+        to know about ONE port rather than which port to take next. The
+        primary-vs-stacked decision needs exactly that: the node's own api_port can
+        be held by an engine container this manager knows nothing about, because a
+        distributed head is restored from config.json on a restart while the manager
+        starts empty.
+        """
+        return port not in self.used_ports() and self._port_bindable(port)
+
     def allocate_port(self, probe: bool = True) -> int:
         """Lowest free port from base_port up.
 
