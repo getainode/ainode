@@ -320,6 +320,7 @@ it, and we would rather say so than publish a number we did not take.
 
 | Model | Params / active | Quant | Placement | Single-stream tok/s | 16 streams tok/s | Rubric | Date | Run |
 |---|---|---|---|---|---|---|---|---|
+| Qwen3.6 35B-A3B | 35B / 3B active | NVFP4 | pollux, 1× Tesla PG500-216, TP=1 | 97.4 | 343.9 | not run | 2026-09-19 | [Pollux V100 solo, onecat src-full](https://github.com/getainode/ainode/blob/main/bench/results/20260919-040456-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-onecat-src-full.json) |
 | Spark-X2.5 4B | 4B dense | BF16 | Spark-4-GX10, 1× GB10, TP=1 (stacked) | 18.9 | 283.8 | not run | 2026-09-18 | [Spark-4 stacked beside Nemotron, BF16](https://github.com/getainode/ainode/blob/main/bench/results/20260918-155217-spark-x2_5-4b-spark-4-stacked-beside-nemotron-bf16.json) |
 | Qwen3.8-Flash-Next (NVFP4) | 125B / 6B active | NVFP4 (mixed, FP8 PLE) | Spark-2-DGX, 2× GB10, TP=2 | 26.2 | 207.6 | not run | 2026-09-16 | [AINode 0.5.18, TP=2 Spark-2+3, vLLM nightly, no MTP](https://github.com/getainode/ainode/blob/main/bench/results/20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json) |
 | DeepSeek V4 Flash (DSpark, FP8) | 284B / 13B active | FP8 (FP4 experts) | Spark-2-DGX, 2× GB10, TP=2 | 34.5 | 94.0 | not run | 2026-09-16 | [AINode 0.5.11, TP=2 Spark-2+Spark-3, mp shape](https://github.com/getainode/ainode/blob/main/bench/results/20260916-033415-deepseek-v4-flash-dspark-fp8-tp2-mp.json) |
@@ -453,6 +454,7 @@ whose needle came back verbatim.
 |---|---|---|---|---|---|---|---|---|
 | DeepSeek V4 Flash | Spark-2-DGX, TP=2 | 22/25 | 9/9 | 3/3 | 2/4 | 100k | 2026-09-18 | [DeepSeek TP=2 Spark-2+3, full](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013839-deepseek-v4-flash-dspark-deepseek-tp-2-spark-2-3-full-agentic.json) |
 | Ornith 1.5 35B-A3B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 3/3 | 4/4 | 100k | 2026-09-18 | [Ornith stacked Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013703-ornith-1_5-35b-a3b-nvfp4-ornith-stacked-spark-1-thinking-on-agentic.json) |
+| Qwen3.6 35B-A3B | pollux, TP=1 | 20/22 | 9/9 | 3/3 | 3/4 | 8k | 2026-09-19 | [Pollux V100 solo, quick](https://github.com/getainode/ainode/blob/main/bench/results/20260919-040711-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-quick-agentic.json) |
 | Qwen3.8 27B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 2/3 | 4/4 | 100k | 2026-09-18 | [Qwen3.8 27B solo Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-020831-qwen3_8-27b-nvfp4-qwen3_8-27b-solo-spark-1-thinking-on-agentic.json) |
 | Spark-X2.5 4B | Spark-4-GX10, TP=1 | 19/25 | 9/9 | 1/3 | 4/4 | 48k | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-151444-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-agentic.json) |
 

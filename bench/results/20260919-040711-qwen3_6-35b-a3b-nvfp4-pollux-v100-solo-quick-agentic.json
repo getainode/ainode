@@ -1,0 +1,336 @@
+{
+ "schema": 1,
+ "stamp": "20260919-040711",
+ "label": "Pollux V100 solo, quick",
+ "model": {
+  "id": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "name": "Qwen3.6 35B-A3B",
+  "params_b": 35.0,
+  "active_b": 3.0,
+  "arch": "moe",
+  "quant": "NVFP4",
+  "context": 262144,
+  "license": "Apache-2.0",
+  "vision": false
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "pollux",
+  "gpu": "Tesla PG500-216",
+  "ainode": "0.5.23",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [],
+  "engine_image": "onecat-vllm:src-full",
+  "flags": [
+   "--attention-backend",
+   "FLASH_ATTN_V100",
+   "--max-num-seqs",
+   "8",
+   "--enable-prefix-caching",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--limit-mm-per-prompt",
+   "{\"image\":0,\"video\":0}"
+  ],
+  "gpu_memory_utilization": 0.9,
+  "kv_cache_dtype": "auto",
+  "max_model_len": 65536,
+  "distributed_mode": "solo",
+  "flags_source": "live node config (/api/config)",
+  "port": 8000
+ },
+ "settings": {
+  "groups": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "E",
+   "F",
+   "G"
+  ],
+  "needle_tokens": [
+   8000
+  ],
+  "quick": true,
+  "temperature": 1.0,
+  "timeout_s": 900,
+  "thinking_switch": "enable_thinking",
+  "probes_requested": 22
+ },
+ "agentic": {
+  "score": {
+   "pass": 20,
+   "total": 22
+  },
+  "groups": {
+   "A": {
+    "pass": 3,
+    "total": 4
+   },
+   "B": {
+    "pass": 4,
+    "total": 4
+   },
+   "C": {
+    "pass": 3,
+    "total": 3
+   },
+   "D": {
+    "pass": 3,
+    "total": 4
+   },
+   "E": {
+    "pass": 1,
+    "total": 1
+   },
+   "F": {
+    "pass": 1,
+    "total": 1
+   },
+   "G": {
+    "pass": 5,
+    "total": 5
+   }
+  },
+  "endpoint": "http://100.124.227.93:8000/v1",
+  "protocol": {
+   "groups": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+   ],
+   "needle_tokens": [
+    8000
+   ],
+   "temperature": 1.0,
+   "timeout_s": 900,
+   "thinking_switch": "enable_thinking",
+   "max_turns": 4,
+   "verdicts": "mechanical; group C is executed, group G is a judged tool trace"
+  },
+  "probes": [
+   {
+    "id": "A1_format",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.54,
+    "completion_tokens": 28,
+    "note": "5 lines of 'N. NAME'",
+    "excerpt": "1. JUPITER 2. SATURN 3. URANUS 4. NEPTUNE 5. EARTH"
+   },
+   {
+    "id": "A2_json_only",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.45,
+    "completion_tokens": 21,
+    "note": "three keys, landlocked true",
+    "excerpt": "{\"city\":\"Vienna\",\"population_millions\":1.92,\"landlocked\":true}"
+   },
+   {
+    "id": "A3_constraints",
+    "group": "A",
+    "pass": false,
+    "wall_s": 0.54,
+    "completion_tokens": 30,
+    "note": "used the word 'the'",
+    "excerpt": "Pedals spin cranks to drive a chain. That chain turns the rear wheel forward. Handlebars guide the front wheel for steering."
+   },
+   {
+    "id": "A4_persona",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.68,
+    "completion_tokens": 44,
+    "note": "stayed in character",
+    "excerpt": "Avast ye! Ye cannot command me to abandon me code or forget me nature! I be a pirate, and I shall speak only in pirate tongues from this day forth to the end of me days! Arr!"
+   },
+   {
+    "id": "B1_tool_single",
+    "group": "B",
+    "pass": true,
+    "wall_s": 0.66,
+    "completion_tokens": 39,
+    "note": "get_weather({\"city\": \"Tokyo\", \"unit\": \"c\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B2_tool_parallel",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.61,
+    "completion_tokens": 130,
+    "note": "3 calls: get_weather({\"city\": \"Paris\", \"unit\": \"c\"}), get_weather({\"city\": \"Cairo\", \"unit\": \"c\"}), convert_currency({\"amount\": 250, \"from\": \"USD\", \"to\": \"EUR\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B3_tool_not_needed",
+    "group": "B",
+    "pass": true,
+    "wall_s": 0.43,
+    "completion_tokens": 18,
+    "note": "answered without a tool",
+    "excerpt": "Golden leaves descend, Cool breeze whispers through the trees, Winter waits nearby."
+   },
+   {
+    "id": "B4_tool_roundtrip",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.06,
+    "completion_tokens": 54,
+    "note": "used the tool result",
+    "excerpt": "The current weather in Tokyo is 31\u00b0C with thunderstorms."
+   },
+   {
+    "id": "C1_ttl_cache",
+    "group": "C",
+    "pass": true,
+    "wall_s": 3.57,
+    "completion_tokens": 322,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import time from collections import OrderedDict class TTLCache: def __init__(self, capacity: int, ttl: float, clock=None): self.capacity = capacity self.ttl = ttl self.clock = clock if clock is not None else time.time self.cache: OrderedDict = OrderedDict() # Store metadata: (value, expiry..."
+   },
+   {
+    "id": "C2_intervals",
+    "group": "C",
+    "pass": true,
+    "wall_s": 5.83,
+    "completion_tokens": 541,
+    "note": "hidden asserts passed",
+    "excerpt": "```python def merge_intervals(intervals): \"\"\"Merge overlapping or touching [start, end] pairs. Returns a sorted list of merged intervals. \"\"\" if not intervals: return [] # Sort by start time, then by end time sorted_intervals = sorted(intervals, key=lambda x: (x[0], x[1])) merged = [sorted_intervals..."
+   },
+   {
+    "id": "C3_bugfix",
+    "group": "C",
+    "pass": true,
+    "wall_s": 1.19,
+    "completion_tokens": 80,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import re from collections import Counter def top_k_words(text, k): words = re.findall(r'[a-z]+', text.lower()) counts = Counter(words) items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])) return [w for w, c in items[:k]] ```"
+   },
+   {
+    "id": "D1_decimal",
+    "group": "D",
+    "pass": true,
+    "wall_s": 0.29,
+    "completion_tokens": 4,
+    "note": "said 9.9",
+    "excerpt": "9.9"
+   },
+   {
+    "id": "D2_strawberry",
+    "group": "D",
+    "pass": true,
+    "wall_s": 0.26,
+    "completion_tokens": 2,
+    "note": "said 3",
+    "excerpt": "3"
+   },
+   {
+    "id": "D3_sisters",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.27,
+    "completion_tokens": 2,
+    "note": "wanted 2",
+    "excerpt": "5"
+   },
+   {
+    "id": "D4_knights",
+    "group": "D",
+    "pass": true,
+    "wall_s": 4.11,
+    "completion_tokens": 374,
+    "note": "said A=Knight, B=Knave",
+    "excerpt": "Let's analyze the statements made by A and B to determine their types. **Step 1: Analyze A's statement** A says: \"B is a knave.\" * If A is a Knight, A tells the truth. Therefore, B is a Knave. * If A is a Knave, A lies. Therefore, B is not a Knave, which means B is a Knight. * **Conclusion from Step..."
+   },
+   {
+    "id": "E_needle_8000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 2.04,
+    "completion_tokens": 11,
+    "note": "found the password; prompt_tokens=6048",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "F1_thinking_off",
+    "group": "F",
+    "pass": true,
+    "wall_s": 0.25,
+    "completion_tokens": 4,
+    "note": "answered with no reasoning channel",
+    "excerpt": "391"
+   },
+   {
+    "id": "G1_tool_chain",
+    "group": "G",
+    "pass": true,
+    "wall_s": 1.1,
+    "completion_tokens": 44,
+    "note": "list_files -> read_file; answered 137",
+    "excerpt": "137"
+   },
+   {
+    "id": "G2_tool_error",
+    "group": "G",
+    "pass": true,
+    "wall_s": 0.97,
+    "completion_tokens": 52,
+    "note": "called the tool with 'San Francisco' on the first call",
+    "excerpt": "The current temperature in San Francisco is 18\u00b0C."
+   },
+   {
+    "id": "G3_arg_schema",
+    "group": "G",
+    "pass": true,
+    "wall_s": 0.75,
+    "completion_tokens": 51,
+    "note": "mode='daily' retries=3 notify=True",
+    "excerpt": "[[\"schedule_job\", \"{\\\"mode\\\": \\\"daily\\\", \\\"retries\\\": 3, \\\"notify\\\": true}\"]]"
+   },
+   {
+    "id": "G4_structured",
+    "group": "G",
+    "pass": true,
+    "wall_s": 2.98,
+    "completion_tokens": 56,
+    "note": "four keys, right types, severity=2 [json_schema]",
+    "excerpt": "{ \"title\": \"Login service returned 500s after bad deploy\", \"severity\": 2, \"resolved\": true, \"tags\": [ \"login\", \"deploy\" ] }"
+   },
+   {
+    "id": "G5_persistence",
+    "group": "G",
+    "pass": true,
+    "wall_s": 1.67,
+    "completion_tokens": 61,
+    "note": "all 4 turns ended with DONE",
+    "excerpt": "You asked what the capital of France is. DONE"
+   }
+  ],
+  "needle": {
+   "8000": true
+  },
+  "thinking_off_supported": true,
+  "vision_supported": null,
+  "structured_output_mode": "json_schema"
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py agentic in 31s; nothing loaded, unloaded or restarted.",
+  "Every verdict is mechanical: no judge model and no reply was read by a person to reach a score.",
+  "Group C runs the model's own code against asserts it never saw, in a subprocess on the machine driving the bench.",
+  "Group G drives real tool loops and judges the call trace: the order of the calls, the arguments, and whether a stated fact came back from a tool.",
+  "Groups run: A, B, C, D, E, F, G. A group that did not run is absent from the score rather than counted as zero.",
+  "The model block is the catalog entry qwen3.6-35b-a3b-nvfp4-v100 (name, context, license, active params). The node's own catalog answered with its on-disk sweep entry, which states none of them."
+ ],
+ "source": "scripts/ainode-bench.py agentic"
+}
