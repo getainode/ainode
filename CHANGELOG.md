@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.24] - 2026-09-19
+
+A V100 serves through the catalog.
+
 ### Added
 - **Qwen3.6 35B-A3B on a V100, through the catalog.** The first model launched through AINode's own launch path on Volta hardware: `nvidia/Qwen3.6-35B-A3B-NVFP4` (Qwen3.5-MoE, 35B total, 3B active per token, modelopt NVFP4) on pollux, a Dell C4130 with one Tesla V100 32 GB. It is a catalog entry (`qwen3.6-35b-a3b-nvfp4-v100`) and not a note in a runbook because the recipe is the hard part and none of it is guessable: mainline vLLM dropped SM70 in 0.20, so the engine image is `onecat-vllm:src-full`, a local build of the 1Cat-vLLM fork with Volta kernels (Castor holds the exported tarball and the build script; the build itself runs about a day), and it serves only with `--attention-backend FLASH_ATTN_V100`, `--max-num-seqs 8`, gmu 0.90, a 65536-token window and the vision tower switched off, because the tower's warmup does not fit in 32 GB beside 23.5 GB of weights. Carrying all of that in the catalog is what makes it one click on any V100 node instead of a hand-rolled container, which is the single-V100 chat lane the Titanium Lab plan asks for. Measured on pollux 2026-09-19: ready in 432 s, 30.4 of 32 GB used, 97.4 tok/s single-stream, 343.9 tok/s across 16 streams, 3428 tok/s of prefill at 4K prompt tokens and decode still 66.2 tok/s at 63K. It scores 20/22 on the quick agentic rubric, with all four tool probes, all three executed-code probes and all five agentic probes passed. Records: `bench/results/20260919-040456-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-onecat-src-full.json` and `bench/results/20260919-040711-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-quick-agentic.json`. The 120K prefill depth is absent from the speed record rather than zero: it is past the window this recipe serves, and the engine answered 400.
 
