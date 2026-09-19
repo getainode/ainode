@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.25] - 2026-09-19
+
+Embeddings served by the fleet; a stacked load can no longer clobber a distributed head.
+
 ### Added
 - **Embeddings served by the fleet.** `POST /v1/embeddings` has been in the API since the Server view shipped, and on our hardware it has never worked: it ran `sentence-transformers` in-process on the CPU of the AINode container from a static catalog of its own, the library is not in that image, so every request came back `dependency_missing` and nothing in the fleet served embeddings at all. The fix is not a second runtime. An embedding model is an ordinary stacked vLLM engine with `--runner pooling`, on the same image as every chat model, so the fleet already knew how to launch it and the model id is already enough to say where the vectors are. `/v1/embeddings` now asks the fleet first, through the same `_routing_candidates` and the same failover loop `proxy_to_vllm` uses (local hop first, then peers, a stacked instance found on its own engine port), forwards the caller's body verbatim, and hands back the engine's status and content type untouched. A candidate that will not connect fails over to the next; every candidate dead is a 502 rather than a quiet fall back to a different model's vectors under the id the caller asked for; and a model no node serves still reaches the in-process manager exactly as before. The master and a worker behave identically, because the candidate list is built from cluster state and every node has it.
 - **Catalog entry: Qwen3 Embedding 0.6B, verified.** 1024 dimensions, 32k context, multilingual, `--runner pooling --max-num-seqs 64 --enable-prefix-caching` at gmu 0.06 with an 8192-token window, on the node's own engine image. At 6 percent of a GB10 it is a model you leave running: it stacked beside Nemotron 3.5 Lightning on Spark-4 and came up in 87 s. `capabilities` gains `embedding`, which is the first capability in the catalog that is not a chat capability, so the model card draws an Embedding chip instead of a "Use in New Chat" button, `/api/server/status` reports the instance as `type: "embed"` with `capabilities: ["embeddings"]` (derived from the catalog, because vLLM's `/v1/models` says nothing about which runner is behind an id), and the chat model picker's existing `type !== 'embed'` filter therefore stops offering a model that would 400 every message.
