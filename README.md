@@ -208,7 +208,8 @@ DGX Sparks. The browser path is the supported one:
    starts the peers' engine containers over SSH, so a password prompt is a failed
    launch.
 4. **Open the head UI.** You should see both nodes and the aggregated memory
-   ("2 nodes · 244 GB · 2 GPUs"). Cluster memory counts one GPU per node.
+   ("2 nodes · 244 GB · 2 GPUs"). Each node detects and announces its own GPU
+   count, so a multi-GPU box contributes all of them to that total.
 5. **Launch it.** In the Launch Instance panel, pick the model, toggle on the nodes
    to span, and launch. That posts one `POST /api/sharding/launch` with the node ids;
    the head is always the node you are on and the rest become peers, resolved to
@@ -516,9 +517,9 @@ number.
   been re-run on a current release, and that run has no concurrency sweep, no
   sustained number and no rubric.
 - **The Dell C4130's other three GPUs.** One model has been launched on a C4130
-  through AINode (the pollux row above), and AINode's node announcement still reports
-  1 of the box's 4 GPUs, so three of them are idle as far as the cluster is
-  concerned. Nothing has been measured across them.
+  through AINode (the pollux row above), on one of its GPUs. The node announces its
+  real GPU count now, so the cluster sees all four, but nothing has been measured
+  across them: no multi-GPU launch on that box has been run or benchmarked.
 - **GLM-5.3-Flash at TP=2.** It ran raw on the Spark-2/Spark-3 pair, outside
   AINode, and was stopped on 2026-09-14 when the pair moved to DeepSeek V4 Flash
   through AINode. No AINode-launched measurement exists for it.
@@ -648,7 +649,8 @@ the tables above with a record behind it; there are no estimates here.
   Flash at 34.5 tok/s single-stream and Qwen3.8-Flash-Next at 26.2.
 - **Four-node cluster** (3× DGX Spark + 1× ASUS GX10), 487 GB aggregated VRAM,
   all four discovered automatically over UDP, topology visible in the browser UI.
-  Cluster memory counts one GPU per node.
+  Each node detects its own GPU count and announces it, so the cluster total is a
+  sum over what the nodes report rather than a count of nodes.
 - **One command per node.** `curl -fsSL https://ainode.dev/install | bash -s -- --job worker`
   installs a worker that needs no model. It still pulls the orchestrator image and
   pre-pulls the engine image, so budget the download.
@@ -850,15 +852,19 @@ into the running container with `docker exec`. Day to day you never need to type
 built by hand once (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
 
 ```bash
-ainode update [version]      # resolve/pull newest (or pinned) tag + restart (upgrade in place)
+ainode update [version]      # pull, pin, restart, verify the node came back on it,
+                             #   then prune the images it replaced
 ainode start                 # Start AINode (inference + web UI)
 ainode stop                  # Stop AINode
 ainode status                # Show cluster status
 ainode models                # List available models
+ainode role master|worker|solo  # Set or show this node's cluster role
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
+ainode auth enable|disable|status|new-key   # API key auth
 ainode doctor                # 21 checks over config, docker, GPUs, disk, ports, peers
+ainode prune-images          # Reclaim older AINode images (what update does for you)
 ainode logs -f               # Tail the engine log the configured backend writes
 ```
 
@@ -890,11 +896,17 @@ place:
 ainode update
 ```
 
-That resolves the **highest numeric GHCR tag** (never a floating
-`:latest`), pulls it, pins it to `~/.ainode/image.env`, and restarts the
-systemd service. Your config (`~/.ainode/config.json`), models
-(`~/.ainode/models/`), and fine-tune outputs are on the host, and the
-container is stateless, so upgrades never touch your data.
+That resolves the **highest numeric GHCR tag** (never a floating `:latest`), pulls
+it, pins it to `~/.ainode/image.env`, restarts the systemd service, and then waits for
+this node's `/api/status` to report the version it just installed. **An update that
+did not apply exits non-zero** instead of reporting success, and nothing is removed in
+that case, so a failed update still has something to fall back to. Once the new
+version is proven serving, the images it replaced are pruned, keeping one rollback
+generation by default so `ainode update <older>` can go back. `--keep-images N` sets
+that; `0` removes every older AINode image. Engine images and `ainode-base` are never
+touched. Your config (`~/.ainode/config.json`), models (`~/.ainode/models/`) and
+fine-tune outputs are on the host, and the container is stateless, so upgrades never
+touch your data.
 
 To pin a specific version:
 
