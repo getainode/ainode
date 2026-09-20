@@ -30,6 +30,19 @@ from ainode.bench.measure import (
 SOURCE = "scripts/ainode-bench.py"
 
 
+def record_path(out_dir, stamp: str, model_id: str, label: str) -> pathlib.Path:
+    """``<stamp>-<model-slug>-<label-slug>.json``, the naming the other sections
+    use, with their slug helper.
+
+    The label is free text a human typed at ``--label``, so it goes through
+    ``slug()`` exactly as the harness, agentic, decide and embed sections put
+    theirs through it. Interpolated verbatim it carried spaces, commas and slashes
+    straight into the filename: a record no shell can name without quoting, and on
+    a label containing a slash a write into a directory that is not there (#158).
+    """
+    return out_dir / f"{stamp}-{slug(model_id)}-{slug(label)}.json"
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="ainode-bench",
@@ -140,7 +153,7 @@ def main(argv=None, out_dir=None):
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     rec = build_record(opts, mb, pl, results, cpt, notes, stamp, SOURCE)
     out_dir.mkdir(parents=True, exist_ok=True)
-    f = out_dir / f"{stamp}-{slug(opts.model)}-{opts.label}.json"
+    f = record_path(out_dir, stamp, opts.model, opts.label)
     f.write_text(json.dumps(rec, indent=1) + "\n")
     print(f"\n  saved {f}")
     print("  render with: python3 bench/report.py")

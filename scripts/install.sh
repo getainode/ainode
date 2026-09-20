@@ -147,16 +147,31 @@ preflight() {
     command -v docker >/dev/null 2>&1 || die "docker not found. Install: https://docs.docker.com/engine/install/"
     docker info >/dev/null 2>&1 || die "docker daemon not reachable. Run 'sudo systemctl start docker' or add \$USER to the 'docker' group"
 
-    # /mnt/shared-models is required by the v0.4.9 systemd unit (--mount
-    # type=bind fails loudly if the source doesn't exist). Surface the setup
-    # requirement here instead of waiting for first-start to fail with a cryptic
-    # docker error. For clusters: make this an NFS mount from the master's model
-    # storage. For single-node: a directory is enough.
-    # TODO(v0.4.10): the NCCL init shim this exists for is eugr-backend only and
-    # the default backend never reads the path. Drop the mount and this check
-    # together.
+    # /mnt/shared-models is the shared model store: it is where downloaded weights
+    # are staged, and a node whose models_dir points at it keeps the engine
+    # container's HF cache there too, so the path has to exist and has to have room
+    # for the weights. The systemd unit this installer renders bind-mounts it into
+    # the AINode container unconditionally (see EXEC_START below), with `--mount
+    # type=bind` rather than `-v` so a missing source fails at container start
+    # instead of being invented as an empty root-owned directory. Check it here so
+    # the requirement is stated up front rather than arriving as a cryptic docker
+    # error on first start. For clusters: an NFS mount from the master's model
+    # storage, so every node reads one copy. For a single node: a directory is
+    # enough.
+    # Note: the reason given here through v0.5.x was the per-node NCCL init shim,
+    # which was the retired eugr launcher's use of the path and not the default
+    # backend's. The mount, and therefore this check, is still unconditional; the
+    # open follow-up is making it conditional on shared storage being configured,
+    # not dropping it while the unit still names it.
+    #
+    # Real newlines, not "\n": die() prints its message through printf's %s, which
+    # does not expand escapes, so a "\n" here reaches the operator's terminal as
+    # two literal characters.
     if [ ! -d /mnt/shared-models ]; then
-        die "AINode v0.4.9+ requires /mnt/shared-models to exist for the per-node NCCL init shim.\n  Create it before re-running this installer:\n    sudo mkdir -p /mnt/shared-models\n  For clusters, mount shared model storage there (NFS from master recommended)."
+        die "AINode requires /mnt/shared-models to exist: it is the model store the service bind-mounts, where downloaded weights live.
+  Create it before re-running this installer:
+    sudo mkdir -p /mnt/shared-models
+  For clusters, mount shared model storage there (NFS from master recommended)."
     fi
 
     # GPU check (nvidia-container-toolkit). AINode targets NVIDIA GB10; skip if

@@ -130,13 +130,27 @@ def test_proxy_fails_over_past_ghost(monkeypatch):
 
 
 def test_failed_load_clears_model_claim(monkeypatch):
+    """A solo load whose engine refuses to start comes back 500 with no claim left.
+
+    The fake goes in through ``get_backend``, not ``app["engine"]``: the solo path
+    APPENDS an instance (``append_solo_instance``), so it builds its own backend
+    from the per-instance config snapshot and never looks at ``app["engine"]``.
+    Leaving ``get_backend`` real made this test drive an actual ``docker run``,
+    which is why ``pytest tests/`` used to leave an ``ainode-vllm-node-solo``
+    container behind on any machine with docker (#221).
+    """
     class _Eng:
+        def __init__(self, cfg, instance_id=""):
+            self.config = cfg
+            self.instance_id = instance_id
         def is_running(self): return False
         def stop(self): pass
         def start(self): return False          # launch fails
+    monkeypatch.setattr(backends_mod, "get_backend",
+                        lambda cfg, instance_id="", on_ready=None: _Eng(cfg, instance_id))
     cfg = NodeConfig(node_id="n", model="m/x")
     cfg.save = lambda: None
-    app = {"engine": _Eng(), "config": cfg, "cluster_state": ClusterState(),
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
     resp = asyncio.run(mr.handle_model_load(_Req(app, {"model": "m/x"})))
     assert resp.status == 500

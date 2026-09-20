@@ -25,6 +25,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from ainode.api.server import create_app
 from ainode.bench.api_routes import _options_from_body
+from ainode.bench.cli import record_path
 from ainode.bench.fleet import BenchTarget, resolve_target
 from ainode.bench.measure import BenchOptions, Reporter, measure, slug
 from ainode.bench.runner import BenchBusy, BenchManager, summarize
@@ -214,6 +215,35 @@ async def test_no_think_sends_enable_thinking_false_except_for_reasoning(engine,
 def test_slug_matches_the_schema_filename_convention():
     assert slug("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4") == \
         "nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4"
+
+
+def test_the_speed_record_filename_slugs_the_label(tmp_path):
+    """A label with spaces and a comma names a file a shell can quote (#158).
+
+    The speed section interpolated ``--label`` verbatim while the harness, agentic,
+    decide and embed sections all ran theirs through ``slug()``, so the one section
+    that predates them wrote the operator's prose into the filename.
+    """
+    path = record_path(tmp_path, "20260919-220011",
+                       "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+                       "Spark-4 solo, 32k ctx")
+    assert path.name == ("20260919-220011-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-"
+                         "spark-4-solo-32k-ctx.json")
+    assert not set(path.name) & set(' ,/\\"\'')
+
+
+def test_the_speed_record_filename_survives_a_slash_in_the_label(tmp_path):
+    """A slash was the one that did more than look bad: it made the write land in a
+    directory that is not there, so the run measured and then lost the record.
+
+    ``slug()`` keeps only the part after the last slash, because its first job is
+    stripping the org off a model id. On a label that costs the text in front of
+    the slash, which is lossy but is what the other four sections do with theirs,
+    and the record still lands in ``out_dir`` under a name a shell can pass around.
+    """
+    path = record_path(tmp_path, "20260919-220011", "org/M", "tp2/roce")
+    assert path.parent == tmp_path
+    assert path.name == "20260919-220011-m-roce.json"
 
 
 # ------------------------------------------------------- the record's model block
