@@ -61,6 +61,9 @@ class TestNodeAnnouncement:
             # loading (elapsed, expected, slow) on every other node's dashboard.
             "load_phase", "load_started_at", "load_elapsed_seconds",
             "expected_ready_minutes",
+            # The release the node runs, so a fleet split across two of them is
+            # visible instead of looking exactly like a fleet on one (#171).
+            "ainode_version",
         }
         assert set(data.keys()) == expected_keys
 

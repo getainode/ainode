@@ -19,6 +19,31 @@ TRAINING_DIR = AINODE_HOME / "training"
 # it from here instead of spelling the path a second time.
 HF_CACHE_MOUNT = "/root/.cache/huggingface"
 
+# The UDP port discovery broadcasts and listens on. One home for the value:
+# NodeConfig below, both discovery classes and the installer all read THIS, so a
+# node that never wrote a config.json agrees with the fleet and with the docs.
+# It was 5678 in this dataclass and in discovery/broadcast.py while the installer
+# wrote 5679, the fleet ran 5679 and the public docs documented 5679 (#181): a
+# source install then broadcast into a port nobody listened on, came up healthy,
+# served its own model, and never appeared in any peer's cluster view, with no log
+# line anywhere saying the port disagreed.
+DEFAULT_DISCOVERY_PORT = 5679
+
+# Which multi-node executor a distributed (head) launch uses when nothing says
+# otherwise. One home for the value: every caller that reads
+# ``config.distributed_executor`` defensively falls back to THIS.
+#   "mp":  one `vllm serve` container per node (rank 0 here, `--headless` rank k
+#          on each peer) rendezvousing on --master-addr/--master-port with vLLM's
+#          own multi-node executor. Needs nothing but vLLM.
+#   "ray": a `ray start --head` container here plus `ray start` workers on each
+#          peer over SSH. REQUIRES the `ray` CLI inside the engine image.
+# This defaulted to "ray" through 0.5.26, and no image AINode ships or launches
+# has ray in it: not the orchestrator image (python:3.12-slim + this package) and
+# not vllm/vllm-openai. So every distributed launch that did not carry a catalog
+# recipe naming "mp" died inside the container (#172, and #84 before it). "mp" is
+# also the shape every proven distributed launch on the fleet actually used.
+DEFAULT_DISTRIBUTED_EXECUTOR = "mp"
+
 # The engine backend a node uses when nothing says otherwise. One home for the
 # value: every caller that reads ``config.engine_backend`` defensively falls back
 # to THIS, so a config.json with the key missing or empty behaves exactly like a
@@ -38,7 +63,7 @@ class NodeConfig:
     host: str = "0.0.0.0"
     api_port: int = 8000
     web_port: int = 3000
-    discovery_port: int = 5678
+    discovery_port: int = DEFAULT_DISCOVERY_PORT  # see the constant (#181)
 
     # Engine
     engine_strategy: str = "pip"  # "pip" | "docker"
@@ -123,7 +148,9 @@ class NodeConfig:
     #           serves DeepSeek V4 Flash ships no ray, and neither does stock
     #           vllm/vllm-openai.
     # Per-model, so a catalog recipe can pin the shape its image supports.
-    distributed_executor: str = "ray"  # "ray" | "mp"
+    # Defaults to "mp" (see DEFAULT_DISTRIBUTED_EXECUTOR): "ray" was the default
+    # through 0.5.26 and no shipped image can run it (#172).
+    distributed_executor: str = DEFAULT_DISTRIBUTED_EXECUTOR  # "mp" | "ray"
     # Max inbound request body for the API server, in MB. aiohttp defaults to
     # 1 MB, which silently caps a 262k-context model at roughly 190k tokens of
     # prompt: the proxy 413s the request before the engine ever sees it, and the
@@ -167,6 +194,14 @@ class NodeConfig:
 
     # Cluster
     cluster_enabled: bool = True
+    # Shared key every node in the cluster signs its UDP announcements with
+    # (discovery/signing.py). Set it to the SAME value on every node: a node that
+    # has it drops any announcement it cannot verify, so a host on the broadcast
+    # domain can no longer announce `role: "master"`, win the election and pull
+    # inference traffic to an address of its choosing (#169). Left unset, discovery
+    # stays unauthenticated exactly as it was, and the listener says so once per
+    # process. Rotating it needs no restart: sender and listener both re-read this
+    # file when it changes. Never leaves the node: scrubbed from GET /api/config.
     cluster_secret: Optional[str] = None
     # Role this node should take in the cluster:
     #   "auto"   -> elected dynamically (lowest node_id among online auto nodes)

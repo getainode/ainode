@@ -10,6 +10,7 @@ from typing import Optional
 from aiohttp import web
 
 from ainode.auth.middleware import is_authenticated
+from ainode.core.config import DEFAULT_DISTRIBUTED_EXECUTOR
 from ainode.discovery.cluster import ClusterState
 from ainode.engine.sharding import ShardingPlanner, ShardingStrategy, ShardingConfig
 from ainode.engine.ray_setup import get_ray_status
@@ -289,7 +290,8 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
             return web.json_response({"error": "Distributed launch returned False"},
                                      status=500)
 
-        executor = getattr(inst_config, "distributed_executor", "ray") or "ray"
+        executor = (getattr(inst_config, "distributed_executor", "")
+                    or DEFAULT_DISTRIBUTED_EXECUTOR)
         manager.add(InstanceRecord(
             instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
             peer_ips=chosen_peers, api_port=port,

@@ -391,3 +391,150 @@ class TestSudoUpdateHomeResolution:
         proc = self._run(wrapper, env)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert (home / ".ainode" / "image.env").exists()
+
+
+# ---------------------------------------------------------------------------
+# 5. `ainode update` verifies the new version, then reclaims what it replaced
+# ---------------------------------------------------------------------------
+#
+# Two separate failures, both in the same six lines of the wrapper:
+#
+#   * It printed "Update complete" and exited 0 whatever happened, because
+#     nothing ever asked the running node what version it was. An update that
+#     pulled, pinned into the wrong .ainode and relaunched the OLD image
+#     reported success (#164, and #182 for the cluster version of it).
+#   * It never removed the image it replaced, so a node kept every release it
+#     had ever run: 180 images, 226 GB reclaimable, on a filesystem at 82
+#     percent (#184).
+#
+# These run the REAL rendered wrapper with docker, systemctl, curl and sleep
+# stubbed, so they pin the order too: verify first, prune only after.
+
+
+def _update_env(tmp_path: Path, *, reported_version: str, service_active: bool,
+                ainode_home: Path, docker_log: Path) -> dict:
+    """PATH stubs for a wrapper `update` run, and the env that reaches it."""
+    bindir = tmp_path / "updbin"
+    bindir.mkdir(exist_ok=True)
+    _stub_bin(bindir, "docker", f'printf "%s\\n" "$*" >> {docker_log}\nexit 0\n')
+    _stub_bin(bindir, "systemctl", "exit 0\n" if service_active else "exit 1\n")
+    # driver_version sits before version on purpose: the wrapper must read the
+    # node's OWN version key and not the first key whose name ends in it.
+    _stub_bin(
+        bindir, "curl",
+        'cat <<JSON\n'
+        '{"node_id": "spark-1", "gpu": {"driver_version": "580.95.05"}, '
+        f'"version": "{reported_version}", "powered_by": "ainode.dev"}}\n'
+        "JSON\n",
+    )
+    _stub_bin(bindir, "sleep", "exit 0\n")  # no real waiting in the retry loop
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["AINODE_HOME"] = str(ainode_home)
+    env["AINODE_UNIT_FILES"] = ""
+    env["AINODE_UPDATE_VERIFY_TIMEOUT"] = "3"
+    env.pop("AINODE_KEEP_IMAGES", None)
+    return env
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+class TestUpdateVerifiesThenPrunes:
+    @pytest.fixture
+    def rendered(self, tmp_path):
+        ainode_home, _ = _render_install(tmp_path)
+        wrapper = ainode_home / "ainode-wrapper"
+        assert wrapper.exists(), "the installer no longer renders a host wrapper"
+        return wrapper, ainode_home
+
+    def _run(self, wrapper: Path, env: dict, *args: str):
+        return subprocess.run(
+            ["bash", str(wrapper), "update", "9.9.9", *args],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+    def test_a_node_that_comes_back_on_the_new_version_prunes_and_succeeds(
+            self, tmp_path, rendered):
+        wrapper, home = rendered
+        log = tmp_path / "docker.log"
+        proc = self._run(wrapper, _update_env(
+            tmp_path, reported_version="9.9.9", service_active=True,
+            ainode_home=home, docker_log=log))
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Node is serving 9.9.9" in proc.stdout
+        assert "Update complete. Version: 9.9.9" in proc.stdout
+        calls = log.read_text()
+        assert "pull ghcr.io/getainode/ainode:9.9.9" in calls
+        # The prune runs in the container that is now up, with the image it just
+        # verified as the baseline, and one rollback generation by default.
+        assert ("exec ainode ainode prune-images --keep-images 1 "
+                "--current ghcr.io/getainode/ainode:9.9.9") in calls
+        # Order matters: pull, then prune. Never the other way round.
+        assert calls.index("pull ghcr") < calls.index("prune-images")
+
+    def test_an_update_that_never_applied_fails_loudly_and_prunes_nothing(
+            self, tmp_path, rendered):
+        """The exact 0.5.x failure: pulled, pinned, restarted, still on the old
+        image, and the wrapper said "Update complete"."""
+        wrapper, home = rendered
+        log = tmp_path / "docker.log"
+        proc = self._run(wrapper, _update_env(
+            tmp_path, reported_version="0.5.26", service_active=True,
+            ainode_home=home, docker_log=log))
+
+        assert proc.returncode != 0
+        assert "Update complete" not in proc.stdout
+        assert "Update did NOT apply" in proc.stderr
+        assert "0.5.26" in proc.stderr, "it names what the node actually reports"
+        assert "prune-images" not in log.read_text(), (
+            "a node that did not take the update must keep every image it has")
+
+    def test_keep_images_is_threaded_through(self, tmp_path, rendered):
+        wrapper, home = rendered
+        log = tmp_path / "docker.log"
+        proc = self._run(wrapper, _update_env(
+            tmp_path, reported_version="9.9.9", service_active=True,
+            ainode_home=home, docker_log=log), "--keep-images", "3")
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "--keep-images 3" in log.read_text()
+
+    def test_a_bad_keep_images_value_is_refused_before_anything_is_pulled(
+            self, tmp_path, rendered):
+        wrapper, home = rendered
+        log = tmp_path / "docker.log"
+        proc = self._run(wrapper, _update_env(
+            tmp_path, reported_version="9.9.9", service_active=True,
+            ainode_home=home, docker_log=log), "--keep-images", "lots")
+
+        assert proc.returncode == 2
+        assert not log.exists(), "nothing should have been pulled"
+
+    def test_a_stopped_service_is_pinned_but_never_pruned(self, tmp_path, rendered):
+        wrapper, home = rendered
+        log = tmp_path / "docker.log"
+        proc = self._run(wrapper, _update_env(
+            tmp_path, reported_version="9.9.9", service_active=False,
+            ainode_home=home, docker_log=log))
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Update complete" not in proc.stdout
+        assert "no old image was removed" in proc.stdout
+        assert "prune-images" not in log.read_text()
+        # The pin still happened, so starting the service boots the new image.
+        assert (home / "image.env").read_text().strip() == (
+            "AINODE_IMAGE=ghcr.io/getainode/ainode:9.9.9")
+
+    def test_update_help_documents_the_flag_and_the_verification(
+            self, tmp_path, rendered):
+        wrapper, home = rendered
+        env = _update_env(tmp_path, reported_version="9.9.9", service_active=True,
+                          ainode_home=home, docker_log=tmp_path / "docker.log")
+        proc = subprocess.run(
+            ["bash", str(wrapper), "update", "--help"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "--keep-images N" in proc.stdout
+        assert "/api/status" in proc.stdout
+        assert "exits non-zero" in proc.stdout

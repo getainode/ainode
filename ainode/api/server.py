@@ -1,6 +1,7 @@
 """AINode API proxy server — aiohttp app that serves the web UI and proxies to vLLM."""
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -12,7 +13,11 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
-from ainode.core.config import DEFAULT_ENGINE_BACKEND, NodeConfig
+from ainode.core.config import (
+    DEFAULT_DISTRIBUTED_EXECUTOR,
+    DEFAULT_ENGINE_BACKEND,
+    NodeConfig,
+)
 from ainode.core.gpu import detect_gpu, detect_gpus, GPUInfo
 from ainode.web.serve import get_index_html, get_onboarding_html, get_static_path
 from ainode.models.api_routes import register_model_routes
@@ -37,6 +42,7 @@ from ainode.discovery.broadcast import (
 )
 from ainode.discovery.cluster import ClusterState
 from ainode.discovery.instance import instance_parallel
+from ainode.discovery.signing import ClusterSecret
 from ainode.engine.sharding_routes import register_sharding_routes
 from ainode.engine.ray_autostart import (
     RayAutostartState,
@@ -292,7 +298,8 @@ def _head_instances(config) -> list:
         api_port=config.api_port,
         tensor_parallel_size=1 + len(peer_ips),
         status="serving",
-        distributed_executor=(getattr(config, "distributed_executor", "ray") or "ray"),
+        distributed_executor=(getattr(config, "distributed_executor", "")
+                              or DEFAULT_DISTRIBUTED_EXECUTOR),
     ).to_dict()]
 
 
@@ -449,6 +456,9 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         # fallback stamp), so the cluster sync loop fills those in on its next
         # tick. The phase is free here and is what a peer reads first.
         load_phase=engine_load_phase(engine, engine_ready),
+        # The release on the wire (#171). Set once: a node cannot change its own
+        # version without restarting the process that reads it.
+        ainode_version=__version__,
     )
 
 
@@ -477,16 +487,30 @@ async def _on_startup(app: web.Application) -> None:
     if config.cluster_enabled:
         # Start broadcast sender
         _collector = app.get("metrics_collector")
+        # One secret source for both directions, re-read from config.json when it
+        # changes so rotating cluster_secret needs no restart (#169). Shared, so
+        # this node never signs with one value while verifying against another.
+        cluster_secret = ClusterSecret(config)
+        app["cluster_secret"] = cluster_secret
         sender = BroadcastSender(
             announcement=announcement,
             discovery_port=config.discovery_port,
             # Stamp live GPU telemetry onto every broadcast so the head can
             # render real per-peer VRAM/util (metrics fan-out).
             metrics_provider=(_collector.get_gpu_metrics if _collector else None),
+            secret_provider=cluster_secret,
         )
         await sender.start()
         app["broadcast_sender"] = sender
-        logger.info("Discovery sender started on port %d", config.discovery_port)
+        # Port AND cluster id AND whether the wire is signed, in one greppable
+        # line: a node on the wrong port (#181) or the only node in the fleet
+        # without a secret (#169) is otherwise invisible at both ends.
+        logger.info(
+            "Discovery sender started on UDP port %d (cluster_id=%s, version=%s, "
+            "announcements %s)",
+            config.discovery_port, getattr(config, "cluster_id", "default"),
+            __version__,
+            "signed" if cluster_secret() else "UNSIGNED (no cluster_secret set)")
 
         # Start broadcast listener
         def on_node_found(ann: NodeAnnouncement):
@@ -501,10 +525,16 @@ async def _on_startup(app: web.Application) -> None:
             discovery_port=config.discovery_port,
             on_node_found=on_node_found,
             on_node_lost=on_node_lost,
+            secret_provider=cluster_secret,
         )
         await listener.start()
         app["broadcast_listener"] = listener
-        logger.info("Discovery listener started on port %d", config.discovery_port)
+        logger.info(
+            "Discovery listener started on UDP port %d (cluster_id=%s, %s)",
+            config.discovery_port, getattr(config, "cluster_id", "default"),
+            "verifying signatures" if cluster_secret()
+            else "accepting UNSIGNED announcements from anyone on this broadcast "
+                 "domain (no cluster_secret set)")
 
         # Start a periodic task to sync listener registry into ClusterState
         app["_cluster_sync_task"] = asyncio.get_event_loop().create_task(
@@ -1237,6 +1267,11 @@ async def handle_nodes(request: web.Request) -> web.Response:
             nodes_list.append({
                 "node_id": n.node_id,
                 "node_name": n.node_name,
+                # The release that node runs (#171). Our own row answers from the
+                # process serving this request; a peer's is what it announced, and
+                # "" means a peer too old to announce one, never agreement.
+                "ainode_version": (__version__ if n.node_id == local_id
+                                   else (getattr(n, "ainode_version", "") or "")),
                 "fabric_ip": getattr(n, "fabric_ip", "") or "",
                 # The address a caller can actually reach this node on. It was
                 # "localhost" for every row, so anything built from it pointed at
@@ -1299,6 +1334,7 @@ async def handle_nodes(request: web.Request) -> web.Response:
         nodes_list = [{
             "node_id": config.node_id,
             "node_name": config.node_name,
+            "ainode_version": __version__,
             "host": "localhost",
             "api_port": config.api_port,
             "web_port": config.web_port,
@@ -1766,12 +1802,17 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
 
     distributed_instance = distributed_instances[0] if distributed_instances else None
 
+    local_node_id = (cluster._local_announcement.node_id
+                     if cluster._local_announcement else "")
     nodes_payload = []
     for n in ready:
         used_gb, total_gb = node_usage.get(n.node_id, (None, None))
         nodes_payload.append({
             "node_id": n.node_id,
             "hostname": n.node_name,
+            # Per-node release, so the cluster view can show a split fleet (#171).
+            "ainode_version": (__version__ if local_node_id and n.node_id == local_node_id
+                               else (getattr(n, "ainode_version", "") or "")),
             "fabric_ip": getattr(n, "fabric_ip", "") or "",
             "host": _node_host(n, local_id),
             "vram_gb": round(float(n.gpu_memory_gb or 0), 1),
@@ -1832,8 +1873,55 @@ def _rebuild_announcement(app: web.Application) -> None:
         announcement.role = getattr(config, "cluster_role", "auto")
 
 
-# In-memory store for cluster update job state
+# Cluster update job state. In memory AND on disk, because the master self-stops
+# as the last step of the job it is reporting on: the workers were updated and
+# recorded, the container died, and the process that came back on the new image
+# had an empty dict, so a UI polling update-status for a job that had fully
+# succeeded got a 404 (#182). The file lives under AINODE_HOME next to
+# instances.json, which is bind-mounted from the host, so it survives the
+# restart the job itself causes.
 _cluster_update_state: dict = {}
+
+# Most recent jobs kept on disk. A job record is a few hundred bytes; this is
+# only here so the file cannot grow without bound on a node that is updated
+# weekly for a year.
+MAX_PERSISTED_UPDATE_JOBS = 10
+
+
+def _cluster_updates_path() -> Path:
+    return _ainode_home_path() / "cluster-updates.json"
+
+
+def _load_cluster_updates() -> dict:
+    """Merge the on-disk jobs into the in-memory dict and return it.
+
+    Disk loses to memory: a job this process is running has fresher rows than
+    anything written before its last mutation.
+    """
+    try:
+        raw = json.loads(_cluster_updates_path().read_text())
+    except (OSError, ValueError):
+        return _cluster_update_state
+    if not isinstance(raw, dict):
+        return _cluster_update_state
+    for update_id, job in raw.items():
+        if isinstance(job, dict) and update_id not in _cluster_update_state:
+            _cluster_update_state[update_id] = job
+    return _cluster_update_state
+
+
+def _save_cluster_updates() -> None:
+    """Write the job state out. Never raises: a job must not fail over its log."""
+    try:
+        keep = sorted(_cluster_update_state.keys())[-MAX_PERSISTED_UPDATE_JOBS:]
+        snapshot = {k: _cluster_update_state[k] for k in keep}
+        path = _cluster_updates_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(snapshot, indent=2))
+        tmp.replace(path)
+    except Exception:
+        logger.debug("could not persist cluster update state", exc_info=True)
 
 
 async def handle_cluster_update_all(request: web.Request) -> web.Response:
@@ -1877,13 +1965,19 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
     if len(all_nodes) == 0:
         return web.json_response({"error": "No nodes in cluster"}, status=400)
 
-    update_id = f"update-{int(asyncio.get_event_loop().time())}"
+    # Wall clock, not loop.time(): the id has to sort by age across the restart
+    # this job causes, and a monotonic clock starts over with the new process.
+    update_id = f"update-{int(time.time())}"
     _cluster_update_state[update_id] = {
         "id": update_id,
         "status": "running",
-        "nodes": {n["node_id"]: {"node_name": n["node_name"], "status": "pending", "log": ""} for n in all_nodes},
-        "started_at": asyncio.get_event_loop().time(),
+        "target": requested or "",
+        "nodes": {n["node_id"]: {"node_name": n["node_name"], "status": "pending",
+                                 "log": "", "version_before": _node_version(cluster, config, n["node_id"])}
+                  for n in all_nodes},
+        "started_at": time.time(),
     }
+    _save_cluster_updates()
 
     # Resolve the target tag once for the whole cluster.
     target = requested
@@ -1903,15 +1997,31 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
             for n in job["nodes"].values():
                 n["status"] = "failed"
                 n["log"] = "Could not resolve a target version from GHCR"
+            _save_cluster_updates()
         return web.json_response(
             {"error": "Could not resolve a target version from GHCR"}, status=502
         )
     image = f"{AINODE_GHCR_REPO}:{target}"
+    _cluster_update_state[update_id]["target"] = target
+    _save_cluster_updates()
+
+    def _mark(state: dict, status: str, log: Optional[str] = None) -> None:
+        """One node's outcome, written to disk as it happens.
+
+        Every mutation persists, because the master's own row is written moments
+        before it stops its own container: an in-memory-only record of the job
+        dies with the process that is reporting on it (#182).
+        """
+        state["status"] = status
+        if log is not None:
+            state["log"] = log
+        state["updated_at"] = time.time()
+        _save_cluster_updates()
 
     async def _update_node(node: dict) -> None:
         nid = node["node_id"]
         state = _cluster_update_state[update_id]["nodes"][nid]
-        state["status"] = "updating"
+        _mark(state, "updating")
 
         if node["is_self"]:
             # Update self: docker pull → write image.env → self-stop (systemd
@@ -1927,32 +2037,31 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
                         )
                     )
                 except _sp.TimeoutExpired:
-                    state["status"] = "failed"
-                    state["log"] = "docker pull timed out after 600s"
+                    _mark(state, "failed", "docker pull timed out after 600s")
                     return
                 if pull.returncode != 0:
-                    state["status"] = "failed"
-                    state["log"] = pull.stderr[:500]
+                    _mark(state, "failed", pull.stderr[:500])
                     return
                 try:
                     _write_image_env(image)
                 except Exception as exc:
-                    state["status"] = "failed"
-                    state["log"] = f"image.env write failed: {exc}"[:200]
+                    _mark(state, "failed", f"image.env write failed: {exc}"[:200])
                     return
                 # Same swappable-unit gate as handle_engine_update: never self-stop
                 # a node whose unit predates the swappable image, or we'd drop it /
                 # reboot the old image and still report "done". Report honestly.
                 if not _unit_is_swappable():
-                    state["status"] = "needs-migration"
-                    state["log"] = (
+                    _mark(state, "needs-migration", (
                         "Image pulled + pinned, but this node's systemd unit "
                         "predates the swappable unit — not restarted. Re-run the "
                         "installer on the host to migrate."
-                    )
+                    ))
                     return
-                state["status"] = "done"
-                state["log"] = "Updated — restarting on new image"
+                # "done" is the outcome of the ACTION (pulled, pinned, restart
+                # triggered), written seconds before this container stops. Whether
+                # the node came back on the target version is a separate question,
+                # answered at poll time from the version on the wire (#182).
+                _mark(state, "done", "Updated, restarting on the new image")
 
                 async def _restart_self():
                     await asyncio.sleep(2)
@@ -1965,8 +2074,7 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
 
                 asyncio.get_event_loop().create_task(_restart_self())
             except Exception as exc:
-                state["status"] = "failed"
-                state["log"] = str(exc)[:200]
+                _mark(state, "failed", str(exc)[:200])
         else:
             # Update remote worker via HTTP — no SSH needed.
             # Each worker runs the same AINode container with /api/engine/update.
@@ -1975,17 +2083,16 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
                 async with session.post(url, json={"version": target}, timeout=aiohttp.ClientTimeout(total=700)) as resp:
                     data = await resp.json()
                     if resp.status < 300:
-                        state["status"] = "done"
-                        state["log"] = data.get("message", "Updated and restarting")
+                        _mark(state, "done",
+                              data.get("message", "Updated and restarting"))
                     else:
-                        state["status"] = "failed"
-                        state["log"] = data.get("error", f"HTTP {resp.status}")[:300]
+                        _mark(state, "failed",
+                              data.get("error", f"HTTP {resp.status}")[:300])
             except asyncio.TimeoutError:
-                state["status"] = "failed"
-                state["log"] = "Timeout — worker may still be pulling the image"
+                _mark(state, "failed",
+                      "Timeout, worker may still be pulling the image")
             except Exception as exc:
-                state["status"] = "failed"
-                state["log"] = str(exc)[:200]
+                _mark(state, "failed", str(exc)[:200])
 
     async def _run_all():
         workers = [n for n in all_nodes if not n["is_self"]]
@@ -1996,7 +2103,13 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
         if self_node:
             await _update_node(self_node)
 
+        # "complete" means every node was told to update and none failed on the
+        # way. Whether each one CAME BACK on the target version is a live question
+        # answered at poll time against the version on the wire, not a claim this
+        # record gets to make on its own.
         _cluster_update_state[update_id]["status"] = "complete"
+        _cluster_update_state[update_id]["finished_at"] = time.time()
+        _save_cluster_updates()
 
     asyncio.get_event_loop().create_task(_run_all())
 
@@ -2007,16 +2120,68 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
     }, status=202)
 
 
+def _node_version(cluster: Optional[ClusterState], config: NodeConfig,
+                  node_id: str) -> str:
+    """The release *node_id* is running, from the wire. "" when it cannot be told.
+
+    Our own row answers from the running process; a peer from its announcement.
+    """
+    if node_id and node_id == config.node_id:
+        return __version__
+    if cluster is None:
+        return ""
+    node = cluster.get_node(node_id)
+    return (getattr(node, "ainode_version", "") or "") if node else ""
+
+
 async def handle_cluster_update_status(request: web.Request) -> web.Response:
-    """GET /api/cluster/update-status?id=... — poll update progress."""
+    """GET /api/cluster/update-status?id=... : poll update progress.
+
+    Served from the on-disk record, so a poll that lands after the master
+    restarted itself still answers for the job that caused the restart (#182),
+    and enriched per node with the version on the wire RIGHT NOW: comparing the
+    running release against the target is the real answer to "did the update
+    work", and it does not depend on a record written by a process that then
+    stopped itself.
+    """
+    config: NodeConfig = request.app["config"]
+    cluster: Optional[ClusterState] = request.app.get("cluster_state")
+    jobs = _load_cluster_updates()
     update_id = request.query.get("id", "")
-    if not update_id or update_id not in _cluster_update_state:
-        # Return most recent if no ID given
-        if _cluster_update_state:
-            update_id = max(_cluster_update_state.keys())
+    if not update_id or update_id not in jobs:
+        # Return most recent if no ID given. Ids are "update-<unix seconds>", so
+        # the newest sorts last for the next two centuries.
+        if jobs:
+            update_id = max(jobs.keys())
         else:
             return web.json_response({"error": "No update in progress"}, status=404)
-    return web.json_response(_cluster_update_state[update_id])
+
+    job = jobs[update_id]
+    target = str(job.get("target") or "")
+    nodes = {}
+    on_target = 0
+    for nid, row in (job.get("nodes") or {}).items():
+        live = _node_version(cluster, config, nid)
+        enriched = dict(row)
+        enriched["ainode_version"] = live
+        # None means "cannot tell": either no target was resolved or that node is
+        # not announcing a version (too old, or not back on the wire yet). Never
+        # False, which would read as "the update failed".
+        matches = (live == target) if (target and live) else None
+        enriched["on_target"] = matches
+        if matches:
+            on_target += 1
+        nodes[nid] = enriched
+
+    payload = dict(job)
+    payload["nodes"] = nodes
+    payload["target"] = target
+    payload["nodes_on_target"] = on_target
+    payload["nodes_total"] = len(nodes)
+    # True only when every node in the job is verifiably on the target version.
+    payload["verified"] = bool(target and nodes and on_target == len(nodes))
+    payload["persisted"] = str(_cluster_updates_path())
+    return web.json_response(payload)
 
 
 async def handle_cluster_set_role(request: web.Request) -> web.Response:
@@ -2236,8 +2401,58 @@ def _unit_is_swappable() -> bool:
     return os.environ.get("AINODE_UNIT_SWAPPABLE") == "1"
 
 
+def _version_key(value: str) -> tuple:
+    """Sort key for a release string. Unparseable parts sort low, never raise."""
+    parts = []
+    for chunk in str(value or "").split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def cluster_versions(app: web.Application) -> dict:
+    """Which release each node in the cluster is running, and whether they agree.
+
+    The answer for THIS node is the version of the process serving the request; a
+    peer's is what it put on the wire. A peer too old to announce one reports ""
+    and is counted in ``unknown_versions`` rather than folded into agreement:
+    absence is not a match. ``cluster_split`` is the thing a roll needs to see
+    (#171) and the honest answer to "did the update land", which is why
+    /api/version/check and /api/cluster/update-status both serve it.
+    """
+    config: NodeConfig = app["config"]
+    cluster: Optional[ClusterState] = app.get("cluster_state")
+    rows = []
+    for n in (cluster.get_nodes(include_offline=False) if cluster else []):
+        rows.append({
+            "node_id": n.node_id,
+            "node_name": n.node_name,
+            "ainode_version": (__version__ if n.node_id == config.node_id
+                               else (getattr(n, "ainode_version", "") or "")),
+        })
+    if not rows:
+        rows = [{
+            "node_id": config.node_id,
+            "node_name": config.node_name,
+            "ainode_version": __version__,
+        }]
+    known = sorted({r["ainode_version"] for r in rows if r["ainode_version"]},
+                   key=_version_key)
+    return {
+        "nodes": rows,
+        "versions": known,
+        "unknown_versions": sum(1 for r in rows if not r["ainode_version"]),
+        "cluster_split": len(known) > 1,
+    }
+
+
 async def handle_version_check(request: web.Request) -> web.Response:
-    """GET /api/version/check — compare local version against latest GHCR tag."""
+    """GET /api/version/check : compare the local version against the latest GHCR tag.
+
+    Also reports the version of every node in the cluster: the master knowing it
+    is stale said nothing about the other five nodes disagreeing with each other
+    (#171), which is exactly the state a partial roll leaves.
+    """
     current = __version__
     try:
         loop = asyncio.get_event_loop()
@@ -2254,11 +2469,13 @@ async def handle_version_check(request: web.Request) -> web.Response:
         except Exception:
             update_available = latest != current
 
-    return web.json_response({
+    payload = {
         "current": current,
         "latest": latest,
         "update_available": update_available,
-    })
+    }
+    payload.update(cluster_versions(request.app))
+    return web.json_response(payload)
 
 
 async def handle_engine_update(request: web.Request) -> web.Response:

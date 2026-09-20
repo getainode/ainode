@@ -12,18 +12,25 @@ Parent: `../../AGENTS.md` · State / "why" / history: Obsidian Vault → `Titani
 ## Two distributed shapes: pick by what the engine image ships
 
 `NodeConfig.distributed_executor` selects the shape per instance (a catalog
-recipe or a `/api/sharding/launch` body can set it). Both live in
+recipe or a `/api/sharding/launch` body can set it). It defaults to `"mp"`, and
+every defensive fallback for a missing or empty value reads
+`DEFAULT_DISTRIBUTED_EXECUTOR` rather than spelling a shape again: the default was
+`"ray"` through 0.5.26 and no image AINode ships or launches has ray in it, so an
+uncurated distributed launch died inside the container (#172). A catalog entry
+that needs ray states `distributed_executor="ray"` and gets it. Both shapes live
+in
 `backends/nvidia.py::start_distributed`; both use the same fabric-IP detection,
 the same `_build_vllm_serve_args`, the same peer container names and the same
 `stop()`.
 
-- **`"ray"` (default).** `ray start --head` container here, an SSH-launched
+- **`"ray"`.** `ray start --head` container here, an SSH-launched
   `ray start` worker container per peer, then `docker exec` into the head to run
   `vllm serve --distributed-executor-backend ray`. **Only usable when the engine
   image ships the `ray` CLI.** Stock `vllm/vllm-openai` does not: the head
   container exits 127. The head must reach Running before the peers are
   SSH-launched, or workers race an unbound `:6379`.
-- **`"mp"`.** One `vllm serve` container per node, rank 0 here and
+- **`"mp"` (the default: `core/config.py::DEFAULT_DISTRIBUTED_EXECUTOR`).** One
+  `vllm serve` container per node, rank 0 here and
   `--node-rank k --headless` on each peer, all rendezvousing on
   `--master-addr`/`--master-port` via vLLM's own multi-node executor. Needs
   nothing in the image beyond vLLM, so **this is the shape for a custom engine

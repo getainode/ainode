@@ -147,10 +147,14 @@ class ModelInfo:
     extra_volumes: list = None      # extra docker mounts, "host:container[:ro]"
     recommended_gmu: float = 0.0    # 0 = use node default gpu_memory_utilization
     # Distributed shape this model's engine image can actually run:
-    #   "ray": the default; needs the `ray` CLI inside the image.
     #   "mp":  one `vllm serve` container per node (vLLM's own multi-node
-    #           executor). The only option for an image without ray.
-    distributed_executor: str = "ray"
+    #          executor). Needs nothing but vLLM, and is the node default.
+    #   "ray": a ray head + ray workers; needs the `ray` CLI inside the image.
+    # Empty means the entry does not state one, in which case the node default
+    # applies (DEFAULT_DISTRIBUTED_EXECUTOR). It defaulted to "ray" here, which
+    # was harmless only because catalog_recipe() then dropped "ray" as if it had
+    # never been stated: an entry that genuinely needed ray could not ask for it.
+    distributed_executor: str = ""
     # Serve values that are part of the proven recipe rather than a user
     # preference. Empty / 0 / False mean "not stated by the recipe", in which
     # case the node default applies. A caller's explicit load value still wins.

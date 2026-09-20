@@ -423,8 +423,11 @@ class TestStartDistributed:
         now "head container never reports Running" — we surface it as an
         NvidiaBackendError instead of hanging.
         """
+        # The Ray shape by name: "mp" is the node default since 0.5.27 (#172)
+        # and has its own launch path, tested in test_mp_distributed_launch.py.
         config = _make_config(
             distributed_mode="head",
+            distributed_executor="ray",
             peer_ips=["10.100.0.13"],
         )
         backend = NvidiaBackend(config)
@@ -454,6 +457,7 @@ class TestStartDistributed:
         """
         config = _make_config(
             distributed_mode="head",
+            distributed_executor="ray",
             peer_ips=["10.100.0.13", "10.100.0.15"],
         )
         backend = NvidiaBackend(config)
@@ -511,6 +515,7 @@ class TestStartDistributed:
 
         config = _make_config(
             distributed_mode="head",
+            distributed_executor="ray",
             peer_ips=["10.100.0.13"],
         )
         backend = NvidiaBackend(config)
@@ -815,7 +820,8 @@ class TestLaunchDistributedShim:
     """Mirrors EugrBackend.launch_distributed. Called by /api/models/load."""
 
     def test_applies_sharding_config_and_flips_to_head(self):
-        config = _make_config(distributed_mode="solo", peer_ips=[])
+        config = _make_config(distributed_mode="solo", peer_ips=[],
+                              distributed_executor="ray")
         backend = NvidiaBackend(config)
 
         sharding = _FakeShardingConfig(
