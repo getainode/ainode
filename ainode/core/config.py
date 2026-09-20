@@ -264,6 +264,21 @@ class NodeConfig:
     # Telemetry (opt-in)
     telemetry: bool = False
 
+    # Metrics retention. Keeps the figures /api/metrics reports in a small SQLite
+    # file under AINODE_HOME so a restart does not reset the node's history to
+    # nothing (ainode/metrics/store.py). Keys, all optional:
+    #   enabled          bool,  default True. The file is small and the write is
+    #                    a handful of rows every interval; off is for a node with
+    #                    a read-only or precious data directory.
+    #   retention_hours  int,   default 48. How long the raw per-tick samples live.
+    #   retention_days   int,   default 30. How long the 1-minute roll-ups live.
+    #   interval_seconds float, default 15. The sampling cadence.
+    # A plain dict and not a nested dataclass because ``load()`` feeds
+    # config.json's values straight back into the field, so a dataclass would
+    # come back as a dict on the second boot and nothing downstream could tell
+    # which shape it had. MetricsSettings.from_config validates and clamps.
+    metrics: Dict[str, object] = field(default_factory=dict)
+
     def save(self):
         AINODE_HOME.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2))

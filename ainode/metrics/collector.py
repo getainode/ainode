@@ -56,6 +56,11 @@ class MetricsCollector:
         # Token tracking
         self._total_tokens: int = 0
 
+        # The on-disk retention sampler, when one is attached. None means every
+        # figure below lives only in this process, which is how it was until
+        # retention landed: a restart reset all of it and nothing kept a copy.
+        self._store_sampler: Any = None
+
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
@@ -104,6 +109,52 @@ class MetricsCollector:
         unified-memory node, where NVML reports no usage of its own.
         """
         self._reservation_provider = provider
+
+    # ------------------------------------------------------------------
+    # On-disk retention
+    # ------------------------------------------------------------------
+
+    def attach_store(self, store: Any, interval_seconds: Optional[float] = None) -> Any:
+        """Start ticking snapshots into *store* and return the sampler.
+
+        The collector had no cadence of its own before this: every figure it
+        holds was read on demand by ``/api/metrics``, by the discovery broadcast
+        and by the dashboard's 3 second poll, and none of those is a cadence a
+        node can be held to (the poll needs a browser open, the broadcast needs
+        clustering on). So the sampler owns the clock, and the store gets an
+        evenly spaced series whether or not anybody is watching.
+
+        Safe to call twice: the previous sampler is stopped first.
+        """
+        # Imported here and not at module scope: ``ainode.metrics.store`` imports
+        # ``optional_float`` from this module, so a top-level import either way
+        # round would be a cycle.
+        from ainode.metrics.store import MetricsSampler
+
+        self.detach_store()
+        sampler = MetricsSampler(
+            store, self.get_snapshot, interval_seconds=interval_seconds
+        )
+        self._store_sampler = sampler
+        sampler.start()
+        return sampler
+
+    def detach_store(self) -> None:
+        """Stop the retention sampler, if one is running. Safe to call twice."""
+        sampler, self._store_sampler = self._store_sampler, None
+        if sampler is None:
+            return
+        try:
+            sampler.stop()
+        except Exception:
+            # Shutdown is not a place to raise: a sampler that will not stop
+            # cleanly is a daemon thread the interpreter will drop anyway.
+            pass
+
+    @property
+    def store_sampler(self) -> Any:
+        """The attached sampler, or None."""
+        return self._store_sampler
 
     def _reserved_fraction(self) -> Optional[float]:
         provider = self._reservation_provider

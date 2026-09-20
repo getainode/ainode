@@ -477,6 +477,8 @@ async def _on_startup(app: web.Application) -> None:
     announcement: NodeAnnouncement = app["announcement"]
     cluster: ClusterState = app["cluster_state"]
 
+    _start_metrics_retention(app, config)
+
     # Always-on: re-load the persisted solo instance set so a `systemctl restart
     # ainode` brings every previously-loaded model back with no manual step.
     # Skipped when the operator requested a clean boot (closet #310, set in the
@@ -574,6 +576,60 @@ async def _on_startup(app: web.Application) -> None:
                     state=app["ray_autostart_state"],
                 )
             )
+
+
+def _start_metrics_retention(app: web.Application, config: NodeConfig) -> None:
+    """Open ``<AINODE_HOME>/metrics.db`` and start the sampler, if enabled.
+
+    Started here and not in ``create_app`` so an application that is built and
+    never run (every test that only inspects the route table) neither opens a
+    database nor starts a thread. ``/api/metrics/history`` reads the store off
+    the app at request time, so it simply reports retention off when this did
+    not run or could not open the file.
+
+    Nothing in here is allowed to stop the node coming up. A metrics file that
+    cannot be opened is a node with no history, which is exactly where every
+    node was before this existed.
+    """
+    from ainode.metrics.store import MetricsSettings, MetricsStore
+
+    settings = MetricsSettings.from_config(config)
+    if not settings.enabled:
+        logger.info("metrics retention disabled by config")
+        return
+    collector = app.get("metrics_collector")
+    if collector is None:
+        return
+    try:
+        store = MetricsStore(settings=settings)
+    except Exception:
+        logger.exception("metrics retention: could not open the sample store")
+        return
+    if not store.available:
+        return
+    app["metrics_store"] = store
+    collector.attach_store(store, interval_seconds=settings.interval_seconds)
+    logger.info(
+        "metrics retention on: %s, raw %dh, rolled up %dd, every %.0fs",
+        store.path, settings.retention_hours, settings.retention_days,
+        settings.interval_seconds,
+    )
+
+
+def _stop_metrics_retention(app: web.Application) -> None:
+    """Stop the sampler and close the store. Never raises."""
+    collector = app.get("metrics_collector")
+    if collector is not None:
+        try:
+            collector.detach_store()
+        except Exception:
+            pass
+    store = app.get("metrics_store")
+    if store is not None:
+        try:
+            store.close()
+        except Exception:
+            pass
 
 
 async def _engine_serving(backend, loop) -> bool:
@@ -745,6 +801,10 @@ async def _cluster_sync_loop(app: web.Application) -> None:
 
 
 async def _on_cleanup(app: web.Application) -> None:
+    # Stop the metrics sampler before anything else, so the last thing it writes
+    # is a sample of a node that is still up rather than one mid-teardown.
+    _stop_metrics_retention(app)
+
     # Stop the instance-replay task if still running
     replay_task = app.get("_instance_replay_task")
     if replay_task:
