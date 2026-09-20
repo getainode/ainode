@@ -1,10 +1,15 @@
-"""API routes for auth management (enable/disable, key CRUD)."""
+"""API routes for auth management (enable/disable, key CRUD).
+
+``GET /api/auth/status`` is the one route here the middleware leaves open: the
+dashboard asks it before anything else so it can tell "this node wants a key"
+apart from "this node is broken". Everything else needs the key once auth is on.
+"""
 
 from __future__ import annotations
 
 from aiohttp import web
 
-from ainode.auth.middleware import AuthConfig
+from ainode.auth.middleware import AuthConfig, is_authenticated
 
 
 def register_auth_routes(app: web.Application) -> None:
@@ -12,6 +17,7 @@ def register_auth_routes(app: web.Application) -> None:
     app.router.add_get("/api/auth/status", handle_auth_status)
     app.router.add_post("/api/auth/enable", handle_auth_enable)
     app.router.add_post("/api/auth/disable", handle_auth_disable)
+    app.router.add_get("/api/auth/keys", handle_list_keys)
     app.router.add_post("/api/auth/keys", handle_create_key)
     app.router.add_delete("/api/auth/keys/{key_id}", handle_revoke_key)
 
@@ -19,30 +25,61 @@ def register_auth_routes(app: web.Application) -> None:
 # -- Handlers ------------------------------------------------------------------
 
 async def handle_auth_status(request: web.Request) -> web.Response:
-    """GET /api/auth/status -- return auth state."""
+    """GET /api/auth/status -- return auth state.
+
+    Open with no key on purpose (see the module docstring). It says whether a
+    key is wanted and whether the one this caller sent works; it never says
+    anything about the keys themselves.
+    """
     auth_cfg: AuthConfig = request.app["auth_config"]
     return web.json_response({
         "enabled": auth_cfg.enabled,
         "key_count": len(auth_cfg.api_keys),
+        # Whether THIS request's key is good. The dashboard uses it to tell a
+        # stale stored key from a missing one.
+        "authenticated": is_authenticated(request),
     })
 
 
 async def handle_auth_enable(request: web.Request) -> web.Response:
-    """POST /api/auth/enable -- enable auth, return the (first) API key."""
+    """POST /api/auth/enable -- enable auth, return the key if one was minted.
+
+    ``api_key`` is null when the node already had keys: only hashes are stored,
+    so an existing key cannot be shown again. The caller is told to use the key
+    it has, or to create a new one.
+    """
     auth_cfg: AuthConfig = request.app["auth_config"]
     entry = auth_cfg.enable()
-    return web.json_response({
+    payload = {
         "enabled": True,
-        "api_key": entry["key"],
         "key_id": entry["id"],
-    })
+        "api_key": entry["key"],
+        "key_count": len(auth_cfg.api_keys),
+    }
+    if not entry["key"]:
+        payload["message"] = (
+            "Auth enabled using the keys this node already has. They are stored "
+            "hashed and cannot be shown again: use the key you have, or create "
+            "a new one."
+        )
+    return web.json_response(payload)
 
 
 async def handle_auth_disable(request: web.Request) -> web.Response:
     """POST /api/auth/disable -- disable auth."""
     auth_cfg: AuthConfig = request.app["auth_config"]
     auth_cfg.disable()
-    return web.json_response({"enabled": False})
+    return web.json_response({"enabled": False, "key_count": len(auth_cfg.api_keys)})
+
+
+async def handle_list_keys(request: web.Request) -> web.Response:
+    """GET /api/auth/keys -- the key ids, so the UI can revoke one by name."""
+    auth_cfg: AuthConfig = request.app["auth_config"]
+    return web.json_response({
+        "enabled": auth_cfg.enabled,
+        "key_count": len(auth_cfg.api_keys),
+        "keys": auth_cfg.key_ids(),
+    })
 
 
 async def handle_create_key(request: web.Request) -> web.Response:
@@ -52,6 +89,7 @@ async def handle_create_key(request: web.Request) -> web.Response:
     return web.json_response({
         "api_key": entry["key"],
         "key_id": entry["id"],
+        "key_count": len(auth_cfg.api_keys),
     })
 
 
@@ -65,4 +103,8 @@ async def handle_revoke_key(request: web.Request) -> web.Response:
             {"error": f"Key '{key_id}' not found"},
             status=404,
         )
-    return web.json_response({"revoked": True, "key_id": key_id})
+    return web.json_response({
+        "revoked": True,
+        "key_id": key_id,
+        "key_count": len(auth_cfg.api_keys),
+    })

@@ -218,8 +218,20 @@ class TestMiddlewareEnabled:
         assert resp.status == 200
 
     @pytest.mark.asyncio
-    async def test_onboarding_skips_auth(self, client_and_key):
+    async def test_onboarding_skips_auth_only_before_onboarding(self, client_and_key):
+        """First-run routes are open until the node IS onboarded, then not.
+
+        They used to be open unconditionally, which left POST
+        /api/onboarding/complete -- it writes the node's identity -- as a mutating
+        route with no key on it on a configured node (#168). The fixture app is
+        onboarded, so the same GET answers 401 here and 200 once onboarding is
+        pending again.
+        """
         client, _ = client_and_key
+        resp = await client.get("/api/onboarding/config")
+        assert resp.status == 401
+
+        client.app["config"].onboarded = False
         resp = await client.get("/api/onboarding/config")
         assert resp.status == 200
 

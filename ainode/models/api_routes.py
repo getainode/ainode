@@ -16,6 +16,7 @@ from typing import Optional
 
 from aiohttp import web
 
+from ainode.auth.middleware import TRUST_REMOTE_CODE_RULE, is_authenticated
 from ainode.core.gpu import detect_gpu
 from ainode.models.registry import ModelManager
 
@@ -509,7 +510,8 @@ RECIPE_CONFIG_KEYS = ("engine_image", "extra_vllm_args", "extra_env",
                       "trust_remote_code")
 
 
-def parse_launch_overrides(body: dict, *, distributed: bool = False) -> tuple:
+def parse_launch_overrides(body: dict, *, distributed: bool = False,
+                           authenticated: bool = False, model: str = "") -> tuple:
     """Parse the per-launch config overrides out of a load/launch body.
 
     Returns ``(overrides, error)``: ``error`` is a message string when the body
@@ -520,6 +522,12 @@ def parse_launch_overrides(body: dict, *, distributed: bool = False) -> tuple:
     Shared by ``/api/models/load`` and ``/api/sharding/launch`` so a distributed
     launch accepts the same keys a solo load does. ``distributed=True`` also
     accepts ``distributed_executor`` (meaningless for a solo load).
+
+    ``trust_remote_code`` is the one key that is not simply the caller's to set:
+    it makes the engine run the repository's own Python, so turning it ON needs
+    either ``authenticated=True`` (the request presented an API key) or a
+    ``model`` whose curated catalog recipe already declares it (#168). Turning it
+    off is always allowed.
     """
     overrides: dict = {}
     smn = body.get("served_model_name")
@@ -541,7 +549,13 @@ def parse_launch_overrides(body: dict, *, distributed: bool = False) -> tuple:
         # request on a VLM is honored, giving the user a way to opt back in.
         overrides["kv_cache_dtype_explicit"] = True
     if body.get("trust_remote_code") is not None:
-        overrides["trust_remote_code"] = bool(body["trust_remote_code"])
+        wanted = bool(body["trust_remote_code"])
+        if wanted and not authenticated and not catalog_recipe(model).get("trust_remote_code"):
+            return {}, (
+                f"{TRUST_REMOTE_CODE_RULE} "
+                f"{model or 'This model'} is not a curated entry that declares it."
+            )
+        overrides["trust_remote_code"] = wanted
     # Recipe passthrough: extra vLLM flags + the engine image to run them on.
     if body.get("extra_vllm_args") is not None:
         raw = body["extra_vllm_args"]
@@ -1489,7 +1503,8 @@ async def handle_model_load(request: web.Request) -> web.Response:
     # shared app config). served_model_name = API alias(es); the rest let stacked
     # models differ in context length / KV dtype / quant without cross-wiring.
     # Shared with /api/sharding/launch so both paths accept the same keys.
-    overrides, err = parse_launch_overrides(body)
+    overrides, err = parse_launch_overrides(
+        body, authenticated=is_authenticated(request), model=model)
     if err:
         return web.json_response({"error": err}, status=400)
 

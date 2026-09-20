@@ -9,6 +9,7 @@ from typing import Optional
 
 from aiohttp import web
 
+from ainode.auth.middleware import is_authenticated
 from ainode.discovery.cluster import ClusterState
 from ainode.engine.sharding import ShardingPlanner, ShardingStrategy, ShardingConfig
 from ainode.engine.ray_setup import get_ray_status
@@ -242,7 +243,8 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
         parse_launch_overrides,
     )
 
-    body_overrides, err = parse_launch_overrides(body, distributed=True)
+    body_overrides, err = parse_launch_overrides(
+        body, distributed=True, authenticated=is_authenticated(request), model=model)
     if err:
         return web.json_response({"error": err}, status=400)
     recipe = catalog_recipe(model)

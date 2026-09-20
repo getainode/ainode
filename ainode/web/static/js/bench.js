@@ -79,7 +79,7 @@ const AINodeBench = {
   },
 
   async json(url, options) {
-    var resp = await fetch(url, options);
+    var resp = await AINodeAuth.fetch(url, options);
     var data = null;
     try { data = await resp.json(); } catch (e) { data = null; }
     return { ok: resp.ok, status: resp.status, data: data };
@@ -186,11 +186,11 @@ const AINodeBench = {
              '<div class="card-header"><span class="card-title">Report</span>' +
                '<span class="bench-report-actions">' +
                  '<button class="btn-ghost" id="bench-report-reload">Reload</button>' +
-                 '<a class="btn-ghost" href="/api/bench/report" target="_blank" ' +
-                   'rel="noopener">Open</a>' +
+                 '<button class="btn-ghost" id="bench-report-open">Open</button>' +
                '</span></div>' +
+             // Filled by reloadReport() through the auth wrapper, not by src.
              '<iframe id="bench-report-frame" class="bench-report-frame" ' +
-               'src="/api/bench/report" title="AINode bench report"></iframe>' +
+               'title="AINode bench report"></iframe>' +
            '</div>';
   },
 
@@ -209,6 +209,11 @@ const AINodeBench = {
     document.getElementById('bench-report-reload').addEventListener('click', function () {
       self.reloadReport();
     });
+    document.getElementById('bench-report-open').addEventListener('click', function () {
+      self.openReport();
+    });
+    // The frame has no src: nothing but the wrapper may fetch the report.
+    this.reloadReport();
     this.bindPills('bench-depth-presets', 'bench-depths');
     this.bindPills('bench-stream-presets', 'bench-streams');
     this.bindPills('bench-think', null);
@@ -438,8 +443,8 @@ const AINodeBench = {
       '<div class="bench-run-actions">' +
         (live ? '<button class="btn-danger" id="bench-cancel">CANCEL</button>' : '') +
         (run.result_file
-          ? '<a class="btn-ghost" href="/api/bench/results/' +
-            encodeURIComponent(run.run_id) + '.json">Download JSON</a>' : '') +
+          ? '<button class="btn-ghost" data-bench-download="' +
+            this.esc(run.run_id) + '">Download JSON</button>' : '') +
         (live ? '' : '<button class="btn-ghost" id="bench-dismiss">Dismiss</button>') +
       '</div>';
     var log = document.getElementById('bench-log');
@@ -459,6 +464,7 @@ const AINodeBench = {
         card.style.display = 'none';
       });
     }
+    this.bindDownloads(body);
   },
 
   // ======================================================================
@@ -503,6 +509,7 @@ const AINodeBench = {
         self.pollDetail();
       });
     });
+    this.bindDownloads(body);
   },
 
   rowHtml(r) {
@@ -539,8 +546,8 @@ const AINodeBench = {
           ? '<button class="btn-ghost" data-bench-watch="' + this.esc(r.run_id) +
             '">Watch</button>'
           : (r.result_file
-              ? '<a class="btn-ghost" href="/api/bench/results/' +
-                encodeURIComponent(r.run_id) + '.json">JSON</a>' : '')) +
+              ? '<button class="btn-ghost" data-bench-download="' +
+                this.esc(r.run_id) + '">JSON</button>' : '')) +
         (running ? '' : '<button class="btn-ghost bench-del" title="Delete this run ' +
           'and its result file" data-bench-delete="' + this.esc(r.run_id) +
           '">&times;</button>') +
@@ -579,13 +586,69 @@ const AINodeBench = {
     this.reloadReport();
   },
 
-  reloadReport() {
+  // An iframe src and an <a href> cannot carry an Authorization header, so with
+  // auth on the report frame and the JSON links 401'd into nothing (#167). Both
+  // go through the wrapper: the report is dropped in as srcdoc (it is one
+  // self-contained page with no script and no CDN reference), a download is
+  // handed to the browser as a blob.
+  async reloadReport() {
     var frame = document.getElementById('bench-report-frame');
     if (!frame) return;
     // The report is rendered per request, so a cache-busting query is what makes
-    // a new result show up in the iframe.
+    // a new result show up.
     this.state.reportNonce += 1;
-    frame.src = '/api/bench/report?v=' + this.state.reportNonce;
+    var resp;
+    try {
+      resp = await AINodeAuth.fetch('/api/bench/report?v=' + this.state.reportNonce);
+    } catch (e) {
+      frame.srcdoc = this._frameNote('The node did not answer.');
+      return;
+    }
+    if (!resp.ok) {
+      frame.srcdoc = this._frameNote(resp.status === 401
+        ? 'This node requires an API key. Config &gt; API access.'
+        : 'Report unavailable (HTTP ' + resp.status + ').');
+      return;
+    }
+    frame.srcdoc = await resp.text();
+  },
+
+  _frameNote(text) {
+    return '<body style="margin:0;font:14px/1.5 system-ui,sans-serif;' +
+           'background:#0d0d0d;color:#888;padding:16px">' + text + '</body>';
+  },
+
+  async openReport() {
+    var resp = await AINodeAuth.fetch('/api/bench/report');
+    if (!resp.ok) { this.toast('Report unavailable (HTTP ' + resp.status + ').', 'error'); return; }
+    var url = URL.createObjectURL(new Blob([await resp.text()], { type: 'text/html' }));
+    window.open(url, '_blank');
+    // Revoked on a timer: revoking immediately races the new tab's load.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  },
+
+  async downloadResult(runId) {
+    var path = '/api/bench/results/' + encodeURIComponent(runId) + '.json';
+    var resp = await AINodeAuth.fetch(path);
+    if (!resp.ok) { this.toast('Result unavailable (HTTP ' + resp.status + ').', 'error'); return; }
+    var url = URL.createObjectURL(new Blob([await resp.text()], { type: 'application/json' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = runId + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  },
+
+  /** One click handler for both result tables and the run card. */
+  bindDownloads(root) {
+    var self = this;
+    (root || document).querySelectorAll('[data-bench-download]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.downloadResult(btn.dataset.benchDownload);
+      });
+    });
   },
 };
 

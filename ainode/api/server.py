@@ -17,7 +17,12 @@ from ainode.core.gpu import detect_gpu, GPUInfo
 from ainode.web.serve import get_index_html, get_onboarding_html, get_static_path
 from ainode.models.api_routes import register_model_routes
 from ainode.onboarding.api_routes import register_onboarding_routes
-from ainode.auth.middleware import AuthConfig, auth_middleware
+from ainode.auth.middleware import (
+    TRUST_REMOTE_CODE_RULE,
+    AuthConfig,
+    auth_middleware,
+    is_authenticated,
+)
 from ainode.auth.api_routes import register_auth_routes
 from ainode.metrics.collector import MetricsCollector
 from ainode.metrics.api_routes import register_metrics_routes
@@ -1026,7 +1031,30 @@ async def handle_status(request: web.Request) -> web.Response:
         "cluster_role": effective_role,
         "cluster_id": getattr(config, "cluster_id", "default"),
         "master_node_id": master.node_id if master else None,
+        # Say out loud how this port is protected. The default is open, which is
+        # fine on a private network and is what Jason runs, but a dashboard that
+        # never mentions it is a dashboard that lets you believe otherwise. The
+        # header reads `label` straight out of here.
+        "auth": auth_status_fields(request.app),
     })
+
+
+def auth_status_fields(app: web.Application) -> dict:
+    """How this node's API is protected, in the words the header shows.
+
+    One place, so /api/status, the dashboard header and the installer's summary
+    line cannot end up saying three different things.
+    """
+    auth_cfg: Optional[AuthConfig] = app.get("auth_config")
+    enabled = bool(getattr(auth_cfg, "enabled", False))
+    key_count = len(getattr(auth_cfg, "api_keys", []) or [])
+    if enabled:
+        label = "API key required"
+    elif key_count:
+        label = "API open, key set but not required"
+    else:
+        label = "API open, no key set"
+    return {"enabled": enabled, "key_count": key_count, "label": label}
 
 async def handle_nodes(request: web.Request) -> web.Response:
     """Return the list of known cluster nodes.
@@ -1847,6 +1875,15 @@ async def handle_cluster_set_id(request: web.Request) -> web.Response:
 
 # Fields that can be updated via PATCH /api/config. Keep this list tight --
 # never expose auth or secret-related fields here.
+# Fields a caller may only set by presenting an API key, even on a node running
+# open. trust_remote_code is the whole list: with it on, a load of an
+# attacker-named repo executes that repo's modeling_*.py inside the engine
+# container (#168), so the unauthenticated PATCH that used to accept it was a
+# remote code execution path on port 3000. It stays patchable for a caller that
+# holds a key, and a curated catalog entry that declares it still applies per
+# load (see models.api_routes.parse_launch_overrides).
+AUTHENTICATED_ONLY_CONFIG_FIELDS = {"trust_remote_code"}
+
 PATCHABLE_CONFIG_FIELDS = {
     "node_name",
     "email",
@@ -2155,6 +2192,8 @@ async def handle_patch_config(request: web.Request) -> web.Response:
     config: NodeConfig = request.app["config"]
     applied: dict = {}
     rejected: list = []
+    rejected_reasons: dict = {}
+    authenticated = is_authenticated(request)
 
     for key, value in body.items():
         if key not in PATCHABLE_CONFIG_FIELDS:
@@ -2162,6 +2201,12 @@ async def handle_patch_config(request: web.Request) -> web.Response:
             continue
         if not hasattr(config, key):
             rejected.append(key)
+            continue
+        # An escalation needs a key. Turning the field OFF is a de-escalation, so
+        # it stays open and a client can always put the node back.
+        if key in AUTHENTICATED_ONLY_CONFIG_FIELDS and bool(value) and not authenticated:
+            rejected.append(key)
+            rejected_reasons[key] = TRUST_REMOTE_CODE_RULE
             continue
         # Basic validation on role / cluster_id
         if key == "cluster_role" and value not in ("auto", "master", "worker"):
@@ -2178,6 +2223,9 @@ async def handle_patch_config(request: web.Request) -> web.Response:
         "ok": True,
         "applied": applied,
         "rejected": rejected,
+        # Why a field was refused, wherever there is a rule to state. A bare
+        # "rejected" is the one answer a caller cannot act on.
+        "rejected_reasons": rejected_reasons,
         "config": _safe_config_dict(config),
     })
 

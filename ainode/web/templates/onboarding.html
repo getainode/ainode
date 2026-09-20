@@ -512,6 +512,10 @@
     </div>
   </div>
 
+  <!-- Same wrapper the dashboard uses, so both pages attach the key the same
+       way. Onboarding's own routes are open until the node is onboarded, but a
+       re-run on a node that already has auth on still needs the header. -->
+  <script src="/static/js/auth.js"></script>
   <script>
     // State
     let currentStep = 1;
@@ -521,7 +525,7 @@
     // Fetch suggestions on load
     async function init() {
       try {
-        const resp = await fetch('/api/onboarding/suggestions');
+        const resp = await AINodeAuth.fetch('/api/onboarding/suggestions');
         suggestions = await resp.json();
 
         // Pre-fill node name
@@ -624,7 +628,7 @@
       };
 
       try {
-        const resp = await fetch('/api/onboarding/complete', {
+        const resp = await AINodeAuth.fetch('/api/onboarding/complete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),

@@ -18,9 +18,21 @@ def _node(nid, fabric="", web_port=3000):
 
 
 class _Req:
-    def __init__(self, app, body):
+    """A stub request.
+
+    ``authenticated`` is the flag ``auth_middleware`` stamps on the real thing:
+    ``trust_remote_code`` on a model the catalog does not vouch for is only
+    accepted from a caller that presented an API key (#168), so a test that sets
+    it is standing in for an operator who did.
+    """
+
+    def __init__(self, app, body, authenticated=False):
         self.app = app
         self._b = body
+        self._state = {"authenticated": authenticated}
+
+    def get(self, key, default=None):
+        return self._state.get(key, default)
 
     async def json(self):
         return self._b
@@ -294,7 +306,8 @@ def test_solo_load_persists_and_resets_primary_overrides(monkeypatch):
     app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
            "ray_autostart_state": None}
 
-    # Load a VLM with the full set of per-load overrides.
+    # Load a VLM with the full set of per-load overrides. Authenticated, because
+    # trust_remote_code is in the set (see _Req).
     asyncio.run(mr.handle_model_load(_Req(app, {
         "model": "Qwen/Qwen2.5-VL-7B-Instruct",
         "gpu_memory_utilization": 0.6,
@@ -302,7 +315,7 @@ def test_solo_load_persists_and_resets_primary_overrides(monkeypatch):
         "kv_cache_dtype": "auto",
         "served_model_name": "vl-alias",
         "trust_remote_code": True,
-    })))
+    }, authenticated=True)))
     assert cfg.model == "Qwen/Qwen2.5-VL-7B-Instruct"
     assert cfg.kv_cache_dtype == "auto"
     assert cfg.max_model_len == 16384
