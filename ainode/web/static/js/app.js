@@ -776,16 +776,23 @@ const AINode = {
     buffer.store = (data && data.store) || null;
     if (!data || !data.series) { buffer.seeded = true; return buffer; }
     var names = this.METRICS_SERIES;
-    var first = data.series[names[0]] || [];
-    for (var i = 0; i < first.length; i++) {
-      var point = { ts: first[i].ts * 1000, values: {} };
+    // Timestamps in milliseconds, like Date.now(), because that is what the live
+    // points below carry and one buffer cannot hold two units.
+    var grid = data.series[names[0]] || [];
+    var seeded = [];
+    for (var i = 0; i < grid.length; i++) {
+      var point = { ts: grid[i].ts * 1000, values: {} };
       for (var s = 0; s < names.length; s++) {
-        var grid = data.series[names[s]] || [];
-        var slot = grid[i];
+        var slot = (data.series[names[s]] || [])[i];
         point.values[names[s]] = slot && slot.value !== undefined ? slot.value : null;
       }
-      buffer.points.push(point);
+      seeded.push(point);
     }
+    // In front of whatever the poll appended while this request was in flight:
+    // the fetch is not awaited by the caller, so a 3 second tick can land first,
+    // and a live point sitting before the history would put the buffer out of
+    // order for anything that reads it as a series.
+    buffer.points = seeded.concat(buffer.points);
     if (buffer.points.length > this.METRICS_BUFFER_POINTS) {
       buffer.points = buffer.points.slice(-this.METRICS_BUFFER_POINTS);
     }

@@ -58,7 +58,7 @@ class MetricsCollector:
 
         # The on-disk retention sampler, when one is attached. None means every
         # figure below lives only in this process, which is how it was until
-        # 0.5.28: a restart reset all of it and nothing kept a copy.
+        # retention landed: a restart reset all of it and nothing kept a copy.
         self._store_sampler: Any = None
 
     # ------------------------------------------------------------------
