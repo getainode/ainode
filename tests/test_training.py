@@ -831,10 +831,15 @@ class TestMergeEndpoint:
 
 
 class TestHFTokenPropagation:
-    """Tests for HF token flow from NodeConfig → training job."""
+    """Tests for HF token flow from NodeConfig into a training job.
+
+    The job the manager holds carries the real token (the launch needs it); the
+    API response only ever says whether there is one. Auth is off by default, so
+    GET /api/training/jobs must not hand out a token to whoever asks.
+    """
 
     @pytest.mark.asyncio
-    async def test_hf_token_injected_from_node_config(self, training_client):
+    async def test_hf_token_injected_from_node_config(self, training_client, training_app):
         """When config has hf_token, it propagates to the submitted job config."""
         # Inject a fake token into the app config
         training_client.app["config"] = type("C", (), {"hf_token": "hf_test123"})()
@@ -843,15 +848,12 @@ class TestHFTokenPropagation:
             json={"base_model": "m", "dataset_path": "user/d"},
         )
         assert resp.status == 201
-        data = await resp.json()
-        # Token should be in config (not exposed directly in status but stored)
-        job_id = data["job_id"]
-        resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
-        job_data = await resp2.json()
-        assert job_data["config"]["hf_token"] == "hf_test123"
+        job_id = (await resp.json())["job_id"]
+        manager: TrainingManager = training_app["training_manager"]
+        assert manager.get_job(job_id).config.hf_token == "hf_test123"
 
     @pytest.mark.asyncio
-    async def test_request_token_takes_precedence(self, training_client):
+    async def test_request_token_takes_precedence(self, training_client, training_app):
         """Explicit token in request body wins over NodeConfig token."""
         training_client.app["config"] = type("C", (), {"hf_token": "hf_config_token"})()
         resp = await training_client.post(
@@ -860,8 +862,30 @@ class TestHFTokenPropagation:
         )
         assert resp.status == 201
         job_id = (await resp.json())["job_id"]
-        resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
-        assert (await resp2.json())["config"]["hf_token"] == "hf_explicit"
+        manager: TrainingManager = training_app["training_manager"]
+        assert manager.get_job(job_id).config.hf_token == "hf_explicit"
+
+    @pytest.mark.asyncio
+    async def test_job_status_masks_the_token(self, training_client):
+        """The key stays, so a caller can see the job HAS a token; the value goes."""
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "hf_token": "hf_secret_value"},
+        )
+        job_id = (await resp.json())["job_id"]
+        for payload in ((await resp.json()),
+                        (await (await training_client.get(
+                            f"/api/training/jobs/{job_id}")).json())):
+            assert payload["config"]["hf_token"] == "***"
+        listing = await (await training_client.get("/api/training/jobs")).json()
+        assert all(j["config"]["hf_token"] != "hf_secret_value" for j in listing["jobs"])
+
+    @pytest.mark.asyncio
+    async def test_job_status_without_a_token_stays_null(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert (await resp.json())["config"]["hf_token"] is None
 
 
 # =============================================================================

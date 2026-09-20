@@ -75,6 +75,19 @@ def _config_without_secrets(config: "TrainingConfig") -> dict:
     return data
 
 
+def _config_for_api(config: "TrainingConfig") -> dict:
+    """Job config as a dict with secrets masked, for an API response.
+
+    The job status is served by GET /api/training/jobs (auth is off by default),
+    so the real token must not ride along. The key stays present, and truthy, so a
+    caller can still see that the job HAS a token."""
+    data = config.to_dict()
+    for key in SECRET_CONFIG_KEYS:
+        if data.get(key):
+            data[key] = "***"
+    return data
+
+
 def _write_token_env_file(job_dir: Path, token: str) -> Optional[Path]:
     """Write a 0600 docker ``--env-file`` carrying the HF token, or None.
 
@@ -571,7 +584,7 @@ class TrainingJob:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "elapsed_seconds": elapsed,
-            "config": self.config.to_dict(),
+            "config": _config_for_api(self.config),
         }
 
     def _build_command(self, config_path: Path) -> list[str]:
