@@ -536,8 +536,8 @@ def test_a_model_outside_the_catalog_has_a_load_time_block_with_nothing_in_it(no
 
 def test_the_card_carries_the_provenance_behind_the_verified_chip(no_ledger):
     """The chip has said "catalog verified" with nothing behind it. Now the card
-    hands over the date and the record, and an entry from before the bench existed
-    is reported as verified with neither rather than dressed up with a date."""
+    hands over the date and the record, and an entry with no record does not wear
+    the chip at all (#201): the flag and its provenance travel together."""
     tested = "unsloth/Qwen3.8-27B-NVFP4"
     older = "QuantTrio/Qwen3.5-9B-AWQ"
     cluster = _cluster([_node("spark1", "Spark-1-DGX", model=tested, instances=[
@@ -554,10 +554,10 @@ def test_the_card_carries_the_provenance_behind_the_verified_chip(no_ledger):
     assert proved["catalog"]["verified_record"] == \
         "20260815-000000-qwen3_8-27b-nvfp4-mtp-vision.json"
 
-    _, legacy = _card(app, model=older)
-    assert legacy["catalog"]["verified"] is True
-    assert legacy["catalog"]["verified_on"] is None
-    assert legacy["catalog"]["verified_record"] is None
+    _, unproved = _card(app, model=older)
+    assert unproved["catalog"]["verified"] is False
+    assert unproved["catalog"]["verified_on"] is None
+    assert unproved["catalog"]["verified_record"] is None
 
 
 # ----------------------------------------------------------- chat view UI --

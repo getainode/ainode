@@ -3,14 +3,16 @@
 `verified=True` on a catalog entry used to be a claim with nothing behind it: no
 date, no node, no record. Some entries carried it from eras before the bench
 existed while the ones proved this week had records nobody could find from the
-entry. So a flip to True now comes with `verified_on` (ISO date) and
-`verified_record` (a filename under `bench/results/`), and an entry that predates
-the bench keeps both empty and says so in a comment, which is the shape the UI
-reports as "marked verified before the bench existed" rather than as tested.
+entry. So the flag comes with `verified_on` (ISO date) and `verified_record` (a
+filename under `bench/results/`), and both are required with it.
 
-These tests are the guard on that rule: a `verified_record` that names a file
-which is not there fails here, and a curated entry the bench has a record for has
-to be marked verified.
+The guard used to be circular (issue #201): it only asserted on entries that
+already named a record, so an entry claiming verification while naming nothing
+passed, and six did. It reads the other way now. Every `verified=True` entry in
+the catalog MUST name a record, that record MUST exist on disk, and it MUST carry
+the date, asserted over the whole catalog rather than over the subset that already
+complies. The reverse direction still holds too: a curated entry the bench has a
+record for has to be marked verified.
 """
 
 from __future__ import annotations
@@ -67,6 +69,24 @@ def test_every_verified_record_names_a_file_that_exists(model_id):
 
 
 @pytest.mark.parametrize("model_id", sorted(_all_entries()))
+def test_a_verified_entry_names_a_record_that_exists(model_id):
+    """The direction the old guard could not check (#201). "Verified" is how a user
+    decides whether a recipe will come up on their hardware, so the flag without a
+    record on disk is a claim nobody can check and this fails on it."""
+    info = _all_entries()[model_id]
+    if not info.verified:
+        return
+    assert info.verified_record, (
+        f"{model_id} is marked verified and names no bench record. Attach the record "
+        f"that proves it, or set verified=False")
+    assert (RESULTS / info.verified_record).exists(), (
+        f"{model_id} is marked verified by bench/results/{info.verified_record}, "
+        f"which is not there")
+    assert info.verified_on, (
+        f"{model_id} is marked verified with no verified_on date")
+
+
+@pytest.mark.parametrize("model_id", sorted(_all_entries()))
 def test_a_curated_model_the_bench_has_a_record_for_is_marked_verified(model_id):
     """The other direction: a record proves the model served on this hardware, so
     the entry must not still read as unproven."""
@@ -87,14 +107,42 @@ def test_verified_on_is_an_iso_date_or_empty():
             f"{model_id}: {info.verified_on!r} is not an ISO date"
 
 
-def test_a_verified_entry_without_a_record_has_an_empty_date():
-    """The two cases have to stay distinguishable from the entry alone: a tested
-    model names its record and its date; one marked before the bench existed
-    carries neither, and the UI says which it is looking at."""
-    for model_id, info in _all_entries().items():
-        if info.verified and not info.verified_record:
-            assert info.verified_on == "", (
-                f"{model_id} has a verified_on but no record to back it")
+def test_no_entry_is_verified_without_a_record():
+    """The whole catalog in one assertion, because the shape "verified, no record"
+    is not a shape any more (#201). Six entries used to be in it, wearing the badge
+    a user reads before trusting a recipe."""
+    unbacked = sorted(model_id for model_id, info in _all_entries().items()
+                      if info.verified and not info.verified_record)
+    assert unbacked == [], (
+        f"marked verified with no bench record: {unbacked}. Attach the record or "
+        f"set verified=False")
+
+
+def test_the_six_entries_with_no_record_are_unverified():
+    """The ones #201 found. Named here so a later edit cannot quietly flip one back
+    without a record: the test above would catch it, this says which entries the
+    decision was about."""
+    for model_id in ("qwen3.5-9b-awq", "qwen3.5-4b-awq", "qwen3.5-35b-a3b-awq",
+                     "llama-3.1-8b-nvfp4", "nemotron-cascade-2-30b-a3b-nvfp4",
+                     "llama-3.3-70b-nvfp4"):
+        info = _all_entries()[model_id]
+        assert not info.verified, f"{model_id} is verified again with no record"
+        assert info.verified_record == "" and info.verified_on == ""
+
+
+def test_a_description_quoting_throughput_names_the_record_behind_it():
+    """Measured numbers live in bench/results/ and nowhere else. A catalog
+    description is read as a promise about the reader's own hardware, and six of
+    them carried tok/s figures no record contains, so a figure in a description now
+    requires the entry to name its record."""
+    import re
+
+    pattern = re.compile(r"tok/s|tokens/s|texts/s|\bt/s\b")
+    offenders = sorted(model_id for model_id, info in _all_entries().items()
+                       if pattern.search(info.description or "")
+                       and not info.verified_record)
+    assert offenders == [], (
+        f"throughput in the description with no bench record named: {offenders}")
 
 
 def test_the_entries_proved_this_week_all_name_their_record():

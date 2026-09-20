@@ -1,6 +1,6 @@
 <!--
-AINode — local AI platform for NVIDIA GB10 and any NVIDIA GPU server.
-Keywords: NVIDIA DGX Spark, ASUS GX10, vLLM, Ray, tensor parallel,
+AINode: local AI platform for NVIDIA GB10 and any NVIDIA GPU server.
+Keywords: NVIDIA DGX Spark, ASUS GX10, vLLM, tensor parallel,
 OpenAI-compatible API, local LLM, self-hosted AI, LoRA fine-tuning,
 cluster inference, GB10, CUDA 13, NCCL, RoCE, RDMA, container AI
 platform, open source ChatGPT alternative.
@@ -14,18 +14,16 @@ platform, open source ChatGPT alternative.
 
 <p align="center">
   <strong>Turn any NVIDIA GPU into a local AI platform.</strong><br/>
-  <em>Inference + fine-tuning in your browser. One container to install. Add nodes, they find each other.</em>
+  <em>Inference + fine-tuning in your browser. One command to install. Add nodes, they find each other.</em>
 </p>
 
 <p align="center">
   <a href="https://github.com/getainode/ainode/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/getainode/ainode?display_name=tag&style=flat-square&color=76B900&label=release"></a>
   <a href="https://github.com/getainode/ainode/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache%202.0-76B900?style=flat-square"></a>
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
-  <a href="https://hub.docker.com/r/argentaios/ainode"><img alt="docker pulls" src="https://img.shields.io/docker/pulls/argentaios/ainode?style=flat-square&logo=docker&logoColor=white&label=dockerhub&color=2496ED"></a>
   <a href="https://github.com/orgs/getainode/packages/container/package/ainode"><img alt="ghcr" src="https://img.shields.io/badge/ghcr-getainode%2Fainode-24292e?style=flat-square&logo=github"></a>
   <img alt="CUDA" src="https://img.shields.io/badge/CUDA-13-76B900?style=flat-square&logo=nvidia&logoColor=white">
-  <img alt="vLLM" src="https://img.shields.io/badge/vLLM-0.19-7C3AED?style=flat-square">
-  <img alt="Ray" src="https://img.shields.io/badge/Ray-2.54-028CF3?style=flat-square">
+  <img alt="vLLM" src="https://img.shields.io/badge/vLLM-per%20recipe-7C3AED?style=flat-square">
   <a href="https://github.com/getainode/ainode/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/getainode/ainode?style=flat-square&color=FFD700"></a>
   <a href="https://releasebot.io/updates/getainode/ainode"><img alt="Release Bot" src="https://releasebot.io/Full.svg" height="20"></a>
 </p>
@@ -35,13 +33,13 @@ platform, open source ChatGPT alternative.
   &nbsp;·&nbsp;
   <a href="https://docs.ainode.dev">docs</a>
   &nbsp;·&nbsp;
-  <a href="#getting-started--step-by-step">Getting Started</a>
+  <a href="#getting-started-step-by-step">Getting Started</a>
   &nbsp;·&nbsp;
   <a href="#screenshots">Screenshots</a>
   &nbsp;·&nbsp;
   <a href="#models-tested-on-ainode">Models tested</a>
   &nbsp;·&nbsp;
-  <a href="#state-of-distributed-inference-june-2026">What Works / What Doesn't</a>
+  <a href="#state-of-distributed-inference">What Works / What Doesn't</a>
 </p>
 
 ---
@@ -49,20 +47,26 @@ platform, open source ChatGPT alternative.
 ## What AINode is
 
 AINode is a self-hosted AI appliance for **NVIDIA GB10** (DGX Spark, ASUS
-GX10) and any NVIDIA GPU box. It ships as **one container** that bundles:
+GX10) and any NVIDIA GPU box. One command installs an orchestrator container
+and a systemd unit per box, and that orchestrator gives you:
 
 - A modern web UI (chat, cluster topology, server console, downloads, training)
 - An OpenAI-compatible API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`)
   and the Anthropic Messages API (`/v1/messages`), both routed fleet-wide by model id
 - A decision endpoint (`/v1/decide`): typed questions in, calibrated
   probabilities out, every question answered in one request
-- A GB10-patched vLLM with Ray for cross-node tensor/pipeline parallel
+- vLLM engines started for you, one container per loaded model, with the engine
+  image and flags each model was proven with
+- Cross-node tensor parallel over RoCE with NCCL configured from the host's fabric
+  interface, launched by picking the nodes in the browser
 - UDP node discovery for automatic clustering
 - NFS-shared model storage so you download once and use everywhere
 - Scripted fine-tuning on a node's own GPU (LoRA, QLoRA, full fine-tune)
 
-One `docker pull`, one systemd unit per box, done. No host Python venv,
-no source-built vLLM, no fragile runtime wiring.
+The orchestrator image is `python:3.12-slim` plus this package, about 364 MB. It
+holds no vLLM and no CUDA: the engine runs as its own container, so a model's
+engine version is a property of the model and not of your AINode install. No host
+Python venv, no source-built vLLM, no fragile runtime wiring.
 
 ```bash
 curl -fsSL https://ainode.dev/install | bash
@@ -72,14 +76,14 @@ curl -fsSL https://ainode.dev/install | bash
 
 ## Screenshots
 
-### Cluster view — 4 nodes, 487 GB aggregated VRAM
+### Cluster view: 4 nodes, 487 GB aggregated VRAM
 
 ![Cluster view](docs/images/cluster-4node.gif)
 
-The "MASTER" node (head) runs the API and orchestrates. The smaller
-orbiting node (member) has its GPU reserved for a Ray worker that the
-head placed. The instance card shows **DISTRIBUTED · TP=2** — the model
-is sharded across both GPUs.
+The "MASTER" node (head) runs the API and orchestrates. The smaller orbiting node
+(member) runs a headless engine container for the rank the head assigned it. The
+instance card shows **DISTRIBUTED · TP=2**, meaning the model is sharded across
+both GPUs.
 
 ### Chat
 
@@ -87,18 +91,18 @@ is sharded across both GPUs.
 
 Full-featured chat with streaming tokens, prompt history, code
 highlighting, per-message metrics (TTFT, tokens/sec, total tokens).
-Works against whatever model the cluster has loaded — solo or sharded.
+Works against whatever model the cluster has loaded, solo or sharded.
 
-### Server — API console (LM Studio style)
+### Server: API console (LM Studio style)
 
-![Server view — API console](docs/images/server-api-console.png)
+![Server view, API console](docs/images/server-api-console.png)
 
 Live developer console: which models are loaded on which node,
 OpenAI-/LM-Studio-/Anthropic-compatible endpoints, per-request logs
 with status codes and latency, eject-model buttons, copyable cURL
 snippets.
 
-### Downloads — live HF catalog
+### Downloads: live HF catalog
 
 ![Model downloads](docs/images/downloads.png)
 
@@ -106,7 +110,7 @@ Browse trending HuggingFace models, with **AVAILABLE** / **FITS GPU**
 badges computed from your cluster's aggregate VRAM. Queue downloads to
 the shared NFS cache; any node can load them instantly.
 
-### Training — overview
+### Training: overview
 
 ![Training overview](docs/images/training-overview.png)
 
@@ -115,7 +119,7 @@ Three quick-start paths: **LoRA** (lightweight, most users), **QLoRA**
 large-memory node). Every run trains on the node's own GPU. Track active +
 completed runs, GPU-hours, and jump into dataset management.
 
-### Training — templates
+### Training: templates
 
 ![Training templates](docs/images/training-templates.png)
 
@@ -123,9 +127,9 @@ Starter recipes for instruction tuning (Alpaca), chat fine-tuning
 (ShareGPT) and classification heads. Each template ships a working dataset
 schema so you can start training in minutes.
 
-### Config — cluster
+### Config: cluster
 
-![Config — cluster](docs/images/config-cluster.png)
+![Config, cluster](docs/images/config-cluster.png)
 
 Pin the node's role (`auto` / `master` / `worker`), set a shared
 `cluster_id` so only matching nodes see each other, and inspect the
@@ -133,7 +137,7 @@ current member list with per-node role, address, and last-seen.
 
 ---
 
-## Getting Started — step by step
+## Getting Started, step by step
 
 ### Single node (solo mode)
 
@@ -151,90 +155,114 @@ current member list with per-node role, address, and last-seen.
    ```
    The unit reads the pinned image from `~/.ainode/image.env`
    (`EnvironmentFile`, `Restart=always`), so it survives cold power
-   cycles and **replays the models you had loaded** on boot.
-3. **Open the UI** at `http://<your-ip>:3000`. First-run onboarding walks
-   you through picking a model. Click a model card → click **Launch** →
-   chat.
+   cycles and **replays the solo and stacked models you had loaded** on boot. A
+   distributed head is deliberately not replayed: it needs its peers, so you
+   relaunch it from the browser.
+   The installer also pre-pulls the vLLM engine image the engine will run (about
+   8.5 GB to download, about 22 GB on disk) so your first launch is not waiting on
+   it. `AINODE_NVIDIA_IMAGE=skip` skips that.
+3. **Open the UI** at `http://<your-ip>:3000` and pick a model from the catalog.
+   Click a model card, then **Launch**, then chat. There is no onboarding wizard on
+   an installer install: the installer writes `onboarded: true` and leaves `model`
+   null, so the node comes up with nothing loaded and waits for you.
 
-Upgrade is `ainode update` (resolves + pulls the newest pinned release
-and restarts) — or `ainode update 0.5.2` to pin a specific version.
+Upgrade is `ainode update`, which resolves and pulls the newest release and
+restarts the unit. Pass a version to pin one (`ainode update 0.5.24`). Run it as the
+user that installed AINode, and read [Updating AINode](#updating-ainode) before you
+reach for `sudo`.
 
-**Prefer to pull the image yourself?** Both registries serve identical
-images — GHCR is canonical (what the installer uses), Docker Hub is a
-public mirror:
+**Prefer to pull the image yourself?** GHCR is the only registry AINode publishes
+to:
 
 ```bash
-docker pull ghcr.io/getainode/ainode:latest      # canonical (always newest)
-docker pull argentaios/ainode:latest             # Docker Hub mirror
-# pin a release instead: …/ainode:0.5.2
+docker pull ghcr.io/getainode/ainode:latest      # newest release
+# or pin the release you want, which is what the installer does:
+docker pull ghcr.io/getainode/ainode:0.5.26
 ```
+
+There is no Docker Hub mirror. An `argentaios/ainode` repository exists there and
+stops at 0.4.7 from April 2026, which predates the engine backend that runs today,
+the catalog, stacking, the bench and embeddings. Do not pull it.
 
 ### Two nodes (distributed mode)
 
-For models that don't fit on one GPU — e.g. a 70B-class model sharded
-across two DGX Sparks:
+For a model that does not fit on one GPU, such as a frontier MoE sharded across two
+DGX Sparks. The browser path is the supported one:
 
-1. **Wire a clean high-speed link** between the two nodes (direct QSFP
-   cable on its own `/24`, or a dedicated switch port). See
-   [Networking requirements](#networking-requirements) — this matters.
-2. **Install AINode on both** (step 1 above).
-3. **On the peer**, set member mode in `~/.ainode/config.json`:
-   ```json
-   {
-     "distributed_mode": "member",
-     "cluster_interface": "enp1s0f0np0",
-     "ssh_user": "sem"
-   }
-   ```
-   `sudo systemctl restart ainode`.
-4. **On the head**, set head mode and add passwordless SSH to the peer:
-   ```json
-   {
-     "distributed_mode": "head",
-     "peer_ips": ["10.0.0.2"],
-     "cluster_interface": "enp1s0f0np0",
-     "ssh_user": "sem"
-   }
-   ```
+1. **Wire a clean high-speed link** between the two nodes (direct QSFP cable on its
+   own `/24`, or a dedicated switch port). See
+   [Networking requirements](#networking-requirements): this matters.
+2. **Install AINode on both.** The peer gets `--job worker`, which writes
+   `distributed_mode: "member"`:
    ```bash
-   ssh-copy-id sem@10.0.0.2 && sudo systemctl restart ainode
+   curl -fsSL https://ainode.dev/install | bash -s -- --job worker
    ```
-5. **Open the head UI** — you should see both nodes, aggregated VRAM
-   ("2 nodes · 244 GB · 2 GPUs"), and the instance badged as
-   **DISTRIBUTED · TP=2**.
+   On the head, name the peers so the installer copies your SSH key to them:
+   ```bash
+   AINODE_PEERS="10.0.0.2" curl -fsSL https://ainode.dev/install | bash -s -- --job master
+   ```
+   `--job master` is not optional. Without it the peer list is used for
+   `ssh-copy-id` and nothing else, and the node installs as solo.
+3. **Check passwordless SSH** from the head's install user to each peer. The head
+   starts the peers' engine containers over SSH, so a password prompt is a failed
+   launch.
+4. **Open the head UI.** You should see both nodes and the aggregated memory
+   ("2 nodes · 244 GB · 2 GPUs"). Cluster memory counts one GPU per node.
+5. **Launch it.** In the Launch Instance panel, pick the model, toggle on the nodes
+   to span, and launch. That posts one `POST /api/sharding/launch` with the node ids;
+   the head is always the node you are on and the rest become peers, resolved to
+   their fabric IPs. A peer with no known fabric IP is refused rather than launched
+   over the management LAN. The instance shows as **DISTRIBUTED · TP=2**.
 
-Want to do it from the browser instead? Open the Launch Instance
-panel, pick the model, set **Minimum Nodes=2**, click **Tensor** →
-**LAUNCH**. The UI writes the config and hot-swaps the engine for you.
+A multi-node launch starts one engine container per node: rank 0 on the head and
+`--headless` rank k on each peer, all rendezvousing on `--master-addr` and
+`--master-port` through vLLM's own multi-node executor. That is the shape every
+multi-node model in the catalog is pinned to and the shape every proven launch used,
+because it needs nothing in the engine image beyond vLLM itself. `distributed_mode:
+"head"` plus explicit `peer_ips` in `config.json` and a service restart is the other
+way in, and it is what an unattended node should use.
+
+Only tensor parallel exists. The launch body accepts a `strategy` field, and any
+node count above one is tensor parallel regardless of what it says. There is no
+pipeline parallelism.
 
 ---
 
 ## Quantize a model (AWQ / NVFP4)
 
 AINode can compress a full-precision model to 4-bit **in the browser**, on your
-own GPU — no external service. Open **Training → Quantize a Model**:
+own GPU, with no external service. Open **Training, Quantize a Model**:
 
-1. **Base model** — a Hugging Face repo id (`Qwen/Qwen3.5-4B`) or an installed model.
-2. **Scheme** — **AWQ** (W4A16, proven on GB10 via `awq_marlin`) or **NVFP4**
+1. **Base model**: a Hugging Face repo id (`Qwen/Qwen3.5-4B`) or an installed model.
+2. **Scheme**: **AWQ** (W4A16, proven on GB10 via `awq_marlin`) or **NVFP4**
    (Blackwell-native 4-bit float).
-3. **Calibration samples** — default 256 (from `HuggingFaceH4/ultrachat_200k`).
-4. *(optional)* **Push result to Hugging Face** — requires a **write** token;
-   pushes a private repo under your namespace.
+3. **Calibration samples**: default 256 (from `HuggingFaceH4/ultrachat_200k`).
+4. *(optional)* **Push result to Hugging Face**, which requires a **write** token
+   and pushes a private repo under your namespace.
 
-The target node must be **idle** — quantization needs the full unified memory, so
+The target node must be **idle**. Quantization needs the full unified memory, so
 AINode refuses to start a quant job while a model is loaded (unload first, or pass
 `force=true`). The output lands in **Installed** as `<org--name>-<scheme>`, ready
 to serve.
 
-> AWQ is the proven path on GB10. NVFP4 quantization is newer; **NVFP4 on
-> multimodal models (e.g. Qwen3.5) is experimental and not yet verified** — prefer
-> AWQ for the Qwen3.5 family today.
+**The node needs the job image.** Quantization, training and adapter merge all run in
+a spawned GPU container, and it is about 22 GB, so nothing pulls it implicitly. The
+node resolves it from an explicit `AINODE_QUANT_IMAGE` / `AINODE_TRAIN_IMAGE`, then
+`ghcr.io/getainode/ainode-train:<ainode version>`, then a locally built
+`ainode-quant:0.17.0-t5`. A job on a node with none of them is rejected up front with
+all three named, rather than dying with `docker` exit 125 in a log. See
+[The job image](#quantize-a-model-awq--nvfp4) under training for how to publish or
+point at one.
+
+> AWQ is the proven path on GB10. NVFP4 quantization is newer, and **NVFP4 on
+> multimodal models (Qwen3.5 for instance) is experimental and not yet verified**, so
+> prefer AWQ for the Qwen3.5 family today.
 
 **Hugging Face tokens (read vs write).** AINode keeps credentials in a local
 Secrets store (`~/.ainode/secrets.json`, mode 0600, obfuscated at rest) with two
 HF slots: a **read** token (download gated models) and a **write** token (push to
-the Hub — read-only tokens are rejected before any multi-GB transfer). Set them in
-**Config → Secrets** (each has a **Test** button showing the detected scope), or
+the Hub, where read-only tokens are rejected before any multi-GB transfer). Set them
+in **Config, Secrets** (each has a **Test** button showing the detected scope), or
 set the read token with `ainode config --hf-token hf_xxx`.
 
 ---
@@ -313,15 +341,15 @@ to match. A resume never writes into the run it resumed.
 | Feature | Status |
 |---|---|
 | One-command install | ✅ |
-| Unified container image (UI + engine) | ✅ v0.4.0 |
+| Slim orchestrator image, engine as its own container per model | ✅ v0.5.0 |
 | Auto-detect GPU and memory | ✅ |
 | Chat UI in your browser | ✅ |
 | OpenAI-compatible API | ✅ |
-| Embeddings endpoint (`/v1/embeddings`) | ✅ |
+| Embeddings endpoint (`/v1/embeddings`), routed to a pooling engine on the fleet | ✅ v0.5.25 |
 | Live HF model catalog with trending + download manager | ✅ |
 | NFS-shared model storage across cluster | ✅ |
 | Multi-node auto-discovery (UDP broadcast) | ✅ |
-| Distributed tensor-parallel inference across nodes | ✅ (4-node verified — 487 GB aggregated VRAM) |
+| Distributed tensor-parallel inference across nodes | ✅ (TP=2 on 0.5.x, TP=4 in June 2026 on 0.4.x) |
 | Cluster topology UI (members, VRAM aggregate, instance badges) | ✅ |
 | Browser-based fine-tuning (LoRA / QLoRA / Full, single node) | ✅ |
 | Training artifact retrieval + download via API | ✅ |
@@ -335,43 +363,45 @@ to match. A resume never writes into the run it resumed.
 | Custom training template persistence | ✅ |
 | Prometheus metrics endpoint (`/metrics`) | ✅ |
 | `ainode role master\|worker\|solo` CLI | ✅ |
-| Worker nodes start instantly — no model required | ✅ |
+| Worker nodes start with no model required | ✅ |
 | Web portal available immediately on start | ✅ |
 | Cluster-wide update from master UI (`⬆ Update all` button) | ✅ |
 | Topology loading animation + per-node fade-in | ✅ |
-| AWQ models on GB10 (sm_12.1) — `awq_marlin` kernel fix | ✅ |
-| In-browser quantization (AWQ W4A16 / NVFP4) → serve or push to HF | ✅ v0.4.44 |
+| AWQ models on GB10 (sm_12.1), `awq_marlin` kernel fix | ✅ |
+| In-browser quantization (AWQ W4A16 / NVFP4), then serve or push to HF | ✅ v0.4.44 |
 | Push quantized / fine-tuned models to Hugging Face (write-token) | ✅ |
 | Secrets store (HF read + HF write + NGC + W&B + OpenAI), masked + testable | ✅ |
-| Federated master router — route `/v1/*` by model name across the cluster | ✅ |
+| Federated master router: `/v1/*` routed by model name across the cluster | ✅ |
 | Load / unload any model on any node from the master UI | ✅ |
-| Model stacking — N concurrent models per node, persisted + replayed on boot | ✅ |
+| Model stacking: N concurrent models per node, persisted and replayed on boot | ✅ |
 | Serve models from on-disk weights (`~/.ainode/models/<slug>`) | ✅ |
 | fp8 KV-cache default on GB10 (long-context headroom) | ✅ |
 | Per-load overrides (`served_model_name` / `max_model_len` / `kv_cache_dtype` / `quantization` / `trust_remote_code`), persisted across restarts | ✅ v0.5.0 |
 | Node-targeted model load (`POST /api/cluster/load {node_id}`) | ✅ v0.5.1 |
-| Stacked-load admission guard — explicit `gpu_memory_utilization` required, reject > 0.9 projected total (409) | ✅ v0.5.1 |
-| VLM (vision) support — fp8 KV auto-skipped on GB10; `kv_cache_dtype=auto` per-load override | ✅ v0.5.1 |
+| Stacked-load admission guard: explicit `gpu_memory_utilization` required, reject > 0.9 projected total (409) | ✅ v0.5.1 |
+| VLM (vision) support: fp8 KV auto-skipped on GB10, `kv_cache_dtype=auto` per-load override | ✅ v0.5.1 |
 | LoRA / QLoRA training **and** adapter merge run in a spawned GPU container (slim orchestrator has no torch) | ✅ v0.5.0 |
-| Deploy pipeline — `git tag` → CI (self-hosted Spark runner) → GHCR → `ainode update` / cluster update-all (genuine pull + swap) | ✅ v0.5.0 |
+| Deploy pipeline: a release tag, CI on a self-hosted Spark runner, GHCR, then `ainode update` or cluster update-all (genuine pull and swap) | ✅ v0.5.0 |
 | Cancellable, commit-pinned, parallel model downloads | ✅ v0.5.2 |
 | Delete a downloaded model from disk (`delete-repo`, frees GB) | ✅ |
-| AutoData — Δ-filtered synthetic-data generation (v2.2 val-set lift objective) | ✅ v0.5.0 |
+| AutoData: Δ-filtered synthetic-data generation (v2.2 val-set lift objective) | ✅ v0.5.0 |
 
 ---
 
 ## Relation to the Community
 
 AINode builds on excellent open-source work in the DGX Spark ecosystem.
-In particular, our base image inherits the patched NCCL from
-**[eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)**
-(`dgxspark-3node-ring` branch), which we've found to be the most reliable
-variant for handling GB10 unified-memory topologies and fabric setups.
+**[eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)** and its
+patched NCCL (`dgxspark-3node-ring` branch) is where AINode's multi-node work
+started: the 0.4.x releases ran eugr's `launch-cluster.sh` and its base image, and
+the flags and topology lessons in this repo came out of that.
 
-eugr's project remains the go-to for raw, high-performance vLLM clustering
-on Spark hardware. AINode layers a modern browser UI, one-command
-deployment, in-browser chat + OpenAI API, and distributed fine-tuning on
-top of that strong foundation.
+What runs today is different, and it is worth being exact about it. AINode 0.5.x
+launches the engine itself, one vLLM container per instance from the image a model's
+recipe pins, and multi-node runs through vLLM's own multi-node executor rather than
+Ray. The `ainode-base` image built from eugr's tree is no longer an input to the
+shipped product. The debt is real all the same, and eugr's project remains the
+go-to for raw vLLM clustering on Spark hardware.
 
 Huge thanks to eugr and the contributors making multi-node Spark setups
 practical.
@@ -463,6 +493,14 @@ number.
 - **Four-node TP=4 on frontier MoE.** Qwen3-235B-A22B NVFP4 across 4× GB10 at
   16.5 tok/s single-stream, surviving a 3,513-token prefill. Measured June 2026
   on AINode 0.4.x with the `scitrera/dgx-spark-vllm` image.
+- **A non-GB10 GPU through the launch path.** Qwen3.6 35B-A3B NVFP4 on pollux, a
+  Dell C4130 with one Tesla V100 32 GB, on 2026-09-19: 97.4 tok/s single-stream and
+  343.9 across 16 streams, on a Volta-capable vLLM fork pinned by its catalog entry.
+  Volta needs its own engine image because mainline vLLM dropped SM70, which is
+  exactly what a catalog recipe is for.
+- **Embeddings.** Qwen3 Embedding 0.6B stacked beside Nemotron on a GX10: 1024
+  dimensions, p50 71.6 ms against a measured 32.1 ms transport floor, 13.9 texts/s at
+  batch 1 rising to 225.5 at batch 64.
 - **Correctness, separately from speed.** Each rubric run is a fresh agent
   against the served endpoint: executed code, parallel tool calls, needle
   retrieval at three context depths, thinking on and off.
@@ -473,21 +511,21 @@ number.
   (`--limit-mm-per-prompt {"image":0,"video":0}`) because the multimodal warmup
   OOM-killed the engine on a node with roughly 35 GB free. No vision numbers and
   no vision rubric for that model.
-- **TP=4 through the current launch path.** The 235B row predates 0.5.x. The
-  four-node path has not been re-verified on 0.5.6, and that run has no
-  concurrency sweep, no sustained number and no rubric.
-- **The Dell C4130 (4× V100).** It joined the cluster as a worker on 2026-09-11,
-  config only. No model has been launched on it through AINode: its raw vLLM
-  container is still outside the launch path, and AINode's node announcement
-  still reports 1 of its 4 GPUs.
+- **TP=4 through the current launch path.** The 235B row predates 0.5.x and has not
+  been re-run on a current release, and that run has no concurrency sweep, no
+  sustained number and no rubric.
+- **The Dell C4130's other three GPUs.** One model has been launched on a C4130
+  through AINode (the pollux row above), and AINode's node announcement still reports
+  1 of the box's 4 GPUs, so three of them are idle as far as the cluster is
+  concerned. Nothing has been measured across them.
 - **GLM-5.3-Flash at TP=2.** It ran raw on the Spark-2/Spark-3 pair, outside
   AINode, and was stopped on 2026-09-14 when the pair moved to DeepSeek V4 Flash
   through AINode. No AINode-launched measurement exists for it.
 - **DeepSeek V4.1 Flash.** Not launched through AINode: no vLLM build serves its
   architecture on GB10 yet. V4 Flash is in the table above, launched by AINode
   across two nodes with the mp shape; its 16-stream point has not been run.
-- **Anything else.** Training throughput, embeddings and quantization jobs have
-  no bench records yet.
+- **Anything else.** Training throughput and quantization jobs have no bench
+  records yet. Embeddings do, and it is in the Embedding runs table below.
 
 ### How these numbers were taken
 
@@ -592,44 +630,55 @@ block is documented in [`bench/SCHEMA.md`](bench/SCHEMA.md).
 
 ---
 
-## State of Distributed Inference (June 2026)
+## State of Distributed Inference
 
 We owe readers the honest picture, not a checkmark-soup. Here's what's
-really running on our hardware.
+really running on our hardware. Every throughput figure in this section is a row in
+the tables above with a record behind it; there are no estimates here.
 
 ### What works today (verified)
 
-- **Single-node inference** on any NVIDIA GB10 box (DGX Spark, ASUS GX10).
-- **Two-node tensor-parallel** (TP=2) with one GPU per node on a
-  direct-connect QSFP `/24`. Both GPUs show ~61 GB of
-  `ray::RayWorkerWrapper` memory; NCCL chose `NET/IB RoCE @ 200 Gb/s`.
-- **Four-node cluster** (3× DGX Spark + 1× ASUS GX10) — 487 GB
-  aggregated VRAM, all four discovered automatically via UDP, topology
-  visible in the browser UI. Verified April 2026.
-- **One-container-per-node install** — `curl -fsSL https://ainode.dev/install | bash -s -- --job worker`
-  installs in seconds with no model required.
+- **Single-node inference** on any NVIDIA GB10 box (DGX Spark, ASUS GX10), and on one
+  Tesla V100 box through a catalog recipe that pins a Volta-capable vLLM build.
+- **Two-node tensor-parallel** (TP=2) with one GPU per node on a direct-connect QSFP
+  `/24`, through vLLM's own multi-node executor: rank 0 on the head, `--headless`
+  rank 1 on the peer, rendezvousing on `--master-addr` and `--master-port`. NCCL
+  chose `NET/IB RoCE @ 200 Gb/s`. Two models are in the tables at TP=2: DeepSeek V4
+  Flash at 34.5 tok/s single-stream and Qwen3.8-Flash-Next at 26.2.
+- **Four-node cluster** (3× DGX Spark + 1× ASUS GX10), 487 GB aggregated VRAM,
+  all four discovered automatically over UDP, topology visible in the browser UI.
+  Cluster memory counts one GPU per node.
+- **One command per node.** `curl -fsSL https://ainode.dev/install | bash -s -- --job worker`
+  installs a worker that needs no model. It still pulls the orchestrator image and
+  pre-pulls the engine image, so budget the download.
 - **`ainode role`** CLI sets master/worker/solo instantly.
-- **Worker nodes start immediately** — no model download, no engine
-  warmup. Web portal is up within seconds of `systemctl start ainode`.
+- **Worker nodes start with no model** and no engine warmup. The web portal is up
+  within seconds of `systemctl start ainode`.
 - **Shared model storage over NFS** from an NVMe-oF-backed master.
-- **UDP cluster discovery** on port 5679 with real peer-IP capture.
-- **Inference throughput:** ~35 tok/s for a warmed-up model over
-  the RoCE fabric.
-
-- **Four-node TP=4** — verified live on frontier MoE: `nvidia/Qwen3-235B-A22B-NVFP4`
-  served at TP=4 across 4× GB10 (~16–17 t/s single-stream, survived a 3,513-token
-  prefill). The GB10 sm120 fix was `--enforce-eager` (vLLM's FlashInfer prefill
-  kernel emits an `illegal instruction` under CUDA-graph capture on GB10).
-- **Federated serving** — a master routes `/v1/*` to the node holding each model;
-  models load/unload per node from the browser.
-- **Model stacking** — multiple models per node, persisted and replayed on boot.
-- **In-browser quantization** — AWQ and NVFP4 jobs run on an idle node and land
-  the result in Installed (optionally pushed to Hugging Face).
+- **UDP cluster discovery** with real peer-IP capture. The installer writes port 5679
+  and `cluster_id: "ainode-cluster"` on every node; the code defaults are 5678 and
+  `"default"`, so a hand-written config has to match its neighbours to see them.
+- **Four-node TP=4** on frontier MoE: `nvidia/Qwen3-235B-A22B-NVFP4` at TP=4 across
+  4× GB10, 16.5 tok/s single-stream, surviving a 3,513-token prefill. Measured
+  June 2026 on 0.4.x. The GB10 sm120 fix there was `--enforce-eager`, because vLLM's
+  FlashInfer prefill kernel emitted an `illegal instruction` under CUDA-graph capture
+  on that engine build. It is not a flag to carry forward blindly: AINode forces it
+  only on the pinned 0.17 engine image, and it costs throughput on 0.27.1.
+- **Federated serving.** A master routes `/v1/*` to the node holding each model, and
+  models load and unload per node from the browser.
+- **Model stacking.** Multiple models per node, persisted and replayed on boot.
+- **In-browser quantization.** AWQ and NVFP4 jobs run on an idle node and land the
+  result in Installed, optionally pushed to Hugging Face, on a node where the job
+  container image has been built.
 
 ### What still needs care
 
-- **Ray over Tailscale** — use physical cables or a dedicated switch.
-- **Single NIC per cluster subnet** — multi-NIC ambiguity still breaks the NCCL ring.
+- **No fabric over Tailscale.** Use physical cables or a dedicated switch: peers are
+  addressed by their fabric IP, and a tunnel is not one.
+- **Single NIC per cluster subnet.** Multi-NIC ambiguity still breaks the NCCL ring.
+- **The engine image decides the multi-node shape.** The `mp` executor needs nothing
+  but vLLM. The `ray` executor needs a `ray` CLI inside the engine image, and no
+  image AINode ships or pins has one, so a catalog recipe that spans nodes pins `mp`.
 
 ### Lessons learned the hard way
 
@@ -643,15 +692,21 @@ really running on our hardware.
    ring setup silently; `NCCL_SOCKET_IFNAME` only tells NCCL which
    address to *listen* on, not which source the kernel picks for
    outbound traffic.
-2. **Ray placement groups outlive SIGKILL.** Hung vLLM doesn't release
-   the reservation; Ray's GCS still thinks the GPU is busy. Always
-   `docker rm -f` the full chain before retrying.
+2. **A hung engine does not release the GPU.** Always `docker rm -f` the full
+   chain of engine containers, on the head and on every peer, before retrying a
+   multi-node launch. On the 0.4.x Ray shape the reservation outlived SIGKILL
+   because Ray's GCS still thought the GPU was busy; on the `mp` shape the
+   containers themselves are what you have to clear.
 3. **Block-level shared storage is unsafe for multi-writer.** NVMe-oF +
    ext4 mounted on two hosts corrupts under concurrent writes. Put NFS
    on top of a single-host mount.
 4. **The patched NCCL in `eugr/spark-vllm-docker`** (`dgxspark-3node-ring`
-   branch) is the only variant we've seen reliably handle GB10
-   unified-memory topologies. Our base image inherits it.
+   branch) was the only variant we saw reliably handle GB10 unified-memory
+   topologies in the 0.4.x era, when AINode's engine came from that base image.
+   0.5.x runs the engine image a model's recipe names, so the NCCL in play is
+   whichever one that image ships. What AINode contributes is the env:
+   `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES` and
+   `NCCL_IB_HCA`, computed from the host's sysfs and set on the engine container.
 5. **SSH from a root container into a host user** fails silently when
    keys are mounted read-only from the host. Our entrypoint copies
    `/host-ssh` → `/root/.ssh` with correct perms and injects
@@ -665,11 +720,11 @@ TP=2 splits the weights evenly. Solved problem.
 
 **Three nodes**: no simple physical topology. Options:
 
-- **Triangle mesh** (A↔B, B↔C, A↔C) with each link on its own `/30` —
-  community tooling assumes this, nobody autoconfigures it.
-- **Dedicated cluster switch** with one NIC per node on an isolated
-  subnet — easier, but a hardware purchase.
-- **Star topology** — asymmetric latency, not recommended.
+- **Triangle mesh** (A↔B, B↔C, A↔C) with each link on its own `/30`. Community
+  tooling assumes this, and nobody autoconfigures it.
+- **Dedicated cluster switch** with one NIC per node on an isolated subnet. Easier,
+  but a hardware purchase.
+- **Star topology**: asymmetric latency, not recommended.
 
 If your three nodes just share a regular LAN, you hit multi-NIC routing
 ambiguity (lesson #1). We did. NCCL ring setup succeeded; data never
@@ -681,10 +736,10 @@ which is the only practical option for 4+. One NIC per node on a fresh
 published recipes (eugr's `recipes/4x-spark-cluster/`, NVIDIA's internal
 4× Spark reference setups).
 
-**Our hypothesis:** the difficulty is not *N* nodes — it's *how you
+**Our hypothesis:** the difficulty is not *N* nodes, it is *how you
 wire N nodes*. Two is forced (one cable). Three forces a topology
 decision. Four+ forces a switch, which is what the community tools
-expect. Stick to 2 now; buy the switch; jump straight to 4.
+expect. Stick to 2 now, buy the switch, jump straight to 4.
 
 ---
 
@@ -697,8 +752,12 @@ best when it owns a clean link.
 - **Single active NIC per cluster subnet** on every node. Multiple
   interfaces on the same `/24` breaks the NCCL ring.
 - **No VPN between nodes for cluster traffic.** Tailscale is fine for
-  laptop→cluster SSH; not fine as the NCCL transport.
+  laptop-to-cluster SSH, and not fine as the NCCL transport.
 - **Consistent MTU** across the cluster subnet.
+- **Open the rendezvous port** between nodes on the fabric subnet. A multi-node
+  launch through vLLM's own executor rendezvouses on `--master-port`, which AINode
+  sets to 29501 plus a per-instance offset. Ray's 6379 is only needed if you point a
+  recipe at the `ray` executor with an engine image that ships it.
 
 ### Recommended topologies
 
@@ -724,10 +783,16 @@ traceroute 10.0.0.2                          # 1 hop = right link
 # Passwordless SSH works
 ssh sem@10.0.0.2 true && echo OK
 
-# After launching distributed: confirm NCCL uses RoCE, not Socket
-docker exec vllm_node bash -c 'grep -E "Using network|NET/IB.*RoCE" \
-  /tmp/ray/session_latest/logs/worker-*-01000000-*.out | head -5'
+# After launching distributed: confirm NCCL uses RoCE, not Socket.
+# `ainode logs` resolves the log file the configured backend writes and says which
+# one it is following, so this works on the head and on a peer.
+ainode logs | grep -E "Using network|NET/IB.*RoCE" | head -5
 # Expect: "Using network IB" + "NET/IB ... mlx5_0:1/RoCE ... speed=200000"
+
+# Or read the engine container directly. The head is ainode-vllm-head (plus the
+# port token for a stacked instance) and each peer runs ainode-vllm-worker-*:
+docker ps --format '{{.Names}}' | grep ainode-vllm
+docker logs ainode-vllm-head 2>&1 | grep -E "Using network|NET/IB.*RoCE" | head -5
 ```
 
 ### Optional: GPU Direct RDMA (GDR)
@@ -742,8 +807,7 @@ sudo modprobe nvidia_peermem
 echo nvidia_peermem | sudo tee -a /etc/modules-load.d/nvidia-peermem.conf
 
 # Verify NCCL picks it up next launch
-docker exec vllm_node bash -c 'grep "GPU Direct RDMA" \
-  /tmp/ray/session_latest/logs/worker-*-01000000-*.out'
+ainode logs | grep "GPU Direct RDMA"
 # Expect: "GPU Direct RDMA Enabled"
 ```
 
@@ -756,8 +820,8 @@ wasteful. AINode supports a shared `models_dir` so every node pulls
 from the same cache.
 
 Block-level shared storage (NVMe-oF, iSCSI, Fibre Channel) is fast but
-**unsafe for multiple Linux kernels writing simultaneously** — ext4
-/ XFS have no distributed lock manager. Layer NFS on top:
+**unsafe for multiple Linux kernels writing simultaneously**, because ext4
+and XFS have no distributed lock manager. Layer NFS on top:
 
 ```
   Storage array (NVMe-oF, SAN, local NVMe)
@@ -770,7 +834,7 @@ Block-level shared storage (NVMe-oF, iSCSI, Fibre Channel) is fast but
   WORKERS      ← mount the NFS share at /mnt/ai-shared
 ```
 
-NFS over a 100G fabric gives 3–8 GB/s — vLLM model loading is a
+NFS over a 100G fabric gives 3 to 8 GB/s, and vLLM model loading is a
 one-shot sequential read, so you won't notice. For 100 GB+ models
 where load time hurts, add an rsync-to-local staging step.
 
@@ -779,9 +843,10 @@ where load time hurts, add an rsync-to-local staging step.
 ## CLI reference
 
 The installer puts a thin `ainode` wrapper at `/usr/local/bin/ainode`.
-Host-side commands (`update`) run directly; everything else is forwarded
-into the running container via `docker exec`. You never need to type
-`docker` yourself.
+Host-side commands (`update`) run directly, and everything else is forwarded
+into the running container with `docker exec`. Day to day you never need to type
+`docker` yourself, though a job container for training or quantization has to be
+built by hand once (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
 
 ```bash
 ainode update [version]      # resolve/pull newest (or pinned) tag + restart (upgrade in place)
@@ -792,14 +857,19 @@ ainode models                # List available models
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
-ainode logs -f               # Tail the engine log
+ainode logs -f               # Tail the engine log the configured backend writes
 ```
+
+`ainode logs` resolves the log path from the backend and prints which file, and
+which backend, it is following: `nvidia-vllm.log` for a solo or stacked engine and
+`nvidia-distributed.log` on a distributed head.
 
 ### Updating AINode
 
-Releases ship through a **tag-triggered pipeline**: `git tag vX.Y.Z` →
-CI on a self-hosted Spark runner builds and pushes
-`ghcr.io/getainode/ainode:X.Y.Z`. To upgrade a node in place:
+Releases ship through a tag-triggered pipeline: a release tag starts CI on a
+self-hosted Spark runner, which builds and pushes
+`ghcr.io/getainode/ainode:X.Y.Z`. GHCR is the only registry. To upgrade a node in
+place:
 
 ```bash
 ainode update
@@ -808,20 +878,34 @@ ainode update
 That resolves the **highest numeric GHCR tag** (never a floating
 `:latest`), pulls it, pins it to `~/.ainode/image.env`, and restarts the
 systemd service. Your config (`~/.ainode/config.json`), models
-(`~/.ainode/models/`), and fine-tune outputs are on the host — the
+(`~/.ainode/models/`), and fine-tune outputs are on the host, and the
 container is stateless, so upgrades never touch your data.
 
 To pin a specific version:
 
 ```bash
-ainode update 0.5.2
+ainode update 0.5.24
+```
+
+**Run it as the user that installed AINode.** The `image.env` the systemd unit reads
+is the one in that user's `~/.ainode`, and the path is baked into the unit at install
+time. Under `sudo`, `$HOME` is root's, so through 0.5.25 `sudo ainode update` pulled
+the new image, pinned it into `/root/.ainode/image.env` where nothing reads it,
+restarted the unit and relaunched the OLD image while reporting success. It bit this
+fleet repeatedly. From 0.5.26 the wrapper resolves the `AINODE_HOME` the unit
+actually reads (an explicit `AINODE_HOME` first, then the unit file's
+`Environment=AINODE_HOME=`, then `$SUDO_USER`'s home), prints the `image.env` it
+wrote, and where it cannot tell it refuses rather than writing a file nothing reads:
+
+```bash
+sudo AINODE_HOME=/home/<user>/.ainode ainode update
 ```
 
 To roll every node in a cluster from the master, use the **Update all**
 button or:
 
 ```bash
-curl -X POST http://<master>:8000/api/cluster/update-all   # genuine pull + swap on every node
+curl -X POST http://<master>:3000/api/cluster/update-all   # genuine pull + swap on every node
 ```
 
 ---
@@ -835,7 +919,7 @@ speaks OpenAI:
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8000/v1",
+    base_url="http://localhost:3000/v1",
     api_key="not-needed",
 )
 
@@ -848,6 +932,19 @@ print(resp.choices[0].message.content)
 
 Works with Open WebUI, LiteLLM, LangChain, llama.cpp clients, and
 anything else that speaks OpenAI.
+
+### Two ports, and which one you want
+
+Point your tools at **3000**. That is the only port AINode itself listens on, and
+everything it offers is there: `/v1` routed fleet-wide by model id with transport
+failover, `/v1/decide`, the Anthropic `/v1/messages` shape, the whole `/api` surface,
+the web UI, and the `ainode_*` Prometheus metrics on `/metrics`.
+
+**8000** is the primary vLLM engine container, talking to you directly. It serves one
+model with no routing and no failover, it is closed until a model is loaded, and its
+`/metrics` is vLLM's own `vllm:*` set rather than AINode's. `:8000/api/...` is a 404.
+It is useful for looking straight at an engine and for nothing else. A stacked model
+gets 8001, 8002 and so on the same way.
 
 ### Decisions: `POST /v1/decide`
 
@@ -928,14 +1025,16 @@ tokenizer does not give a two-letter label its own token, that label's mass is
 its first letter's token mass, which the single-letter label of the same letter
 also claims. Read such a pair as jointly calibrated.
 
-### Metrics — `/metrics` (Prometheus) and `/api/metrics` (JSON)
+### Metrics: `/metrics` (Prometheus) and `/api/metrics` (JSON)
 
-AINode exposes its own metrics on the same port as the API:
+AINode exposes its own metrics on port 3000, the same port as its API. The engine's
+own `vllm:*` metrics are a separate set on the engine port and are not these:
 
 ```bash
-curl http://localhost:8000/metrics           # Prometheus text exposition
-curl http://localhost:8000/api/metrics       # JSON snapshot
-curl http://localhost:8000/api/metrics/gpu   # GPU subset
+curl http://localhost:3000/metrics           # Prometheus text exposition, ainode_*
+curl http://localhost:3000/api/metrics       # JSON snapshot
+curl http://localhost:3000/api/metrics/gpu   # GPU subset
+curl http://localhost:8000/metrics           # the primary engine's own vllm:* set
 ```
 
 Key series:
@@ -945,7 +1044,9 @@ Key series:
 - `ainode_tokens_generated_total`, `ainode_tokens_per_second`
 - `ainode_request_latency_milliseconds{quantile="0.5|0.95|0.99"}`
 - `ainode_requests_by_model_total{model=...}`
-- `ainode_gpu_utilization_percent`, `ainode_gpu_memory_used_bytes`, `ainode_gpu_temperature_celsius`
+- `ainode_gpu_utilization_percent`, `ainode_gpu_memory_used_bytes`,
+  `ainode_gpu_memory_total_bytes`, `ainode_gpu_temperature_celsius`,
+  `ainode_gpu_available`
 
 Scrape config for Prometheus:
 
@@ -953,7 +1054,7 @@ Scrape config for Prometheus:
 scrape_configs:
   - job_name: ainode
     static_configs:
-      - targets: ["ainode-host:8000"]
+      - targets: ["ainode-host:3000"]
 ```
 
 ---
@@ -961,11 +1062,16 @@ scrape_configs:
 ## Requirements
 
 - **OS**: Ubuntu 22.04+ (DGX Spark OS works out of the box)
-- **GPU**: NVIDIA GB10 (DGX Spark, ASUS GX10) — or any NVIDIA GPU with
-  CUDA 13 drivers
+- **GPU**: NVIDIA GB10 (DGX Spark, ASUS GX10), which is where every measurement in
+  this README was taken, plus one Tesla V100 lane proven through a catalog recipe.
+  Any NVIDIA GPU with CUDA 13 drivers is the design target, and a GPU outside those
+  two families has not been run: the default engine image is a GB10 build, so a new
+  architecture may need its own `engine_image` in the recipe, the way Volta did.
 - **Memory**: 8 GB+ GPU for small models, 128 GB recommended for the
   big ones, 240 GB+ aggregated for real sharded work
-- **Disk**: 20 GB for the container image; more for models
+- **Disk**: about 400 MB for the AINode image, plus the engine image (roughly 22 GB
+  on disk for the default one, and a second one if a recipe pins its own), plus the
+  model weights
 - **Docker**: 24.0+ with the NVIDIA Container Toolkit
 
 ---
@@ -974,38 +1080,44 @@ scrape_configs:
 
 | | Cloud AI | AINode |
 |---|---|---|
-| Monthly cost | $100–10,000+ | $0 (you own the hardware) |
+| Monthly cost | $100 to $10,000+ | $0 (you own the hardware) |
 | Data privacy | Your data on their servers | Your data stays local |
 | Rate limits | Yes | None |
-| Latency | 200–2000 ms | 10–50 ms |
-| Fine-tuning | Limited, expensive | Unlimited, free |
-| Internet required | Yes | No |
+| Network hop | Out to a provider and back | Your own LAN |
+| Fine-tuning | Limited, expensive | LoRA, QLoRA and full, single node, free |
+| Internet required | Yes | Only to pull images and weights |
 | Models available | Their choice | Your choice |
+
+Measured latency belongs in the tables above, not here. The fastest time to first
+token in any of our records is 194 ms, on a 4K prompt.
 
 ---
 
 ## Roadmap
 
 - [x] Core CLI + installer
-- [x] vLLM integration (patched NCCL for GB10)
+- [x] vLLM engines launched for you, one container per model, per-recipe image
 - [x] Web UI (chat, server, downloads, training, config)
 - [x] Multi-node auto-discovery + cluster topology view
-- [x] Automatic model sharding across nodes (TP=2 verified)
+- [x] Model sharding across nodes from the browser node picker (TP=2 verified)
 - [x] NFS-shared model storage
-- [x] Unified container image + systemd install
+- [x] Slim orchestrator image + systemd install
 - [x] Browser-driven fine-tuning (LoRA / QLoRA / Full, single node)
 - [x] Training artifact retrieval, LoRA merge, checkpoint resume
 - [x] Training jobs, artifacts and resume survive a restart
 - [x] Evaluation loop + W&B integration
 - [x] Prometheus metrics endpoint (`/metrics`)
-- [x] 4-node TP=4 sharded inference (verified — 235B-A22B-NVFP4)
+- [x] 4-node TP=4 sharded inference (235B-A22B-NVFP4, June 2026 on 0.4.x)
 - [x] In-browser quantization (AWQ / NVFP4) + push to Hugging Face
 - [x] Federated multi-model serving (master routes `/v1/*` by model name)
 - [x] Model stacking (N models per node, persisted + replayed)
 - [x] Training + adapter-merge in a spawned GPU container (slim orchestrator)
-- [x] Deploy pipeline (tag → CI → GHCR → `ainode update` / cluster update-all)
+- [x] Deploy pipeline (release tag, CI, GHCR, then `ainode update` or update-all)
 - [x] VLM (vision) serving with fp8-KV auto-skip on GB10
-- [x] AutoData — Δ-filtered synthetic-data generation (val-set lift objective)
+- [x] AutoData, Δ-filtered synthetic-data generation (val-set lift objective)
+- [x] A non-GB10 GPU served through a catalog recipe (Tesla V100)
+- [x] Training image published from CI, with a preflight that names it
+- [ ] Publish the quantization job image from CI
 - [ ] Model marketplace (custom registries)
 - [ ] Mobile-friendly UI
 
@@ -1013,18 +1125,27 @@ scrape_configs:
 
 ## Contributing
 
-AINode is Apache-2.0 and welcomes contributions. See
-[CONTRIBUTING.md](CONTRIBUTING.md) — and please run the test suite
-(`pytest tests/`) before opening a PR.
+AINode is Apache-2.0 and welcomes contributions. Work on a branch, open a PR, and
+run the test suite and the linter before you do:
+
+```bash
+pip install -e ".[dev]"
+python -m pytest tests/ -q
+ruff check ainode tests
+```
+
+The repo's edit rules live in [`AGENTS.md`](AGENTS.md) and in the `AGENTS.md` nearest
+the folder you are changing. To report a security issue, read
+[SECURITY.md](SECURITY.md) and mail it rather than opening an issue.
 
 ---
 
 ## License
 
-Apache 2.0 — use it however you want.
+Apache 2.0. Use it however you want.
 
 ---
 
 <p align="center">
-  <sub>crafted with <span style="color:#e74c3c">♥</span> by Jason Brashear · powered by <a href="https://argentos.ai">argentos.ai</a></sub>
+  <sub>crafted with <span style="color:#e74c3c">♥</span> by Jason Brashear · Made in Texas</sub>
 </p>
