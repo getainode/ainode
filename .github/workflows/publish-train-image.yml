@@ -138,9 +138,13 @@ jobs:
       # llmcompressor is the one thing this image adds over the base.
       - name: Smoke test the image
         run: |
-          docker run --rm "${IMAGE_REPO}:${TRAIN_VERSION}" --help | head -5
-          docker run --rm --entrypoint python3 "${IMAGE_REPO}:${TRAIN_VERSION}" \
-            -c "import llmcompressor, torch, transformers; print('llmcompressor', llmcompressor.__version__, 'torch', torch.__version__, 'transformers', transformers.__version__)"
+          # No arguments: the image's CMD is the quant runner's --help, and its
+          # ENTRYPOINT is empty, so any argument here would REPLACE that command.
+          docker run --rm "${IMAGE_REPO}:${TRAIN_VERSION}" | head -5
+          # llmcompressor is the one thing this image adds over the base, and the
+          # runner needs torch and transformers. Versions come from
+          # importlib.metadata, because not all three expose __version__.
+          docker run --rm --entrypoint python3 "${IMAGE_REPO}:${TRAIN_VERSION}" -c "import importlib.metadata as md, llmcompressor, torch, transformers; print('llmcompressor', md.version('llmcompressor'), 'torch', md.version('torch'), 'transformers', md.version('transformers'))"
 
       - name: Report the image size
         run: |
