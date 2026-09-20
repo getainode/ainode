@@ -131,6 +131,10 @@ def fleet_instances(app) -> list[dict]:
             "gpu_name": getattr(node, "gpu_name", "") or None,
             "gpu_memory_gb": getattr(node, "gpu_memory_gb", None) or None,
             "unified_memory": getattr(node, "unified_memory", None),
+            # The node's real device count, which it now announces (#163). The
+            # card used to infer it from the launch width, so a four-V100 host
+            # serving TP=1 read as one GPU.
+            "gpu_count": int(getattr(node, "gpu_count", 1) or 1),
         }
         if getattr(node, "model", ""):
             add({**base, "model": node.model, "port": node_port, "record": None})
@@ -439,9 +443,11 @@ async def handle_model_card(request: web.Request) -> web.Response:
 
     nodes = _instance_nodes(record, entry)
     tp = (record or {}).get("tensor_parallel_size")
+    # A distributed instance spans one GPU per node; a solo one spans whatever
+    # the node announced (#163), which is four on the fleet's x86 box.
     gpu_count = len(nodes) if nodes else (tp if tp and tp > 1 else None)
     if gpu_count is None and entry.get("gpu_name"):
-        gpu_count = 1  # AINode models one GPU per node; the node reported one
+        gpu_count = int(entry.get("gpu_count") or 1)
 
     return web.json_response({
         "model": model,

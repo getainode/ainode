@@ -727,14 +727,23 @@ const AINode = {
 
       // VRAM — merge this node's live GPU metrics so the ring shows real %.
       // Only mutates the local node; remote nodes keep their static totals.
+      // Every figure here can be null (a driver that does not expose GPU
+      // utilisation, a unified-memory node with no engine reservation to report),
+      // and null must survive the merge: coerced to 0 it becomes an idle, empty
+      // node on the graphic (#175, #176).
       var gm = this.state.metrics && this.state.metrics.gpu;
       if (gm && !gm.error && gm.memory_total_mb > 0) {
         var localId = s.node_id;
+        var usedPct = gm.memory_used_mb === null || gm.memory_used_mb === undefined
+          ? null : Math.round((gm.memory_used_mb / gm.memory_total_mb) * 100);
         topoNodes.forEach(function (n) {
           if (n.node_id === localId || topoNodes.length === 1) {
-            n.gpu_memory_used_pct = Math.round((gm.memory_used_mb / gm.memory_total_mb) * 100);
-            n.gpu_utilization = gm.utilization_percent;
-            n.gpu_temp = gm.temperature_c;
+            n.gpu_memory_used_pct = usedPct;
+            n.gpu_utilization = gm.utilization_percent === undefined
+              ? null : gm.utilization_percent;
+            n.gpu_temp = gm.temperature_c === undefined ? null : gm.temperature_c;
+            if (gm.gpu_count) n.gpu_count = gm.gpu_count;
+            if (gm.memory_kind) n.memory_kind = gm.memory_kind;
           }
         });
       }
@@ -1251,11 +1260,28 @@ const AINode = {
 
       var byId = {};
       (self.state.nodes || []).forEach(function (nd) { byId[nd.node_id] = nd; });
-      var freeOf = function (nd) { return nd ? Math.max(0, (nd.gpu_memory_gb || 0) * (1 - (nd.gpu_memory_used_pct || 0) / 100)) : 0; };
       var perShard = req / n;
-      var frees = Array.prototype.map.call(active, function (d) { return freeOf(byId[d.dataset.nodeId]); });
-      var minFree = frees.length ? Math.min.apply(null, frees) : 0;
-      if (minFree < perShard) {
+      // A node that does not report its memory use has an UNKNOWN amount free,
+      // which is neither "empty" nor "full": treating the missing figure as 0
+      // percent used claimed the whole node was free (#174, #175). Say so
+      // instead of sizing the launch against a number nobody measured.
+      var frees = [];
+      var unknownNodes = [];
+      Array.prototype.forEach.call(active, function (d) {
+        var nd = byId[d.dataset.nodeId];
+        var pct = nd ? nd.gpu_memory_used_pct : null;
+        if (!nd || pct === null || pct === undefined) {
+          unknownNodes.push(d.textContent.replace('★', '').trim());
+          return;
+        }
+        frees.push(Math.max(0, (nd.gpu_memory_gb || 0) * (1 - pct / 100)));
+      });
+      var minFree = frees.length ? Math.min.apply(null, frees) : null;
+      if (unknownNodes.length) {
+        launchHint.className = 'launch-hint warn';
+        launchHint.textContent = 'Needs ~' + Math.round(perShard) + ' GB/node. ' +
+          unknownNodes.join(', ') + ' does not report memory use, so free space there is unknown.';
+      } else if (minFree !== null && minFree < perShard) {
         launchHint.className = 'launch-hint warn';
         launchHint.textContent = '⚠ Needs ~' + Math.round(perShard) + ' GB/node but a selected node has only ~' +
           Math.round(minFree) + ' GB free — unload a model to free space.';
@@ -1288,7 +1314,13 @@ const AINode = {
     var nodes = (this.state.nodes || []).filter(function (n) { return n.status !== 'offline'; });
     var size = m.size_gb || 0;
     if (!nodes.length || (!size && !m.min_mem)) return;
-    var freeOf = function (n) { return Math.max(0, (n.gpu_memory_gb || 0) * (1 - (n.gpu_memory_used_pct || 0) / 100)); };
+    // Unknown memory use is not free memory: a node that cannot report it is
+    // ranked last rather than as the emptiest node in the fleet (#174, #175).
+    var freeOf = function (n) {
+      var pct = n.gpu_memory_used_pct;
+      if (pct === null || pct === undefined) return 0;
+      return Math.max(0, (n.gpu_memory_gb || 0) * (1 - pct / 100));
+    };
     var headId = this.state.status && this.state.status.node_id;
     var head = nodes.find(function (n) { return n.node_id === headId; }) || nodes[0];
     var peers = nodes.filter(function (n) { return n !== head; }).sort(function (a, b) {
