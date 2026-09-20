@@ -6137,11 +6137,40 @@ const AINode = {
     this.openApiAccess();
   },
 
+  // The TLS sentence in the API access panel, from /api/status's tls block
+  // (api/server.py::tls_status_fields). Three states, because "I could not read
+  // it" is not the same answer as "there is none": a browser with no key gets a
+  // 401 from /api/status while this panel is exactly where it is sent.
+  tlsAccessNote(tls) {
+    if (!tls) {
+      return 'TLS state unknown from this browser: /api/status needs the key. Paste one above to see whether this node serves HTTPS.';
+    }
+    if (!tls.enabled) {
+      return 'There is no TLS on these ports: a key travels in plain text over the network. Run <code>ainode tls enable</code> on the node (or <code>ainode tls enable --tailscale</code> for a certificate a Mac will trust), or put AINode behind a reverse proxy that terminates TLS.';
+    }
+    var note = 'HTTPS is on, on port <code>' + this.esc(String(tls.port)) + '</code>. HTTP stays on this port for fleet clients, so a key still travels in plain text unless the caller uses the HTTPS one.';
+    if (tls.cert_expires) {
+      note += ' Certificate: ' + (tls.self_signed ? 'self-signed' : 'CA-issued')
+        + ', expires ' + this.esc(String(tls.cert_expires));
+      if (tls.cert_days_left !== null && tls.cert_days_left !== undefined) {
+        note += ' (' + this.esc(String(tls.cert_days_left)) + ' days left)';
+      }
+      note += '.';
+    } else if (tls.label) {
+      note += ' ' + this.esc(String(tls.label)) + '.';
+    }
+    return note;
+  },
+
   async renderConfigApiAccess() {
     var mount = this._configMount();
     if (!mount) return;
     var self = this;
     var st = await this.refreshAuthStatus() || this.state.authStatus || {};
+    // Read TLS off /api/status rather than assuming it: null means this browser
+    // could not read it (no key), which tlsAccessNote reports as such.
+    var statusNow = await this.fetchJSON('/api/status') || this.state.status || null;
+    var tlsState = (statusNow && statusNow.tls) ? statusNow.tls : null;
     var keys = null;
     if (!st.enabled || st.authenticated) {
       keys = await this.fetchJSON('/api/auth/keys');
@@ -6218,7 +6247,10 @@ const AINode = {
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Also worth knowing</h3>';
     html += '<p class="config-card-desc"><code>trust_remote_code</code> makes the engine run Python from the model repository. It can only be turned on by a request that presents a key, or by loading a curated catalog model whose recipe already declares it, so an open port cannot be talked into executing an arbitrary repo.</p>';
-    html += '<p class="config-card-desc">There is no TLS on these ports: a key travels in plain text over the network. On anything but a trusted LAN or a tailnet, put AINode behind a reverse proxy that terminates TLS.</p>';
+    // TLS is a real state now, so this line reads it instead of stating a fact
+    // that stopped being true. /api/status needs the key when auth is on, so a
+    // browser that cannot read it says so rather than guessing either way.
+    html += '<p class="config-card-desc">' + this.tlsAccessNote(tlsState) + '</p>';
     html += '</div>';
 
     mount.innerHTML = html;

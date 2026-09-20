@@ -5,8 +5,8 @@ and nearly every gotcha that audit turned up was one command away from being
 visible: a stale image pin, a cluster split across two releases, an
 ``engine_backend`` still on eugr, a discovery port mismatch, a member with no
 fabric IP, a secrets store nobody had chmodded. So the command is deliberately
-a *list of small facts* rather than a score: one line per check, OK / WARN /
-FAIL, and a one-line fix hint wherever the answer is not OK.
+a *list of small facts* rather than a score: one line per check, INFO / OK /
+WARN / FAIL, and a one-line fix hint wherever the answer is not OK.
 
 Shape, so this stays testable and stays honest:
 
@@ -20,7 +20,10 @@ Shape, so this stays testable and stays honest:
   :func:`probe_gpus`). Tests monkeypatch the seam, not the check.
 * WARN means "this will bite you"; FAIL means "this node cannot do its job
   right now". Only a FAIL makes the command exit non-zero, because a fleet
-  where every WARN is fatal is a fleet where nobody runs the doctor.
+  where every WARN is fatal is a fleet where nobody runs the doctor. INFO is a
+  configuration fact where neither state is wrong (the rate limits), and it is
+  never a reason to act: it stays out of the exit code and out of the
+  ``--fix`` "left for a human" list.
 * ``--fix`` applies only fixes that cannot lose anything: create a missing
   directory, chmod the secrets store to 0600, write the fleet discovery port.
   Everything else is listed for a human.
@@ -48,13 +51,21 @@ from ainode.core.config import (
     DEFAULT_ENGINE_BACKEND,
     NodeConfig,
 )
+from ainode.ratelimit.middleware import RateLimitConfig
+from ainode.tls.certs import certificate_info
+from ainode.tls.config import load_tls_config
 
 OK = "ok"
 WARN = "warn"
 FAIL = "fail"
+#: A fact worth printing that is not a judgement. Used where the honest answer is
+#: "here is how this node is configured" and neither state is wrong: rate limiting
+#: off is the right shape for a single-user node and a problem for an exposed one,
+#: and the doctor is not the place to guess which this is.
+INFO = "info"
 
 #: Rank order for the exit code and the summary line.
-_SEVERITY = {OK: 0, WARN: 1, FAIL: 2}
+_SEVERITY = {INFO: 0, OK: 0, WARN: 1, FAIL: 2}
 
 #: The UDP port a fleet announces on, from the one home for that value. It was a
 #: separate 5679 here because ``NodeConfig.discovery_port`` defaulted to 5678
@@ -73,6 +84,11 @@ DISK_WARN_FRACTION = 0.15
 #: Above this, vLLM's KV cache leaves no room for a second engine, and the
 #: stacked-load admission guard refuses anything that would pass 0.90.
 GMU_WARN_AT = 0.9
+
+#: A certificate this close to its end is a WARN. Two weeks is enough notice for
+#: an operator who runs the doctor weekly, and a tailnet certificate is renewed by
+#: one command, so there is no reason to warn earlier and live with a yellow line.
+TLS_EXPIRY_WARN_DAYS = 14
 
 
 @dataclass
@@ -936,6 +952,80 @@ def check_secrets(home) -> list[Check]:
                   data=data)]
 
 
+def check_tls(config: NodeConfig) -> list[Check]:
+    """Does anything here speak HTTPS, and is the certificate still good?
+
+    TLS off is a WARN rather than a FAIL: it is the default, it is fine on a LAN
+    or a tailnet, and it is what the whole fleet runs. An expired certificate IS a
+    FAIL, because the node is refusing connections on a port it advertises.
+    """
+    tls = load_tls_config(config)
+    web_port = int(getattr(config, "web_port", 3000) or 3000)
+    data = {"enabled": bool(tls.enabled), "port": int(tls.port),
+            "cert_file": tls.cert_file, "http_port": web_port}
+
+    if not tls.enabled:
+        return [Check("tls.enabled", WARN,
+                      f"no TLS: the dashboard, the API and any key travel in clear "
+                      f"text on {web_port}",
+                      fix="ainode tls enable (self-signed), or ainode tls enable "
+                          "--tailscale for a real certificate",
+                      data=data)]
+    if not tls.cert_file or not tls.key_file:
+        return [Check("tls.enabled", FAIL,
+                      "TLS is enabled with no certificate configured, so the port "
+                      "never opens",
+                      fix="ainode tls enable",
+                      data=data)]
+    info = certificate_info(tls.cert_file)
+    data.update({"expires": info.get("expires"), "days_left": info.get("days_left"),
+                 "self_signed": info.get("self_signed")})
+    if not info.get("exists"):
+        return [Check("tls.enabled", FAIL,
+                      f"TLS is enabled but {tls.cert_file} is not there, so the "
+                      f"port never opens",
+                      fix="ainode tls enable (regenerates the pair)",
+                      data=data)]
+    if info.get("error"):
+        return [Check("tls.enabled", WARN,
+                      f"TLS is enabled and {info['error']}",
+                      fix="ainode tls status, then ainode tls enable to replace it",
+                      data=data)]
+    days = info.get("days_left")
+    kind = "self-signed" if info.get("self_signed") else "CA-issued"
+    if days is not None and days < 0:
+        return [Check("tls.enabled", FAIL,
+                      f"the certificate on {tls.port} expired {abs(days)} days ago, "
+                      f"so every HTTPS client is refusing this node",
+                      fix="ainode tls enable (self-signed) or ainode tls enable "
+                          "--tailscale, then restart",
+                      data=data)]
+    if days is not None and days <= TLS_EXPIRY_WARN_DAYS:
+        return [Check("tls.enabled", WARN,
+                      f"the {kind} certificate on {tls.port} expires in {days} days",
+                      fix="ainode tls enable to replace it, then restart the node",
+                      data=data)]
+    return [Check("tls.enabled", OK,
+                  f"HTTPS on {tls.port}, {kind}, {days} days left "
+                  f"(HTTP still on {web_port})",
+                  data=data)]
+
+
+def check_rate_limit(config: NodeConfig) -> list[Check]:
+    """Report the per-client limits. A fact, not a judgement: see INFO."""
+    limits = RateLimitConfig.from_config(config)
+    data = limits.to_dict()
+    if not limits.enabled:
+        return [Check("ratelimit.state", INFO,
+                      "no per-client limit on /v1, so one client can hold every "
+                      "engine busy",
+                      fix='set rate_limit {"enabled": true, "max_inflight": 8} in '
+                          "config.json",
+                      data=data)]
+    return [Check("ratelimit.state", INFO,
+                  f"/v1 limited per client: {limits.label()}", data=data)]
+
+
 def check_hf_token(config: NodeConfig, home, env: Optional[dict] = None) -> list[Check]:
     """Is a Hugging Face token configured anywhere? Presence only, never a value."""
     env = dict(os.environ if env is None else env)
@@ -1001,6 +1091,8 @@ def run_checks(home=None, config_path=None) -> list[Check]:
     checks += check_fabric(config)
     checks += check_distributed(home)
     checks += check_secrets(home)
+    checks += check_tls(config)
+    checks += check_rate_limit(config)
     checks += check_hf_token(config, home)
     return checks
 
@@ -1159,8 +1251,8 @@ def peer_checks(peer: str) -> tuple[list[Check], Optional[dict]]:
 # Rendering
 # ---------------------------------------------------------------------------
 
-_STYLE = {OK: "green", WARN: "yellow", FAIL: "bold red"}
-_LABEL = {OK: " OK ", WARN: "WARN", FAIL: "FAIL"}
+_STYLE = {INFO: "cyan", OK: "green", WARN: "yellow", FAIL: "bold red"}
+_LABEL = {INFO: "INFO", OK: " OK ", WARN: "WARN", FAIL: "FAIL"}
 
 
 def render(checks: list[Check], console=None, header: str = "") -> None:
@@ -1185,8 +1277,11 @@ def render(checks: list[Check], console=None, header: str = "") -> None:
                           highlight=False, soft_wrap=True)
     console.print("")
     tone = "bold red" if counts[FAIL] else ("yellow" if counts[WARN] else "green")
-    console.print(f"[{tone}]{counts['total']} checks: {counts[OK]} OK, "
-                  f"{counts[WARN]} WARN, {counts[FAIL]} FAIL[/{tone}]")
+    line = (f"{counts['total']} checks: {counts[OK]} OK, "
+            f"{counts[WARN]} WARN, {counts[FAIL]} FAIL")
+    if counts.get(INFO):
+        line += f", {counts[INFO]} INFO"
+    console.print(f"[{tone}]{line}[/{tone}]")
 
 
 def _sorted_by_severity(checks: list[Check]) -> list[Check]:
@@ -1240,7 +1335,8 @@ def cmd_doctor(args) -> None:
                 console.print(f"  {line}")
         else:
             console.print("[dim]--fix had nothing safe to apply[/dim]")
-        remaining = [c for c in _sorted_by_severity(checks) if c.status != OK]
+        remaining = [c for c in _sorted_by_severity(checks)
+                     if c.status not in (OK, INFO)]
         if remaining:
             console.print("")
             console.print("[bold cyan]left for a human[/bold cyan]")
