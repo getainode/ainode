@@ -19,6 +19,7 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
+from ainode import __version__
 from ainode.core.config import NodeConfig
 from ainode.discovery.instance import instance_parallel
 
@@ -628,6 +629,350 @@ async def handle_server_eject(request: web.Request) -> web.Response:
 
 
 # ------------------------------------------------------------------
+# The client endpoint: every node can say where the fleet answers
+# ------------------------------------------------------------------
+#
+# Routing is already replicated, every node proxies every fleet model, but the
+# ADDRESS is not: a client holds one, so an outage on the node it holds strands
+# it even though every other node could have served it. These helpers answer
+# GET /api/cluster/endpoint, and fill /api/status's endpoint_hint, with the
+# addresses a client can fail over to, so a client learns its own fallbacks from
+# the node it is already talking to.
+#
+# Two rules run through all of it:
+#   * "localhost" is never an answer. It is what /api/nodes reports for every
+#     row, and it is the one address guaranteed wrong on the caller's machine, so
+#     any loopback spelling is dropped here rather than handed out.
+#   * A host is only echoed back when this node really answers on it. The Host
+#     header is caller-controlled, so accepting it unchecked would let one
+#     request make a node advertise any address at all to the next reader.
+
+#: Spellings that only ever mean "the machine making the request", so they can
+#: never be handed to a client as a fleet address. 127.* is matched by prefix.
+LOOPBACK_HOSTS = frozenset({
+    "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
+    "0.0.0.0", "::", "::1", "127.0.0.1",
+})
+
+#: Placeholders a node can carry instead of a name (``node_name`` is Optional,
+#: and the Ray join path already guards against these exact values), which must
+#: never become a URL.
+UNRESOLVED_HOSTS = frozenset({"unknown", "none", "null", ""})
+
+#: How long this node's own addresses are cached, in seconds.
+#:
+#: NOT an optimization to skip: deriving them reads the host (an ``ip``
+#: subprocess and a socket the kernel has to route), and this runs on
+#: /api/status, which every dashboard polls every few seconds for every node it
+#: draws, so uncached it would put a fork per poll on the fleet's hottest route,
+#: on the event loop. A machine's addresses change on the timescale of a DHCP
+#: lease, so a minute of staleness costs nothing.
+ADDRESS_CACHE_SECONDS = 60.0
+
+#: ``{"at": <monotonic>, "key": <config fields>, "own": frozenset, "lan": str}``.
+#: Both answers are refreshed together because both come from one read of the host.
+_address_cache: dict = {"at": 0.0, "key": None, "own": frozenset(), "lan": ""}
+
+
+def reset_address_cache() -> None:
+    """Forget the cached addresses. For tests."""
+    _address_cache.update({"at": 0.0, "key": None, "own": frozenset(), "lan": ""})
+
+
+def _is_usable_host(value) -> bool:
+    """True when *value* is an address worth handing to another machine."""
+    if not isinstance(value, str):
+        return False
+    host = value.strip().strip("[]").lower()
+    if host in UNRESOLVED_HOSTS or host in LOOPBACK_HOSTS:
+        return False
+    return not host.startswith("127.")
+
+
+def _first_usable(*candidates) -> str:
+    for candidate in candidates:
+        if _is_usable_host(candidate):
+            return str(candidate).strip()
+    return ""
+
+
+def host_header_host(request) -> str:
+    """The host part of this request's Host header, port stripped, or ""."""
+    try:
+        header = (request.headers.get("Host") or "").strip()
+    except AttributeError:  # pragma: no cover - a stub request with no headers
+        return ""
+    if not header:
+        return ""
+    if header.startswith("["):  # [::1]:3000, an IPv6 literal keeps its colons
+        closing = header.find("]")
+        return header[: closing + 1] if closing != -1 else header
+    return header.split(":", 1)[0].strip()
+
+
+def _local_ipv4s() -> list:
+    """Every IPv4 bound on this host, in ``ip`` order, or [].
+
+    Deliberately the raw address list rather than ``netdev.list_ipv4_interfaces``:
+    that one drops virtual devices while it hunts for a fabric port, and a tailnet
+    or bridge address is a perfectly good way to reach this dashboard.
+    """
+    try:
+        from ainode.cluster import netdev
+
+        return list(netdev._parse_ipv4_addrs(
+            netdev._run_command(["ip", "-o", "-4", "addr", "show"])
+        ).values())
+    except Exception:  # pragma: no cover - no ip(8), or a host that will not say
+        logger.debug("could not enumerate this node's addresses", exc_info=True)
+        return []
+
+
+def _outbound_ipv4() -> str:
+    """The address the kernel would source an outbound packet from, or "".
+
+    A UDP ``connect()`` sends nothing, so this is a routing-table lookup rather
+    than a network round trip. No name resolution anywhere in here: the DNS
+    lookup this used to do could stall for seconds on a host whose own hostname
+    does not resolve, and it would have done it on the /api/status path.
+    """
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))
+            return probe.getsockname()[0]
+        finally:
+            probe.close()
+    except Exception:  # pragma: no cover - no route at all
+        logger.debug("could not source an outbound address", exc_info=True)
+        return ""
+
+
+def _derive_addresses(config) -> tuple:
+    """``(own_addresses, lan_address)`` read fresh from the host."""
+    own: set = set()
+
+    def _add(value) -> None:
+        if isinstance(value, str) and value.strip():
+            own.add(value.strip().lower())
+
+    addrs = _local_ipv4s()
+    for addr in addrs:
+        _add(addr)
+    hostname = ""
+    try:
+        hostname = socket.gethostname()
+    except Exception:  # pragma: no cover - a host with no name
+        hostname = ""
+    _add(hostname)
+    _add(hostname.split(".", 1)[0] if hostname else "")
+    if config is not None:
+        _add(getattr(config, "node_name", ""))
+        _add(getattr(config, "host", ""))
+
+    # The address to advertise: an explicitly configured bind host, the interface
+    # carrying the default route, then any other real address on the box, then
+    # this node's name. Loopback is rejected at every step, so a node that can
+    # offer nothing routable answers "" and its url comes back null, which a
+    # client can act on where "localhost" cannot.
+    configured = getattr(config, "host", "") if config is not None else ""
+    lan = ""
+    if _is_usable_host(configured):
+        lan = str(configured).strip()
+    else:
+        lan = _first_usable(_outbound_ipv4(), *addrs,
+                            getattr(config, "node_name", "") if config else "",
+                            hostname)
+    return frozenset(own), lan
+
+
+def _addresses(config) -> tuple:
+    """``(own_addresses, lan_address)``, cached for ADDRESS_CACHE_SECONDS.
+
+    Keyed by the two config fields that feed it, so a renamed node or a changed
+    bind host answers correctly at once rather than after the TTL, and so two
+    apps in one process (which is every test module) cannot read each other's.
+    """
+    now = time.monotonic()
+    key = (getattr(config, "node_name", None), getattr(config, "host", None))
+    if (_address_cache.get("key") == key
+            and now - float(_address_cache.get("at") or 0.0) < ADDRESS_CACHE_SECONDS):
+        return _address_cache["own"], _address_cache["lan"]
+    own, lan = _derive_addresses(config)
+    _address_cache.update({"at": now, "key": key, "own": own, "lan": lan})
+    return own, lan
+
+
+def own_addresses(config) -> frozenset:
+    """Every spelling of an address THIS node answers on, lowercased.
+
+    The guard on the Host header: a caller-supplied host is echoed back only when
+    it is in here. Built from the node's own interfaces, its hostname, and its
+    configured identity. A DNS alias of this node that is none of those is not
+    echoed back and falls through to the LAN address, which is a correct answer
+    too: resolving the hostname here cost seconds on hosts where that lookup
+    fails, on a route the dashboard polls constantly.
+    """
+    return _addresses(config)[0]
+
+
+def lan_address(config) -> str:
+    """The address this node tells other machines to use, or "".
+
+    See ``_derive_addresses`` for the order. Cached with ``own_addresses``.
+    """
+    return _addresses(config)[1]
+
+
+def self_host(request, config) -> str:
+    """The address to report for the node answering this request.
+
+    The Host header wins when this node really answers on it: that is the address
+    the caller just proved it can reach, tailnet or LAN or a name out of its own
+    hosts file, and it is a better answer than anything derived here. A header
+    naming something else (a proxy's name, a spoof, or ``localhost``) is ignored
+    in favour of the LAN address.
+    """
+    header_host = host_header_host(request)
+    if _is_usable_host(header_host) and header_host.strip().lower() in own_addresses(config):
+        return header_host.strip()
+    return lan_address(config)
+
+
+def peer_host(node) -> str:
+    """The address to report for a PEER, or "".
+
+    The UDP source address first: the announcement payload carries no routable
+    address of its own, and the source IP is the one address the peer has proved
+    it sends from. Then its fabric IP, then its name.
+    """
+    return _first_usable(
+        getattr(node, "peer_ip", None),
+        getattr(node, "fabric_ip", ""),
+        getattr(node, "node_name", ""),
+    )
+
+
+def endpoint_url(host: str, port: int) -> Optional[str]:
+    """``http://host:port`` for a usable host, else None (never a loopback URL)."""
+    if not _is_usable_host(host):
+        return None
+    return f"http://{host}:{int(port or 3000)}"
+
+
+def endpoint_nodes(app, request) -> list:
+    """Every node of this cluster a client could talk to instead, master first.
+
+    Ordered so a client that has lost its address reaches the coordinator while
+    it is up, then the rest by name for a stable list. Offline nodes are left
+    out: this is a list of addresses to try, not a roster. In-memory only, no
+    node is probed, so a client already polling /api/status pays nothing for it.
+    """
+    config: Optional[NodeConfig] = app.get("config")
+    cluster = app.get("cluster_state")
+    if cluster is None:
+        return []
+    local_id = getattr(config, "node_id", None)
+    web_port = int(getattr(config, "web_port", 3000) or 3000)
+
+    try:
+        from ainode.discovery.broadcast import NodeStatus
+
+        members = [n for n in cluster.members() if n.status != NodeStatus.OFFLINE]
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not read the cluster's members")
+        return []
+
+    master = None
+    try:
+        master = cluster.get_master()
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not read the cluster's master")
+    master_id = getattr(master, "node_id", None)
+
+    rows: list[dict] = []
+    for node in members:
+        is_self = node.node_id == local_id
+        host = self_host(request, config) if is_self else peer_host(node)
+        port = web_port if is_self else int(getattr(node, "web_port", 3000) or 3000)
+        rows.append({
+            "name": node.node_name or node.node_id,
+            "host": host,
+            "port": port,
+            # Our own version from the running process, a peer's from the wire
+            # (``ainode_version`` on the announcement). A peer that announces
+            # none reports "", the same spelling every other node-listing view
+            # uses, and NEVER this node's version: filling it in is how a split
+            # fleet goes on looking like a healthy one (#171). The key is
+            # ``version`` here because every field in this payload is about the
+            # node it describes; it is the same value /api/nodes calls
+            # ``ainode_version``.
+            "version": (__version__ if is_self
+                        else (getattr(node, "ainode_version", "") or "")),
+            "role": "master" if node.node_id == master_id else "worker",
+            "url": endpoint_url(host, port),
+        })
+    rows.sort(key=lambda row: (row["role"] != "master", (row["name"] or "").lower()))
+    return rows
+
+
+def endpoint_payload(app, request) -> dict:
+    """The body of GET /api/cluster/endpoint.
+
+    Addresses and nothing else, which is what lets it answer without an API key:
+    a client that cannot reach its configured node has to be able to ask a
+    reachable one where the fleet is, and the key it holds is no use to it if the
+    node that went down is the one holding the fleet's addresses.
+    """
+    config: Optional[NodeConfig] = app.get("config")
+    cluster = app.get("cluster_state")
+    web_port = int(getattr(config, "web_port", 3000) or 3000)
+    host = self_host(request, config)
+    local_id = getattr(config, "node_id", None)
+
+    master = None
+    if cluster is not None:
+        try:
+            master = cluster.get_master()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("could not read the cluster's master")
+
+    master_block = None
+    if master is not None:
+        is_self = master.node_id == local_id
+        master_host = host if is_self else peer_host(master)
+        master_port = web_port if is_self else int(getattr(master, "web_port", 3000) or 3000)
+        master_block = {
+            "name": master.node_name or master.node_id,
+            "host": master_host,
+            "port": master_port,
+            "url": endpoint_url(master_host, master_port),
+        }
+
+    return {
+        "self": {
+            "name": getattr(config, "node_name", None) or local_id,
+            "host": host,
+            "port": web_port,
+            "version": __version__,
+            "role": ("master" if master is not None and master.node_id == local_id
+                     else "worker"),
+        },
+        # Null, not an empty dict and not this node: a member that has seen no
+        # master says so, so a client can tell "no coordinator" apart from "the
+        # coordinator is the node I am asking".
+        "master": master_block,
+        "nodes": endpoint_nodes(app, request),
+        "generated_at": time.time(),
+    }
+
+
+async def handle_cluster_endpoint(request: web.Request) -> web.Response:
+    """GET /api/cluster/endpoint: where this fleet answers, asked of any node."""
+    return web.json_response(endpoint_payload(request.app, request))
+
+
+# ------------------------------------------------------------------
 # Registration
 # ------------------------------------------------------------------
 
@@ -646,3 +991,4 @@ def register_server_routes(app: web.Application) -> None:
     app.router.add_get("/api/server/logs", handle_server_logs_get)
     app.router.add_delete("/api/server/logs", handle_server_logs_clear)
     app.router.add_post("/api/server/models/{model_id:.+}/eject", handle_server_eject)
+    app.router.add_get("/api/cluster/endpoint", handle_cluster_endpoint)

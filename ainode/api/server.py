@@ -52,6 +52,8 @@ from ainode.secrets.api_routes import register_secrets_routes
 from ainode.embeddings.manager import EmbeddingManager
 from ainode.embeddings.api_routes import register_embedding_routes
 from ainode.api.server_routes import (
+    endpoint_nodes,
+    peer_host,
     register_server_routes,
     request_log_middleware,
     init_server_state,
@@ -1311,6 +1313,13 @@ async def handle_status(request: web.Request) -> web.Response:
         "cluster_role": effective_role,
         "cluster_id": getattr(config, "cluster_id", "default"),
         "master_node_id": master.node_id if master else None,
+        # Where else this fleet answers, for free, to a client that already polls
+        # status. Routing is replicated across every node but the ADDRESS a client
+        # holds is not, so a client that never reads this is stranded by an outage
+        # on one node while five others could have served it. Same rows as
+        # GET /api/cluster/endpoint (which needs no key, for the client that
+        # cannot reach this node at all).
+        "endpoint_hint": endpoint_nodes(request.app, request),
         # Say out loud how this port is protected. The default is open, which is
         # fine on a private network and is what Jason runs, but a dashboard that
         # never mentions it is a dashboard that lets you believe otherwise. The
@@ -1348,10 +1357,15 @@ def _node_host(node, local_id: Optional[str]) -> str:
     announcement arrived from (the listener captures it with ``recvfrom``, which
     is the management-LAN address a browser is on), and the fabric IP when
     nothing else is known: the address the master itself launches over.
+
+    The peer half is ``server_routes.peer_host``, which is the same order plus
+    the two guards a client endpoint needs (a loopback or placeholder value is
+    dropped rather than published, and a node with neither address falls back to
+    its name). One derivation, two readers: this row and /api/cluster/endpoint.
     """
     if local_id and node.node_id == local_id:
         return "localhost"
-    return (getattr(node, "peer_ip", "") or getattr(node, "fabric_ip", "") or "")
+    return peer_host(node)
 
 
 async def handle_nodes(request: web.Request) -> web.Response:

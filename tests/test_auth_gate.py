@@ -1,8 +1,9 @@
-"""With auth on, every route needs the key except the three that cannot.
+"""With auth on, every route needs the key except the few that cannot.
 
 The rule this file pins (#168): when auth is enabled, every path under ``/api``
 and ``/v1`` requires ``Authorization: Bearer <key>``, except ``/api/health``,
-``/api/auth/status`` and the static shell. It is checked against the REAL route
+``/api/auth/status``, ``/api/cluster/endpoint``, ``POST /api/cluster/join`` and
+the static shell. It is checked against the REAL route
 table (``create_app``), not a list of paths typed out here, because a list is
 what drifts: the next mutating route somebody adds is covered by the rule and
 by this test on the day it is registered.
@@ -89,11 +90,15 @@ async def keyed(app):
 #   /api/health        a liveness probe has no key
 #   /api/auth/status   so the dashboard can say a key is wanted, not render blank
 #   /                  the static shell, which is what asks for the key
+#   /api/cluster/endpoint  addresses only: a client whose node is down has to be
+#                      able to ask a reachable node where the fleet is
+#                      (tests/test_failover_endpoint.py holds it to addresses)
 #   /api/cluster/join  a node joining this cluster does not hold this cluster's
 #                      key yet, so a single-use expiring join token is the
 #                      credential and the handler rate limits per source IP
 #                      (api/cluster_join.py). Covered by tests/test_join_flow.py.
-OPEN_WITH_AUTH_ON = {"/", "/api/health", "/api/auth/status", "/api/cluster/join"}
+OPEN_WITH_AUTH_ON = {"/", "/api/health", "/api/auth/status",
+                     "/api/cluster/endpoint", "/api/cluster/join"}
 
 # Routes whose path carries a variable. Filled in with something harmless: the
 # request must be refused before the handler ever looks at it.
