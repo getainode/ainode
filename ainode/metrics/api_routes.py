@@ -135,6 +135,8 @@ async def handle_metrics_history(request: web.Request) -> web.Response:
         "oldest_sample": stats["oldest_sample"],
         "newest_sample": stats["newest_sample"],
         "db_bytes": stats["db_bytes"],
+        "samples": stats["samples"],
+        "downsampled": stats["downsampled"],
     }
     return web.json_response(payload)
 

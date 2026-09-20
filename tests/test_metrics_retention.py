@@ -619,6 +619,8 @@ class TestHistoryRoute:
         assert points[0] == {"ts": BASE, "value": 41.0}
         assert body["store"]["retention_hours"] == 48
         assert body["store"]["degraded"] is False
+        assert body["store"]["samples"] == 1
+        assert body["store"]["downsampled"] == 0
 
     async def test_null_is_json_null_not_zero(self, route_client, store):
         store.write({"gpu.utilization_percent": None}, ts=BASE)
