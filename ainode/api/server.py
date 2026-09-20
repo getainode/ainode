@@ -80,6 +80,7 @@ from ainode.api.chat_routes import (
 )
 from ainode.api.cluster_join import register_cluster_join_routes
 from ainode.api.decide import handle_decide
+from ainode.api.multipart import form_fields, is_multipart
 from ainode.bench.api_routes import register_bench_routes
 
 from ainode import __version__
@@ -248,6 +249,21 @@ def create_app(
     app.router.add_post("/detokenize", proxy_to_vllm)
     app.router.add_post("/v1/rerank", proxy_to_vllm)
     app.router.add_post("/v1/score", proxy_to_vllm)
+    # Speech to text, the one pair of forwarded paths whose body is NOT JSON:
+    # OpenAI's audio API is a multipart file upload and the model id rides beside
+    # the file as a form field. Same handler anyway, because routing is the only
+    # thing that reads the body: proxy_to_vllm takes the model out of the
+    # multipart fields instead of a JSON key and forwards the buffered bytes
+    # untouched, under the caller's own Content-Type and boundary. Candidate
+    # ordering, failover, header and status passthrough are the same code the
+    # JSON paths run. vLLM attaches its speech_to_text router only when the served
+    # model reports the transcription task, so a chat or pooling engine's
+    # /openapi.json does not list these two at all (checked 2026-09-19 on Spark-4:
+    # absent on Nemotron at :8000 and on the pooling engine at :8001). The paths
+    # are the ones that router declares in the engine image the whisper entry pins
+    # (entrypoints/openai/speech_to_text/api_router.py, vLLM 0.17.1).
+    app.router.add_post("/v1/audio/transcriptions", proxy_to_vllm)
+    app.router.add_post("/v1/audio/translations", proxy_to_vllm)
     # The decision endpoint. NOT a forwarded path and deliberately not on
     # proxy_to_vllm: it composes N grammar-constrained chat completions of its
     # own out of one request, so there is no caller body to forward. It routes
@@ -1768,6 +1784,26 @@ def _no_multimodal_instance(model: str, tried: list) -> web.Response:
     )
 
 
+def _missing_form_model() -> web.Response:
+    """400 for a multipart request that never says which model to route to.
+
+    Names the field and shows the flag that sets it: the caller of an audio path
+    is usually a curl line or an SDK that filled in everything but this, and
+    "model_not_found" for a model nobody named would read as a fleet problem.
+    """
+    return web.json_response(
+        {"error": {
+            "message": ("this path takes multipart/form-data and the 'model' "
+                        "form field names the model to route to: add "
+                        "-F model=<model id> (GET /v1/models lists what the "
+                        "fleet is serving)"),
+            "type": "invalid_request_error",
+            "param": "model",
+            "code": "missing_model_field"}},
+        status=400,
+    )
+
+
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     """Forward the request to the node serving the requested model (F1 federation)."""
     config: NodeConfig = request.app["config"]
@@ -1779,14 +1815,29 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     body_obj: dict = {}
     if request.method == "POST":
         body_bytes = await request.read()
-        try:
-            import json as _json
-            parsed = _json.loads(body_bytes)
-            if isinstance(parsed, dict):
-                body_obj = parsed
-                model = parsed.get("model", model)
-        except Exception:
-            pass
+        content_type = request.headers.get("Content-Type", "")
+        if is_multipart(content_type):
+            # A file upload: the audio paths. The model is a form field, and there
+            # is no JSON body to fall back on, so an unnamed model cannot be
+            # answered by routing to this node's own model the way a JSON body
+            # with no `model` is: that would send someone's audio to a chat engine
+            # and return its refusal as if the fleet had nothing to serve. Say
+            # which field is missing instead.
+            fields = form_fields(body_bytes, content_type)
+            field_model = (fields.get("model") or "").strip()
+            if not field_model:
+                collector.record_request(model, 0.0, error=True)
+                return _missing_form_model()
+            model = field_model
+        else:
+            try:
+                import json as _json
+                parsed = _json.loads(body_bytes)
+                if isinstance(parsed, dict):
+                    body_obj = parsed
+                    model = parsed.get("model", model)
+            except Exception:
+                pass
     # Tag the request so the server-view log middleware can capture the model
     try:
         request["_log_model"] = model

@@ -1,0 +1,28 @@
+# Engine image for Whisper (speech to text): the fleet default GB10 vLLM build
+# plus the two audio libraries vLLM's transcription endpoint needs.
+#
+# Why this exists at all: no engine image on the fleet carries the `vllm[audio]`
+# extras, and vLLM's `entrypoints/openai/speech_to_text/speech_to_text.py`
+# imports soundfile at module scope. That module is imported as soon as the
+# served model reports the `transcription` task, so a Whisper serve on the stock
+# image dies with ModuleNotFoundError before it ever binds a port. Checked
+# 2026-09-19 against scitrera/dgx-spark-vllm:0.17.0-t5 (vLLM 0.17.1.dev0),
+# vllm/vllm-openai:v0.27.1, nvcr.io/nvidia/vllm:26.02-py3 and our own
+# ainode-base: none of them has librosa or soundfile.
+#
+# Build on the node that will serve it (arm64, the image is not published):
+#   mkdir -p /tmp/ainode-whisper-build
+#   cp scripts/Dockerfile.whisper /tmp/ainode-whisper-build/Dockerfile
+#   cd /tmp/ainode-whisper-build && docker build -t ainode-whisper:0.17.0-t5 .
+#
+# numpy and numba are pinned to the versions the base image already ships so pip
+# resolves librosa AROUND the engine rather than upgrading the array stack under
+# torch: a resolver free to move numpy turns a missing-audio-library problem into
+# a broken engine, and a hard pin fails the build instead, which is the failure
+# we want. The final import line is the build's own test: it is exactly the
+# import that crashed the stock image.
+FROM scitrera/dgx-spark-vllm:0.17.0-t5
+RUN python3 -m pip install --no-cache-dir \
+        "numpy==2.4.2" "numba==0.64.0" librosa soundfile \
+    && python3 -c "import librosa, soundfile; print(librosa.__version__, soundfile.__version__)" \
+    && python3 -c "import vllm.entrypoints.openai.speech_to_text.speech_to_text"
