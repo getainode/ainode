@@ -239,6 +239,75 @@ set the read token with `ainode config --hf-token hf_xxx`.
 
 ---
 
+## Fine-tune a model (LoRA / QLoRA / full)
+
+Open **Training → New Run**, pick a base model and a dataset, and submit. The run
+goes through a spawned GPU container (the orchestrator image has no torch), one
+job at a time per node, and the queue starts the next job by itself when one
+exits.
+
+**The job image.** Training, quantize and merge all need the training image. A
+node resolves it in this order, and a job is rejected up front with all three
+named if the node has none of them (it used to die with `docker` exit 125):
+
+1. `AINODE_TRAIN_IMAGE` / `AINODE_QUANT_IMAGE`, an explicit override.
+2. `ghcr.io/getainode/ainode-train:<ainode version>`, the release image.
+3. `ainode-quant:0.17.0-t5`, a locally built tag.
+
+The release image is published by `.github/workflows/publish-train-image.yml`,
+which builds `scripts/Dockerfile.quant` on the self-hosted Spark runner. It is
+about **22 GB**, so nothing pulls or builds it implicitly and an ordinary release
+does not rebuild it. Publish one by pushing a `train-v<version>` tag (the version
+must match `pyproject.toml`, because that is the tag the engine looks for), or run
+the workflow by hand:
+
+```bash
+gh workflow run publish-train-image.yml -f push=true -f version=0.5.27
+```
+
+One build can serve several releases through that workflow's `alias_versions`
+input (an extra tag on the same digest uploads nothing). On a node that already
+has an image, point it there instead:
+
+```bash
+sudo systemctl set-environment AINODE_TRAIN_IMAGE=ghcr.io/getainode/ainode-train:0.5.27
+```
+
+**Dataset formats.** A `.jsonl` file (under `~/.ainode/datasets/`) or a Hugging
+Face dataset id. Rows may be any of:
+
+| Shape | Trained as |
+|---|---|
+| `{"text": "..."}` | the text itself |
+| `{"instruction": "...", "output": "..."}` | Alpaca-style prompt + response |
+| `{"prompt": "...", "completion": "..."}` | the two joined |
+| `{"conversations": [{"from": "human", "value": "..."}, ...]}` | rendered with the model's own chat template |
+
+The last one is what **AutoData** writes and what the `sharegpt-chat` template
+advertises; `role`/`content` turns and a `messages` column work the same way. The
+whole rendered conversation is supervised (assistant-only masking is not
+implemented, so this does not claim it). Pad positions are never labels.
+
+**Runs survive a restart.** Each job writes a `status.json` into its own job dir at
+every transition, and the registry is rebuilt from `~/.ainode/training/jobs/` at
+startup, so the Runs table, the stats tiles, logs, artifact download, merge and
+resume all still work for jobs from before the restart. Two consequences worth
+knowing:
+
+- A job that was RUNNING when AINode stopped comes back **failed**: its process
+  went with the restart.
+- A job dir written by AINode 0.5.26 or earlier has no status file, so its status
+  is reconstructed from what is on disk (completed if it left weights, failed
+  otherwise). Those rows are marked `restored` and carry a `note` saying exactly
+  that, and they report no duration, because none was ever recorded.
+
+**Resume.** `POST /api/training/jobs/{id}/resume` (or the button on the job) starts
+a NEW job from the latest checkpoint: its own output dir, with the source job's dir
+mounted read-only at `/src` inside the container and the checkpoint path rewritten
+to match. A resume never writes into the run it resumed.
+
+---
+
 ## Features
 
 | Feature | Status |
@@ -257,7 +326,10 @@ set the read token with `ainode config --hf-token hf_xxx`.
 | Browser-based fine-tuning (LoRA / QLoRA / Full, single node) | ✅ |
 | Training artifact retrieval + download via API | ✅ |
 | LoRA adapter merge into base model | ✅ |
-| Checkpoint resume | ✅ |
+| Checkpoint resume (own output dir; source run mounted read-only) | ✅ v0.5.27 |
+| Training jobs survive a restart (`status.json` per job, registry rebuilt from disk) | ✅ v0.5.27 |
+| Training image published to GHCR (`ainode-train:<version>`), with a named preflight | ✅ v0.5.27 |
+| Chat / ShareGPT / AutoData `conversations` datasets train (model's own chat template) | ✅ v0.5.27 |
 | Evaluation loop (configurable train/eval split) | ✅ |
 | W&B logging integration | ✅ |
 | Custom training template persistence | ✅ |
@@ -921,8 +993,9 @@ scrape_configs:
 - [x] Automatic model sharding across nodes (TP=2 verified)
 - [x] NFS-shared model storage
 - [x] Unified container image + systemd install
-- [x] Browser-driven fine-tuning (LoRA / QLoRA / Full + DDP)
+- [x] Browser-driven fine-tuning (LoRA / QLoRA / Full, single node)
 - [x] Training artifact retrieval, LoRA merge, checkpoint resume
+- [x] Training jobs, artifacts and resume survive a restart
 - [x] Evaluation loop + W&B integration
 - [x] Prometheus metrics endpoint (`/metrics`)
 - [x] 4-node TP=4 sharded inference (verified — 235B-A22B-NVFP4)

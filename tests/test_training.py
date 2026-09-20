@@ -19,6 +19,16 @@ from ainode.training.engine import (
 from ainode.training.api_routes import setup_training_routes
 
 
+@pytest.fixture
+def no_local_images(monkeypatch):
+    """Pretend this machine has none of the candidate job images.
+
+    Image resolution asks the docker daemon, and a Spark running the suite DOES
+    have the hand-built train image, so a test that pins the image in an argv is
+    only deterministic with this."""
+    monkeypatch.setattr(engine, "_image_present", lambda image: False)
+
+
 @pytest.fixture(autouse=True)
 def isolate_jobs_dir(tmp_path, monkeypatch):
     """Keep the suite out of the developer's real ~/.ainode.
@@ -910,14 +920,15 @@ class TestContainerTrainingCommand:
         assert "ainode.training._run_training" in cmd
         assert "docker" not in cmd
 
-    def test_in_container_lora_docker_shape(self, tmp_path, monkeypatch):
+    def test_in_container_lora_docker_shape(self, tmp_path, monkeypatch, no_local_images):
         monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
         monkeypatch.setenv("AINODE_HOST_HOME", "/host")
         job = self._job(tmp_path, monkeypatch, method="lora")
         cmd = job._build_command(job._job_dir / "config.json")
 
         assert cmd[:3] == ["docker", "run", "--rm"]
-        assert engine.TRAIN_IMAGE in cmd
+        # Nothing present locally, so the argv carries the preferred candidate.
+        assert engine.job_image_candidates("lora")[0] in cmd
         assert "--gpus" in cmd and "all" in cmd
         assert "--ipc=host" in cmd
 
@@ -950,10 +961,11 @@ class TestContainerTrainingCommand:
         shell = cmd[-1]
         assert "peft" in shell and "bitsandbytes" in shell
 
-    def test_train_image_override(self, tmp_path, monkeypatch):
+    def test_train_image_override(self, tmp_path, monkeypatch, no_local_images):
+        """AINODE_TRAIN_IMAGE wins over the release tag and the local one."""
         monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
         monkeypatch.setenv("AINODE_HOST_HOME", "/host")
-        monkeypatch.setattr("ainode.training.engine.TRAIN_IMAGE", "custom/train:tag")
+        monkeypatch.setenv("AINODE_TRAIN_IMAGE", "custom/train:tag")
         job = self._job(tmp_path, monkeypatch, method="lora")
         cmd = job._build_command(job._job_dir / "config.json")
         assert "custom/train:tag" in cmd
@@ -1053,7 +1065,7 @@ class TestContainerTrainingCommand:
 class TestMergeContainerCommand:
     """build_merge_command spawns a GPU container mirroring the training pattern."""
 
-    def test_merge_docker_shape(self, tmp_path, monkeypatch):
+    def test_merge_docker_shape(self, tmp_path, monkeypatch, no_local_images):
         monkeypatch.setenv("AINODE_HOST_HOME", "/host")
         monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
         merge_job = TrainingJob(TrainingConfig(base_model="m", dataset_path="__merge__"))
@@ -1064,7 +1076,7 @@ class TestMergeContainerCommand:
         cmd = build_merge_command(merge_job, "base/model", adapter_dir, merged_dir, "hf_tok")
 
         assert cmd[:3] == ["docker", "run", "--rm"]
-        assert engine.TRAIN_IMAGE in cmd
+        assert engine.job_image_candidates("lora")[0] in cmd
         mounts = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-v"]
         assert any(m.endswith(":/adapter:ro") for m in mounts)
         assert any(m.endswith(":/out") for m in mounts)
@@ -1164,16 +1176,19 @@ class TestUnlaunchableJob:
         monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
         monkeypatch.setenv("AINODE_HOST_HOME", "/host")
         monkeypatch.setenv("AINODE_NO_WHEEL_FETCH", "1")
-        monkeypatch.setattr(
-            engine, "_assert_image_present",
-            lambda image: (_ for _ in ()).throw(RuntimeError(f"image {image} is not present")),
-        )
+        monkeypatch.setattr(engine, "_image_present", lambda image: False)
         resp = await training_client.post(
             "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
         )
         assert resp.status == 400
         body = await resp.json()
-        assert "is not present" in body["error"]
+        # The message names every candidate, because which one to fix depends on
+        # the node: pull the release tag, build the local one, or set the override.
+        error = body["error"]
+        assert "No training image is present" in error
+        for candidate in engine.job_image_candidates("lora"):
+            assert candidate in error
+        assert "AINODE_TRAIN_IMAGE" in error
         job = training_app["training_manager"].get_job(body["job_id"])
         assert job.status == JobStatus.FAILED
 

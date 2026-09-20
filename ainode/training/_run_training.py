@@ -88,6 +88,107 @@ def assert_finite_metrics(logs: dict, step: int) -> None:
         raise NonFiniteLoss(f"non-finite {detail} at step {step}")
 
 
+# Columns that hold a list of chat turns. AutoData writes "conversations"
+# (ShareGPT shape); HF chat datasets usually write "messages".
+CONVERSATION_COLUMNS = ("conversations", "messages")
+
+# ShareGPT / AutoData speaker names, mapped onto chat-template roles. Anything
+# unrecognized is treated as a user turn, which is the safe direction: it is
+# supervised text either way, and it never claims the model said something.
+ROLE_ALIASES = {
+    "human": "user",
+    "user": "user",
+    "prompter": "user",
+    "gpt": "assistant",
+    "assistant": "assistant",
+    "bot": "assistant",
+    "model": "assistant",
+    "chatgpt": "assistant",
+    "system": "system",
+    "tool": "tool",
+    "function": "tool",
+    "observation": "tool",
+}
+
+
+def normalize_conversation(turns) -> list[dict]:
+    """Turn one row's chat turns into ``{"role", "content"}`` messages.
+
+    Accepts both spellings in the wild: ShareGPT / AutoData ``from`` + ``value``
+    and the OpenAI-style ``role`` + ``content``. Rows that carry neither are
+    dropped rather than guessed at."""
+    messages: list[dict] = []
+    for turn in turns or []:
+        if not isinstance(turn, dict):
+            continue
+        role = turn.get("role") or turn.get("from") or ""
+        content = turn.get("content")
+        if content is None:
+            content = turn.get("value")
+        if content is None:
+            continue
+        messages.append({
+            "role": ROLE_ALIASES.get(str(role).strip().lower(), "user"),
+            "content": str(content),
+        })
+    return messages
+
+
+def plain_chat_text(messages: list[dict]) -> str:
+    """Fallback rendering for a tokenizer with no chat template."""
+    return "\n\n".join(
+        f"### {m['role'].capitalize()}:\n{m['content']}" for m in messages
+    )
+
+
+def render_conversations(tokenizer, rows) -> list[str]:
+    """Render conversation rows into training text with the chat template.
+
+    This is the format AutoData actually writes (``{"conversations": [...]}``) and
+    the one the ``sharegpt-chat`` template advertises. Until 0.5.27 the runner had
+    no branch for it, so the documented AutoData handoff died in ``dataset.map``
+    with an IndexError from the generic string-join fallback.
+
+    The whole rendered conversation is supervised, the same way the
+    prompt/completion and instruction/output branches supervise their whole
+    string. Masking everything but the assistant turns needs per-turn
+    tokenization of template prefixes, which is template-dependent; it is not
+    here, so this does not claim it."""
+    texts: list[str] = []
+    warned = False
+    for row in rows:
+        messages = normalize_conversation(row)
+        if not messages:
+            texts.append("")
+            continue
+        try:
+            rendered = tokenizer.apply_chat_template(messages, tokenize=False)
+        except Exception as exc:
+            if not warned:
+                _log(
+                    f"WARNING: this tokenizer cannot apply a chat template ({exc}); "
+                    "falling back to plain '### Role:' text for the conversations."
+                )
+                warned = True
+            rendered = plain_chat_text(messages)
+        texts.append(rendered if isinstance(rendered, str) else str(rendered))
+    return texts
+
+
+def conversation_column(examples: dict) -> str | None:
+    """Name of the chat-turns column in this batch, or None.
+
+    Checks that the values really are lists: a dataset with a ``messages`` column
+    of plain strings is text, not a conversation."""
+    for key in CONVERSATION_COLUMNS:
+        values = examples.get(key)
+        if not values:
+            continue
+        if isinstance(values[0], (list, tuple)):
+            return key
+    return None
+
+
 def build_prompt_texts(examples: dict) -> list[str]:
     """Flatten one batch of dataset rows into training strings."""
     if "text" in examples:
@@ -109,6 +210,10 @@ def build_prompt_texts(examples: dict) -> list[str]:
 def make_tokenize_fn(tokenizer, max_seq_length: int):
     """Return the batched ``dataset.map`` function used for every method.
 
+    Chat datasets (a ``conversations`` or ``messages`` column) go through the
+    tokenizer's chat template first; everything else is flattened by
+    ``build_prompt_texts``.
+
     Truncates but NEVER pads: the collator pads each batch to its own longest row
     and pads the labels with -100. Padding to ``max_length`` here and copying
     ``input_ids`` into ``labels`` (what this did until 0.5.26) asked the model to
@@ -116,7 +221,11 @@ def make_tokenize_fn(tokenizer, max_seq_length: int):
     at ln(vocab) and blew the gradient up by six orders of magnitude."""
 
     def tokenize_fn(examples):
-        texts = build_prompt_texts(examples)
+        chat_column = conversation_column(examples)
+        if chat_column is not None:
+            texts = render_conversations(tokenizer, examples[chat_column])
+        else:
+            texts = build_prompt_texts(examples)
         enc = tokenizer(
             texts,
             truncation=True,

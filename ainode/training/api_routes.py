@@ -371,12 +371,7 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
     async def _merge_in_container() -> None:
         """Slim orchestrator (no peft/torch): spawn a GPU container to merge,
         streaming its stdout so the AINODE_PROGRESS protocol keeps working."""
-        from ainode.training.engine import (
-            TRAIN_IMAGE,
-            _assert_image_present,
-            build_merge_command,
-            scrub_command,
-        )
+        from ainode.training.engine import build_merge_command, scrub_command
         # build_merge_command can shell out to a blocking `pip download` (peft
         # wheel vendoring, up to 120s on a cold cache) — build it OFF the loop so
         # a slow/unreachable network can't freeze the whole API server.
@@ -387,7 +382,9 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
         # scrub_command, not the raw argv: this log is served by
         # GET /api/training/jobs/{id}/logs.
         merge_job._log("Merge command: " + " ".join(scrub_command(cmd)))
-        await loop.run_in_executor(None, _assert_image_present, TRAIN_IMAGE)
+        # Same preflight as a training job, over the same candidate list, so a
+        # node with no train image is told which images were tried.
+        await loop.run_in_executor(None, merge_job._assert_job_image)
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
@@ -415,6 +412,7 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
             return
         merge_job.status = JobStatus.RUNNING
         merge_job.start_time = time.time()
+        merge_job._write_status()
         try:
             if os.environ.get("AINODE_IN_CONTAINER"):
                 await _merge_in_container()
@@ -448,15 +446,18 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
                 merge_job.status = JobStatus.FAILED
                 merge_job.end_time = time.time()
                 merge_job._log(f"Merge failed: {exc}")
+            merge_job._write_status()
             return
         # Success path — but a cancel may have landed right as the container
         # exited 0; honour it rather than overwriting CANCELLED with COMPLETED.
         if merge_job.status == JobStatus.CANCELLED:
             merge_job._log("Merge cancelled")
+            merge_job._write_status()
             return
         merge_job.status = JobStatus.COMPLETED
         merge_job.end_time = time.time()
         merge_job.progress = 100.0
+        merge_job._write_status()
 
     loop.create_task(_do_merge())
 
@@ -520,14 +521,20 @@ async def handle_resume_job(request: web.Request) -> web.Response:
     else:
         checkpoint_path = checkpoint_dirs[0]
 
-    # Create a new job config with resume_from_checkpoint set
+    # Create a new job config with the checkpoint to resume from. The path stays
+    # the ORCHESTRATOR path: the engine mounts the source job dir read-only at
+    # /src and rewrites the path for the container (see _resume_mount_for).
     from ainode.training.engine import TrainingConfig
     import dataclasses
     resume_config_dict = dataclasses.asdict(job.config)
     resume_config_dict["run_name"] = f"resume-{job_id}"
     resume_config_dict["description"] = f"Resumed from {checkpoint_path.name} of job {job_id}"
-    # HF Trainer honours TRAINING_RESUME_FROM_CHECKPOINT — pass via env/config
     resume_config_dict["_resume_from_checkpoint"] = str(checkpoint_path)
+    # The resumed run gets its OWN output dir. Inheriting the source job's (what
+    # this did until 0.5.27) wrote a second run's checkpoints and adapter into the
+    # first run's directory, so afterwards neither job's output meant anything.
+    # None makes TrainingJob.__init__ place it under the new job's dir.
+    resume_config_dict["output_dir"] = None
 
     try:
         resume_config = TrainingConfig.from_dict(resume_config_dict)
@@ -535,15 +542,24 @@ async def handle_resume_job(request: web.Request) -> web.Response:
         return web.json_response({"error": f"Failed to create resume config: {exc}"}, status=500)
 
     resume_job = manager.submit_job(resume_config)
-    resume_job._resume_checkpoint = str(checkpoint_path)
 
-    await manager.start_next()
+    # Same contract as submit: a job the engine refuses to launch answers 400 with
+    # the reason, not 500 with a phantom job holding the queue.
+    try:
+        await manager.start_next()
+    except RuntimeError as exc:
+        return web.json_response(
+            {"error": str(exc), "resume_job_id": resume_job.job_id,
+             "status": resume_job.status.value},
+            status=400,
+        )
 
     return web.json_response({
         "resume_job_id": resume_job.job_id,
         "source_job_id": job_id,
         "checkpoint": checkpoint_path.name,
         "checkpoint_path": str(checkpoint_path),
+        "output_dir": resume_job.config.output_dir,
         "available_checkpoints": [d.name for d in checkpoint_dirs],
         "status": resume_job.status.value,
     }, status=201)

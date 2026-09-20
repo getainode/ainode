@@ -1,0 +1,7 @@
+# Labels of the self-hosted runners this repo's image builds use, so actionlint
+# stops reporting them as unknown. A Spark, i.e. an aarch64 GB10 box with docker
+# and the nvidia container toolkit.
+self-hosted-runner:
+  labels:
+    - dgx-spark
+    - aarch64
