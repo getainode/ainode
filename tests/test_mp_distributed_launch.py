@@ -99,6 +99,24 @@ def _backend(config: NodeConfig, *, infiniband: bool = True) -> NvidiaBackend:
     return b
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ainode_home(tmp_path_factory, monkeypatch):
+    """No test in this file may write into the operator's own ``~/.ainode``.
+
+    A successful ``/api/sharding/launch`` now persists the distributed shape
+    (``distributed.json``, #179), so the launch tests below would otherwise leave
+    a record on the machine running the suite, and one test's record would be
+    read by the next one.
+    """
+    home = tmp_path_factory.mktemp("ainode-home")
+    monkeypatch.setattr("ainode.core.config.AINODE_HOME", home)
+    from ainode.engine import reconcile
+
+    reconcile.reset_state_for_tests()
+    yield home
+    reconcile.reset_state_for_tests()
+
+
 def _nccl_free():
     """Patch the fabric/HCA probes the env builder reads off the host."""
     return (
@@ -1297,3 +1315,96 @@ def test_sharding_launch_records_the_shape_on_the_instance():
         resp = asyncio.run(handle_sharding_launch(_Req()))
     assert resp.status == 200
     assert [r.distributed_executor for r in manager.records()] == ["mp"]
+
+
+# ---------------------------------------------------------------------------
+# The shape is written down, and a stacked load cannot overwrite it (#179)
+# ---------------------------------------------------------------------------
+
+
+def test_a_distributed_launch_writes_the_shape_down():
+    """The record is what a restart reads when the container is gone.
+
+    A distributed launch stays out of ``instances.json`` (that manifest is
+    replayed entry by entry as a SOLO load), so the shape goes in its own record:
+    model, width, peers, port, executor, container name and the launch overrides
+    the relaunch has to render again.
+    """
+    from ainode.engine.reconcile import load_distributed_record
+    from ainode.models.api_routes import load_instance_manifest
+
+    _, resp, _ = _launch({"model": DSPARK_REPO, "node_ids": ["head", "m1"]})
+    assert resp.status == 200
+    record = load_distributed_record()
+    assert record["model"] == DSPARK_REPO
+    assert record["api_port"] == 8000
+    assert record["peer_ips"] == ["10.100.0.13"]
+    assert record["tensor_parallel_size"] == 2
+    assert record["distributed_executor"] == "mp"
+    assert record["container"] == "ainode-vllm-head"
+    assert record["head_node_id"] == "head"
+    assert record["status"] == "serving"
+    assert record["overrides"]["engine_image"] == DSPARK_IMAGE
+    # And it is NOT in the solo manifest, which would replay it as one node.
+    assert load_instance_manifest() == []
+
+
+def test_a_stacked_load_beside_an_adopted_head_leaves_the_head_config_alone():
+    """The 0.5.25 primary-port guard, now with the manager telling the truth.
+
+    Stacking an embedder on the mp head on 2026-09-19 overwrote ``config.model``,
+    reset ``distributed_mode`` to solo and dropped ``peer_ips``, because the
+    manager was empty after the restart and the next load called itself the
+    primary. Adoption fills the manager, so the same load is stacked for the
+    plainest possible reason: something else already holds the node's port.
+    """
+    import ainode.engine.reconcile as reconcile
+    from ainode.models.api_routes import append_solo_instance
+
+    config = _mp_config(node_id="head", models_dir="/tmp/ainode-models")
+    saved: list = []
+    config.save = lambda *a, **k: saved.append(config.model)
+
+    head_argv = ["vllm", "serve", DSPARK_REPO, "--tensor-parallel-size", "2",
+                 "--port", "8000", "--nnodes", "2", "--node-rank", "0",
+                 "--served-model-name", DSPARK_REPO]
+    info = {"Id": "head01", "Config": {"Image": DSPARK_IMAGE, "Cmd": head_argv},
+            "State": {"Running": True, "Status": "running",
+                      "StartedAt": "2026-09-19T20:14:31.1Z"}}
+
+    class _Stub:
+        def __init__(self, cfg, on_ready=None, instance_id=""):
+            self.config = cfg
+            self.instance_id = instance_id
+
+        def is_running(self):
+            return True
+
+        def start(self):
+            return True
+
+        def stop(self):
+            pass
+
+    app = {"config": config, "engine": None}
+    with mock.patch.object(reconcile, "inspect_container", lambda name: info), \
+            mock.patch.object(reconcile, "list_engine_containers",
+                              lambda: ["ainode-vllm-head"]), \
+            mock.patch.object(reconcile, "port_serving",
+                              lambda port, timeout=3.0: True), \
+            mock.patch("ainode.engine.backends.get_backend", _Stub):
+        asyncio.run(reconcile.adopt_running_engines(app))
+        # The head is in the manager with its real shape, so the port is taken.
+        assert [(r.model, r.api_port, r.tensor_parallel_size, r.adopted)
+                for r in app["instances"].records()] == [(DSPARK_REPO, 8000, 2, True)]
+        result = append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.05,
+                                      persist=False)
+
+    assert result["ok"] is True
+    assert result["stacked"] is True
+    assert result["api_port"] != 8000
+    # The head's own config is untouched: still the head, still its peers.
+    assert config.model == DSPARK_REPO
+    assert config.distributed_mode == "head"
+    assert config.peer_ips == ["10.100.0.13"]
+    assert saved == [], "a stacked load does not rewrite the primary's config"

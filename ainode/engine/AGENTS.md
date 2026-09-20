@@ -116,6 +116,59 @@ A multi-minute MoE profiling forward-pass with GPUs at 0% and quiet logs is **no
 - **`EngineBackend.activity_mark()` reads the ENGINE'S OWN CONTAINER, never the host and never the whole GPU.** `NvidiaBackend` takes cumulative CPU time from that container's cgroup when the tree is visible and falls back to `docker stats --no-stream` (about a second, so the backend caches one answer per poll); the wait calls it off the event loop thread. Do not substitute pynvml utilization: `metrics/collector.py` reads device 0 as a whole, so it cannot say which engine is busy (a stacked neighbour would vouch for a wedged one) and it reads 0% during exactly the phases this probe exists for. A backend that cannot see its engine's container returns `None` and the wait falls back to the log alone.
 - **A backend's `last_log_activity` must come from that engine's own stdout stream** (`_stream_logs`), never from the log file's mtime or size: stacked instances on a node share one log file, so file-based freshness lets a busy primary vouch for a wedged neighbour. A backend that cannot report returns `None`, and the wait then leans on activity, container exit and the ceiling.
 
+## Reconcile before you launch: adopt, record, replay (`reconcile.py`)
+
+Engine containers are siblings spawned through docker.sock, so they outlive the
+orchestrator. `reconcile.py` is the only home for what a boot does about that, and
+its three steps run in this order, ahead of the launch order below.
+
+- **ADOPT FIRST, and adopt rather than relaunch.** `adopt_running_engines` runs
+  before the settle wait, before the sweep and before anything launches: it asks
+  `docker inspect` about the containers this node would have created, and puts the
+  RUNNING ones back in the `InstanceManager`. **The container's own argv is the
+  authority on the shape** (model from `--served-model-name`, width from
+  `--tensor-parallel-size`, port from `--port`, `mp` from `--nnodes`), because
+  config.json can have been edited since the launch and a stacked instance whose
+  manifest write never happened has no other record at all. An adopted record
+  carries `adopted=True`, its backend is built on a per-instance config snapshot
+  (never the shared `app["config"]`) with the same `instance_id` token the launch
+  used so `stop()` reaches the right container, and `_launched_at` is stamped from
+  the container's `StartedAt` so `is_running()` asks docker instead of answering
+  from a launch subprocess this process never had. An adopted backend has no log
+  follower, so a bind wait on it leans on activity and container state.
+- **The sweep may not remove an adopted container.** `_remove_engine_containers`
+  and `_orphan_engine_ids` both filter on `reconcile.adopted_container_ids()`.
+  Nothing is adopted before the boot sweep, so that one is unaffected.
+- **A distributed launch is PERSISTED, to `distributed.json`, not to
+  `instances.json`.** The solo manifest is replayed entry by entry through
+  `append_solo_instance`, so a distributed shape in that list would come back as a
+  single-node load. The record is written when the launch succeeds (and refreshed
+  by adoption, because the mp head is a config state with no launch call of its
+  own) and removed by the unload path via `forget_distributed_instance`, matched on
+  model AND port so unloading a neighbour never clears it.
+- **Replay only on evidence, once, and never in a loop.**
+  `replay_distributed_if_needed` relaunches ONLY when the record exists, the
+  container is gone, and every peer answers `probe_peer` (the same
+  `ssh -o BatchMode=yes -o ConnectTimeout=10` the launch places a peer container
+  with, running `docker version`). Anything else stamps the record `degraded` with
+  which peer answered what, and that is surfaced in three places:
+  `ainode doctor` (`cluster.distributed`), `/api/status`'s `degraded_instances`,
+  and the dashboard banner. One attempt per process: a launch that needs a human
+  is not improved by retrying it every ten seconds.
+- **A solo load may not replace a MULTI-NODE instance.** `append_solo_instance`
+  refuses with a 409 when the model is already up here with peers or a width above
+  1 (`_is_distributed_record`). Re-loading a model that is up replaces that
+  instance, and doing that to a distributed engine stops it and brings a frontier
+  MoE back on one node. Before adoption the manager was empty after a restart, so
+  the load path could not see the head and the question never came up.
+- **Tests fake the seams, not the checks.** `inspect_container`,
+  `list_engine_containers`, `probe_peer` and `port_serving` are module-level
+  functions for that reason, and `adopt_running_engines` /
+  `replay_distributed_if_needed` are module-level names in `models/api_routes.py`
+  so a replay test can neuter them. **A test that calls
+  `replay_instances_on_startup` must fake both**, or it reaches the real docker on
+  the machine running the suite (the CI runner is a Spark with live engines).
+
 ## Launch ORDER on a node: sweep, primary, bind, then stacked one at a time
 
 vLLM sizes its KV cache from what is FREE when the engine profiles, so two engines

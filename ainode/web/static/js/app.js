@@ -707,6 +707,31 @@ const AINode = {
     topBar.appendChild(badge);
   },
 
+  // A shape this node knows it should be serving and cannot (#179). The record
+  // says which model, how wide, and which peer did not answer, so the banner says
+  // all three. A degraded distributed instance used to be completely silent: the
+  // engine container was gone, nothing replayed it, and no surface mentioned it.
+  // Sits next to the update badge in the top bar and is rebuilt from
+  // /api/status on every poll, so it clears itself once the shape is back.
+  renderDegradedBanner() {
+    var existing = document.getElementById('degraded-banner');
+    if (existing) existing.remove();
+    var list = (this.state.status && this.state.status.degraded_instances) || [];
+    if (!list.length) return;
+    var topBar = document.querySelector('.top-bar') || document.querySelector('nav');
+    if (!topBar) return;
+    var d = list[0];
+    var peers = (d.peers_unreachable || []).map(function (p) { return p.peer_ip; }).join(', ');
+    var banner = document.createElement('div');
+    banner.id = 'degraded-banner';
+    banner.className = 'degraded-banner';
+    banner.textContent = '⚠ ' + d.model + ' TP=' + (d.tensor_parallel_size || 1) +
+      ' is not running here' + (peers ? ', peer(s) unreachable: ' + peers : '') +
+      (list.length > 1 ? ' (+' + (list.length - 1) + ' more)' : '');
+    banner.title = d.reason || '';
+    topBar.appendChild(banner);
+  },
+
   async pollMetrics() {
     var data = await this.fetchJSON('/api/metrics');
     if (data) this.state.metrics = data;
@@ -719,6 +744,7 @@ const AINode = {
   updateTopBar() {
     var nodes = this.state.nodes;
     var s = this.state.status;
+    this.renderDegradedBanner();
     var onlineCount = 0;
     if (s && s.engine_ready) onlineCount = 1;
     onlineCount = Math.max(onlineCount, nodes.filter(function (n) {
