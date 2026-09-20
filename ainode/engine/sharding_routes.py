@@ -263,6 +263,21 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
             tensor_parallel_size=1 + len(chosen_peers), status="starting",
             distributed_executor=executor), backend)
 
+        # Write the shape down (#179). A distributed launch stays out of
+        # instances.json -- that manifest is replayed entry by entry as a SOLO
+        # load -- but a restart still has to know what this node was serving, so
+        # it goes in its own record that the reconciler reads on the next boot.
+        # Removed again by the unload path.
+        from ainode.engine.reconcile import (
+            head_container_name,
+            write_distributed_record,
+        )
+        write_distributed_record(
+            config, model=model, api_port=port, peer_ips=chosen_peers,
+            tensor_parallel_size=1 + len(chosen_peers),
+            distributed_executor=executor, instance_id=instance_id,
+            container=head_container_name(config, port), overrides=overrides)
+
         if is_primary:
             # Back-compat: the proxy/status path reads app["config"] + app["engine"].
             config.model = model

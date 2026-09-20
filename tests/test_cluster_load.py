@@ -283,10 +283,19 @@ def test_instance_manifest_persist_and_replay(monkeypatch, tmp_path):
 
     async def _no_sweep():
         return None
+
+    async def _no_adopt(app):
+        return []
+
+    async def _no_distributed(app):
+        return {"action": "none"}
     monkeypatch.setattr(mr.asyncio, "sleep", _noop_sleep)
     # The replay sweeps engine containers before it launches (#96), but not
-    # through this test's fake docker.
+    # through this test's fake docker. Same for the reconcile step that asks
+    # docker what this node is already running (#179).
     monkeypatch.setattr(mr, "ensure_startup_sweep", _no_sweep)
+    monkeypatch.setattr(mr, "adopt_running_engines", _no_adopt)
+    monkeypatch.setattr(mr, "replay_distributed_if_needed", _no_distributed)
     asyncio.run(mr.replay_instances_on_startup(app2))
 
     models = {i.record.model for i in app2["instances"].instances()}

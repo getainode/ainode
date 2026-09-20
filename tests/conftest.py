@@ -1,9 +1,10 @@
 """Shared pytest fixtures.
 
-Two are global: netdev isolation (per test) and the engine-container guard (per
-session, at the bottom of this file).
+Three are global, all there to keep the suite from reading or touching the machine
+it runs on: netdev isolation and the boot-reconcile guard (per test), and the
+engine-container guard (per session, at the bottom of this file).
 
-``ainode.cluster.netdev`` reads the
+``isolate_netdev``: ``ainode.cluster.netdev`` reads the
 real host (``ip -o -4 addr show``, ``/sys/class/net``) and caches the answer
 per process, so without this fixture the suite would give different results
 on a Mac (no ``ip``, no sysfs) than on the Linux CI runner (``ip`` present,
@@ -15,6 +16,17 @@ nothing, and clear the resolution cache around every test. A host with no
 detectable interface resolves to the configured name unchanged, which is the
 behavior those tests already assert. Tests that WANT detection to fire
 monkeypatch these same two seams with their own fakes.
+
+``no_boot_reconcile``: ``create_app``'s startup schedules the instance replay,
+whose first step asks docker which engine containers this node is already
+running and can then relaunch a recorded distributed shape over ssh
+(``ainode/engine/reconcile.py``, #179). Neither belongs in a route test that
+merely wants an app: on a machine with a real docker and live engines that
+background task would adopt real containers into a test app, a run on a head
+could try to relaunch its shape, and a test that patches ``subprocess.run`` and
+asserts it was not called races it (observed as a flaky
+``tests/test_api.py::test_engine_update_unresolvable_version``). The tests that
+exercise reconciliation call it directly, which these no-ops do not affect.
 """
 
 import shutil
@@ -33,6 +45,31 @@ def isolate_netdev(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(netdev, "_run_command", lambda argv: "")
     yield
     netdev.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def no_boot_reconcile(monkeypatch):
+    """The boot replay's reconcile step is a no-op unless a test asks for it.
+
+    Patched where the replay reads them, on ``models.api_routes``, so a direct
+    call to ``ainode.engine.reconcile.adopt_running_engines`` (what the tests for
+    this behaviour make) still runs the real thing.
+    """
+    from ainode.engine import reconcile
+    from ainode.models import api_routes
+
+    async def _no_adopt(app):
+        return []
+
+    async def _no_distributed_replay(app):
+        return {"action": "none"}
+
+    monkeypatch.setattr(api_routes, "adopt_running_engines", _no_adopt)
+    monkeypatch.setattr(api_routes, "replay_distributed_if_needed",
+                        _no_distributed_replay)
+    reconcile.reset_state_for_tests()
+    yield
+    reconcile.reset_state_for_tests()
 
 
 def _engine_containers():

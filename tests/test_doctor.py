@@ -602,6 +602,52 @@ def test_a_configured_interface_with_an_address_is_ok(monkeypatch):
     assert "10.0.0.2" in check.detail and "mlx5_0" in check.detail
 
 
+# ---------------------------------------------------------- distributed shape
+
+def _record(tmp_path, **kw) -> Path:
+    record = {"model": "fraserprice/DeepSeek-V4-Flash-DSpark", "api_port": 8000,
+              "peer_ips": ["10.100.0.15"], "tensor_parallel_size": 2,
+              "distributed_executor": "mp", "status": "serving"}
+    record.update(kw)
+    path = tmp_path / "distributed.json"
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_no_distributed_record_is_ok(tmp_path):
+    check = _one(doc.check_distributed(tmp_path))
+    assert check.status == OK
+    assert check.data["exists"] is False
+
+
+def test_a_healthy_distributed_record_reports_the_shape(tmp_path):
+    _record(tmp_path)
+    check = _one(doc.check_distributed(tmp_path))
+    assert check.status == OK
+    assert "TP=2" in check.detail
+    assert check.data["peer_ips"] == ["10.100.0.15"]
+
+
+def test_a_degraded_distributed_record_warns_with_the_peer_named(tmp_path):
+    """Nothing retries a degraded shape, so the doctor is where a human sees it."""
+    _record(tmp_path, status="degraded",
+            degraded_reason=("DeepSeek TP=2 is not running here and 1 of 1 peer(s) "
+                             "did not answer: 10.100.0.15 answered 'No route to host'"),
+            degraded_peers=[{"peer_ip": "10.100.0.15", "answer": "No route to host"}])
+    check = _one(doc.check_distributed(tmp_path))
+    assert check.status == WARN
+    assert "No route to host" in check.detail
+    assert check.data["peers_unreachable"] == ["10.100.0.15"]
+    assert "10.100.0.15" in check.fix
+
+
+def test_an_unreadable_distributed_record_is_a_warn_not_a_crash(tmp_path):
+    (tmp_path / "distributed.json").write_text("{not json")
+    check = _one(doc.check_distributed(tmp_path))
+    assert check.status == WARN
+    assert "cannot read" in check.detail
+
+
 # -------------------------------------------------------------------- secrets
 
 def test_no_secrets_store_is_ok(tmp_path):
@@ -794,8 +840,8 @@ def test_run_checks_produces_one_check_per_name_and_no_exceptions(tmp_path, monk
                      "config.model", "docker.daemon", "gpu.devices", "disk.home",
                      "disk.models", "image.pin", "image.latest", "service.unit",
                      "port.web", "port.engine", "port.discovery", "config.cluster_id",
-                     "cluster.peers", "fabric.interface", "secrets.store",
-                     "credentials.hf_token"):
+                     "cluster.peers", "fabric.interface", "cluster.distributed",
+                     "secrets.store", "credentials.hf_token"):
         assert expected in names
 
 

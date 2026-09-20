@@ -252,10 +252,22 @@ def _fake_replay(monkeypatch, entries, *, primary_binds=True, launch_ok=None):
     async def _no_sleep(*_a, **_k):
         return None
 
+    async def _adopt(app):
+        return []
+
+    async def _replay_distributed(app):
+        return {"action": "none"}
+
     monkeypatch.setattr(api_routes, "load_instance_manifest", lambda: entries)
     monkeypatch.setattr(api_routes, "append_solo_instance", _append)
     monkeypatch.setattr(api_routes, "_ensure_serving", _ensure)
     monkeypatch.setattr(api_routes, "ensure_startup_sweep", _sweep)
+    # The reconcile step the replay now opens with (#179) asks docker what this
+    # node is already running. Faked here for the same reason the sweep is: this
+    # file's subject is the ORDER, and the suite runs on a machine with a real
+    # docker and real engine containers.
+    monkeypatch.setattr(api_routes, "adopt_running_engines", _adopt)
+    monkeypatch.setattr(api_routes, "replay_distributed_if_needed", _replay_distributed)
     monkeypatch.setattr(api_routes.asyncio, "sleep", _no_sleep)
     return events, manager
 

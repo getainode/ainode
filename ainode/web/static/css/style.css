@@ -114,9 +114,12 @@ body {
   transition: background 0.15s;
   animation: pulse-green 2s infinite;
 }
-/* A cluster whose nodes disagree about their release. Amber, not green: this is
-   a state to fix, not an offer to take. */
-.version-split-banner {
+/* Two node-level warnings that share one treatment, because they are the same
+   kind of news in the same place: a cluster whose nodes disagree about their
+   release, and a recorded distributed shape this node cannot serve right now
+   (#179). Amber, not green: a state to fix, not an offer to take. */
+.version-split-banner,
+.degraded-banner {
   margin-right: 12px;
   padding: 4px 10px;
   background: rgba(255, 176, 0, 0.12);
@@ -132,6 +135,10 @@ body {
   text-overflow: ellipsis;
   max-width: 44vw;
 }
+
+/* Pushed to the right of the top bar, same as the update badge, so whichever of
+   the two is present sits in the one place node-level trouble shows up. */
+.degraded-banner { margin-left: auto; }
 
 .update-badge:hover { background: rgba(76, 175, 80, 0.3); }
 .update-badge:disabled { opacity: 0.6; cursor: not-allowed; animation: none; }

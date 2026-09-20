@@ -1211,6 +1211,18 @@ async def handle_status(request: web.Request) -> web.Response:
                         or config.model or "")
     progress = await load_progress_payload(request.app, engine, phase, loading_model)
 
+    # What this node knows it should be serving and cannot (#179). A distributed
+    # shape whose container is gone and whose peers did not answer the launch's
+    # own probe is recorded degraded rather than retried in a loop, and silence
+    # was the part of that failure that needed fixing: it surfaces here, in
+    # `ainode doctor` and as a dashboard banner. Empty on a healthy node.
+    try:
+        from ainode.engine.reconcile import degraded_instances
+        degraded = degraded_instances()
+    except Exception:
+        logger.exception("could not read the distributed record")
+        degraded = []
+
     return web.json_response({
         "node_id": config.node_id,
         "node_name": config.node_name,
@@ -1246,6 +1258,8 @@ async def handle_status(request: web.Request) -> web.Response:
         # never mentions it is a dashboard that lets you believe otherwise. The
         # header reads `label` straight out of here.
         "auth": auth_status_fields(request.app),
+        # Recorded shapes this node cannot serve right now, with the reason.
+        "degraded_instances": degraded,
     })
 
 

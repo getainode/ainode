@@ -31,6 +31,13 @@ class InstanceRecord:
     # executor). Carried so a replay relaunches the SAME shape. An image that
     # ships no ray cannot be brought back by the Ray path.
     distributed_executor: str = "ray"
+    # True when this record was RECONSTRUCTED from a container that was already
+    # running rather than created by a launch in this process
+    # (``engine/reconcile.py``, #179). An orchestrator restart does not touch the
+    # engine containers, so after one the only honest account of an instance is
+    # the container itself; a reader that wants to know whether this process
+    # launched what it is reporting reads this flag.
+    adopted: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,7 +48,7 @@ class InstanceRecord:
         fields = (
             "instance_id", "model", "head_node_id", "member_node_ids",
             "peer_ips", "api_port", "tensor_parallel_size", "status",
-            "distributed_executor",
+            "distributed_executor", "adopted",
         )
         return cls(**{k: d[k] for k in fields if k in d})
 

@@ -29,6 +29,9 @@ import pytest
 
 from ainode.models import api_routes
 
+# The replay's reconcile step (#179) would ask docker what this node is already
+# running; ``no_boot_reconcile`` in conftest.py neutralises it for every test.
+
 
 # The old fixed window, in the scaled-down units these tests run in. Every
 # "slow" engine here binds well past it.

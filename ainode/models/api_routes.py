@@ -18,6 +18,10 @@ from aiohttp import web
 
 from ainode.auth.middleware import TRUST_REMOTE_CODE_RULE, is_authenticated
 from ainode.core.gpu import detect_gpu
+from ainode.engine.reconcile import (
+    adopt_running_engines,
+    replay_distributed_if_needed,
+)
 from ainode.models.registry import ModelManager
 
 logger = logging.getLogger(__name__)
@@ -270,6 +274,29 @@ def load_instance_manifest() -> list:
         return json.loads(p.read_text()).get("instances", []) or []
     except Exception:
         return []
+
+
+def forget_distributed_instance(model: str, api_port) -> bool:
+    """Drop the persisted distributed shape when THIS unload was that instance.
+
+    The other half of ``write_distributed_record``: a shape that has been unloaded
+    must not be replayed by the next restart, and the record is what a restart
+    reads (#179). Matched on the port, which is what tells two instances of one
+    model apart, and on the model, so unloading a neighbour never clears it.
+    Returns True when a record was removed.
+    """
+    from ainode.engine.reconcile import clear_distributed_record, load_distributed_record
+    record = load_distributed_record()
+    if record is None:
+        return False
+    try:
+        same_port = int(record.get("api_port") or 0) == int(api_port or 0)
+    except (TypeError, ValueError):
+        same_port = False
+    if not same_port or (model and record.get("model") != model):
+        return False
+    clear_distributed_record()
+    return True
 
 
 # -- Launch-time ledger (how long this model took to come up here) -----------
@@ -689,6 +716,21 @@ def _will_own_primary_port(manager, config, existing) -> bool:
     return manager.port_free(node_port)
 
 
+def _is_distributed_record(record) -> bool:
+    """Does this instance record describe a MULTI-NODE engine?
+
+    Either half is enough: the peer list is what the launch spanned and the width
+    is what vLLM was told, and an adopted record can carry the width from the
+    container's own argv before anything has resolved peers.
+    """
+    if list(getattr(record, "peer_ips", []) or []):
+        return True
+    try:
+        return int(getattr(record, "tensor_parallel_size", 1) or 1) > 1
+    except (TypeError, ValueError):
+        return False
+
+
 def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: bool = True) -> dict:
     """APPEND a solo instance through the InstanceManager — the shared core of the
     /api/models/load solo path AND the startup replay. Returns a plain dict (no
@@ -714,6 +756,22 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
     # BEFORE that check would leave the model unloaded on a "failed" request with
     # no automatic restore. So decide admission first, then destroy.
     existing = manager.by_model(model)
+    # ...unless THAT instance is a multi-node one. A solo load would stop the
+    # distributed engine and bring the model back on one node, which for a
+    # frontier MoE is a model that cannot fit and a head that is now gone. Before
+    # #179 this could not happen (the manager was empty after a restart, so the
+    # head was invisible here); now that adoption puts the head back, the
+    # downgrade has to be refused out loud instead.
+    if existing is not None and _is_distributed_record(existing.record):
+        peers = list(getattr(existing.record, "peer_ips", []) or [])
+        return {"ok": False, "status": 409,
+                "error": (f"{model} is already serving here as a DISTRIBUTED instance "
+                          f"(TP={getattr(existing.record, 'tensor_parallel_size', 1)} "
+                          f"across this node + {len(peers)} peer(s) "
+                          f"{', '.join(peers) or 'unknown'}) on port "
+                          f"{existing.record.api_port}. A solo load would tear that "
+                          f"engine down and bring the model back on one node. Unload "
+                          f"it first, or relaunch it across the cluster.")}
     replaced_primary = existing is not None and app.get("engine") is existing.backend
 
     def _existing_id():
@@ -1252,17 +1310,36 @@ def _engine_container_names(include_primary: bool) -> list:
 
 
 def _orphan_engine_ids() -> list:
-    """Stacked-engine poll seam. Kept zero-arg: tests fake it by name."""
-    return _engine_container_ids(include_primary=False)
+    """Stacked-engine poll seam. Kept zero-arg: tests fake it by name.
+
+    An adopted container is not an orphan, so it is not what this poll is waiting
+    to disappear: counting it would spend the whole clear timeout and then warn
+    about a container the node is deliberately still running (#179).
+    """
+    from ainode.engine.reconcile import adopted_container_ids
+    keep = adopted_container_ids()
+    return [i for i in _engine_container_ids(include_primary=False)
+            if not any(a.startswith(i) or i.startswith(a) for a in keep)]
 
 
 def _remove_engine_containers(include_primary: bool) -> list:
-    """``docker rm -f`` this node's engine containers. Returns the ids removed."""
+    """``docker rm -f`` this node's engine containers. Returns the ids removed.
+
+    An engine ADOPTED by ``engine/reconcile.py`` is excluded: adoption runs before
+    this sweep, and the point of it is that the container is still serving and now
+    has a record in the manager, so removing it here would take down the very
+    instance the node just decided to keep (#179). Nothing is adopted before the
+    boot sweep, so that one is unaffected.
+    """
     import subprocess
+
+    from ainode.engine.reconcile import adopted_container_ids
     ps = subprocess.run(
         ["docker", "ps", "-aq", *_engine_name_filters(include_primary)],
         capture_output=True, text=True, timeout=20)
-    ids = [i for i in ps.stdout.split() if i]
+    keep = adopted_container_ids()
+    ids = [i for i in ps.stdout.split()
+           if i and not any(a.startswith(i) or i.startswith(a) for a in keep)]
     if ids:
         subprocess.run(["docker", "rm", "-f", *ids],
                        capture_output=True, text=True, timeout=60)
@@ -1398,23 +1475,56 @@ async def replay_instances_on_startup(app) -> None:
     has reaped yet -- under-provisions its cache and dies in engine init. A launch
     that fails after its one retry does not block the rest: it logs and the replay
     moves on to the next model.
+
+    ADOPTION COMES FIRST, before the settle wait and before the sweep (#179). An
+    orchestrator restart leaves the engine containers running, so the first thing
+    this node has to do is find out what it is already serving: a container that
+    is up is put back in the InstanceManager with its real shape, and never
+    relaunched. The distributed replay decision comes LAST, once the manager
+    reflects reality, so a shape whose container is alive is recognised rather
+    than launched a second time.
     """
     config = app.get("config")
     if config is None:
         return
     entries = load_instance_manifest()
+
+    # What is this node already running? Asked before anything is swept or
+    # launched, because the answer decides both. Both reconciliation steps are
+    # module-level names here for the same reason ``ensure_startup_sweep`` is: a
+    # test drives the replay's ordering with them faked, and neither may shell out
+    # to a real docker on the machine running the suite.
+    try:
+        adopted = await adopt_running_engines(app)
+        if adopted:
+            logger.info("adopted %d running engine container(s) on startup", len(adopted))
+    except Exception:
+        logger.exception("engine adoption failed; continuing with the replay")
+
     await asyncio.sleep(_REPLAY_SETTLE_SECONDS)
 
     # Sweep BEFORE anything launches, and wait for it -- even with nothing to
     # replay, an engine from a previous life must not be left holding memory.
     await ensure_startup_sweep()
-    if not entries:
-        return
 
     # One launch at a time on this node, and the replay outranks nobody: it queues
     # rather than refusing, because boot has nobody to report a refusal to.
-    async with launch_slot("startup replay", wait=WAIT_FOREVER):
-        await _replay_serialized(app, config, entries)
+    if entries:
+        async with launch_slot("startup replay", wait=WAIT_FOREVER):
+            await _replay_serialized(app, config, entries)
+
+    # The distributed shape last: one attempt, and only when the container is
+    # gone AND every peer answers. Otherwise the record is marked degraded and
+    # reported (ainode doctor, /api/status, the dashboard banner). It takes the
+    # node's launch slot itself, and only around a real relaunch, because it holds
+    # that slot until the engine BINDS (the lock is not reentrant, so it cannot be
+    # wrapped in one here).
+    try:
+        outcome = await replay_distributed_if_needed(app)
+        if outcome.get("action") not in (None, "none"):
+            logger.info("distributed replay: %s", outcome.get("action"))
+    except Exception:
+        logger.exception("distributed replay failed")
 
 
 async def _replay_serialized(app, config, entries) -> None:
@@ -1728,6 +1838,7 @@ async def handle_model_unload(request: web.Request) -> web.Response:
                     errors.append(f"config.save: {exc}")
             # Persist the reduced set so a restart doesn't resurrect the unloaded one.
             save_instance_manifest(request.app)
+            forget_distributed_instance(inst.record.model, inst.record.api_port)
             return web.json_response({
                 "stopped": True, "model": model,
                 "instance_id": inst.record.instance_id,
@@ -1752,6 +1863,8 @@ async def handle_model_unload(request: web.Request) -> web.Response:
     # different model, which is why the dashboard's Unload button silently no-op'd.
     served_here = engine is not None and (not model or getattr(config, "model", None) == model)
     if served_here:
+        forget_distributed_instance(getattr(config, "model", "") or model,
+                                    getattr(config, "api_port", 0))
         try:
             if engine.is_running():
                 engine.stop()

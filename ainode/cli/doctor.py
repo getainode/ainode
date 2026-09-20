@@ -869,6 +869,51 @@ def check_fabric(config: NodeConfig) -> list[Check]:
     return [Check("fabric.interface", OK, f"{iface} at {address}{suffix}", data=data)]
 
 
+def check_distributed(home) -> list[Check]:
+    """The recorded distributed shape: is this node serving what it wrote down?
+
+    A head persists its multi-node shape to ``distributed.json`` and the
+    reconciler stamps that record ``degraded`` when the engine container is gone
+    and a peer did not answer the launch's own probe (#179). Nothing retries it,
+    on purpose, so this is one of the three places the node says so out loud, and
+    the only one a human reaches without a browser.
+    """
+    path = Path(home) / "distributed.json"
+    if not _exists(path):
+        return [Check("cluster.distributed", OK,
+                      "no distributed shape recorded on this node",
+                      data={"path": str(path), "exists": False})]
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return [Check("cluster.distributed", WARN,
+                      f"cannot read {path}: {exc}",
+                      fix="delete it if this node is not a distributed head; the "
+                          "next launch writes a fresh one",
+                      data={"path": str(path), "exists": True})]
+    model = str(record.get("model") or "")
+    width = record.get("tensor_parallel_size") or 1
+    peers = list(record.get("peer_ips") or [])
+    data = {"path": str(path), "exists": True, "model": model,
+            "tensor_parallel_size": width, "peer_ips": peers,
+            "distributed_executor": record.get("distributed_executor"),
+            "status": record.get("status")}
+    if record.get("status") != "degraded":
+        return [Check("cluster.distributed", OK,
+                      f"{model} TP={width} recorded across {len(peers)} peer(s), "
+                      f"shape reported healthy", data=data)]
+    down = [str(entry.get("peer_ip") or entry)
+            for entry in (record.get("degraded_peers") or [])]
+    data["peers_unreachable"] = down
+    return [Check("cluster.distributed", WARN,
+                  f"{model} TP={width} is recorded here and NOT running: "
+                  f"{record.get('degraded_reason') or 'no reason recorded'}",
+                  fix=("bring " + (", ".join(down) or "the peer(s)") +
+                       " back and restart ainode to replay it, or unload the "
+                       "model to drop the record"),
+                  data=data)]
+
+
 def check_secrets(home) -> list[Check]:
     """The secrets store exists and nobody but its owner can read it."""
     path = Path(home) / "secrets.json"
@@ -954,6 +999,7 @@ def run_checks(home=None, config_path=None) -> list[Check]:
     checks += check_cluster_id(config, seen)
     checks += peer_checks
     checks += check_fabric(config)
+    checks += check_distributed(home)
     checks += check_secrets(home)
     checks += check_hf_token(config, home)
     return checks
