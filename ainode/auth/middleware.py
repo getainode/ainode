@@ -1,4 +1,23 @@
-"""API key authentication middleware for aiohttp."""
+"""API key authentication middleware for aiohttp.
+
+The rule, in one place: **when auth is enabled every path under ``/api`` and
+``/v1`` needs the key.** The exceptions are the three things a browser with no
+key must still be able to reach, or the dashboard cannot ask for one:
+
+* the static shell (``/``, ``/onboarding``, ``/static/*``),
+* ``/api/health`` (liveness, for a probe that has no key),
+* ``/api/auth/status`` (so the UI can say "this node wants a key" instead of
+  rendering an empty page).
+
+First-run onboarding is open only while the node is NOT yet onboarded:
+``POST /api/onboarding/complete`` writes the node's identity, so leaving it open
+on a configured node is a mutating route with no key on it (#168).
+
+Every request is stamped with ``request["authenticated"]`` -- True only when a
+Bearer token matched a stored key hash. Handlers read it through
+``is_authenticated()`` to gate the few fields that are dangerous even when auth
+is switched off (``trust_remote_code``; see ``TRUST_REMOTE_CODE_RULE``).
+"""
 
 from __future__ import annotations
 
@@ -19,15 +38,35 @@ def _hash_key(key: str) -> str:
 
 AUTH_FILE = AINODE_HOME / "auth.json"
 
-SKIP_PATHS: set[str] = {"/", "/onboarding", "/api/health"}
-SKIP_PREFIXES: tuple[str, ...] = ("/static/", "/api/onboarding/")
+SKIP_PATHS: set[str] = {"/", "/onboarding", "/api/health", "/api/auth/status"}
+SKIP_PREFIXES: tuple[str, ...] = ("/static/",)
+
+#: ``request`` key carrying the outcome of token validation for this request.
+AUTHENTICATED_KEY = "authenticated"
+
+#: Printed back to any caller refused a ``trust_remote_code`` escalation, and
+#: quoted in the CHANGELOG. One sentence of rule, one of how to comply.
+TRUST_REMOTE_CODE_RULE = (
+    "trust_remote_code makes the engine execute Python from the model "
+    "repository inside the engine container, so it can only be set by a "
+    "request that presents an API key (dashboard: Config > API access, or "
+    "Authorization: Bearer <key>), or by loading a curated catalog model whose "
+    "recipe already declares it."
+)
+
+#: What a 401 tells the caller. The dashboard turns this into its API access
+#: panel; a curl user gets the header to send.
+MISSING_KEY_MESSAGE = (
+    "This node requires an API key. Send Authorization: Bearer <key>, or paste "
+    "the key into the dashboard under Config > API access."
+)
 
 
 @dataclass
 class AuthConfig:
     enabled: bool = False
     api_keys: list[dict] = field(default_factory=list)
-    # Each key entry: {"id": "<short-id>", "key": "<hex>"}
+    # Each key entry: {"id": "<short-id>", "key_hash": "<sha256 hex>"}
 
     # -- persistence ----------------------------------------------------------
 
@@ -58,6 +97,10 @@ class AuthConfig:
             return True
         return False
 
+    def key_ids(self) -> list[dict]:
+        """The stored keys as the UI may see them: ids only, never a hash."""
+        return [{"id": entry.get("id", "")} for entry in self.api_keys]
+
     def validate_token(self, token: str) -> bool:
         token_hash = _hash_key(token)
         for entry in self.api_keys:
@@ -67,17 +110,58 @@ class AuthConfig:
         return False
 
     def enable(self) -> dict:
+        """Turn auth on, minting a first key only when there is none.
+
+        Returns ``{"id": ..., "key": <plaintext> | None}``. The plaintext is
+        there only for a key minted by this call: the file stores hashes, so an
+        existing key cannot be shown again and the caller has to say so rather
+        than hand back a ``KeyError`` (it used to: ``entry["key"]`` on a reused
+        entry 500'd both ``POST /api/auth/enable`` and ``ainode auth enable``).
+        """
         self.enabled = True
         if not self.api_keys:
             entry = self.generate_key()
-        else:
-            entry = self.api_keys[0]
             self.save()
-        return entry
+            return {"id": entry["id"], "key": entry["key"]}
+        self.save()
+        return {"id": self.api_keys[0].get("id", ""), "key": None}
 
     def disable(self) -> None:
         self.enabled = False
         self.save()
+
+
+def bearer_token(request: web.Request) -> str:
+    """The Bearer token on this request, or "" when there is none."""
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        return header[7:].strip()
+    return ""
+
+
+def is_authenticated(request) -> bool:
+    """True when this request presented a token matching a stored key.
+
+    Independent of whether auth is ENABLED: a node running open can still have
+    a key, and presenting it is what separates the operator from anyone else who
+    can reach the port.
+
+    Tolerant of a request-like object with no mapping interface, because several
+    tests call handlers with a stub request; a stub reads as not authenticated,
+    which is the safe direction.
+    """
+    getter = getattr(request, "get", None)
+    if not callable(getter):
+        return False
+    return bool(getter(AUTHENTICATED_KEY, False))
+
+
+def _onboarding_open(request: web.Request) -> bool:
+    """First-run routes answer without a key, but only before onboarding."""
+    if not request.path.startswith("/api/onboarding"):
+        return False
+    config = request.app.get("config")
+    return not bool(getattr(config, "onboarded", False))
 
 
 def _should_skip(request: web.Request) -> bool:
@@ -86,26 +170,28 @@ def _should_skip(request: web.Request) -> bool:
         return True
     if path.startswith(SKIP_PREFIXES):
         return True
-    if request.method == "GET" and path.startswith("/api/onboarding"):
-        return True
-    return False
+    return _onboarding_open(request)
 
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     auth_cfg: AuthConfig | None = request.app.get("auth_config")
+    token = bearer_token(request)
+    # Stamped on every request, enabled or not: handlers gate on it (see
+    # is_authenticated) even when the node is running open.
+    request[AUTHENTICATED_KEY] = bool(
+        token and auth_cfg is not None and auth_cfg.validate_token(token)
+    )
     if auth_cfg is None or not auth_cfg.enabled:
         return await handler(request)
     if _should_skip(request):
         return await handler(request)
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if not token:
         return web.json_response(
-            {"error": {"message": "Missing or invalid Authorization header", "type": "auth_error"}},
+            {"error": {"message": MISSING_KEY_MESSAGE, "type": "auth_error"}},
             status=401,
         )
-    token = auth_header[7:]
-    if not auth_cfg.validate_token(token):
+    if not request[AUTHENTICATED_KEY]:
         return web.json_response(
             {"error": {"message": "Invalid API key", "type": "auth_error"}},
             status=401,

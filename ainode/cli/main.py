@@ -742,10 +742,17 @@ def cmd_auth(args):
     if action == "enable":
         entry = auth_cfg.enable()
         console.print("  [green]Auth enabled.[/green]")
-        console.print(f"  API key: {entry['key']}")
-        console.print(f"  Key ID:  {entry['id']}")
+        if entry["key"]:
+            console.print(f"  API key: {entry['key']}")
+            console.print(f"  Key ID:  {entry['id']}")
+        else:
+            # Keys are stored hashed, so an existing one cannot be printed again.
+            console.print(f"  Using the {len(auth_cfg.api_keys)} key(s) this node "
+                          "already has (stored hashed, so not shown again).")
+            console.print("  Lost it? ainode auth new-key")
         console.print()
         console.print("  Use: Authorization: Bearer <key>")
+        console.print("  Dashboard: paste the key under Config > API access.")
         console.print("  Made in Texas")
 
     elif action == "disable":
@@ -757,6 +764,9 @@ def cmd_auth(args):
         state = "[green]enabled[/green]" if auth_cfg.enabled else "[dim]disabled[/dim]"
         console.print(f"  Auth: {state}")
         console.print(f"  Keys: {len(auth_cfg.api_keys)}")
+        if not auth_cfg.enabled:
+            console.print("  API open, no key set" if not auth_cfg.api_keys
+                          else "  API open, key set but not required")
         console.print("  Made in Texas")
 
     elif action == "new-key":

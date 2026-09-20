@@ -6204,3 +6204,72 @@ select {
   white-space: nowrap;
 }
 .btn-stop:hover { background: var(--red-glow); box-shadow: 0 0 16px var(--red-glow); }
+
+/* ==========================================================================
+   API ACCESS: the header chip and the Config > API access panel
+
+   The chip is the truthful-by-default part of #167: a node with no key says so
+   in the header rather than letting the operator assume a password exists.
+   ========================================================================== */
+
+.api-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.api-chip:hover { color: var(--text-primary); border-color: var(--text-muted); }
+
+.api-chip .api-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+/* open: no key wanted. keyed: key wanted and this browser has one.
+   locked: key wanted and this browser has none, so nothing will load. */
+.api-chip[data-state="open"] .api-chip-dot { background: var(--amber); }
+.api-chip[data-state="keyed"] .api-chip-dot { background: var(--nvidia-green); }
+.api-chip[data-state="locked"] .api-chip-dot { background: var(--red); }
+.api-chip[data-state="locked"] { border-color: var(--red); color: var(--red); }
+
+.api-access-state {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.api-access-state[data-state="open"] { border-color: var(--amber); }
+.api-access-state[data-state="keyed"] { border-color: var(--nvidia-green); }
+.api-access-state[data-state="locked"] { border-color: var(--red); }
+
+.config-card.config-card-alert { border-color: var(--amber); }
+
+.api-key-reveal {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+.api-key-reveal code {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--nvidia-green);
+  background: rgba(118, 185, 0, 0.1);
+  border-radius: 4px;
+  padding: 8px 10px;
+  word-break: break-all;
+  user-select: all;
+}

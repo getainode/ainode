@@ -34,6 +34,10 @@ const AINode = {
     modelsSearch: '',
     modelsSort: 'recommended',
     configSection: 'credentials',
+    // /api/auth/status, polled on its own because it is the one API route that
+    // still answers when the key is missing (#167).
+    authStatus: null,
+    authBlocked: null,
     configData: {
       secrets: null,
       cluster: null,
@@ -61,6 +65,9 @@ const AINode = {
   // ========================================================================
 
   init() {
+    // First: a node that wants a key must be able to say so before any panel
+    // tries to render (#167).
+    this.initAuth();
     this.loadChatSettings();
     this.loadConversations();
     // Per-turn stats ride along with each conversation, so the per-instance
@@ -79,6 +86,21 @@ const AINode = {
     this.loadActiveDownloads();
     // Also ask the server if there are active jobs we missed
     setTimeout(() => this.reconcileActiveDownloads(), 500);
+  },
+
+  // ========================================================================
+  //  API KEY (see static/js/auth.js for the wrapper every fetch goes through)
+  // ========================================================================
+
+  initAuth() {
+    var self = this;
+    // One handler for the whole UI: any 401, from any panel, opens the panel
+    // that fixes it instead of leaving an empty shell behind.
+    AINodeAuth.onUnauthorized(function (info) { self.onUnauthorized(info); });
+    var chip = document.getElementById('api-access-chip');
+    if (chip) chip.addEventListener('click', function () { self.openApiAccess(); });
+    this.refreshAuthStatus();
+    this.state.authInterval = setInterval(function () { self.refreshAuthStatus(); }, 15000);
   },
 
   initTopology() {
@@ -318,7 +340,7 @@ const AINode = {
 
   async fetchJSON(url) {
     try {
-      var resp = await fetch(url);
+      var resp = await AINodeAuth.fetch(url);
       if (!resp.ok) return null;
       return await resp.json();
     } catch (e) {
@@ -446,7 +468,7 @@ const AINode = {
 
   checkVersion() {
     var self = this;
-    fetch('/api/version/check')
+    AINodeAuth.fetch('/api/version/check')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         self.state.versionInfo = data;
@@ -473,7 +495,7 @@ const AINode = {
     if (btn) { btn.disabled = true; btn.textContent = 'Updating...'; }
     if (panel) { panel.style.display = ''; panel.innerHTML = '<div class="cluster-update-row"><span class="cu-spinner">⟳</span> Starting update...</div>'; }
 
-    fetch('/api/cluster/update-all', { method: 'POST' })
+    AINodeAuth.fetch('/api/cluster/update-all', { method: 'POST' })
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (data.error) {
@@ -495,7 +517,7 @@ const AINode = {
     var panel = document.getElementById('cluster-update-panel');
     var btn = document.getElementById('cluster-update-all-btn');
 
-    fetch('/api/cluster/update-status?id=' + updateId)
+    AINodeAuth.fetch('/api/cluster/update-status?id=' + updateId)
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (!panel) return;
@@ -571,7 +593,7 @@ const AINode = {
       if (!confirm('Update all ' + nodeCount + ' ' + nodeWord + ' to v' + info.latest + '? Services restart one by one.')) return;
       badge.textContent = 'Updating...';
       badge.disabled = true;
-      fetch('/api/cluster/update-all', { method: 'POST' })
+      AINodeAuth.fetch('/api/cluster/update-all', { method: 'POST' })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (data && data.error) {
@@ -1102,7 +1124,7 @@ const AINode = {
 
   async deleteInstance(model) {
     try {
-      var resp = await fetch('/api/models/unload', {
+      var resp = await AINodeAuth.fetch('/api/models/unload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: model }),
@@ -1490,7 +1512,7 @@ const AINode = {
         body = { model: model, node_id: target };
         if (gmu != null) body.gpu_memory_utilization = gmu;
       }
-      var resp = await fetch(endpoint, {
+      var resp = await AINodeAuth.fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -2308,7 +2330,7 @@ const AINode = {
     var chunks = 0, usage = null, finish = null, err = null, aborted = false;
 
     try {
-      var resp = await fetch('/v1/chat/completions', {
+      var resp = await AINodeAuth.fetch('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -2712,7 +2734,7 @@ const AINode = {
       });
     });
 
-    fetch('/api/models/' + source)
+    AINodeAuth.fetch('/api/models/' + source)
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var models = data.models || [];
@@ -2845,7 +2867,7 @@ const AINode = {
       var btn = modal.querySelector('#cd-confirm');
       btn.disabled = true;
       btn.textContent = 'Deleting...';
-      fetch('/api/models/delete-repo', {
+      AINodeAuth.fetch('/api/models/delete-repo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hf_repo: hfRepo }),
@@ -2932,7 +2954,7 @@ const AINode = {
     var dl = self.state.activeDownloads && self.state.activeDownloads[hfRepo];
     if (!dl) return;
 
-    fetch('/api/models/download/status?job_id=' + encodeURIComponent(dl.jobId))
+    AINodeAuth.fetch('/api/models/download/status?job_id=' + encodeURIComponent(dl.jobId))
       .then(function (r) { return r.json(); })
       .then(function (st) {
         if (st.error || st.status === 'unknown') {
@@ -2996,7 +3018,7 @@ const AINode = {
   checkIfDownloaded(hfRepo) {
     var self = this;
     var slug = hfRepo.replace(/\//g, '--').toLowerCase();
-    fetch('/api/models/' + encodeURIComponent(slug)).then(function (r) {
+    AINodeAuth.fetch('/api/models/' + encodeURIComponent(slug)).then(function (r) {
       return r.ok ? r.json() : null;
     }).then(function (info) {
       var dl = self.state.activeDownloads && self.state.activeDownloads[hfRepo];
@@ -3041,7 +3063,7 @@ const AINode = {
   // Reconcile on startup — ask server for active jobs that might be ours
   reconcileActiveDownloads() {
     var self = this;
-    fetch('/api/models/downloads/active')
+    AINodeAuth.fetch('/api/models/downloads/active')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var jobs = (data.jobs || []).filter(function (j) {
@@ -3088,7 +3110,7 @@ const AINode = {
       return;
     }
 
-    fetch('/api/models/download-repo', {
+    AINodeAuth.fetch('/api/models/download-repo', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ hf_repo: hfRepo }),
@@ -3176,7 +3198,7 @@ const AINode = {
         }
       });
     };
-    fetch('/api/models/download-cancel', {
+    AINodeAuth.fetch('/api/models/download-cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_id: jobId }),
@@ -3375,7 +3397,7 @@ const AINode = {
     });
     if (!model) {
       // Fetch details from HF search as a fallback
-      fetch('/api/models/search?q=' + encodeURIComponent(repoOrId.split('/').pop() || repoOrId) + '&limit=5')
+      AINodeAuth.fetch('/api/models/search?q=' + encodeURIComponent(repoOrId.split('/').pop() || repoOrId) + '&limit=5')
         .then(function (r) { return r.json(); })
         .then(function (data) {
           var hit = (data.models || []).find(function (m) { return m.hf_repo === repoOrId; });
@@ -3511,7 +3533,7 @@ const AINode = {
       launchBtn.addEventListener('click', function () {
         launchBtn.disabled = true;
         launchBtn.textContent = 'Launching...';
-        fetch('/api/engine/set-model', {
+        AINodeAuth.fetch('/api/engine/set-model', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: repo }),
@@ -3630,7 +3652,7 @@ const AINode = {
 
     if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Searching HuggingFace...</div>';
 
-    fetch('/api/models/search?q=' + encodeURIComponent(query) + '&limit=50')
+    AINodeAuth.fetch('/api/models/search?q=' + encodeURIComponent(query) + '&limit=50')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         self._hfResults = data.models || [];
@@ -3766,7 +3788,7 @@ const AINode = {
     // Fetch downloaded models from disk — lazy load, refresh periodically
     if (!this.state.downloadedModels) {
       this.state.downloadedModels = {};
-      fetch('/api/models/downloaded').then(function (r) { return r.json(); }).then(function (data) {
+      AINodeAuth.fetch('/api/models/downloaded').then(function (r) { return r.json(); }).then(function (data) {
         var map = {};
         (data.models || data || []).forEach(function (m) {
           var repo = m.hf_repo || m.id || '';
@@ -3781,7 +3803,7 @@ const AINode = {
     // Fetch catalog from API (42+ models) — lazy load once
     if (!this.state.catalog) {
       this.state.catalog = [];
-      fetch('/api/models').then(function (r) { return r.json(); }).then(function (data) {
+      AINodeAuth.fetch('/api/models').then(function (r) { return r.json(); }).then(function (data) {
         self.state.catalog = (data.models || []).map(function (m) {
           return {
             id: m.hf_repo || m.id,
@@ -3982,7 +4004,7 @@ const AINode = {
         var modelId = btn.dataset.modelId;
         btn.disabled = true;
         btn.textContent = 'Planning...';
-        fetch('/api/sharding/plan?model=' + encodeURIComponent(modelId))
+        AINodeAuth.fetch('/api/sharding/plan?model=' + encodeURIComponent(modelId))
           .then(function (r) { return r.json(); })
           .then(function (data) {
             if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Shard Across Cluster'; return; }
@@ -4013,7 +4035,7 @@ const AINode = {
               var lb = ev.target;
               lb.disabled = true;
               lb.textContent = 'Launching...';
-              fetch('/api/sharding/launch', {
+              AINodeAuth.fetch('/api/sharding/launch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ model: modelId }),
@@ -4274,7 +4296,7 @@ const AINode = {
       if (repo) payload.hf_repo = repo;
       qBtn.disabled = true; qBtn.textContent = 'Submitting…';
       try {
-        var resp = await fetch('/api/training/jobs', {
+        var resp = await AINodeAuth.fetch('/api/training/jobs', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         });
         var result = await resp.json();
@@ -4385,7 +4407,7 @@ const AINode = {
     var runBtn = container.querySelector('#ad-run');
     runBtn.disabled = true; runBtn.textContent = 'Starting…';
     try {
-      var resp = await fetch('/api/training/autodata', {
+      var resp = await AINodeAuth.fetch('/api/training/autodata', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       var data = await resp.json();
@@ -4494,7 +4516,7 @@ const AINode = {
       b.addEventListener('click', async function (e) {
         e.stopPropagation();
         if (!confirm('Delete this dataset?')) return;
-        var resp = await fetch('/api/datasets/' + encodeURIComponent(b.dataset.dsDelete), { method: 'DELETE' });
+        var resp = await AINodeAuth.fetch('/api/datasets/' + encodeURIComponent(b.dataset.dsDelete), { method: 'DELETE' });
         if (resp.ok) { self.toast('Dataset deleted', 'success'); self.renderTraining(); }
         else { self.toast('Failed to delete dataset', 'error'); }
       });
@@ -5047,7 +5069,7 @@ const AINode = {
         var match = (s.datasets || []).find(function (d) { return d.id === s.dataset_id; });
         if (match) sampleCount = match.samples || 0;
       }
-      var resp = await fetch('/api/training/estimate', {
+      var resp = await AINodeAuth.fetch('/api/training/estimate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5106,7 +5128,7 @@ const AINode = {
     }
 
     try {
-      var resp = await fetch('/api/training/jobs', {
+      var resp = await AINodeAuth.fetch('/api/training/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -5227,7 +5249,7 @@ const AINode = {
           var fd = new FormData();
           fd.append('file', fileIn.files[0]);
           if (name) fd.append('name', name);
-          resp = await fetch('/api/datasets/upload', { method: 'POST', body: fd });
+          resp = await AINodeAuth.fetch('/api/datasets/upload', { method: 'POST', body: fd });
         } else {
           var body = { source: currentSrc, name: name };
           var pathEl = document.getElementById('dsm-path');
@@ -5241,7 +5263,7 @@ const AINode = {
           } else {
             body.path = pathVal;
           }
-          resp = await fetch('/api/datasets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          resp = await AINodeAuth.fetch('/api/datasets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         }
         var data = await resp.json();
         if (!resp.ok) { self.toast('Error: ' + (data.error || 'Failed'), 'error'); btn.disabled = false; btn.textContent = 'Add Dataset'; return; }
@@ -5429,7 +5451,7 @@ const AINode = {
     var cjb = document.getElementById('training-cancel-job-btn');
     if (cjb) cjb.addEventListener('click', async function () {
       if (!confirm('Cancel this training job?')) return;
-      var resp = await fetch('/api/training/jobs/' + jobId, { method: 'DELETE' });
+      var resp = await AINodeAuth.fetch('/api/training/jobs/' + jobId, { method: 'DELETE' });
       if (resp.ok) self.renderTraining();
       else {
         var err = await resp.json().catch(function () { return {}; });
@@ -5441,7 +5463,7 @@ const AINode = {
     if (mb) mb.addEventListener('click', async function () {
       if (!confirm('Merge this adapter into a full model? This can take several minutes.')) return;
       mb.disabled = true;
-      var resp = await fetch('/api/training/jobs/' + jobId + '/merge', { method: 'POST' });
+      var resp = await AINodeAuth.fetch('/api/training/jobs/' + jobId + '/merge', { method: 'POST' });
       var result = await resp.json().catch(function () { return {}; });
       if (resp.ok) {
         self.toast('Merge started — output: ' + result.output_dir, 'success');
@@ -5459,7 +5481,7 @@ const AINode = {
     if (rb) rb.addEventListener('click', async function () {
       if (!confirm('Resume training from the latest checkpoint?')) return;
       rb.disabled = true;
-      var resp = await fetch('/api/training/jobs/' + jobId + '/resume', { method: 'POST' });
+      var resp = await AINodeAuth.fetch('/api/training/jobs/' + jobId + '/resume', { method: 'POST' });
       var result = await resp.json().catch(function () { return {}; });
       if (resp.ok) {
         self.toast('Resumed from checkpoint ' + result.checkpoint, 'success');
@@ -5713,6 +5735,7 @@ const AINode = {
   renderConfigSection() {
     switch (this.state.configSection) {
       case 'credentials': return this.renderConfigCredentials();
+      case 'api':         return this.renderConfigApiAccess();
       case 'cluster':     return this.renderConfigCluster();
       case 'node':        return this.renderConfigNode();
       case 'storage':     return this.renderConfigStorage();
@@ -5802,7 +5825,7 @@ const AINode = {
       btn.addEventListener('click', async function () {
         var name = btn.dataset.customDelete;
         if (!confirm('Delete custom secret "' + name + '"?')) return;
-        await fetch('/api/secrets/custom/' + encodeURIComponent(name), { method: 'DELETE' });
+        await AINodeAuth.fetch('/api/secrets/custom/' + encodeURIComponent(name), { method: 'DELETE' });
         self.toast('Deleted ' + name, 'info');
         self.renderConfigCredentials();
       });
@@ -5816,7 +5839,7 @@ const AINode = {
         var name = (nameEl.value || '').trim();
         var value = valEl.value || '';
         if (!name || !value) { self.toast('Name and value required', 'error'); return; }
-        var resp = await fetch('/api/secrets/custom/' + encodeURIComponent(name), {
+        var resp = await AINodeAuth.fetch('/api/secrets/custom/' + encodeURIComponent(name), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ value: value }),
@@ -5887,7 +5910,7 @@ const AINode = {
       var inp = document.getElementById('cfg-sec-val-' + key);
       var val = inp ? inp.value : '';
       if (!val) { self.toast('Value is required', 'error'); return; }
-      var resp = await fetch('/api/secrets/' + encodeURIComponent(key), {
+      var resp = await AINodeAuth.fetch('/api/secrets/' + encodeURIComponent(key), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: val }),
@@ -5912,7 +5935,7 @@ const AINode = {
     var del = row.querySelector('[data-delete-secret="' + key + '"]');
     if (del) del.addEventListener('click', async function () {
       if (!confirm('Delete ' + key + '?')) return;
-      await fetch('/api/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
+      await AINodeAuth.fetch('/api/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
       self.toast('Deleted', 'info');
       self.renderConfigCredentials();
     });
@@ -5921,7 +5944,7 @@ const AINode = {
     if (test) test.addEventListener('click', async function () {
       var result = document.getElementById('cfg-sec-result-' + key);
       if (result) { result.style.display = ''; result.className = 'config-test-result'; result.textContent = 'Testing…'; }
-      var resp = await fetch('/api/secrets/' + encodeURIComponent(key) + '/test');
+      var resp = await AINodeAuth.fetch('/api/secrets/' + encodeURIComponent(key) + '/test');
       var body = await resp.json().catch(function () { return {}; });
       if (!result) return;
       if (body.ok) {
@@ -5932,6 +5955,285 @@ const AINode = {
         result.textContent = 'Failed: ' + (body.message || 'unknown error');
       }
     });
+  },
+
+  // ----- API access ---------------------------------------------------------
+  // The panel that makes auth usable: whether this port wants a key, the switch
+  // that turns it on, a key shown once, the keys that exist, and a box to paste
+  // one into on a fresh browser. A 401 anywhere in the UI lands here (#167).
+
+  async refreshAuthStatus() {
+    // /api/auth/status answers with no key on purpose, so this stays truthful
+    // even while every other panel is 401ing.
+    var st = await this.fetchJSON('/api/auth/status');
+    if (st) this.state.authStatus = st;
+    this.renderAuthChip();
+    return st;
+  },
+
+  authChipText() {
+    var st = this.state.authStatus;
+    if (!st) return 'API access';
+    if (st.enabled) {
+      return st.authenticated ? 'API key required, key set' : 'API key required, no key';
+    }
+    // Must read the same as /api/status's auth.label (api/server.py
+    // ::auth_status_fields) -- one fact, one wording.
+    return st.key_count ? 'API open, key set but not required' : 'API open, no key set';
+  },
+
+  renderAuthChip() {
+    var chip = document.getElementById('api-access-chip');
+    var label = document.getElementById('api-chip-label');
+    if (!chip || !label) return;
+    var st = this.state.authStatus || {};
+    label.textContent = this.authChipText();
+    var state = 'open';
+    if (st.enabled) state = st.authenticated ? 'keyed' : 'locked';
+    chip.dataset.state = state;
+    chip.title = st.enabled
+      ? 'This node requires an API key. Click to manage keys.'
+      : 'Anyone who can reach this port can load models and change config. Click to require a key.';
+  },
+
+  openApiAccess() {
+    this.state.configSection = 'api';
+    if (this.state.currentView !== 'config') {
+      this.navigate('config');
+    }
+    var nav = document.getElementById('config-nav');
+    if (nav) {
+      nav.querySelectorAll('.config-nav-item').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.section === 'api');
+      });
+    }
+    this.renderConfigSection();
+  },
+
+  onUnauthorized(info) {
+    // A blank dashboard is the bug. Say what happened and open the one panel
+    // that fixes it.
+    this.state.authBlocked = info || { hadKey: AINodeAuth.hasKey() };
+    this.toast(info && info.hadKey
+      ? 'This node rejected the stored API key. Paste a current one.'
+      : 'This node requires an API key.', 'error');
+    this.refreshAuthStatus();
+    this.openApiAccess();
+  },
+
+  async renderConfigApiAccess() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var self = this;
+    var st = await this.refreshAuthStatus() || this.state.authStatus || {};
+    var keys = null;
+    if (!st.enabled || st.authenticated) {
+      keys = await this.fetchJSON('/api/auth/keys');
+    }
+    var stored = AINodeAuth.getKey();
+    var html = '';
+    html += '<h2 class="config-section-title">API access</h2>';
+    html += '<p class="config-section-desc">Who may call this node. AINode serves the dashboard, the OpenAI-compatible API and every management route on the same ports, so a key is the whole access control: with auth on, every <code>/api</code> and <code>/v1</code> route needs <code>Authorization: Bearer &lt;key&gt;</code> except <code>/api/health</code>, <code>/api/auth/status</code> and the static shell.</p>';
+
+    if (this.state.authBlocked) {
+      html += '<div class="config-card config-card-alert">';
+      html += '<h3 class="config-card-title">This node refused the last request</h3>';
+      html += '<p class="config-card-desc">' + (this.state.authBlocked.hadKey
+        ? 'The key stored in this browser is not one of this node\'s keys. Paste a current one below, or create a new key from a session that is authenticated.'
+        : 'Auth is on and this browser has no key. Paste one below.') + '</p>';
+      html += '</div>';
+    }
+
+    // -- state ---------------------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Status</h3>';
+    html += '<div class="api-access-state" data-state="' + (st.enabled ? (st.authenticated ? 'keyed' : 'locked') : 'open') + '">';
+    html += '<strong>' + this.esc(this.authChipText()) + '</strong>';
+    html += '</div>';
+    if (!st.enabled) {
+      html += '<p class="config-card-desc">Anyone who can reach this port can load and delete models, change config, start training and restart the cluster. That is fine on a private network and it is the default; turn it on before this node is reachable from anywhere else.</p>';
+      html += '<button class="config-btn" id="auth-enable">Require a key</button>';
+    } else {
+      html += '<p class="config-card-desc">Keys are stored hashed in <code>~/.ainode/auth.json</code>. This browser keeps its key in <code>localStorage</code> under <code>' + this.esc(AINodeAuth.STORAGE_KEY) + '</code>, never in the page or a URL.</p>';
+      html += '<button class="config-btn secondary" id="auth-disable">Stop requiring a key</button>';
+    }
+    html += '</div>';
+
+    // -- the key this browser sends -----------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Key in this browser</h3>';
+    html += '<p class="config-card-desc">' + (stored
+      ? 'Sending <code>' + this.esc(AINodeAuth.maskKey(stored)) + '</code> with every request.'
+      : 'No key stored. Paste one here to use this dashboard against a node that requires a key.') + '</p>';
+    html += '<div class="config-secret-input-row">';
+    html += '  <input type="password" class="form-input" id="auth-key-input" placeholder="Paste an API key" autocomplete="off">';
+    html += '  <button class="config-btn" id="auth-key-save">Save</button>';
+    if (stored) html += '  <button class="config-btn secondary" id="auth-key-clear">Forget</button>';
+    html += '</div>';
+    html += '</div>';
+
+    // -- keys on the node ----------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Keys on this node</h3>';
+    if (keys === null) {
+      html += '<div class="config-empty">Paste a working key above to list and manage keys.</div>';
+    } else {
+      var rows = (keys.keys || []);
+      if (!rows.length) {
+        html += '<div class="config-empty">No keys yet.</div>';
+      } else {
+        rows.forEach(function (k) {
+          html += '<div class="config-secret-row">';
+          html += '  <div class="config-secret-main"><div class="config-secret-label-row">';
+          html += '    <span class="config-secret-name">Key ' + self.esc(k.id) + '</span>';
+          html += '    <span class="config-secret-unset">stored hashed</span>';
+          html += '  </div></div>';
+          html += '  <button class="config-btn danger" data-revoke="' + self.esc(k.id) + '">Revoke</button>';
+          html += '  <span></span>';
+          html += '</div>';
+        });
+      }
+      html += '<button class="config-btn secondary" id="auth-key-new">+ Create a key</button>';
+    }
+    html += '<div id="auth-new-key"></div>';
+    html += '</div>';
+
+    // -- what a key does NOT cover ------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Also worth knowing</h3>';
+    html += '<p class="config-card-desc"><code>trust_remote_code</code> makes the engine run Python from the model repository. It can only be turned on by a request that presents a key, or by loading a curated catalog model whose recipe already declares it, so an open port cannot be talked into executing an arbitrary repo.</p>';
+    html += '<p class="config-card-desc">There is no TLS on these ports: a key travels in plain text over the network. On anything but a trusted LAN or a tailnet, put AINode behind a reverse proxy that terminates TLS.</p>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    // -- behaviour -----------------------------------------------------------
+    var enableBtn = document.getElementById('auth-enable');
+    if (enableBtn) {
+      enableBtn.addEventListener('click', function () { self.authEnable(); });
+    }
+    var disableBtn = document.getElementById('auth-disable');
+    if (disableBtn) {
+      disableBtn.addEventListener('click', function () { self.authDisable(); });
+    }
+    var saveBtn = document.getElementById('auth-key-save');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', function () {
+        var input = document.getElementById('auth-key-input');
+        var value = (input && input.value || '').trim();
+        if (!value) { self.toast('Paste a key first.', 'error'); return; }
+        AINodeAuth.setKey(value);
+        self.state.authBlocked = null;
+        self.toast('Key saved in this browser.', 'success');
+        self.refresh();
+        self.renderConfigApiAccess();
+      });
+    }
+    var clearBtn = document.getElementById('auth-key-clear');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function () {
+        AINodeAuth.clearKey();
+        self.toast('Key forgotten in this browser.', 'info');
+        self.renderConfigApiAccess();
+      });
+    }
+    var newBtn = document.getElementById('auth-key-new');
+    if (newBtn) {
+      newBtn.addEventListener('click', function () { self.authCreateKey(); });
+    }
+    mount.querySelectorAll('[data-revoke]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.authRevokeKey(btn.dataset.revoke); });
+    });
+  },
+
+  /** A key is shown once: it exists hashed on the node and nowhere else. */
+  _showNewKey(keyId, apiKey, note) {
+    var slot = document.getElementById('auth-new-key');
+    if (!slot) return;
+    var html = '<div class="config-card config-card-alert">';
+    html += '<h3 class="config-card-title">Copy this key now</h3>';
+    html += '<p class="config-card-desc">It is stored hashed on the node and cannot be shown again.' + (note ? ' ' + this.esc(note) : '') + '</p>';
+    html += '<div class="api-key-reveal"><code id="auth-new-key-value">' + this.esc(apiKey) + '</code>';
+    html += '<button class="config-btn secondary" id="auth-new-key-copy">Copy</button></div>';
+    html += '<p class="config-card-desc">Key ID <code>' + this.esc(keyId || '') + '</code></p>';
+    html += '</div>';
+    slot.innerHTML = html;
+    var copy = document.getElementById('auth-new-key-copy');
+    var self = this;
+    if (copy) {
+      copy.addEventListener('click', function () {
+        try {
+          navigator.clipboard.writeText(apiKey);
+          self.toast('Key copied.', 'success');
+        } catch (e) {
+          self.toast('Copy failed, select the key by hand.', 'error');
+        }
+      });
+    }
+  },
+
+  async authEnable() {
+    var resp = await AINodeAuth.fetch('/api/auth/enable', { method: 'POST' });
+    var data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok || !data) {
+      this.toast('Could not enable auth.', 'error');
+      return;
+    }
+    if (data.api_key) {
+      // Store it straight away: the browser that flipped the switch must not
+      // lock itself out, which is exactly what used to happen.
+      AINodeAuth.setKey(data.api_key);
+      this.state.authBlocked = null;
+      this.toast('Auth on. This browser is using the new key.', 'success');
+    } else {
+      this.toast(data.message || 'Auth on using the keys this node already has.', 'info');
+    }
+    await this.refreshAuthStatus();
+    await this.renderConfigApiAccess();
+    if (data.api_key) this._showNewKey(data.key_id, data.api_key, 'Saved in this browser already.');
+    this.refresh();
+  },
+
+  async authDisable() {
+    if (!confirm('Stop requiring an API key?\n\nEvery /api and /v1 route on this node answers anyone who can reach the port.')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/disable', { method: 'POST' });
+    if (!resp.ok) { this.toast('Could not disable auth.', 'error'); return; }
+    this.state.authBlocked = null;
+    this.toast('Auth off. This port is open.', 'info');
+    await this.refreshAuthStatus();
+    await this.renderConfigApiAccess();
+    this.refresh();
+  },
+
+  async authCreateKey() {
+    var resp = await AINodeAuth.fetch('/api/auth/keys', { method: 'POST' });
+    var data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok || !data || !data.api_key) {
+      this.toast('Could not create a key.', 'error');
+      return;
+    }
+    await this.renderConfigApiAccess();
+    this._showNewKey(data.key_id, data.api_key, '');
+  },
+
+  async authRevokeKey(keyId) {
+    if (!keyId) return;
+    var mine = AINodeAuth.getKey();
+    if (!confirm('Revoke key ' + keyId + '?')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/keys/' + encodeURIComponent(keyId), { method: 'DELETE' });
+    if (!resp.ok) { this.toast('Could not revoke ' + keyId + '.', 'error'); return; }
+    this.toast('Key ' + keyId + ' revoked.', 'success');
+    // A browser holding the key it just revoked would 401 on its next poll with
+    // nothing said, so ask the node whether this key still works and forget it
+    // here if it does not.
+    if (mine) {
+      var still = await this.fetchJSON('/api/auth/status');
+      if (still && still.enabled && still.authenticated === false) AINodeAuth.clearKey();
+    }
+    await this.refreshAuthStatus();
+    await this.renderConfigApiAccess();
   },
 
   // ----- Cluster ------------------------------------------------------------
@@ -6033,7 +6335,7 @@ const AINode = {
     mount.querySelectorAll('[data-set-role]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var role = btn.dataset.setRole;
-        var resp = await fetch('/api/cluster/role', {
+        var resp = await AINodeAuth.fetch('/api/cluster/role', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ role: role }),
@@ -6047,7 +6349,7 @@ const AINode = {
     var idBtn = document.getElementById('cfg-cluster-id-save');
     if (idBtn) idBtn.addEventListener('click', async function () {
       var val = document.getElementById('cfg-cluster-id').value.trim() || 'default';
-      var resp = await fetch('/api/cluster/id', {
+      var resp = await AINodeAuth.fetch('/api/cluster/id', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cluster_id: val }),
@@ -6245,7 +6547,7 @@ const AINode = {
       if (typeof v === 'number' && Number.isNaN(v)) delete patch[k];
       if (v === '') patch[k] = null;
     });
-    var resp = await fetch('/api/config', {
+    var resp = await AINodeAuth.fetch('/api/config', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -6549,7 +6851,7 @@ const AINode = {
     if (!modelId) return;
     if (!confirm('Eject model ' + modelId + '?')) return;
     try {
-      var resp = await fetch('/api/server/models/' + encodeURIComponent(modelId) + '/eject', { method: 'POST' });
+      var resp = await AINodeAuth.fetch('/api/server/models/' + encodeURIComponent(modelId) + '/eject', { method: 'POST' });
       var body = await resp.json().catch(function () { return {}; });
       if (resp.ok) this.toast(body.message || 'Model ejected', 'success');
       else this.toast(body.message || 'Eject not available', 'info');
@@ -6706,7 +7008,7 @@ const AINode = {
             btn.disabled = true;
             btn.textContent = 'Loading…';
             try {
-              var resp = await fetch('/api/models/load', {
+              var resp = await AINodeAuth.fetch('/api/models/load', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ model: mid }),
@@ -6771,7 +7073,7 @@ const AINode = {
           btn.disabled = true;
           btn.textContent = 'Loading…';
           try {
-            var resp = await fetch('/api/embeddings/models/' + encodeURIComponent(id) + '/load', { method: 'POST' });
+            var resp = await AINodeAuth.fetch('/api/embeddings/models/' + encodeURIComponent(id) + '/load', { method: 'POST' });
             var payload = await resp.json().catch(function () { return {}; });
             if (resp.ok) {
               self.toast('Loaded ' + id, 'success');
@@ -6796,7 +7098,7 @@ const AINode = {
 
   async _serverClearLogs() {
     try {
-      await fetch('/api/server/logs', { method: 'DELETE' });
+      await AINodeAuth.fetch('/api/server/logs', { method: 'DELETE' });
       this._serverState.logs = [];
       this._serverState.logsSince = 0;
       var panel = document.getElementById('server-log-panel');

@@ -651,6 +651,7 @@ printf '    \033[1;32m━━━━━━━━━━━━━━━━━━━�
 printf '\n'
 printf '    Web:     http://localhost:3000\n'
 printf '    API:     http://localhost:8000/v1\n'
+printf '    Access:  API open, no key set. Require one in Config > API access.\n'
 printf '    Status:  ainode status\n'
 printf '    Logs:    ainode logs -f\n'
 printf '    Update:  ainode update\n'
