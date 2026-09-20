@@ -8,6 +8,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.5.26] - 2026-09-19
+
+A fresh install can load a model; fine-tuning produces finite weights.
+
 A fresh install can load a model.
 
 ### Fixed
