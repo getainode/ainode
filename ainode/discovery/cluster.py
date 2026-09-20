@@ -58,6 +58,11 @@ class ClusterNode:
     load_started_at: Optional[float] = None
     load_elapsed_seconds: Optional[float] = None
     expected_ready_minutes: Optional[float] = None
+    # The release that node is running, straight off the wire. Empty for a peer
+    # too old to announce one, which every view renders as "unknown" rather than
+    # as agreement: a cluster split across two releases used to be
+    # indistinguishable from one on a single release (#171).
+    ainode_version: str = ""
 
     @classmethod
     def from_discovered(cls, discovered: DiscoveredNode) -> "ClusterNode":
@@ -92,6 +97,7 @@ class ClusterNode:
             load_started_at=getattr(a, "load_started_at", None),
             load_elapsed_seconds=getattr(a, "load_elapsed_seconds", None),
             expected_ready_minutes=getattr(a, "expected_ready_minutes", None),
+            ainode_version=getattr(a, "ainode_version", "") or "",
         )
 
     @classmethod
@@ -125,6 +131,7 @@ class ClusterNode:
             load_started_at=getattr(announcement, "load_started_at", None),
             load_elapsed_seconds=getattr(announcement, "load_elapsed_seconds", None),
             expected_ready_minutes=getattr(announcement, "expected_ready_minutes", None),
+            ainode_version=getattr(announcement, "ainode_version", "") or "",
         )
 
 

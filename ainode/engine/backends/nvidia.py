@@ -57,7 +57,12 @@ from ainode.cluster.netdev import (
     interface_candidates_hint,
     resolve_cluster_interface,
 )
-from ainode.core.config import HF_CACHE_MOUNT, LOGS_DIR, NodeConfig
+from ainode.core.config import (
+    DEFAULT_DISTRIBUTED_EXECUTOR,
+    HF_CACHE_MOUNT,
+    LOGS_DIR,
+    NodeConfig,
+)
 from ainode.engine.backends.base import EngineBackend
 
 logger = logging.getLogger(__name__)
@@ -946,7 +951,8 @@ class NvidiaBackend(EngineBackend):
         a container. ``stop()`` and ``is_running()`` must never raise on it,
         which is why they route through :meth:`_is_mp_distributed` instead.
         """
-        value = (getattr(self.config, "distributed_executor", "") or "ray").strip().lower()
+        value = (getattr(self.config, "distributed_executor", "")
+                 or DEFAULT_DISTRIBUTED_EXECUTOR).strip().lower()
         if value not in ("ray", "mp"):
             raise NvidiaBackendError(
                 f"Unknown distributed_executor={value!r}; expected 'ray' "
@@ -959,7 +965,8 @@ class NvidiaBackend(EngineBackend):
         """True for a head instance running the mp shape. Never raises."""
         if self.config.distributed_mode != "head":
             return False
-        return (getattr(self.config, "distributed_executor", "") or "ray").strip().lower() == "mp"
+        return (getattr(self.config, "distributed_executor", "")
+                or DEFAULT_DISTRIBUTED_EXECUTOR).strip().lower() == "mp"
 
     def _local_model_dir(self) -> Optional[str]:
         """This model's on-disk weight dir (flat ``org--name`` layout written by

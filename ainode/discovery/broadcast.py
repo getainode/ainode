@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
+from ainode.core.config import DEFAULT_DISCOVERY_PORT
+from ainode.discovery.signing import ACCEPT, rejection, seal
 from ainode.metrics.collector import optional_float
 
 
@@ -31,6 +33,11 @@ logger = logging.getLogger(__name__)
 # fully populated announcement still fits, because this payload has grown field
 # by field (telemetry, instances, load progress) and nothing else would notice.
 MAX_ANNOUNCEMENT_BYTES = 4096
+
+# Both classes below take core.config.DEFAULT_DISCOVERY_PORT (5679) as their
+# default, imported rather than respelled: each carried its own 5678 while the
+# installer, the fleet and the docs used 5679, which is how a node could listen
+# where nobody spoke (#181).
 
 
 @dataclass
@@ -104,6 +111,15 @@ class NodeAnnouncement:
     # reader must not subtract a remote start stamp from its own now().
     load_elapsed_seconds: Optional[float] = None
     expected_ready_minutes: Optional[float] = None
+    # The release this node is running (ainode.__version__). Without it a cluster
+    # split across two releases is indistinguishable from one on a single release
+    # (#171), which is the state a roll leaves every time a node is missed, and
+    # the announcement IS the cross-version contract: 0.5.25 changed how a head's
+    # instances are merged into ``instances``, so a 0.5.24 reader and a 0.5.25
+    # sender were exchanging different data with nothing to say so. Empty on a
+    # peer too old to send it, which every reader renders as "unknown" rather
+    # than guessing.
+    ainode_version: str = ""
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -149,9 +165,10 @@ class BroadcastSender:
     def __init__(
         self,
         announcement: NodeAnnouncement,
-        discovery_port: int = 5678,
+        discovery_port: int = DEFAULT_DISCOVERY_PORT,
         broadcast_interval: float = 5.0,
         metrics_provider: Optional[Callable[[], dict]] = None,
+        secret_provider: Optional[Callable[[], Optional[str]]] = None,
     ):
         self.announcement = announcement
         self.discovery_port = discovery_port
@@ -160,9 +177,38 @@ class BroadcastSender:
         # its values are stamped onto the announcement each tick so peers
         # broadcast live VRAM/util/temp.
         self.metrics_provider = metrics_provider
+        # Optional zero-arg callable returning the cluster_secret, asked on EVERY
+        # send rather than captured here: rotating the secret must not need a
+        # restart of every node in the fleet (see signing.ClusterSecret).
+        self.secret_provider = secret_provider
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._warned_oversize = False
+        self._warned_secret_error = False
+
+    def current_secret(self) -> Optional[str]:
+        """The secret to sign with right now, or None to send unsigned.
+
+        A provider that raises is treated as "no secret" and reported once: the
+        node then keeps broadcasting, and a peer that HAS a secret drops it,
+        which is visible in that peer's log rather than silent here.
+        """
+        if self.secret_provider is None:
+            return None
+        try:
+            return self.secret_provider()
+        except Exception:
+            if not self._warned_secret_error:
+                self._warned_secret_error = True
+                logger.warning(
+                    "could not read cluster_secret; broadcasting UNSIGNED "
+                    "announcements, which peers that have a secret will drop",
+                    exc_info=True)
+            return None
+
+    def datagram(self) -> bytes:
+        """The bytes for one announcement, signed when a secret is configured."""
+        return json.dumps(seal(asdict(self.announcement), self.current_secret())).encode()
 
     async def start(self):
         """Start the broadcast loop."""
@@ -212,7 +258,10 @@ class BroadcastSender:
                                     self.announcement.gpu_count = int(m["gpu_count"])
                         except Exception:
                             pass
-                    data = self.announcement.to_json().encode()
+                    # Signed here, not in to_json(): the signature is an envelope
+                    # around the payload, and the size check below has to see the
+                    # bytes that actually go on the wire.
+                    data = self.datagram()
                     if len(data) > MAX_ANNOUNCEMENT_BYTES and not self._warned_oversize:
                         # Once per process: peers are dropping us and nothing
                         # else in the system can tell you why.
@@ -233,21 +282,110 @@ class BroadcastSender:
 class BroadcastListener:
     """Listens for UDP broadcast announcements and maintains a node registry."""
 
+    # A rejected sender is reported once per (source, reason) so a forged flood
+    # cannot fill the log, and capped so a spoofed source address cannot fill
+    # memory either: at this many distinct pairs the listener says so once and
+    # stops naming individual sources. ``dropped`` keeps counting either way.
+    MAX_REPORTED_SOURCES = 50
+
     def __init__(
         self,
         local_node_id: str,
-        discovery_port: int = 5678,
+        discovery_port: int = DEFAULT_DISCOVERY_PORT,
         on_node_found: Optional[Callable[[NodeAnnouncement], None]] = None,
         on_node_lost: Optional[Callable[[str], None]] = None,
+        secret_provider: Optional[Callable[[], Optional[str]]] = None,
     ):
         self.local_node_id = local_node_id
         self.discovery_port = discovery_port
         self.on_node_found = on_node_found
         self.on_node_lost = on_node_lost
+        # Asked per datagram, so a rotated secret takes effect without a restart
+        # (see signing.ClusterSecret). None, or a provider that returns nothing,
+        # means this node has no secret and accepts what it always accepted.
+        self.secret_provider = secret_provider
         self._registry: Dict[str, DiscoveredNode] = {}
         self._running = False
         self._listen_task: Optional[asyncio.Task] = None
         self._reaper_task: Optional[asyncio.Task] = None
+        self._warned_unauthenticated = False
+        self._warned_flood = False
+        self._reported: set = set()
+        self.dropped: Dict[str, int] = {}
+
+    def current_secret(self) -> Optional[str]:
+        """The secret to verify against right now, or None to verify nothing."""
+        if self.secret_provider is None:
+            return None
+        try:
+            return self.secret_provider()
+        except Exception:
+            # Cannot read the key: verifying would drop the whole cluster, so
+            # accept as an unsigned fleet does and let the once-per-process
+            # warning below say discovery is unauthenticated.
+            logger.debug("cluster_secret provider raised", exc_info=True)
+            return None
+
+    def _report_drop(self, reason: str, source: str, node_id: str) -> None:
+        self.dropped[reason] = self.dropped.get(reason, 0) + 1
+        key = (reason, source)
+        if key in self._reported:
+            return
+        if len(self._reported) >= self.MAX_REPORTED_SOURCES:
+            if not self._warned_flood:
+                self._warned_flood = True
+                logger.warning(
+                    "more than %d distinct sources have sent discovery "
+                    "announcements this node cannot verify (%s); no longer naming "
+                    "them individually. Counts stay in the listener's `dropped`.",
+                    self.MAX_REPORTED_SOURCES, self.dropped)
+            return
+        self._reported.add(key)
+        logger.warning(
+            "dropped a discovery announcement from %s claiming node_id %r: %s. "
+            "This node has a cluster_secret, so an announcement it cannot verify "
+            "is not cluster membership. Set the SAME cluster_secret on that node, "
+            "or it stays invisible here.",
+            source, node_id, reason)
+
+    def handle_datagram(self, data: bytes, peer_ip: Optional[str] = None) -> str:
+        """Verify and register one received datagram. Returns why it was dropped.
+
+        The empty string means it was accepted. Split out of the receive loop so
+        the accept/drop decision is one testable function of the bytes on the
+        wire, which is the only place the forged-master attack in #169 can be
+        stopped.
+        """
+        try:
+            raw = json.loads(data.decode())
+        except Exception:
+            return "unparseable"
+        if not isinstance(raw, dict):
+            return "unparseable"
+
+        secret = self.current_secret()
+        if not secret and not self._warned_unauthenticated:
+            self._warned_unauthenticated = True
+            logger.warning(
+                "discovery is UNAUTHENTICATED on port %d: no cluster_secret is "
+                "set, so any host on this broadcast domain can join this cluster, "
+                "claim to be its master and advertise instances this node will "
+                "route inference to. Set the same cluster_secret on every node to "
+                "sign announcements.",
+                self.discovery_port)
+
+        reason = rejection(raw, secret)
+        if reason != ACCEPT:
+            self._report_drop(reason, peer_ip or "an unknown address",
+                              str(raw.get("node_id", "")))
+            return reason
+
+        try:
+            announcement = NodeAnnouncement.from_json(data.decode())
+        except Exception:
+            return "unparseable"
+        self._process_announcement(announcement, peer_ip=peer_ip)
+        return ACCEPT
 
     @property
     def registry(self) -> Dict[str, DiscoveredNode]:
@@ -317,9 +455,8 @@ class BroadcastListener:
                     # authoritative address for SSH + Ray bootstrap.
                     data, addr = await loop.run_in_executor(
                         None, lambda: sock.recvfrom(MAX_ANNOUNCEMENT_BYTES))
-                    announcement = NodeAnnouncement.from_json(data.decode())
                     peer_ip = addr[0] if addr else None
-                    self._process_announcement(announcement, peer_ip=peer_ip)
+                    self.handle_datagram(data, peer_ip=peer_ip)
                 except Exception:
                     await asyncio.sleep(1)
         finally:

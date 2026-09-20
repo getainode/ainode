@@ -473,6 +473,7 @@ const AINode = {
       .then(function (data) {
         self.state.versionInfo = data;
         self.renderVersionBadge();
+        self.renderVersionSplitBanner();
       })
       .catch(function () {});
   },
@@ -551,6 +552,39 @@ const AINode = {
       .catch(function () {
         setTimeout(function () { self._pollClusterUpdate(updateId); }, 5000);
       });
+  },
+
+  // A fleet running two releases looked exactly like a fleet running one: the
+  // announcement is the cross-version contract, and a roll that missed a node
+  // left that state with nothing to see (#171). /api/version/check now carries a
+  // version per node, so say so in the header, next to the update badge.
+  renderVersionSplitBanner() {
+    var info = this.state.versionInfo;
+    var existing = document.getElementById('version-split-banner');
+    if (existing) existing.remove();
+    if (!info || !info.cluster_split) return;
+
+    var nodes = info.nodes || [];
+    var byVersion = {};
+    nodes.forEach(function (n) {
+      var v = n.ainode_version || 'unknown';
+      (byVersion[v] = byVersion[v] || []).push(n.node_name || n.node_id);
+    });
+    var parts = Object.keys(byVersion).sort().map(function (v) {
+      return v + ' (' + byVersion[v].join(', ') + ')';
+    });
+
+    var topBar = document.querySelector('.top-bar') || document.querySelector('nav');
+    if (!topBar) return;
+    var banner = document.createElement('span');
+    banner.id = 'version-split-banner';
+    banner.className = 'version-split-banner';
+    banner.textContent = 'Fleet split across ' + (info.versions || []).length +
+      ' releases: ' + parts.join('  ');
+    banner.title = 'These nodes are not running the same AINode release. The ' +
+      'discovery announcement is the cross-version contract, so a split fleet ' +
+      'can exchange subtly different data. Update all to converge.';
+    topBar.appendChild(banner);
   },
 
   renderVersionBadge() {

@@ -514,10 +514,11 @@ def test_unknown_distributed_executor_is_rejected_loudly():
 # ---------------------------------------------------------------------------
 
 
-def test_ray_shape_is_still_the_default_and_unchanged():
+def test_ray_shape_is_unchanged_when_asked_for_by_name():
+    """"mp" is the default since 0.5.27 (#172); asking for ray still gets ray."""
     config = _mp_config(distributed_executor="ray", engine_image="")
     b = NvidiaBackend(config)
-    assert NodeConfig().distributed_executor == "ray"
+    assert NodeConfig().distributed_executor == "mp"
     args = b._build_vllm_serve_args(tp_size=2)
     assert args[args.index("--distributed-executor-backend") + 1] == "ray"
     assert "--nnodes" not in args
@@ -1234,10 +1235,16 @@ def test_sharding_launch_body_overrides_beat_the_recipe():
 
 
 def test_sharding_launch_leaves_an_uncurated_model_on_the_defaults():
+    """And the default is the shape a shipped image can actually run.
+
+    An uncurated model used to land on "ray", which no image AINode ships or
+    launches contains, so the launch died inside the container with the recipe
+    system papering over it for curated models only (#172).
+    """
     _, resp, launched = _launch({"model": "some/random-model",
                                  "node_ids": ["head", "m1"]})
     assert resp.status == 200
-    assert launched.distributed_executor == "ray"
+    assert launched.distributed_executor == "mp"
     assert launched.engine_image == ""
     assert launched.extra_vllm_args == []
 

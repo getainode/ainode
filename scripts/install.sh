@@ -535,6 +535,75 @@ resolve_ainode_home() {
 is_user_mode() {
     systemctl --user is-enabled "\$AINODE_SERVICE" >/dev/null 2>&1
 }
+
+# The web port this node serves /api/status on, from the config the service
+# reads. 3000 is what the installer writes and the fallback when the file is
+# missing or says nothing.
+node_web_port() {
+    local home="\$1" port=""
+    if [ -r "\$home/config.json" ]; then
+        port=\$(sed -n 's/.*"web_port"[[:space:]]*:[[:space:]]*\\([0-9]\\{1,\\}\\).*/\\1/p' \\
+            "\$home/config.json" 2>/dev/null | head -1) || true
+    fi
+    printf '%s\\n' "\${port:-3000}"
+}
+
+# The version /api/status reports. Empty output plus non-zero when the node does
+# not answer at all. "version" is the only key with that exact name in the
+# payload (driver_version and friends do not match the leading quote).
+api_version() {
+    local url="\$1" body=""
+    body=\$(curl -fsS --max-time 5 "\$url" 2>/dev/null) || return 1
+    printf '%s\\n' "\$body" \\
+        | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1
+}
+
+# Wait for the node to come back reporting \$2. Prints the last version it saw.
+# Non-zero when the target never appears, which is the point: "Update complete"
+# used to print for an update that never applied, because nothing ever asked the
+# running node what version it was (the pull landed, image.env was written where
+# the unit does not read it, and the OLD container came back).
+wait_for_version() {
+    local url="\$1" target="\$2" timeout="\${3:-180}" waited=0 seen=""
+    while [ "\$waited" -lt "\$timeout" ]; do
+        seen=\$(api_version "\$url") || seen=""
+        if [ -n "\$seen" ] && [ "\$seen" = "\$target" ]; then
+            printf '%s\\n' "\$seen"
+            return 0
+        fi
+        sleep 3
+        waited=\$(( waited + 3 ))
+    done
+    printf '%s\\n' "\$seen"
+    return 1
+}
+
+print_update_help() {
+    cat <<UPDATEHELP
+Usage: ainode update [version] [--keep-images N]
+
+Pull a release, pin it for the systemd unit, restart, and verify.
+
+  version            release to install (default: the highest numeric GHCR tag)
+  --keep-images N    rollback generations of the AINode image to keep below the
+                     new one (default 1, so the release you updated FROM stays
+                     on disk and 'ainode update <older>' can go back).
+                     0 removes every older AINode image. Engine images and
+                     ainode-base are never touched.
+  -h, --help         this text
+
+After the restart the wrapper waits for this node's /api/status to report the
+version it just installed, and exits non-zero if it does not: an update that did
+not apply must not report success. Only then are the images it replaced removed,
+so a failed update still has something to fall back to.
+
+Environment:
+  AINODE_HOME                     .ainode the unit reads (normally detected)
+  AINODE_KEEP_IMAGES              default for --keep-images
+  AINODE_UPDATE_VERIFY_TIMEOUT    seconds to wait for the new version (180)
+UPDATEHELP
+}
+
 restart_service() {
     if is_user_mode; then
         systemctl --user restart "\$AINODE_SERVICE"
@@ -547,7 +616,32 @@ case "\${1:-}" in
     update)
         # Optional explicit version: 'ainode update 0.5.0'. Otherwise resolve
         # the highest numeric GHCR tag. Never pull a floating :latest here.
-        TARGET_VERSION="\${2:-}"
+        shift
+        TARGET_VERSION=""
+        KEEP_IMAGES="\${AINODE_KEEP_IMAGES:-1}"
+        VERIFY_TIMEOUT="\${AINODE_UPDATE_VERIFY_TIMEOUT:-180}"
+        while [ \$# -gt 0 ]; do
+            case "\$1" in
+                -h|--help) print_update_help; exit 0 ;;
+                --keep-images=*) KEEP_IMAGES="\${1#*=}"; shift ;;
+                --keep-images)
+                    if [ \$# -lt 2 ]; then
+                        echo "XX --keep-images needs a number" >&2
+                        exit 2
+                    fi
+                    KEEP_IMAGES="\$2"; shift 2 ;;
+                --*)
+                    echo "XX Unknown option: \$1" >&2
+                    print_update_help >&2
+                    exit 2 ;;
+                *) TARGET_VERSION="\$1"; shift ;;
+            esac
+        done
+        case "\$KEEP_IMAGES" in
+            ''|*[!0-9]*)
+                echo "XX --keep-images needs a non-negative integer, got '\$KEEP_IMAGES'" >&2
+                exit 2 ;;
+        esac
         if [ -z "\$TARGET_VERSION" ]; then
             TARGET_VERSION="\$(resolve_latest_tag || true)"
         fi
@@ -581,11 +675,40 @@ case "\${1:-}" in
         if is_user_mode || systemctl is-active --quiet "\$AINODE_SERVICE" 2>/dev/null; then
             restart_service
         else
-            echo "   (service not running — start it with: sudo systemctl start ainode)"
+            echo "==> Pulled and pinned, but the service is not running, so nothing"
+            echo "    was restarted and no old image was removed."
+            echo "    Start it with: sudo systemctl start ainode"
+            exit 0
         fi
-        echo "==> Update complete. Version:"
-        docker exec ainode ainode --version 2>/dev/null || \\
-            docker run --rm --entrypoint ainode "\$PULL_IMAGE" --version
+
+        # Ask the node what it is running before claiming anything happened.
+        STATUS_URL="http://127.0.0.1:\$(node_web_port "\$AINODE_HOME")/api/status"
+        if [ -z "\$TARGET_VERSION" ]; then
+            echo "!! No version was resolved, so there is nothing to verify against."
+            echo "   /api/status reports: \$(api_version "\$STATUS_URL" || echo 'no answer')"
+            echo "   Images were left alone."
+            exit 0
+        fi
+        echo "==> Waiting up to \${VERIFY_TIMEOUT}s for \$STATUS_URL to report \$TARGET_VERSION"
+        RUNNING_VERSION="\$(wait_for_version "\$STATUS_URL" "\$TARGET_VERSION" "\$VERIFY_TIMEOUT")" || {
+            echo "XX Update did NOT apply. \$TARGET_VERSION was pulled and pinned in" >&2
+            echo "   \$AINODE_HOME/image.env, but after the restart /api/status reports" >&2
+            echo "   '\${RUNNING_VERSION:-nothing}'." >&2
+            echo "   Nothing was removed. Check: systemctl status ainode; docker ps;" >&2
+            echo "   grep AINODE_HOME /etc/systemd/system/ainode.service" >&2
+            exit 1
+        }
+        echo "==> Node is serving \$RUNNING_VERSION"
+
+        # Only now, with the new version proven serving, reclaim what it replaced
+        # (#184). Keeps \$KEEP_IMAGES rollback generation(s); the decision itself
+        # lives in ainode.core.image_prune, inside the container that is now up.
+        echo "==> Removing AINode images older than \$RUNNING_VERSION (keeping \$KEEP_IMAGES)"
+        docker exec ainode ainode prune-images \\
+            --keep-images "\$KEEP_IMAGES" --current "\$PULL_IMAGE" || \\
+            echo "!! Could not prune; images were left alone. Retry: ainode prune-images"
+
+        echo "==> Update complete. Version: \$RUNNING_VERSION"
         ;;
     "" | -h | --help)
         cat <<HELP
@@ -595,10 +718,15 @@ restart) run on the host; everything else is forwarded to the container.
 Usage: ainode <command> [args...]
 
 Host-side:
-  update [version]        pull the release and pin it for the systemd unit,
-                          then restart. Under sudo the image is pinned in the
-                          .ainode the UNIT reads, not root's; override with
+  update [version] [--keep-images N]
+                          pull the release, pin it for the systemd unit, restart,
+                          verify /api/status reports it, then remove the images it
+                          replaced (keeping N rollback generations, default 1).
+                          Exits non-zero if the node does not come back on the new
+                          version. Under sudo the image is pinned in the .ainode
+                          the UNIT reads, not root's; override with
                           AINODE_HOME=/home/<user>/.ainode if it guesses wrong.
+                          Run 'ainode update --help' for the rest.
   --version               print the wrapper's pinned image tag
 
 Container-side (forwarded via docker exec):

@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 import uuid
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -780,6 +781,65 @@ def cmd_auth(args):
         console.print("  Usage: ainode auth {enable|disable|status|new-key}")
 
 
+def cmd_prune_images(args):
+    """Remove the AINode images an update replaced.
+
+    ``ainode update`` pulls a release and never removed the one it replaced, so
+    a node carried every release it had ever run: 180 images and 226 GB
+    reclaimable on Spark-1 (#184). This is the step that reclaims them, run by
+    the host wrapper AFTER the new version is confirmed serving, so a failed
+    update still has an image to fall back to.
+
+    Decisions live in ainode.core.image_prune, which is a pure function of a
+    ``docker images`` listing: ``--images-from`` replays somebody else's listing
+    (a node you are not on) and prints what would happen, touching nothing.
+    """
+    from ainode.core.image_prune import (
+        DOCKER_IMAGES_FORMAT,
+        format_plan,
+        parse_images,
+        prune_images,
+        running_image,
+    )
+
+    keep = max(0, int(getattr(args, "keep_images", 1) or 0))
+    listing = getattr(args, "images_from", None)
+    rows = None
+    dry_run = bool(getattr(args, "dry_run", False))
+    if listing:
+        # A listing from elsewhere can only ever be a plan: the images it names
+        # are not the images on this host.
+        dry_run = True
+        try:
+            rows = parse_images(Path(listing).read_text())
+        except OSError as exc:
+            console.print(f"  [red]Cannot read {listing}: {exc}[/red]")
+            return 1
+
+    current = getattr(args, "current", None) or running_image(__version__)
+    if not current:
+        console.print("  [red]Cannot tell which image this node runs.[/red]")
+        console.print("  Name it: ainode prune-images --current "
+                      "ghcr.io/getainode/ainode:X.Y.Z")
+        return 1
+
+    try:
+        plan, log = prune_images(current, keep, dry_run=dry_run, rows=rows)
+    except RuntimeError as exc:
+        console.print(f"  [red]{exc}[/red]")
+        console.print(f"  (listing command: docker images --format "
+                      f"'{DOCKER_IMAGES_FORMAT}')")
+        return 1
+
+    console.print(format_plan(plan, verbose=bool(getattr(args, "verbose", False))))
+    for line in log:
+        console.print(f"  {line}")
+    if dry_run and not plan.refused:
+        console.print("  (dry run: nothing was removed)")
+    console.print("  Made in Texas")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ainode",
@@ -872,6 +932,30 @@ def main():
     auth_sub.add_parser("new-key", help="Generate a new API key")
     auth_parser.set_defaults(func=cmd_auth)
 
+    # prune-images: reclaim the images an update replaced (#184)
+    prune_parser = subparsers.add_parser(
+        "prune-images",
+        help="Remove AINode images older than the running release (keeps 1 rollback)",
+    )
+    prune_parser.add_argument(
+        "--keep-images", type=int, default=1, metavar="N",
+        help="Rollback generations to keep below the running release (default 1)")
+    prune_parser.add_argument(
+        "--current", metavar="IMAGE",
+        help="The image this node runs (default: AINODE_HOME/image.env, then "
+             "$AINODE_IMAGE, then this version's ghcr tag)")
+    prune_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the decision and remove nothing")
+    prune_parser.add_argument(
+        "--images-from", metavar="FILE",
+        help="Decide against a saved `docker images` listing instead of this "
+             "host's. Implies --dry-run.")
+    prune_parser.add_argument(
+        "--verbose", action="store_true",
+        help="Also print every image that is kept, and why")
+    prune_parser.set_defaults(func=cmd_prune_images)
+
     # doctor: node health report. Exits non-zero on any FAIL so it can gate a
     # script; see ainode/cli/doctor.py for what each check means.
     doctor_parser = subparsers.add_parser(
@@ -907,7 +991,11 @@ def main():
         # No subcommand — default to start
         cmd_start(args)
     else:
-        args.func(args)
+        # A command that returns a code means it: `ainode prune-images` failing
+        # inside `ainode update` has to be visible to the shell that called it.
+        code = args.func(args)
+        if code:
+            sys.exit(int(code))
 
 
 if __name__ == "__main__":

@@ -485,7 +485,11 @@ def catalog_recipe(model: str) -> dict:
             if getattr(info, "extra_volumes", None):
                 recipe["extra_volumes"] = list(info.extra_volumes)
             executor = (getattr(info, "distributed_executor", "") or "").strip()
-            if executor and executor != "ray":
+            if executor:
+                # Any shape the entry states, "ray" included. This used to drop
+                # "ray" as if it had not been stated, which was invisible while
+                # ray was also the node default and became a real gap when the
+                # default moved to "mp" (#172).
                 recipe["distributed_executor"] = executor
             if getattr(info, "kv_cache_dtype", ""):
                 recipe["kv_cache_dtype"] = info.kv_cache_dtype

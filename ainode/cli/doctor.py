@@ -42,7 +42,12 @@ from pathlib import Path
 from typing import Optional
 
 from ainode import __version__
-from ainode.core.config import AINODE_HOME, DEFAULT_ENGINE_BACKEND, NodeConfig
+from ainode.core.config import (
+    AINODE_HOME,
+    DEFAULT_DISCOVERY_PORT,
+    DEFAULT_ENGINE_BACKEND,
+    NodeConfig,
+)
 
 OK = "ok"
 WARN = "warn"
@@ -51,13 +56,14 @@ FAIL = "fail"
 #: Rank order for the exit code and the summary line.
 _SEVERITY = {OK: 0, WARN: 1, FAIL: 2}
 
-#: The UDP port a fleet installed by ``scripts/install.sh`` announces on. It is
-#: NOT ``NodeConfig.discovery_port``'s dataclass default (5678): the installer
-#: writes 5679 and the shipped image EXPOSEs 5679/udp, so a config.json with the
-#: key missing or carrying the old value leaves a node talking to nobody while
-#: looking perfectly healthy. That mismatch is what this constant exists to
-#: catch, and it is the one config value ``--fix`` will write.
-FLEET_DISCOVERY_PORT = 5679
+#: The UDP port a fleet announces on, from the one home for that value. It was a
+#: separate 5679 here because ``NodeConfig.discovery_port`` defaulted to 5678
+#: through 0.5.27 while the installer wrote 5679 and the shipped image EXPOSEs
+#: 5679/udp, so a config.json with the key missing left a node talking to nobody
+#: while looking perfectly healthy (#181). The default agrees now; this check
+#: still earns its place for a config.json carrying the old value by hand, and it
+#: is the one config value ``--fix`` will write.
+FLEET_DISCOVERY_PORT = DEFAULT_DISCOVERY_PORT
 
 #: Free space below this fraction of a filesystem is a WARN. A GB10 node pays
 #: for a model twice (download, then the engine's own cache), so "nearly full"
