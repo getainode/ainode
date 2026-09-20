@@ -132,9 +132,11 @@ def cmd_start(args):
         config.api_port = args.port
         config.save()
 
-    # First run — onboarding.
-    # Skip when there is no TTY (e.g. running as a systemd service).
-    # The web UI at :3000 handles onboarding for non-interactive starts.
+    # First run: the terminal wizard (ainode/onboarding/setup.py).
+    # Skip when there is no TTY (e.g. running as a systemd service): there is no
+    # browser wizard to fall back to any more (#208), and there never usefully
+    # was. A non-interactive start marks the node onboarded and the dashboard is
+    # where the model, the cluster and the rest are configured.
     if not config.onboarded:
         if sys.stdin.isatty():
             from ainode.onboarding.setup import run_onboarding
@@ -516,7 +518,13 @@ def cmd_config(args):
     table.add_column("Value")
 
     for key, value in data.items():
-        display = str(value) if value is not None else "[dim]not set[/dim]"
+        # The cluster secret is what a joined node signs discovery with. It is
+        # scrubbed from GET /api/config for the same reason it is masked here:
+        # `ainode config` output gets pasted into issues and chat.
+        if key == "cluster_secret":
+            display = "[dim]set (hidden)[/dim]" if value else "[dim]not set[/dim]"
+        else:
+            display = str(value) if value is not None else "[dim]not set[/dim]"
         table.add_row(key, display)
 
     console.print(table)
@@ -838,6 +846,250 @@ def cmd_prune_images(args):
         console.print("  (dry run: nothing was removed)")
     console.print("  Made in Texas")
     return 0
+# =============================================================================
+#  Joining a cluster
+# =============================================================================
+#
+# Two halves, and neither of them is the web. On the MASTER, `ainode cluster
+# token` mints a single-use expiring token and prints the line to paste. On the
+# JOINER, `ainode join <master> <token>` spends it and writes the config keys
+# that make this node a member. Joining used to mean hand-editing config.json on
+# the new box, which is what joining pollux took (#208).
+#
+# The token is minted ON THE BOX, never over the API: a minting endpoint would
+# have to be keyless to be useful to a node that has not joined, and a keyless
+# endpoint that hands out credentials is the thing this design exists to avoid.
+
+
+def _http_post_json(url: str, payload: dict, timeout: float = 15.0):
+    """POST JSON with the stdlib and return ``(status, body_dict_or_None)``.
+
+    urllib rather than aiohttp or requests: this runs from `ainode join` on a
+    fresh node, and the CLI's startup cost is paid by every other subcommand too.
+    A status of 0 means the request never got an answer.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            try:
+                return resp.status, _json.loads(raw)
+            except ValueError:
+                return resp.status, None
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, _json.loads(raw)
+        except ValueError:
+            return exc.code, None
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return 0, {"error": {"message": str(exc)}}
+
+
+def _error_text(body, fallback: str) -> str:
+    """The message out of an error body, in either shape this API uses."""
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+        if err:
+            return str(err)
+    return fallback
+
+
+def _primary_address() -> str:
+    """This node's address as another node would reach it.
+
+    A UDP connect to a public address picks the interface the default route uses
+    without sending a packet; the hostname is the fallback when there is no route.
+    """
+    import socket
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+        finally:
+            sock.close()
+    except OSError:
+        return socket.gethostname()
+
+
+def cmd_cluster(args):
+    """Cluster commands run on the box: mint and list join tokens."""
+    from ainode.cluster.join import (
+        DEFAULT_TTL_SECONDS,
+        DEFAULT_WEB_PORT,
+        JoinTokenStore,
+        ensure_cluster_secret,
+        join_command,
+    )
+
+    action = getattr(args, "cluster_action", None)
+
+    if action == "token":
+        config = NodeConfig.load()
+        ttl = int(getattr(args, "ttl", None) or DEFAULT_TTL_SECONDS)
+        try:
+            minted = JoinTokenStore().mint(ttl_seconds=ttl)
+        except ValueError as exc:
+            console.print(f"  [red]{exc}[/red]")
+            raise SystemExit(2)
+
+        secret, generated = ensure_cluster_secret(config)
+        host = (getattr(config, "master_address", None) or "").strip()
+        if not host:
+            port = int(getattr(config, "web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT)
+            host = f"{_primary_address()}:{port}"
+
+        console.print()
+        console.print("  [bold green]Join token minted.[/bold green]  "
+                      f"[dim]valid {ttl / 60:.0f} min, one use, id {minted.token_id}[/dim]")
+        console.print()
+        console.print("  Run this on the joining node:")
+        console.print()
+        # soft_wrap: Rich would fold this at the terminal width, and a join
+        # command broken across two lines is one an operator pastes wrong.
+        console.print(f"    [bold]{join_command(host, minted.token)}[/bold]",
+                      soft_wrap=True)
+        console.print()
+        if generated:
+            console.print("  [yellow]This master had no cluster_secret, so one was "
+                          "generated and saved.[/yellow]")
+            console.print("  [dim]Every node in the cluster must end up with the same "
+                          "value: signed discovery drops announcements it cannot "
+                          "verify, so a peer that did not join through a token needs "
+                          "the secret set by hand.[/dim]")
+        elif not secret:
+            console.print("  [yellow]This master has no cluster_secret: discovery on "
+                          "this cluster is unauthenticated.[/yellow]")
+        console.print(f"  [dim]Tokens live hashed in "
+                      f"{AINODE_HOME / 'join-tokens.json'}. Lost one? Mint another.[/dim]")
+        console.print("  Made in Texas")
+        console.print()
+        return
+
+    if action == "tokens":
+        live = JoinTokenStore().live()
+        if not live:
+            console.print("  No live join tokens. Mint one: ainode cluster token")
+            return
+        table = Table(title="Live join tokens", border_style="cyan")
+        table.add_column("ID", style="bold cyan", no_wrap=True)
+        table.add_column("Expires in")
+        now = time.time()
+        for record in live:
+            left = max(0, int(float(record.get("expires_at") or 0) - now))
+            table.add_row(str(record.get("id") or "?"), f"{left // 60}m {left % 60}s")
+        console.print(table)
+        return
+
+    console.print("  Usage: ainode cluster {token|tokens}")
+
+
+def cmd_join(args):
+    """Join this node to a cluster using a token minted on the master."""
+    from ainode.cluster.join import (
+        apply_join,
+        join_url,
+        parse_host_port,
+        version_refusal,
+    )
+
+    target = (getattr(args, "master", "") or "").strip()
+    token = (getattr(args, "token", "") or "").strip()
+    name = (getattr(args, "name", "") or "").strip()
+    interface = (getattr(args, "interface", "") or "").strip()
+    allow_mismatch = bool(getattr(args, "allow_version_mismatch", False))
+
+    try:
+        host, port = parse_host_port(target)
+        url = join_url(target)
+    except ValueError as exc:
+        console.print(f"  [red]{exc}[/red]")
+        console.print("  Usage: ainode join <master-host>:3000 <token>")
+        raise SystemExit(2)
+
+    console.print(f"\n  Joining the cluster at [bold]{host}:{port}[/bold] ...")
+    status, body = _http_post_json(url, {"token": token, "node_name": name})
+
+    if status == 0:
+        console.print(f"  [red]Could not reach {url}[/red]")
+        console.print(f"  [dim]{_error_text(body, 'no answer')}[/dim]")
+        raise SystemExit(1)
+    if status == 429:
+        console.print("  [red]The master is rate limiting join attempts from this "
+                      "address.[/red] Wait a minute and try again.")
+        raise SystemExit(1)
+    if status != 200 or not isinstance(body, dict):
+        console.print(f"  [red]The master refused the join (HTTP {status}).[/red]")
+        console.print(f"  [dim]{_error_text(body, 'no reason given')}[/dim]")
+        raise SystemExit(1)
+
+    refusal = version_refusal(__version__, body.get("ainode_version", ""),
+                              allow_mismatch=allow_mismatch)
+    if refusal:
+        console.print("  [red]Refusing to join: version mismatch.[/red]")
+        console.print(f"  {refusal}")
+        raise SystemExit(1)
+
+    written = apply_join(body, node_name=name, interface=interface)
+
+    console.print("  [bold green]Joined.[/bold green]")
+    console.print(f"    cluster_id        {written.get('cluster_id')}")
+    console.print(f"    master_address    {written.get('master_address', 'unchanged')}")
+    console.print(f"    discovery_port    {written.get('discovery_port', 'unchanged')}")
+    console.print("    cluster_role      worker  [dim](distributed_mode=member)[/dim]")
+    if written.get("cluster_secret"):
+        console.print("    cluster_secret    [dim]set (hidden)[/dim]")
+    else:
+        console.print("    cluster_secret    [yellow]not set by the master: discovery "
+                      "on this cluster is unauthenticated[/yellow]")
+    if written.get("cluster_interface"):
+        console.print(f"    cluster_interface {written['cluster_interface']}")
+    console.print(f"  [dim]Written to {AINODE_HOME / 'config.json'}. "
+                  "No other key was touched.[/dim]")
+    console.print()
+
+    # A freshly joined node is the one place a restart from here is right: the
+    # config it just wrote is only read at startup, and this node is not serving
+    # anything yet. Everywhere else, restarting the service is the operator's
+    # call, because it sweeps the engine containers with it.
+    _restart_after_join()
+    console.print("  Made in Texas")
+    console.print()
+
+
+def _restart_after_join() -> None:
+    """Restart the service to apply the join, or print the exact command."""
+    from ainode.service import systemd
+
+    for user_mode in (False, True):
+        if not systemd.is_installed(user_mode=user_mode):
+            continue
+        scope = "--user " if user_mode else ""
+        try:
+            systemd.restart_service(user_mode=user_mode)
+        except Exception as exc:  # noqa: BLE001 - every systemctl failure gets the same advice
+            console.print(f"  [yellow]Could not restart the service: {exc}[/yellow]")
+            console.print(f"  Run it yourself:  sudo systemctl {scope}restart ainode")
+            return
+        console.print(f"  [green]Restarted ainode.service[/green] "
+                      f"[dim](systemctl {scope}restart ainode)[/dim]")
+        return
+    # No unit here: the usual case, because this CLI runs inside the container
+    # where there is no systemd bus. The host wrapper forwards the command.
+    console.print("  Restart AINode on the HOST to apply:")
+    console.print("    [bold]sudo systemctl restart ainode[/bold]")
 
 
 def main():
@@ -922,6 +1174,35 @@ def main():
     svc_logs_parser = service_sub.add_parser("logs", help="Show AINode service logs")
     svc_logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of log lines")
     service_parser.set_defaults(func=cmd_service)
+
+    # cluster: token minting, on the box. See the cmd_cluster block above for
+    # why minting is deliberately not an API route.
+    cluster_parser = subparsers.add_parser(
+        "cluster", help="Cluster commands: mint a join token for a new node")
+    cluster_sub = cluster_parser.add_subparsers(dest="cluster_action")
+    token_parser = cluster_sub.add_parser(
+        "token", help="Mint a single-use join token and print the command to paste")
+    token_parser.add_argument(
+        "--ttl", type=int, default=None, metavar="SECONDS",
+        help="How long the token stays valid (default 1800, i.e. 30 minutes)")
+    cluster_sub.add_parser("tokens", help="List join tokens that are still valid")
+    cluster_parser.set_defaults(func=cmd_cluster)
+
+    # join
+    join_parser = subparsers.add_parser(
+        "join", help="Join this node to a cluster with a token from the master")
+    join_parser.add_argument("master", metavar="HOST[:PORT]",
+                             help="The master's address, e.g. 10.0.0.1:3000")
+    join_parser.add_argument("token", help="A join token minted on the master")
+    join_parser.add_argument("--name", default="", help="Name this node announces")
+    join_parser.add_argument(
+        "--interface", default="",
+        help="NIC the cluster fabric binds (empty = autodetect at startup)")
+    join_parser.add_argument(
+        "--allow-version-mismatch", action="store_true",
+        dest="allow_version_mismatch",
+        help="Join even when the master runs a different AINode release")
+    join_parser.set_defaults(func=cmd_join)
 
     # auth
     auth_parser = subparsers.add_parser("auth", help="Manage API key authentication")

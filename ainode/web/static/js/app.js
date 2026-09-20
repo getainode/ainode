@@ -6361,6 +6361,9 @@ const AINode = {
 
     mount.innerHTML = html;
 
+    // The "Join a cluster" card lives in static/js/join.js, not here.
+    if (window.AINodeJoin) window.AINodeJoin.mount(mount, { onJoined: function () { self.renderConfigCluster(); } });
+
     mount.querySelectorAll('[data-set-role]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var role = btn.dataset.setRole;

@@ -46,7 +46,7 @@ def _make_app(auth_config):
     app.router.add_get("/", _handle_index)
     app.router.add_get("/api/health", _handle_health)
     app.router.add_get("/api/status", _handle_status)
-    app.router.add_get("/api/onboarding/config", _handle_onboarding)
+    app.router.add_post("/api/cluster/join", _handle_join)
     app.router.add_get("/v1/models", _handle_protected)
     app.router.add_post("/v1/chat/completions", _handle_protected)
     app.router.add_static("/static", Path(__file__).parent, name="static")
@@ -66,8 +66,8 @@ async def _handle_health(_req):
 async def _handle_status(_req):
     return web.json_response({"node_id": "test"})
 
-async def _handle_onboarding(_req):
-    return web.json_response({"step": 1})
+async def _handle_join(_req):
+    return web.json_response({"cluster_id": "test"})
 
 async def _handle_protected(_req):
     return web.json_response({"data": "secret"})
@@ -218,22 +218,21 @@ class TestMiddlewareEnabled:
         assert resp.status == 200
 
     @pytest.mark.asyncio
-    async def test_onboarding_skips_auth_only_before_onboarding(self, client_and_key):
-        """First-run routes are open until the node IS onboarded, then not.
+    async def test_cluster_join_skips_auth(self, client_and_key):
+        """The join route answers with no key, because a joiner has none.
 
-        They used to be open unconditionally, which left POST
-        /api/onboarding/complete -- it writes the node's identity -- as a mutating
-        route with no key on it on a configured node (#168). The fixture app is
-        onboarded, so the same GET answers 401 here and 200 once onboarding is
-        pending again.
+        A node joining this cluster cannot hold this cluster's API key, so the
+        join token is its credential instead (see api/cluster_join.py and
+        tests/test_join_flow.py for the token rules and the per-IP rate limit
+        that stand in for the key). It is the one route with no key on it that
+        does anything, and every other path on this app still 401s.
         """
         client, _ = client_and_key
-        resp = await client.get("/api/onboarding/config")
-        assert resp.status == 401
-
-        client.app["config"].onboarded = False
-        resp = await client.get("/api/onboarding/config")
+        resp = await client.post("/api/cluster/join", json={"token": "x"})
         assert resp.status == 200
+
+        resp = await client.get("/api/status")
+        assert resp.status == 401
 
     @pytest.mark.asyncio
     async def test_status_requires_auth(self, client_and_key):

@@ -24,7 +24,7 @@ AUTH_JS = STATIC / "js" / "auth.js"
 UI_SOURCES = [
     STATIC / "js" / "app.js",
     STATIC / "js" / "bench.js",
-    TEMPLATES / "onboarding.html",
+    STATIC / "js" / "join.js",
 ]
 
 
@@ -53,12 +53,9 @@ def test_the_wrapper_is_the_only_file_that_calls_fetch_itself():
 
 def test_the_shell_loads_the_wrapper_first():
     html = (TEMPLATES / "index.html").read_text()
-    for later in ("/static/js/app.js", "/static/js/bench.js", "/static/js/topology.js"):
+    for later in ("/static/js/app.js", "/static/js/bench.js",
+                  "/static/js/topology.js", "/static/js/join.js"):
         assert html.index("/static/js/auth.js") < html.index(later)
-
-
-def test_onboarding_loads_the_wrapper():
-    assert "/static/js/auth.js" in (TEMPLATES / "onboarding.html").read_text()
 
 
 def test_the_header_chip_and_the_panel_are_in_the_shell():
