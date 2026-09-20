@@ -698,3 +698,56 @@ async def test_progress_reports_section_and_step(client, fake):
     assert any(p["section_label"] == "Prefill scaling" for p in seen)
     assert any(p["step_total"] == 3 for p in seen)
     assert max(p["percent"] for p in seen) == 100.0
+
+
+# ------------------------------------- the width of a single-node TP launch
+
+class TestFlagWidth:
+    """``tp`` / ``gpus`` for a solo launch across several cards in one box.
+
+    The instance record counts NODES, so it says 1 for every solo launch, and
+    castor's first record therefore read ``tp: 1, gpus: 1`` beside its own
+    ``flags: [--tensor-parallel-size, 4]``. A record that contradicts itself is
+    the one thing placement may not do (``bench/SCHEMA.md``), and this block is
+    what a reader weighs before trusting a recipe on their own hardware.
+    """
+
+    def test_a_stated_width_corrects_a_node_count_of_one(self):
+        from ainode.bench.fleet import apply_flag_width
+        pl = {"tp": 1, "gpus": 1,
+              "flags": ["--tensor-parallel-size", "4", "--max-num-seqs", "4"]}
+        apply_flag_width(pl)
+        assert pl["tp"] == 4 and pl["gpus"] == 4
+
+    def test_the_equals_form_is_read_too(self):
+        from ainode.bench.fleet import apply_flag_width
+        pl = {"tp": 1, "gpus": 1, "flags": ["--tensor-parallel-size=8"]}
+        apply_flag_width(pl)
+        assert pl["tp"] == 8 and pl["gpus"] == 8
+
+    def test_no_stated_width_stays_one_rather_than_being_guessed(self):
+        from ainode.bench.fleet import apply_flag_width
+        pl = {"tp": 1, "gpus": 1, "flags": ["--max-num-seqs", "4"]}
+        apply_flag_width(pl)
+        assert pl["tp"] == 1 and pl["gpus"] == 1
+
+    def test_a_flagless_placement_is_left_alone(self):
+        from ainode.bench.fleet import apply_flag_width
+        pl = {"tp": 2, "gpus": 2}
+        apply_flag_width(pl)
+        assert pl == {"tp": 2, "gpus": 2}
+
+    def test_a_multi_node_width_is_never_lowered(self):
+        """A head's ``tp`` is its node count, read from the announcement. The
+        flags carry the same number, and a smaller one there (a recipe pinning a
+        per-node width) must not shrink it."""
+        from ainode.bench.fleet import apply_flag_width
+        pl = {"tp": 4, "gpus": 4, "flags": ["--tensor-parallel-size", "2"]}
+        apply_flag_width(pl)
+        assert pl["tp"] == 4 and pl["gpus"] == 4
+
+    def test_an_unparseable_width_is_ignored(self):
+        from ainode.bench.fleet import apply_flag_width
+        pl = {"tp": 1, "gpus": 1, "flags": ["--tensor-parallel-size", "auto"]}
+        apply_flag_width(pl)
+        assert pl["tp"] == 1

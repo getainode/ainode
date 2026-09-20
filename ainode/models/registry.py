@@ -876,15 +876,31 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "needed for it here, so the flag that hangs on GB10 never comes up. "
             "126 GB of weights against 4x32 GB of dedicated VRAM leaves almost no "
             "headroom, which is why the reservation is 0.94 and max-num-seqs is 4. "
-            "ADDRESS THIS LANE BY ITS CATALOG ID: it shares nvidia/Qwen3.8-Flash-"
-            "Next-NVFP4 with the GB10 entry above, and a load posted as the repo id "
-            "resolves to that one (a GB10 nightly image, TP=2, the mp shape), which "
-            "is not runnable on Volta."
+            "Measured on castor 2026-09-20 through AINode: ready in 855 s, 126.7 of "
+            "128.0 GB used at peak, 49.6 tok/s single-stream with a 285 ms TTFT, "
+            "65.3 tok/s sustained over 1500 tokens, 92.5 tok/s with thinking off, "
+            "104.2 tok/s across 16 streams, prefill flat near 2150 tok/s out to "
+            "118K prompt tokens with decode still at 52.8. MTP earns its place: the "
+            "engine reports a mean acceptance length near 3.0 at a 50 percent draft "
+            "acceptance rate. ADDRESS THIS LANE BY ITS CATALOG ID: it shares "
+            "nvidia/Qwen3.8-Flash-Next-NVFP4 with the GB10 entry above, and a load "
+            "posted as the repo id resolves to that one (a GB10 nightly image, "
+            "TP=2, the mp shape), which is not runnable on Volta."
         ),
         quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=126,
         family="qwen", params_b=125.0,
         active_params_b=6.0, arch="moe",
-        proven_tp=1, verified=False, recommended=False, curated=True,
+        proven_tp=1, verified=True, recommended=False, curated=True,
+        verified_on="2026-09-20",
+        verified_record=(
+            "20260920-122006-qwen3_8-flash-next-nvfp4-v100-ainode-0_5_29-castor-"
+            "tp-4-four-v100-32-gb-onecat-vllm-1_5_0-mm-mtp-4-via-the-fleet-"
+            "endpoint.json"
+        ),
+        # Timed on castor 2026-09-20: container start to "Application startup
+        # complete" was 855 s, of which 393 s was weight load and 288 s was
+        # profile plus KV cache plus warmup (142 s of that compilation).
+        typical_ready_minutes=14.25,
         context_length=262144, license="Apache 2.0",
         format="safetensors",
         capabilities=["tool_use", "reasoning", "code"],

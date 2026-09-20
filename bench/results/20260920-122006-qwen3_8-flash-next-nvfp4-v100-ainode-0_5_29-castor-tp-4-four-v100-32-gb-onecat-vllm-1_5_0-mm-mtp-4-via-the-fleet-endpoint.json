@@ -1,0 +1,183 @@
+{
+ "schema": 1,
+ "stamp": "20260920-122006",
+ "label": "AINode 0.5.29, castor TP=4 four V100 32 GB, onecat-vllm 1.5.0-mm, MTP 4, via the fleet endpoint",
+ "model": {
+  "id": "qwen3.8-flash-next-nvfp4-v100",
+  "name": "Qwen3.8-Flash-Next",
+  "params_b": 125.0,
+  "active_b": 6.0,
+  "arch": "moe",
+  "quant": "NVFP4 (mixed, FP8 PLE)",
+  "context": 262144,
+  "license": "Apache 2.0",
+  "vision": false
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "castor",
+  "gpu": "Tesla PG500-216",
+  "ainode": "0.5.29",
+  "tp": 4,
+  "gpus": 4,
+  "stacked_with": [],
+  "engine_image": "onecat-vllm:1.5.0-mm",
+  "flags": [
+   "--tensor-parallel-size",
+   "4",
+   "--attention-backend",
+   "FLASH_ATTN_V100",
+   "--max-num-seqs",
+   "4",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--speculative-config",
+   "{\"method\":\"qwen4_exp_mtp\",\"num_speculative_tokens\":4}"
+  ],
+  "gpu_memory_utilization": 0.94,
+  "kv_cache_dtype": "auto",
+  "max_model_len": 262144,
+  "distributed_mode": "solo",
+  "flags_source": "live node config (/api/config)"
+ },
+ "settings": {
+  "thinking": null,
+  "max_tokens": 200,
+  "temperature": null,
+  "sustained_tokens": 1500,
+  "reasoning_tokens": 600,
+  "depths_requested": [
+   4000,
+   16000,
+   32000,
+   64000,
+   120000
+  ],
+  "streams_requested": [
+   1,
+   2,
+   4,
+   8,
+   16
+  ],
+  "chars_per_token_probe": 5.31
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 49.6,
+   "gen_tokens": 182,
+   "ttft_ms": 285,
+   "prompt_tokens": 74
+  },
+  "prefill": [
+   {
+    "ttft_ms": 1918,
+    "prompt_tokens": 3938,
+    "prefill_tok_s": 2053.3,
+    "decode_tok_s": 51.79
+   },
+   {
+    "ttft_ms": 7471,
+    "prompt_tokens": 15839,
+    "prefill_tok_s": 2120.0,
+    "decode_tok_s": 55.47
+   },
+   {
+    "ttft_ms": 14642,
+    "prompt_tokens": 31606,
+    "prefill_tok_s": 2158.5,
+    "decode_tok_s": 49.43
+   },
+   {
+    "ttft_ms": 29394,
+    "prompt_tokens": 63217,
+    "prefill_tok_s": 2150.7,
+    "decode_tok_s": 50.67
+   },
+   {
+    "ttft_ms": 55687,
+    "prompt_tokens": 118476,
+    "prefill_tok_s": 2127.5,
+    "decode_tok_s": 52.8
+   }
+  ],
+  "sustained": {
+   "decode_tok_s": 65.29,
+   "gen_tokens": 1500,
+   "wall_s": 23.321,
+   "ttft_ms": 362
+  },
+  "concurrency": [
+   {
+    "streams": 1,
+    "aggregate_tok_s": 47.5,
+    "ok": 1,
+    "failed": 0,
+    "wall_s": 4.19,
+    "per_stream_tok_s": 51.2,
+    "median_ttft_ms": 321
+   },
+   {
+    "streams": 2,
+    "aggregate_tok_s": 26.1,
+    "ok": 2,
+    "failed": 0,
+    "wall_s": 14.64,
+    "per_stream_tok_s": 13.6,
+    "median_ttft_ms": 464
+   },
+   {
+    "streams": 4,
+    "aggregate_tok_s": 107.6,
+    "ok": 4,
+    "failed": 0,
+    "wall_s": 6.95,
+    "per_stream_tok_s": 31.8,
+    "median_ttft_ms": 757
+   },
+   {
+    "streams": 8,
+    "aggregate_tok_s": 72.0,
+    "ok": 8,
+    "failed": 0,
+    "wall_s": 21.07,
+    "per_stream_tok_s": 27.5,
+    "median_ttft_ms": 9254
+   },
+   {
+    "streams": 16,
+    "aggregate_tok_s": 104.2,
+    "ok": 16,
+    "failed": 0,
+    "wall_s": 29.55,
+    "per_stream_tok_s": 29.5,
+    "median_ttft_ms": 10709
+   }
+  ],
+  "reasoning_tax": {
+   "thinking_off_wall_s": 6.786,
+   "thinking_off_tokens": 600,
+   "thinking_on_wall_s": 4.144,
+   "thinking_on_tokens": 243,
+   "tax_x": 0.61
+  },
+  "telemetry": {
+   "gpu_mem_used_gb": 126.7,
+   "gpu_mem_total_gb": 128.0,
+   "gpu_util_pct": 99,
+   "temp_c": 44,
+   "samples": 112,
+   "reading": "peak observed over the run; sampled from /api/nodes",
+   "gpu_util_pct_at_start": 0,
+   "temp_c_at_start": 29
+  }
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py in 243s; nothing loaded, unloaded or restarted.",
+  "prefill_tok_s is prompt_tokens/TTFT, a floor: TTFT includes queueing, and the OpenAI API exposes no internal prefill timing."
+ ],
+ "source": "scripts/ainode-bench.py"
+}

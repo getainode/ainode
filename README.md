@@ -435,6 +435,7 @@ it, and we would rather say so than publish a number we did not take.
 
 | Model | Params / active | Quant | Placement | Single-stream tok/s | 16 streams tok/s | Rubric | Date | Run |
 |---|---|---|---|---|---|---|---|---|
+| Qwen3.8-Flash-Next | 125B / 6B active | NVFP4 (mixed, FP8 PLE) | castor, 4× Tesla PG500-216, TP=4 | 49.6 | 104.2 | not run | 2026-09-20 | [AINode 0.5.29, castor TP=4 four V100 32 GB, onecat-vllm 1.5.0-mm, MTP 4, via the fleet endpoint](https://github.com/getainode/ainode/blob/main/bench/results/20260920-122006-qwen3_8-flash-next-nvfp4-v100-ainode-0_5_29-castor-tp-4-four-v100-32-gb-onecat-vllm-1_5_0-mm-mtp-4-via-the-fleet-endpoint.json) |
 | Qwen3.6 35B-A3B | 35B / 3B active | NVFP4 | pollux, 1× Tesla PG500-216, TP=1 | 97.4 | 343.9 | not run | 2026-09-19 | [Pollux V100 solo, onecat src-full](https://github.com/getainode/ainode/blob/main/bench/results/20260919-040456-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-onecat-src-full.json) |
 | Spark-X2.5 4B | 4B dense | BF16 | Spark-4-GX10, 1× GB10, TP=1 (stacked) | 18.9 | 283.8 | not run | 2026-09-18 | [Spark-4 stacked beside Nemotron, BF16](https://github.com/getainode/ainode/blob/main/bench/results/20260918-155217-spark-x2_5-4b-spark-4-stacked-beside-nemotron-bf16.json) |
 | Qwen3.8-Flash-Next (NVFP4) | 125B / 6B active | NVFP4 (mixed, FP8 PLE) | Spark-2-DGX, 2× GB10, TP=2 | 26.2 | 207.6 | not run | 2026-09-16 | [AINode 0.5.18, TP=2 Spark-2+3, vLLM nightly, no MTP](https://github.com/getainode/ainode/blob/main/bench/results/20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json) |
