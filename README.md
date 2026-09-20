@@ -580,6 +580,7 @@ whose needle came back verbatim.
 | Ornith 1.5 35B-A3B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 3/3 | 4/4 | 100k | 2026-09-18 | [Ornith stacked Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013703-ornith-1_5-35b-a3b-nvfp4-ornith-stacked-spark-1-thinking-on-agentic.json) |
 | Qwen3.6 35B-A3B | pollux, TP=1 | 20/22 | 9/9 | 3/3 | 3/4 | 8k | 2026-09-19 | [Pollux V100 solo, quick](https://github.com/getainode/ainode/blob/main/bench/results/20260919-040711-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-quick-agentic.json) |
 | Qwen3.8 27B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 2/3 | 4/4 | 100k | 2026-09-18 | [Qwen3.8 27B solo Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-020831-qwen3_8-27b-nvfp4-qwen3_8-27b-solo-spark-1-thinking-on-agentic.json) |
+| Qwen3.8-Flash-Next | castor, TP=4 | 20/22 | 9/9 | 3/3 | 3/4 | 8k | 2026-09-20 | [castor TP=4 four V100, onecat-vllm 1.5.0-mm, MTP 4, quick rubric via the fleet endpoint](https://github.com/getainode/ainode/blob/main/bench/results/20260920-122230-qwen3_8-flash-next-nvfp4-v100-castor-tp-4-four-v100-onecat-vllm-1_5_0-mm-mtp-4-quick-rubric-via-the-fleet-endpoint-agentic.json) |
 | Spark-X2.5 4B | Spark-4-GX10, TP=1 | 19/25 | 9/9 | 1/3 | 4/4 | 48k | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-151444-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-agentic.json) |
 
 <!-- END agentic-bench-table -->

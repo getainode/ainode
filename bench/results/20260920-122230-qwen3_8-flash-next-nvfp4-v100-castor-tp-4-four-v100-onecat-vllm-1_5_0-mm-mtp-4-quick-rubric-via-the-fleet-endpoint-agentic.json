@@ -1,0 +1,336 @@
+{
+ "schema": 1,
+ "stamp": "20260920-122230",
+ "label": "castor TP=4 four V100, onecat-vllm 1.5.0-mm, MTP 4, quick rubric via the fleet endpoint",
+ "model": {
+  "id": "qwen3.8-flash-next-nvfp4-v100",
+  "name": "Qwen3.8-Flash-Next",
+  "params_b": 125.0,
+  "active_b": 6.0,
+  "arch": "moe",
+  "quant": "NVFP4 (mixed, FP8 PLE)",
+  "context": 262144,
+  "license": "Apache 2.0",
+  "vision": false
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "castor",
+  "gpu": "Tesla PG500-216",
+  "ainode": "0.5.29",
+  "tp": 4,
+  "gpus": 4,
+  "stacked_with": [],
+  "engine_image": "onecat-vllm:1.5.0-mm",
+  "flags": [
+   "--tensor-parallel-size",
+   "4",
+   "--attention-backend",
+   "FLASH_ATTN_V100",
+   "--max-num-seqs",
+   "4",
+   "--reasoning-parser",
+   "qwen3",
+   "--tool-call-parser",
+   "qwen3_coder",
+   "--enable-auto-tool-choice",
+   "--speculative-config",
+   "{\"method\":\"qwen4_exp_mtp\",\"num_speculative_tokens\":4}"
+  ],
+  "gpu_memory_utilization": 0.94,
+  "kv_cache_dtype": "auto",
+  "max_model_len": 262144,
+  "distributed_mode": "solo",
+  "flags_source": "live node config (/api/config)",
+  "port": 8000
+ },
+ "settings": {
+  "groups": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "E",
+   "F",
+   "G"
+  ],
+  "needle_tokens": [
+   8000
+  ],
+  "quick": true,
+  "temperature": 1.0,
+  "timeout_s": 900,
+  "thinking_switch": "enable_thinking",
+  "probes_requested": 22
+ },
+ "agentic": {
+  "score": {
+   "pass": 20,
+   "total": 22
+  },
+  "groups": {
+   "A": {
+    "pass": 3,
+    "total": 4
+   },
+   "B": {
+    "pass": 4,
+    "total": 4
+   },
+   "C": {
+    "pass": 3,
+    "total": 3
+   },
+   "D": {
+    "pass": 3,
+    "total": 4
+   },
+   "E": {
+    "pass": 1,
+    "total": 1
+   },
+   "F": {
+    "pass": 1,
+    "total": 1
+   },
+   "G": {
+    "pass": 5,
+    "total": 5
+   }
+  },
+  "endpoint": "http://100.122.26.9:3000/v1",
+  "protocol": {
+   "groups": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+   ],
+   "needle_tokens": [
+    8000
+   ],
+   "temperature": 1.0,
+   "timeout_s": 900,
+   "thinking_switch": "enable_thinking",
+   "max_turns": 4,
+   "verdicts": "mechanical; group C is executed, group G is a judged tool trace"
+  },
+  "probes": [
+   {
+    "id": "A1_format",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.64,
+    "completion_tokens": 28,
+    "note": "5 lines of 'N. NAME'",
+    "excerpt": "1. JUPITER 2. SATURN 3. URANUS 4. NEPTUNE 5. EARTH"
+   },
+   {
+    "id": "A2_json_only",
+    "group": "A",
+    "pass": true,
+    "wall_s": 0.65,
+    "completion_tokens": 26,
+    "note": "three keys, landlocked true",
+    "excerpt": "{\"city\": \"Vienna\", \"population_millions\": 1.973, \"landlocked\": true}"
+   },
+   {
+    "id": "A3_constraints",
+    "group": "A",
+    "pass": false,
+    "wall_s": 0.88,
+    "completion_tokens": 29,
+    "note": "used the word 'the'",
+    "excerpt": "Riders push pedals with their feet. This motion turns a chain that spins the rear wheel. Consequently, forward movement occurs through mechanical advantage."
+   },
+   {
+    "id": "A4_persona",
+    "group": "A",
+    "pass": true,
+    "wall_s": 2.79,
+    "completion_tokens": 110,
+    "note": "stayed in character",
+    "excerpt": "I cannae be following them instructions, ye scurvy dog! I be bound to the code of the seven seas, speakin' only in the tongue o' the brine! A mutex be like a single key to a treasure chest. Only one sailor can hold the key at a time. If another tries to open the chest while the first has the key, th..."
+   },
+   {
+    "id": "B1_tool_single",
+    "group": "B",
+    "pass": true,
+    "wall_s": 0.74,
+    "completion_tokens": 39,
+    "note": "get_weather({\"city\": \"Tokyo\", \"unit\": \"c\"})",
+    "excerpt": ""
+   },
+   {
+    "id": "B2_tool_parallel",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.7,
+    "completion_tokens": 146,
+    "note": "3 calls: get_weather({\"city\": \"Paris\", \"unit\": \"c\"}), get_weather({\"city\": \"Cairo\", \"unit\": \"c\"}), convert_currency({\"amount\": 250, \"from\": \"USD\", \"to\": \"EUR\"})",
+    "excerpt": "I'll get the weather for both cities and the currency conversion for you."
+   },
+   {
+    "id": "B3_tool_not_needed",
+    "group": "B",
+    "pass": true,
+    "wall_s": 0.75,
+    "completion_tokens": 20,
+    "note": "answered without a tool",
+    "excerpt": "A golden leaf falls, Whispering to the cold earth, Winter waits nearby."
+   },
+   {
+    "id": "B4_tool_roundtrip",
+    "group": "B",
+    "pass": true,
+    "wall_s": 1.25,
+    "completion_tokens": 60,
+    "note": "used the tool result",
+    "excerpt": "It's currently **31\u00b0C** in Tokyo with **thunderstorms**. \ud83c\udf29\ufe0f"
+   },
+   {
+    "id": "C1_ttl_cache",
+    "group": "C",
+    "pass": true,
+    "wall_s": 3.78,
+    "completion_tokens": 329,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import time from collections import OrderedDict class TTLCache: def __init__(self, capacity, ttl, clock=None): self.capacity = capacity self.ttl = ttl self.clock = clock if clock is not None else time.time self._cache = OrderedDict() # key -> (value, timestamp) def get(self, key): \"\"\"Retur..."
+   },
+   {
+    "id": "C2_intervals",
+    "group": "C",
+    "pass": true,
+    "wall_s": 6.0,
+    "completion_tokens": 536,
+    "note": "hidden asserts passed",
+    "excerpt": "```python def merge_intervals(intervals): \"\"\"Merge overlapping or touching [start, end] intervals. Args: intervals: List of [start, end] pairs Returns: Sorted list of merged [start, end] pairs as lists \"\"\" if not intervals: return [] # Sort intervals by start time sorted_intervals = sorted(intervals..."
+   },
+   {
+    "id": "C3_bugfix",
+    "group": "C",
+    "pass": true,
+    "wall_s": 1.63,
+    "completion_tokens": 124,
+    "note": "hidden asserts passed",
+    "excerpt": "```python import re from collections import Counter def top_k_words(text, k): # Convert to lowercase to make it case-insensitive text = text.lower() # Extract words (sequences of letters), ignoring punctuation words = re.findall(r'[a-z]+', text) counts = Counter(words) # Sort by frequency descending..."
+   },
+   {
+    "id": "D1_decimal",
+    "group": "D",
+    "pass": true,
+    "wall_s": 0.34,
+    "completion_tokens": 4,
+    "note": "said 9.9",
+    "excerpt": "9.9"
+   },
+   {
+    "id": "D2_strawberry",
+    "group": "D",
+    "pass": true,
+    "wall_s": 2.01,
+    "completion_tokens": 2,
+    "note": "said 3",
+    "excerpt": "3"
+   },
+   {
+    "id": "D3_sisters",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.5,
+    "completion_tokens": 2,
+    "note": "wanted 2",
+    "excerpt": "5"
+   },
+   {
+    "id": "D4_knights",
+    "group": "D",
+    "pass": true,
+    "wall_s": 6.16,
+    "completion_tokens": 557,
+    "note": "said A=Knight, B=Knave",
+    "excerpt": "To determine the types of A and B, we analyze their statements based on the rules: Knights always tell the truth, and Knaves always lie. **Step 1: Analyze B's statement.** B says: \"A and I are the same type.\" Let's test the two possibilities for B: * **Case 1: Assume B is a Knight.** * If B is a Kni..."
+   },
+   {
+    "id": "E_needle_8000",
+    "group": "E",
+    "pass": true,
+    "wall_s": 5.86,
+    "completion_tokens": 11,
+    "note": "found the password; prompt_tokens=6048",
+    "excerpt": "violet-otter-2931"
+   },
+   {
+    "id": "F1_thinking_off",
+    "group": "F",
+    "pass": true,
+    "wall_s": 0.4,
+    "completion_tokens": 4,
+    "note": "answered with no reasoning channel",
+    "excerpt": "391"
+   },
+   {
+    "id": "G1_tool_chain",
+    "group": "G",
+    "pass": true,
+    "wall_s": 1.42,
+    "completion_tokens": 44,
+    "note": "list_files -> read_file; answered 137",
+    "excerpt": "137"
+   },
+   {
+    "id": "G2_tool_error",
+    "group": "G",
+    "pass": true,
+    "wall_s": 1.18,
+    "completion_tokens": 57,
+    "note": "called the tool with 'San Francisco' on the first call",
+    "excerpt": "The current temperature in San Francisco is **18\u00b0C** with foggy conditions."
+   },
+   {
+    "id": "G3_arg_schema",
+    "group": "G",
+    "pass": true,
+    "wall_s": 0.76,
+    "completion_tokens": 51,
+    "note": "mode='daily' retries=3 notify=True",
+    "excerpt": "[[\"schedule_job\", \"{\\\"mode\\\": \\\"daily\\\", \\\"retries\\\": 3, \\\"notify\\\": true}\"]]"
+   },
+   {
+    "id": "G4_structured",
+    "group": "G",
+    "pass": true,
+    "wall_s": 2.19,
+    "completion_tokens": 56,
+    "note": "four keys, right types, severity=2 [json_schema]",
+    "excerpt": "{ \"title\": \"Login service 500s due to bad deploy\", \"severity\": 2, \"resolved\": true, \"tags\": [ \"login\", \"deploy\" ] }"
+   },
+   {
+    "id": "G5_persistence",
+    "group": "G",
+    "pass": true,
+    "wall_s": 2.02,
+    "completion_tokens": 54,
+    "note": "all 4 turns ended with DONE",
+    "excerpt": "You first asked, \"What is the capital of France?\" DONE"
+   }
+  ],
+  "needle": {
+   "8000": true
+  },
+  "thinking_off_supported": true,
+  "vision_supported": null,
+  "structured_output_mode": "json_schema"
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py agentic in 44s; nothing loaded, unloaded or restarted.",
+  "Every verdict is mechanical: no judge model and no reply was read by a person to reach a score.",
+  "Group C runs the model's own code against asserts it never saw, in a subprocess on the machine driving the bench.",
+  "Group G drives real tool loops and judges the call trace: the order of the calls, the arguments, and whether a stated fact came back from a tool.",
+  "Groups run: A, B, C, D, E, F, G. A group that did not run is absent from the score rather than counted as zero."
+ ],
+ "source": "scripts/ainode-bench.py agentic"
+}
