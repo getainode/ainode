@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass
 
 from ainode.bench.measure import CTL_TIMEOUT, get_json, node_sample
+from ainode.metrics.collector import optional_float
 
 
 # ---------------------------------------------------------------- shared
@@ -526,29 +527,34 @@ def cluster_nodes_reader(app, node_id: str):
             return None
         if node is None:
             return None
-        used_mb = float(getattr(node, "gpu_memory_used_mb", 0.0) or 0.0)
-        total_mb = float(getattr(node, "gpu_memory_total_mb", 0.0) or 0.0)
-        util = float(getattr(node, "gpu_utilization", 0.0) or 0.0)
-        temp = float(getattr(node, "gpu_temp", 0.0) or 0.0)
+        # A figure this node cannot measure stays None all the way into the
+        # record. Coerced to 0 it becomes a measurement: a bench record claiming
+        # an idle GPU and an empty node while the run was in flight, which is
+        # exactly what a record must never contain.
+        used_mb = optional_float(getattr(node, "gpu_memory_used_mb", None))
+        total_mb = optional_float(getattr(node, "gpu_memory_total_mb", None))
+        util = optional_float(getattr(node, "gpu_utilization", None))
+        temp = optional_float(getattr(node, "gpu_temp", None))
         if node_id == config.node_id and collector is not None:
             try:
                 m = collector.get_gpu_metrics() or {}
                 if not m.get("error"):
-                    used_mb = float(m.get("memory_used_mb", used_mb) or used_mb)
-                    total_mb = float(m.get("memory_total_mb", total_mb) or total_mb)
-                    util = float(m.get("utilization_percent", util) or util)
-                    temp = float(m.get("temperature_c", temp) or temp)
+                    used_mb = optional_float(m.get("memory_used_mb"))
+                    total_mb = optional_float(m.get("memory_total_mb")) or total_mb
+                    util = optional_float(m.get("utilization_percent"))
+                    temp = optional_float(m.get("temperature_c"))
             except Exception:
                 pass
         if not total_mb and getattr(node, "gpu_memory_gb", 0):
-            total_mb = node.gpu_memory_gb * 1024
+            total_mb = float(node.gpu_memory_gb) * 1024
         if not total_mb:
             return None
         return node_sample({
             "gpu_memory_gb": total_mb / 1024,
-            "gpu_memory_used_pct": round(used_mb / total_mb * 100),
-            "gpu_utilization": round(util),
-            "gpu_temp": round(temp),
+            "gpu_memory_used_pct": (round(used_mb / total_mb * 100)
+                                    if used_mb is not None else None),
+            "gpu_utilization": (round(util) if util is not None else None),
+            "gpu_temp": (round(temp) if temp is not None else None),
         })
 
     return read

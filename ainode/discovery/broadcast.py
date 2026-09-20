@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
+from ainode.metrics.collector import optional_float
+
 
 class NodeStatus(str, Enum):
     """Health status of a discovered node."""
@@ -37,6 +39,10 @@ class NodeAnnouncement:
     node_id: str
     node_name: str
     gpu_name: str
+    # The node's TOTAL memory across every NVIDIA device on it, not device 0's.
+    # A four-V100 host announced 32 GB and counted as one GPU, which is what the
+    # cluster's total VRAM, the topology's GPU count and every placement decision
+    # were built on (#163).
     gpu_memory_gb: float
     unified_memory: bool
     model: str
@@ -61,14 +67,22 @@ class NodeAnnouncement:
     # "DISTRIBUTED across N nodes" and know which topology members are busy.
     distributed_instance_id: Optional[str] = None
     distributed_peers: List[str] = field(default_factory=list)
+    # How many NVIDIA devices this node has. One per node was true of every GB10
+    # and false of the two x86 nodes in the fleet, so the fleet's GPU count was
+    # its node count (#163). An older peer sends no field, which reads as 1, the
+    # shape it was announcing anyway.
+    gpu_count: int = 1
     # Live GPU telemetry (metrics fan-out): stamped fresh on every broadcast
     # tick so the head can render real per-peer VRAM/util on the cluster
-    # graphic. Defaults keep older nodes backward-compatible — from_json drops
-    # unknown keys, so a peer running an older build just reports zeros.
-    gpu_memory_used_mb: float = 0.0
-    gpu_memory_total_mb: float = 0.0
-    gpu_utilization: float = 0.0
-    gpu_temp: float = 0.0
+    # graphic. None means "this node cannot measure it", which is the truth on a
+    # part whose driver does not populate the counter, and it is NOT the same
+    # claim as 0 (#176, #175): a permanent 0 reads as an idle, empty node. An
+    # older peer sends 0.0 for all four, and a reader cannot tell that apart from
+    # a real zero: one release of that, and nothing worse than today.
+    gpu_memory_used_mb: Optional[float] = None
+    gpu_memory_total_mb: Optional[float] = None
+    gpu_utilization: Optional[float] = None
+    gpu_temp: Optional[float] = None
     # This node's IP on the cluster fabric (cluster_interface). The head uses
     # this to launch distributed peers over the fabric — NOT the mgmt-LAN UDP
     # source IP (peer_ip), which lands a Ray worker on a non-GPU address (BUG D).
@@ -187,10 +201,15 @@ class BroadcastSender:
                         try:
                             m = self.metrics_provider() or {}
                             if not m.get("error"):
-                                self.announcement.gpu_memory_used_mb = float(m.get("memory_used_mb", 0) or 0)
-                                self.announcement.gpu_memory_total_mb = float(m.get("memory_total_mb", 0) or 0)
-                                self.announcement.gpu_utilization = float(m.get("utilization_percent", 0) or 0)
-                                self.announcement.gpu_temp = float(m.get("temperature_c", 0) or 0)
+                                # A figure the node cannot measure travels as
+                                # null, so a peer draws n/a rather than a zero it
+                                # would read as an idle node (#176).
+                                self.announcement.gpu_memory_used_mb = optional_float(m.get("memory_used_mb"))
+                                self.announcement.gpu_memory_total_mb = optional_float(m.get("memory_total_mb"))
+                                self.announcement.gpu_utilization = optional_float(m.get("utilization_percent"))
+                                self.announcement.gpu_temp = optional_float(m.get("temperature_c"))
+                                if m.get("gpu_count"):
+                                    self.announcement.gpu_count = int(m["gpu_count"])
                         except Exception:
                             pass
                     data = self.announcement.to_json().encode()

@@ -33,11 +33,15 @@ class ClusterNode:
     distributed_instance_id: Optional[str] = None
     distributed_peers: list = field(default_factory=list)
     peer_ip: Optional[str] = None  # captured from UDP recvfrom on the head
-    # Live GPU telemetry carried in the broadcast (metrics fan-out).
-    gpu_memory_used_mb: float = 0.0
-    gpu_memory_total_mb: float = 0.0
-    gpu_utilization: float = 0.0
-    gpu_temp: float = 0.0
+    # How many NVIDIA devices the node announced (#163).
+    gpu_count: int = 1
+    # Live GPU telemetry carried in the broadcast (metrics fan-out). None where
+    # the node said it cannot measure the figure; never defaulted to 0, which
+    # every view downstream would draw as a real reading (#176).
+    gpu_memory_used_mb: Optional[float] = None
+    gpu_memory_total_mb: Optional[float] = None
+    gpu_utilization: Optional[float] = None
+    gpu_temp: Optional[float] = None
     fabric_ip: str = ""  # this node's cluster-fabric IP (BUG D: launch over fabric, not mgmt)
     instances: list = field(default_factory=list)  # Phase 2: distributed instances this node heads
     # The node's OWN word on its engine, straight from the announcement:
@@ -76,10 +80,11 @@ class ClusterNode:
             distributed_instance_id=getattr(a, "distributed_instance_id", None),
             distributed_peers=list(getattr(a, "distributed_peers", []) or []),
             peer_ip=getattr(discovered, "peer_ip", None),
-            gpu_memory_used_mb=getattr(a, "gpu_memory_used_mb", 0.0),
-            gpu_memory_total_mb=getattr(a, "gpu_memory_total_mb", 0.0),
-            gpu_utilization=getattr(a, "gpu_utilization", 0.0),
-            gpu_temp=getattr(a, "gpu_temp", 0.0),
+            gpu_count=int(getattr(a, "gpu_count", 1) or 1),
+            gpu_memory_used_mb=getattr(a, "gpu_memory_used_mb", None),
+            gpu_memory_total_mb=getattr(a, "gpu_memory_total_mb", None),
+            gpu_utilization=getattr(a, "gpu_utilization", None),
+            gpu_temp=getattr(a, "gpu_temp", None),
             fabric_ip=getattr(a, "fabric_ip", "") or "",
             instances=list(getattr(a, "instances", []) or []),
             engine_status=getattr(a, "status", "") or "",
@@ -108,10 +113,11 @@ class ClusterNode:
             distributed_mode=getattr(announcement, "distributed_mode", "solo"),
             distributed_instance_id=getattr(announcement, "distributed_instance_id", None),
             distributed_peers=list(getattr(announcement, "distributed_peers", []) or []),
-            gpu_memory_used_mb=getattr(announcement, "gpu_memory_used_mb", 0.0),
-            gpu_memory_total_mb=getattr(announcement, "gpu_memory_total_mb", 0.0),
-            gpu_utilization=getattr(announcement, "gpu_utilization", 0.0),
-            gpu_temp=getattr(announcement, "gpu_temp", 0.0),
+            gpu_count=int(getattr(announcement, "gpu_count", 1) or 1),
+            gpu_memory_used_mb=getattr(announcement, "gpu_memory_used_mb", None),
+            gpu_memory_total_mb=getattr(announcement, "gpu_memory_total_mb", None),
+            gpu_utilization=getattr(announcement, "gpu_utilization", None),
+            gpu_temp=getattr(announcement, "gpu_temp", None),
             fabric_ip=getattr(announcement, "fabric_ip", "") or "",
             instances=list(getattr(announcement, "instances", []) or []),
             engine_status=getattr(announcement, "status", "") or "",
@@ -264,7 +270,9 @@ class ClusterState:
 
         return {
             "total_nodes": len(active_nodes),
-            "total_gpus": len(active_nodes),
+            # GPUs, not nodes: the fleet's two x86 boxes hold four and one V100,
+            # so counting nodes reported nine GPUs as six (#163).
+            "total_gpus": sum(int(getattr(n, "gpu_count", 1) or 1) for n in active_nodes),
             "total_memory_gb": sum(n.gpu_memory_gb for n in active_nodes),
             "models_available": sorted(models),
             "leader_id": leader.node_id if leader else None,

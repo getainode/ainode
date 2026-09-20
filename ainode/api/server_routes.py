@@ -255,6 +255,26 @@ def serving_kind(model: str) -> tuple[str, list]:
     return _LLM_KIND[0], list(_LLM_KIND[1])
 
 
+def model_disk_facts(model: str) -> tuple:
+    """``(size_bytes, quantization, quantization_source)`` for a served model id.
+
+    The Server view published ``size_bytes: 0`` and ``quantization: null`` for
+    every row (#180): nothing resolved a served id back to the weights on disk.
+    Both are read here, from the snapshot directory and the catalog recipe or the
+    model's own config.json, and both are None when this node cannot tell:
+    never a 0 the interface would draw as a measured size.
+    """
+    try:
+        from ainode.models.registry import model_disk_size_bytes, model_quantization
+
+        size = model_disk_size_bytes(model)
+        quant, source = model_quantization(model)
+        return size, quant, source
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("failed to read on-disk facts for %s", model)
+        return None, None, None
+
+
 def _remote_parallel(node, model: str, port: int) -> int:
     """TP width of a PEER's instance, from the instance list on its announcement.
 
@@ -299,6 +319,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
     loaded_models: list[dict] = []
     for mid in local_models:
         kind, caps = serving_kind(mid)
+        size_bytes, quant, quant_source = model_disk_facts(mid)
         loaded_models.append({
             "id": mid,
             "node_hostname": config.node_name or "local",
@@ -308,8 +329,9 @@ async def handle_server_status(request: web.Request) -> web.Response:
             "ejectable": True,
             "type": kind,
             "format": "SafeTensors",
-            "quantization": None,
-            "size_bytes": 0,
+            "quantization": quant,
+            "quantization_source": quant_source,
+            "size_bytes": size_bytes,
             "parallel": _local_parallel(request.app, mid, primary_port),
             "capabilities": caps,
             "loaded_at": start_time,
@@ -337,6 +359,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                 # a dead instance can still be cleaned up from the UI.
                 stacked_live = await _probe_loaded_models(session, rec.api_port)
                 kind, caps = serving_kind(rec.model)
+                size_bytes, quant, quant_source = model_disk_facts(rec.model)
                 loaded_models.append({
                     "id": rec.model,
                     "node_hostname": config.node_name or "local",
@@ -346,8 +369,9 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     "ejectable": True,
                     "type": kind,
                     "format": "SafeTensors",
-                    "quantization": None,
-                    "size_bytes": 0,
+                    "quantization": quant,
+                    "quantization_source": quant_source,
+                    "size_bytes": size_bytes,
                     "parallel": instance_parallel(rec),
                     "capabilities": caps,
                     "loaded_at": start_time,
@@ -372,6 +396,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     "type": "embed",
                     "format": "SafeTensors",
                     "quantization": None,
+                    "quantization_source": None,
                     "size_bytes": int(size_mb) * 1024 * 1024,
                     "parallel": 1,
                     "capabilities": ["embeddings"],
@@ -395,6 +420,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                 # endpoint only targets this node's local InstanceManager.
                 if m.model:
                     kind, caps = serving_kind(m.model)
+                    size_bytes, quant, quant_source = model_disk_facts(m.model)
                     loaded_models.append({
                         "id": m.model,
                         "node_hostname": m.node_name,
@@ -404,8 +430,9 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "ejectable": False,
                         "type": kind,
                         "format": "SafeTensors",
-                        "quantization": None,
-                        "size_bytes": 0,
+                        "quantization": quant,
+                        "quantization_source": quant_source,
+                        "size_bytes": size_bytes,
                         "parallel": _remote_parallel(m, m.model, member_port),
                         "capabilities": caps,
                         "loaded_at": getattr(m, "last_seen", start_time),
@@ -422,6 +449,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
                     if im == m.model and inst_port == member_port:
                         continue  # primary already added above
                     kind, caps = serving_kind(im)
+                    size_bytes, quant, quant_source = model_disk_facts(im)
                     loaded_models.append({
                         "id": im,
                         "node_hostname": m.node_name,
@@ -431,8 +459,9 @@ async def handle_server_status(request: web.Request) -> web.Response:
                         "ejectable": False,
                         "type": kind,
                         "format": "SafeTensors",
-                        "quantization": None,
-                        "size_bytes": 0,
+                        "quantization": quant,
+                        "quantization_source": quant_source,
+                        "size_bytes": size_bytes,
                         "parallel": instance_parallel(inst),
                         "capabilities": caps,
                         "loaded_at": getattr(m, "last_seen", start_time),

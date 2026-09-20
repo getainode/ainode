@@ -145,25 +145,52 @@ class TestThreadSafety:
 
 
 # ---------------------------------------------------------------------------
-# GB10 unified-memory: nvml returns used=0 (doesn't raise) → psutil fallback
+# GB10 unified memory: nvml returns a struct of zeros (it does not raise), so
+# the node's memory is the host's pool and its usage is what the engines
+# reserved. Host RAM in use is NOT that number: it counts page cache and every
+# other process, and publishing it as VRAM put every GB10 at 84 to 100 percent
+# used forever, whatever the user did (#175).
 # ---------------------------------------------------------------------------
 
 class TestGB10UnifiedMemory:
-    def _run(self, nvml_used, nvml_total, psutil_used):
+    def _run(self, nvml_used, nvml_total, psutil_used, reserved=None):
         mod = _mock_pynvml()
         mod.nvmlDeviceGetMemoryInfo.return_value = MagicMock(used=nvml_used, total=nvml_total)
         fake_vm = MagicMock(used=psutil_used, total=122 * 1024**3)
+        collector = MetricsCollector()
+        if reserved is not None:
+            collector.set_reservation_provider(lambda: reserved)
         with patch.dict("sys.modules", {"pynvml": mod}), \
              patch("psutil.virtual_memory", return_value=fake_vm):
-            return MetricsCollector().get_gpu_metrics()
+            return collector.get_gpu_metrics()
 
-    def test_zero_nvml_used_falls_back_to_psutil(self):
-        # GB10: nvml succeeds but used=0 → must use psutil's real unified RAM
+    def test_host_ram_in_use_is_never_reported_as_vram(self):
+        # GB10: nvml succeeds but reports zeros. The host has 40 GB in use, and
+        # that figure must not come back as GPU memory used.
         m = self._run(0, 0, 40 * 1024**3)
-        assert m["memory_used_mb"] == round(40 * 1024**3 / (1024 * 1024))
+        assert m["memory_kind"] == "unified"
         assert m["memory_total_mb"] == round(122 * 1024**3 / (1024 * 1024))
+        assert m["memory_used_mb"] is None  # nothing said, so nothing claimed
+        assert m["system_memory_used_mb"] == round(40 * 1024**3 / (1024 * 1024))
+
+    def test_usage_is_what_the_engines_reserved(self):
+        m = self._run(0, 0, 40 * 1024**3, reserved=0.5)
+        total = round(122 * 1024**3 / (1024 * 1024))
+        assert m["memory_used_mb"] == round(total * 0.5)
+        assert m["memory_used_source"] == "engine_reservations"
+        assert m["engine_reserved_fraction"] == 0.5
+
+    def test_utilisation_is_unknown_not_zero(self):
+        # The driver answers 0 for a counter it does not populate, next to N/A
+        # memory. A 0 published here read as an idle node while it served (#176).
+        m = self._run(0, 0, 40 * 1024**3)
+        assert m["utilization_percent"] is None
+        assert m["temperature_c"] == 55  # the same NVML call still works
 
     def test_real_nvml_used_is_kept(self):
-        # discrete GPU: nvml reports real used → keep it, don't fall back
+        # discrete GPU: nvml reports real used, and utilisation with it
         m = self._run(8 * 1024**3, 24 * 1024**3, 5 * 1024**3)
+        assert m["memory_kind"] == "dedicated"
         assert m["memory_used_mb"] == round(8 * 1024**3 / (1024 * 1024))
+        assert m["memory_used_source"] == "nvml"
+        assert m["utilization_percent"] == 42

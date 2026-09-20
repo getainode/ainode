@@ -42,6 +42,11 @@
       this.width = 0;
       this.height = 0;
       this.nodes = [];
+      // The node drawn at the centre (layout), and the node the cluster elected
+      // (the crown). They used to be the same field, which is how the graphic
+      // came to crown whatever it centred (#203): the centre is row order, the
+      // crown is the election.
+      this.hub = null;
       this.master = null;
       this.time = 0;
       this.lastFrame = 0;
@@ -71,6 +76,13 @@
         pulse: Math.random() * Math.PI * 2,
       }));
 
+      // The crown goes to the node the cluster ELECTED, which /api/nodes now
+      // states per row (effective_role / is_leader, from the same get_master()
+      // the Config view's members table reads). There is no row-order fallback:
+      // it crowned incoming[0], and that is always the local node because
+      // ClusterState inserts itself first, so every node's dashboard crowned
+      // itself and the product gave two different answers in two views (#203).
+      // With no role information, no node wears a crown.
       const masterIdx = incoming.findIndex(
         (n) => n.data.effective_role === 'master' || n.data.is_leader
       );
@@ -78,15 +90,15 @@
         const m = incoming.splice(masterIdx, 1)[0];
         m.role = 'master';
         incoming.unshift(m);
-      } else if (incoming.length > 0) {
-        incoming[0].role = 'master';
       }
       incoming.forEach((n) => { if (!n.role) n.role = 'worker'; });
 
-      // Track which nodes are new (get fade-in alpha starting at 0)
-      incoming.forEach((n) => {
+      // Track which nodes are new (get fade-in alpha starting at 0). The
+      // centred node is index 0 whether or not anything is crowned, and it
+      // starts visible.
+      incoming.forEach((n, i) => {
         if (!this._prevNodeIds.has(n.id)) {
-          this._nodeAlpha[n.id] = n.role === 'master' ? 1 : 0; // master starts visible
+          this._nodeAlpha[n.id] = i === 0 ? 1 : 0;
         }
       });
       this._prevNodeIds = new Set(incoming.map((n) => n.id));
@@ -99,18 +111,19 @@
       }
 
       this.nodes = incoming;
-      this.master = this.nodes[0] || null;
+      this.hub = this.nodes[0] || null;
+      this.master = this.nodes.find((n) => n.role === 'master') || null;
       this._layout();
     }
 
     _layout() {
-      if (!this.master) return;
+      if (!this.hub) return;
       const cx = this.width / 2;
       const cy = this.height / 2;
-      this.master.x = cx;
-      this.master.y = cy;
+      this.hub.x = cx;
+      this.hub.y = cy;
 
-      const workers = this.nodes.filter((n) => n.role === 'worker');
+      const workers = this.nodes.filter((n) => n !== this.hub);
       if (workers.length === 0) return;
 
       const orbitR = Math.min(this.width, this.height) * CFG.orbitRatio;
@@ -184,7 +197,7 @@
       ctx.clearRect(0, 0, this.width, this.height);
       this._drawGrid();
 
-      if (!this.master) {
+      if (!this.hub) {
         // No nodes at all — show the loading animation
         this._drawLoading();
         return;
@@ -193,14 +206,14 @@
       // Advance master transition (loading → real): takes ~0.8s
       if (this._engineReady && this._masterTransition < 1) {
         this._masterTransition = Math.min(1, this._masterTransition + dt / 0.8);
-      } else if (!this._engineReady && this.master) {
+      } else if (!this._engineReady && this.hub) {
         // Engine not ready — stay in loading state
         this._masterTransition = Math.max(0, this._masterTransition - dt / 0.5);
       }
 
       // Advance per-worker fade-in
       this.nodes.forEach((n) => {
-        if (n.role === 'worker') {
+        if (n !== this.hub) {
           if (this._nodeAlpha[n.id] === undefined) this._nodeAlpha[n.id] = 0;
           this._nodeAlpha[n.id] = Math.min(1, (this._nodeAlpha[n.id] || 0) + dt / 1.2);
         }
@@ -211,20 +224,20 @@
 
       // Connection lines (fade in with their workers)
       this.nodes.forEach((n) => {
-        if (n.role === 'worker') {
+        if (n !== this.hub) {
           const a = this._nodeAlpha[n.id] || 0;
-          if (a > 0) this._drawConnection(n, this.master, a);
+          if (a > 0) this._drawConnection(n, this.hub, a);
         }
       });
 
       // Nodes — master always visible once discovered; workers fade in
       this.nodes.forEach((n, i) => {
-        const alpha = n.role === 'master' ? 1 : (this._nodeAlpha[n.id] || 0);
+        const alpha = n === this.hub ? 1 : (this._nodeAlpha[n.id] || 0);
         if (alpha > 0.01) this._drawNode(n, i === this.hoverIdx, alpha);
       });
 
       // Loading overlay on master while engine isn't ready (fades out)
-      if (this._masterTransition < 1 && this.master) {
+      if (this._masterTransition < 1 && this.hub) {
         this._drawMasterLoadingOverlay(1 - this._masterTransition);
       }
 
@@ -338,9 +351,9 @@
     _drawMasterLoadingOverlay(alpha) {
       // Shown on top of the real master node while engine is starting up.
       // Keeps the node name/GPU visible but adds a spinning arc + dim veil.
-      if (alpha <= 0 || !this.master) return;
+      if (alpha <= 0 || !this.hub) return;
       const ctx = this.ctx;
-      const m = this.master;
+      const m = this.hub;
       const r = CFG.masterRadius;
       const t = this.time;
 
@@ -381,7 +394,7 @@
 
     _drawMasterRings() {
       const ctx = this.ctx;
-      const m = this.master;
+      const m = this.hub;
       const baseR = CFG.masterRadius;
       ctx.save();
 
@@ -508,9 +521,13 @@
       ctx.arc(0, 0, haloR, 0, Math.PI * 2);
       ctx.fill();
 
-      // Memory ring on border
-      const memPct = Number(n.data.gpu_memory_used_pct || 0);
-      if (memPct > 0) {
+      // Memory ring on border. A node that cannot measure its memory use sends
+      // null and gets NO ring: a ring drawn from a zero reads as an empty node,
+      // which is a claim, not a blank (#175, #176).
+      const memKnown = n.data.gpu_memory_used_pct !== null
+        && n.data.gpu_memory_used_pct !== undefined;
+      const memPct = memKnown ? Number(n.data.gpu_memory_used_pct) : null;
+      if (memKnown && memPct > 0) {
         const memColor = memPct > 90 ? CFG.red : memPct > 70 ? CFG.amber : CFG.nvidiaGreen;
         ctx.strokeStyle = this._rgba(memColor, 0.85);
         ctx.lineWidth = 3.5;
@@ -588,8 +605,10 @@
       // Below labels
       const labelY = n.y + r + 22;
       const memTotal = Number(n.data.gpu_memory_gb || 0).toFixed(0);
-      const memUsed = (memTotal * memPct / 100).toFixed(1);
-      const memText = memUsed + '/' + memTotal + ' GB (' + Math.round(memPct) + '%)';
+      const memText = memKnown
+        ? (memTotal * memPct / 100).toFixed(1) + '/' + memTotal + ' GB ('
+          + Math.round(memPct) + '%)'
+        : memTotal + ' GB (usage n/a)';
 
       ctx.save();
       ctx.fillStyle = CFG.textSecondary;
@@ -618,7 +637,8 @@
 
     _drawWaitingLabel() {
       const ctx = this.ctx;
-      const m = this.master;
+      const m = this.hub;
+      if (!m) return;
       const labelAlpha = 0.4 + Math.sin(this.time * 1.6) * 0.2;
       ctx.save();
       ctx.fillStyle = this._rgba(CFG.textMuted, labelAlpha);
@@ -638,18 +658,34 @@
       pairs.push({ label: 'Role', value: (n.role || '').toUpperCase(), green: true });
       pairs.push({ label: 'GPU', value: d.gpu_name || '?' });
 
+      // Each of these is a measurement or an n/a, never a zero standing in for
+      // one. On this hardware the driver reports no GPU utilisation at all, and
+      // a permanent 0 read as an idle node while it was serving (#176).
+      const known = function (v) { return v !== null && v !== undefined && v !== ''; };
       const memGb = Number(d.gpu_memory_gb || 0);
-      const memPct = Number(d.gpu_memory_used_pct || 0);
       if (memGb > 0) {
-        const usedGb = (memGb * memPct / 100).toFixed(1);
-        pairs.push({ label: 'VRAM', value: usedGb + ' / ' + memGb.toFixed(0) + ' GB (' + Math.round(memPct) + '%)' });
+        const kind = d.memory_kind === 'unified' ? ' unified' : '';
+        if (known(d.gpu_memory_used_pct)) {
+          const pct = Number(d.gpu_memory_used_pct);
+          pairs.push({ label: 'VRAM',
+            value: (memGb * pct / 100).toFixed(1) + ' / ' + memGb.toFixed(0)
+              + ' GB' + kind + ' (' + Math.round(pct) + '%)' });
+        } else {
+          pairs.push({ label: 'VRAM',
+            value: memGb.toFixed(0) + ' GB' + kind + ' · used n/a' });
+        }
+      }
+      if (Number(d.gpu_count || 1) > 1) {
+        pairs.push({ label: 'GPUs', value: String(d.gpu_count) });
       }
 
-      const util = Number(d.gpu_utilization || 0);
-      if (util > 0) pairs.push({ label: 'GPU util', value: util.toFixed(0) + '%' });
+      pairs.push({ label: 'GPU util',
+        value: known(d.gpu_utilization) ? Number(d.gpu_utilization).toFixed(0) + '%'
+          : 'n/a (not exposed here)' });
 
-      const temp = Number(d.gpu_temp || 0);
-      if (temp > 0) pairs.push({ label: 'Temp', value: temp.toFixed(0) + '°C' });
+      if (known(d.gpu_temp)) {
+        pairs.push({ label: 'Temp', value: Number(d.gpu_temp).toFixed(0) + '°C' });
+      }
 
       // Disk on the models filesystem, which is the one that fills. `warn` is
       // the server's own verdict (/api/status -> disk.models), not a threshold
@@ -671,7 +707,11 @@
 
       if (d.version) pairs.push({ label: 'Version', value: 'v' + d.version });
       if (d.api_port) pairs.push({ label: 'API', value: ':' + d.api_port });
-      if (d.peer_ip) pairs.push({ label: 'IP', value: d.peer_ip });
+      // The address this node is actually reachable on. It used to read
+      // "localhost" for every peer (#178), so the tooltip pointed every viewer
+      // at their own machine.
+      const addr = d.host && d.host !== 'localhost' ? d.host : (d.peer_ip || d.fabric_ip);
+      if (addr) pairs.push({ label: 'IP', value: addr });
 
       // Render
       const padX = 12, padY = 10, lineH = 15;

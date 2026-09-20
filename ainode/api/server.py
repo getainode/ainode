@@ -13,7 +13,7 @@ import aiohttp
 from aiohttp import web
 
 from ainode.core.config import DEFAULT_ENGINE_BACKEND, NodeConfig
-from ainode.core.gpu import detect_gpu, GPUInfo
+from ainode.core.gpu import detect_gpu, detect_gpus, GPUInfo
 from ainode.web.serve import get_index_html, get_onboarding_html, get_static_path
 from ainode.models.api_routes import register_model_routes
 from ainode.onboarding.api_routes import register_onboarding_routes
@@ -24,7 +24,7 @@ from ainode.auth.middleware import (
     is_authenticated,
 )
 from ainode.auth.api_routes import register_auth_routes
-from ainode.metrics.collector import MetricsCollector
+from ainode.metrics.collector import MetricsCollector, optional_float
 from ainode.metrics.api_routes import register_metrics_routes
 from ainode.training.engine import TrainingManager
 from ainode.training.api_routes import setup_training_routes
@@ -143,6 +143,10 @@ def create_app(
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
     app["metrics_collector"] = collector
+    # On a unified-memory node the collector has no usage figure of its own to
+    # report, and host RAM is not VRAM (#175). Give it the one number this node
+    # really knows: what its engines reserved.
+    collector.set_reservation_provider(lambda: engine_reserved_fraction(app))
     app["training_manager"] = manager
     app["dataset_manager"] = dataset_manager
     app["cluster_state"] = cluster
@@ -320,12 +324,71 @@ def announced_instances(config, live_records, dmode: str, engine_serving: bool) 
     return out
 
 
+def engine_reserved_fraction(app) -> Optional[float]:
+    """How much of this node's memory the engines on it have RESERVED, 0.0 to 1.0.
+
+    This is the honest answer to "how much of this node is committed" on a
+    unified-memory part, where NVML reports no usage at all and the psutil
+    figure that stood in for it was host RAM: page cache and every other
+    process, published as VRAM used (#175).
+
+    The number AINode actually knows is vLLM's ``gpu_memory_utilization``, set
+    per instance at launch and already the basis of the stacked-load admission
+    gate. Summed across the live instances, it is what the engines hold. None
+    when there is no engine layer to ask, which reports the figure as unknown
+    rather than as an empty node.
+    """
+    config = app.get("config")
+    if config is None:
+        return None
+    default_gmu = getattr(config, "gpu_memory_utilization", None)
+
+    manager = app.get("instances")
+    records = []
+    if manager is not None:
+        try:
+            records = list(manager.instances())
+        except Exception:
+            records = []
+
+    if records:
+        total = 0.0
+        for inst in records:
+            gmu = getattr(getattr(inst, "backend", None), "config", None)
+            gmu = getattr(gmu, "gpu_memory_utilization", None) if gmu else None
+            if gmu is None:
+                gmu = default_gmu
+            if gmu is not None:
+                total += float(gmu)
+        return total
+
+    # A distributed head replayed from config.json is not in the manager, and
+    # neither is the boot engine before the seed lands: an engine that is running
+    # holds its node's configured fraction.
+    engine = app.get("engine")
+    if engine is not None and default_gmu is not None:
+        return float(default_gmu)
+    # No engine on this node reserves nothing. That is a measurement, not a gap.
+    return 0.0
+
+
 def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
     """Create a NodeAnnouncement from current node state."""
-    gpu: Optional[GPUInfo] = detect_gpu()
-    gpu_name = gpu.name if gpu else "CPU"
-    gpu_memory_gb = round(gpu.memory_total_mb / 1024, 1) if gpu else 0.0
-    unified_memory = gpu.unified_memory if gpu else False
+    # Every device on the host, not device 0: a four-V100 node announced one
+    # 32 GB GPU, and that number was the cluster's total VRAM, the topology's
+    # GPU count and every placement decision (#163).
+    gpus = detect_gpus()
+    if gpus is not None:
+        gpu_name = gpus.name
+        gpu_count = gpus.count
+        gpu_memory_gb = round(gpus.memory_total_mb / 1024, 1)
+        unified_memory = gpus.unified_memory
+    else:
+        gpu: Optional[GPUInfo] = detect_gpu()
+        gpu_name = gpu.name if gpu else "CPU"
+        gpu_count = 1 if gpu else 0
+        gpu_memory_gb = round(gpu.memory_total_mb / 1024, 1) if gpu else 0.0
+        unified_memory = gpu.unified_memory if gpu else False
 
     # This node's fabric IP, so a head can launch us over the cluster fabric
     # (BUG D fix — not the mgmt-LAN UDP source address).
@@ -368,6 +431,7 @@ def _build_announcement(config: NodeConfig, engine=None) -> NodeAnnouncement:
         node_name=config.node_name or socket.gethostname() or "unknown",
         gpu_name=gpu_name,
         gpu_memory_gb=gpu_memory_gb,
+        gpu_count=gpu_count,
         unified_memory=unified_memory,
         model=config.model or "" if distributed_mode != "member" else "",
         status=status,
@@ -947,10 +1011,19 @@ async def handle_status(request: web.Request) -> web.Response:
 
     gpu: Optional[GPUInfo] = detect_gpu()
     gpu_info = asdict(gpu) if gpu else None
-    # detect_gpu() caches and reports free==total on GB10 unified memory, so the
-    # dashboard showed 0% used. Overlay the collector's live psutil reading — the
-    # same source /api/nodes uses — so the two endpoints agree.
+    # The node's whole GPU inventory, because this block is what the browser
+    # sizes models against: device 0's 32 GB stood for a four-V100 host's 128
+    # (#163). Names and counts come from the set; the live figures from the
+    # collector, the same source /api/nodes uses, so the two endpoints agree.
+    gpus = detect_gpus()
+    if gpu_info is not None and gpus is not None:
+        gpu_info["name"] = gpus.name
+        gpu_info["gpu_count"] = gpus.count
+        gpu_info["memory_total_mb"] = gpus.memory_total_mb
+        gpu_info["unified_memory"] = gpus.unified_memory
+        gpu_info["memory_free_mb"] = None
     if gpu_info is not None:
+        gpu_info.setdefault("gpu_count", 1)
         collector = request.app.get("metrics_collector")
         if collector is not None:
             try:
@@ -960,8 +1033,21 @@ async def handle_status(request: web.Request) -> web.Response:
                     used_mb = m.get("memory_used_mb")
                     if total_mb:
                         gpu_info["memory_total_mb"] = round(total_mb)
-                        if used_mb is not None:
-                            gpu_info["memory_free_mb"] = max(0, round(total_mb - used_mb))
+                    gpu_info["gpu_count"] = int(m.get("gpu_count") or gpu_info["gpu_count"])
+                    gpu_info["memory_kind"] = m.get("memory_kind")
+                    # Free memory is null, not total, when nothing can say how
+                    # much is in use: the dashboard draws n/a for an unknown and
+                    # a real bar for a measurement (#175, #176).
+                    gpu_info["memory_used_mb"] = (round(used_mb) if used_mb is not None
+                                                  else None)
+                    gpu_info["memory_free_mb"] = (
+                        max(0, round(total_mb - used_mb))
+                        if (total_mb and used_mb is not None) else None)
+                    gpu_info["utilization_percent"] = m.get("utilization_percent")
+                    gpu_info["temperature_c"] = m.get("temperature_c")
+                    gpu_info["devices"] = m.get("devices") or []
+                    if m.get("system_memory_used_mb") is not None:
+                        gpu_info["system_memory_used_mb"] = m["system_memory_used_mb"]
             except Exception:
                 pass
 
@@ -1056,6 +1142,22 @@ def auth_status_fields(app: web.Application) -> dict:
         label = "API open, no key set"
     return {"enabled": enabled, "key_count": key_count, "label": label}
 
+
+def _node_host(node, local_id: Optional[str]) -> str:
+    """The address a caller can REACH this node on.
+
+    ``/api/nodes`` hardcoded "localhost" for every row, so any link a consumer
+    built from it pointed at the viewer's own machine (#178). "localhost" is
+    right for exactly one node. For a peer the reachable address is the one its
+    announcement arrived from (the listener captures it with ``recvfrom``, which
+    is the management-LAN address a browser is on), and the fabric IP when
+    nothing else is known: the address the master itself launches over.
+    """
+    if local_id and node.node_id == local_id:
+        return "localhost"
+    return (getattr(node, "peer_ip", "") or getattr(node, "fabric_ip", "") or "")
+
+
 async def handle_nodes(request: web.Request) -> web.Response:
     """Return the list of known cluster nodes.
 
@@ -1073,6 +1175,7 @@ async def handle_nodes(request: web.Request) -> web.Response:
     cluster_nodes = cluster.get_nodes(include_offline=False)
     collector = request.app.get("metrics_collector")
     local_id = config.node_id
+    master = cluster.get_master()
     if cluster_nodes:
         nodes_list = []
         for n in cluster_nodes:
@@ -1103,38 +1206,62 @@ async def handle_nodes(request: web.Request) -> web.Response:
             # Live GPU telemetry: peers come from their broadcast; the local
             # node's ClusterNode is built once at startup, so read it fresh
             # from our own collector here. (metrics fan-out)
-            used_mb = float(getattr(n, "gpu_memory_used_mb", 0.0) or 0.0)
-            total_mb = float(getattr(n, "gpu_memory_total_mb", 0.0) or 0.0)
-            util = float(getattr(n, "gpu_utilization", 0.0) or 0.0)
-            temp = float(getattr(n, "gpu_temp", 0.0) or 0.0)
+            #
+            # Every one of these is Optional. A figure the node could not measure
+            # travels as null and is drawn as n/a: a 0 published here read as an
+            # idle GPU on a node that was serving, on every node in the fleet
+            # (#176), and a percentage computed from host RAM read as a full node
+            # whatever the user did (#175).
+            used_mb = optional_float(getattr(n, "gpu_memory_used_mb", None))
+            total_mb = optional_float(getattr(n, "gpu_memory_total_mb", None))
+            util = optional_float(getattr(n, "gpu_utilization", None))
+            temp = optional_float(getattr(n, "gpu_temp", None))
+            gpu_count = int(getattr(n, "gpu_count", 1) or 1)
+            memory_kind = "unified" if n.unified_memory else "dedicated"
             if n.node_id == local_id and collector is not None:
                 try:
                     m = collector.get_gpu_metrics() or {}
                     if not m.get("error"):
-                        used_mb = float(m.get("memory_used_mb", used_mb) or used_mb)
-                        total_mb = float(m.get("memory_total_mb", total_mb) or total_mb)
-                        util = float(m.get("utilization_percent", util) or util)
-                        temp = float(m.get("temperature_c", temp) or temp)
+                        used_mb = optional_float(m.get("memory_used_mb"))
+                        total_mb = optional_float(m.get("memory_total_mb")) or total_mb
+                        util = optional_float(m.get("utilization_percent"))
+                        temp = optional_float(m.get("temperature_c"))
+                        gpu_count = int(m.get("gpu_count") or gpu_count)
+                        memory_kind = str(m.get("memory_kind") or memory_kind)
                 except Exception:
                     pass
             if not total_mb and n.gpu_memory_gb:
-                total_mb = n.gpu_memory_gb * 1024
-            used_pct = round(used_mb / total_mb * 100) if total_mb else 0
+                total_mb = float(n.gpu_memory_gb) * 1024
+            used_pct = (round(used_mb / total_mb * 100)
+                        if (used_mb is not None and total_mb) else None)
             nodes_list.append({
                 "node_id": n.node_id,
                 "node_name": n.node_name,
                 "fabric_ip": getattr(n, "fabric_ip", "") or "",
-                "host": "localhost",
+                # The address a caller can actually reach this node on. It was
+                # "localhost" for every row, so anything built from it pointed at
+                # the viewer's own machine (#178).
+                "host": _node_host(n, local_id),
                 "api_port": n.api_port,
                 "web_port": n.web_port,
                 "model": n.model,
                 "gpu_name": n.gpu_name,
+                "gpu_count": gpu_count,
                 "gpu_memory_gb": n.gpu_memory_gb,
                 "unified_memory": n.unified_memory,
+                "memory_kind": memory_kind,
                 "gpu_memory_used_pct": used_pct,
-                "gpu_utilization": round(util),
-                "gpu_temp": round(temp),
+                "gpu_memory_used_mb": (round(used_mb) if used_mb is not None else None),
+                "gpu_memory_total_mb": (round(total_mb) if total_mb else None),
+                "gpu_utilization": (round(util) if util is not None else None),
+                "gpu_temp": (round(temp) if temp is not None else None),
                 "status": status_str,
+                # The role the cluster ELECTED, from the same get_master() the
+                # Config view's members table reads. Without it the topology
+                # crowned whichever node you happened to open the dashboard on
+                # (#203).
+                "effective_role": cluster.get_cluster_role_for(n.node_id),
+                "is_leader": bool(master is not None and master.node_id == n.node_id),
                 "engine_ready": ready,
                 "load_phase": load_phase,
                 "load_started_at": load_progress["load_started_at"],
@@ -1172,10 +1299,16 @@ async def handle_nodes(request: web.Request) -> web.Response:
         nodes_list = [{
             "node_id": config.node_id,
             "node_name": config.node_name,
-            "host": config.host,
+            "host": "localhost",
             "api_port": config.api_port,
             "web_port": config.web_port,
             "model": config.model,
+            # This branch is the no-cluster case (discovery off, or nothing
+            # discovered yet): one node, no election to report, and it is the
+            # only node there is. Saying so beats leaving the topology to pick a
+            # crown out of row order (#203).
+            "effective_role": "master",
+            "is_leader": True,
             "engine_ready": engine_ready or dmode == "member",
             "load_phase": load_phase,
             "load_started_at": load_progress["load_started_at"],
@@ -1542,7 +1675,47 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         in ("online", "serving", "starting", "member-ready")
     ]
     total_vram = sum(float(n.gpu_memory_gb or 0) for n in ready)
-    total_gpus = len(ready)  # one GPU per node today; future: per-node GPU count
+    # GPUs, not nodes. Counting nodes reported the fleet's nine GPUs as six,
+    # because the two x86 boxes hold four and one V100 (#163).
+    total_gpus = sum(int(getattr(n, "gpu_count", 1) or 1) for n in ready)
+
+    # What is actually free. This was a copy of the total, so the cluster view
+    # showed an empty fleet however many models were loaded (#174). Per node:
+    # total minus what that node reports in use (NVML on a discrete GPU, the
+    # engines' reservations on a unified-memory part). A node with no usable
+    # figure is NOT counted as free. It is named in `vram_unknown_nodes`, and
+    # the available total says it is a floor rather than the whole answer.
+    local_metrics: dict = {}
+    _collector = request.app.get("metrics_collector")
+    if _collector is not None:
+        try:
+            local_metrics = _collector.get_gpu_metrics() or {}
+        except Exception:
+            local_metrics = {}
+    local_id = getattr(request.app.get("config"), "node_id", None)
+
+    def _node_usage(node) -> tuple[Optional[float], Optional[float]]:
+        """(used_gb, total_gb) for one node, either None when unknown."""
+        total_gb = float(getattr(node, "gpu_memory_gb", 0) or 0) or None
+        if node.node_id == local_id and local_metrics and not local_metrics.get("error"):
+            used_mb = optional_float(local_metrics.get("memory_used_mb"))
+            total_mb = optional_float(local_metrics.get("memory_total_mb"))
+            if total_mb:
+                total_gb = total_mb / 1024
+            return ((used_mb / 1024 if used_mb is not None else None), total_gb)
+        used_mb = optional_float(getattr(node, "gpu_memory_used_mb", None))
+        return ((used_mb / 1024 if used_mb is not None else None), total_gb)
+
+    available_vram = 0.0
+    vram_unknown_nodes: list = []
+    node_usage: dict = {}
+    for n in ready:
+        used_gb, total_gb = _node_usage(n)
+        node_usage[n.node_id] = (used_gb, total_gb)
+        if used_gb is None or total_gb is None:
+            vram_unknown_nodes.append(n.node_name or n.node_id)
+            continue
+        available_vram += max(0.0, total_gb - used_gb)
 
     # Phase 2: the LIST of distributed instances across all nodes — each head
     # advertises the instances it heads. Resolve each instance's peer FABRIC IPs
@@ -1595,14 +1768,22 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
 
     nodes_payload = []
     for n in ready:
+        used_gb, total_gb = node_usage.get(n.node_id, (None, None))
         nodes_payload.append({
             "node_id": n.node_id,
             "hostname": n.node_name,
             "fabric_ip": getattr(n, "fabric_ip", "") or "",
+            "host": _node_host(n, local_id),
             "vram_gb": round(float(n.gpu_memory_gb or 0), 1),
-            "gpus": 1,
+            # Every device on the node, not one per node (#163).
+            "gpus": int(getattr(n, "gpu_count", 1) or 1),
+            "vram_used_gb": (round(used_gb, 1) if used_gb is not None else None),
+            "vram_free_gb": (round(max(0.0, total_gb - used_gb), 1)
+                             if (used_gb is not None and total_gb is not None) else None),
             "gpu_name": n.gpu_name,
             "unified_memory": n.unified_memory,
+            "memory_kind": "unified" if n.unified_memory else "dedicated",
+            "effective_role": cluster.get_cluster_role_for(n.node_id),
             "status": n.status.value if hasattr(n.status, "value") else str(n.status),
             "distributed_mode": getattr(n, "distributed_mode", "solo") or "solo",
             "ray_status": (
@@ -1614,7 +1795,15 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
 
     return web.json_response({
         "total_vram_gb": round(total_vram, 1),
-        "available_vram_gb": round(total_vram, 1),  # best-effort; same as total until live utilization is wired
+        # Summed from real per-node usage. None when NOT ONE node could say, so
+        # the view shows nothing rather than the total twice (#174).
+        "available_vram_gb": (round(available_vram, 1)
+                              if len(vram_unknown_nodes) < len(ready) else None),
+        # The nodes whose usage is unknown. While this list is non-empty the
+        # figure above is a floor: those nodes contribute none of their free
+        # memory to it.
+        "vram_unknown_nodes": vram_unknown_nodes,
+        "available_vram_is_floor": bool(vram_unknown_nodes),
         "total_gpus": total_gpus,
         "total_nodes": len(ready),
         "nodes": nodes_payload,

@@ -39,6 +39,13 @@ model on one placement (node, engine image, flags) on one day.
 Sections may be omitted when not measured. Never fill a missing measurement with an
 estimate; the page renders "not measured" for a missing key.
 
+That holds key by key inside a section, not just section by section. The `telemetry`
+block is routinely partial on a GB10: the driver exposes no GPU utilisation counter
+there and NVML reports no memory usage, so `gpu_util_pct` and `gpu_mem_used_gb` are
+absent from those records rather than recorded as 0 (a peak of 0 percent during a run
+is a claim nobody measured). `temp_c` and `gpu_mem_total_gb` are real on the same
+node and stay.
+
 `active_b` and `arch` come from the catalog entry when it states them
 (`active_params_b` / `arch` in `ainode/models/registry.py`) and otherwise off the
 `A<n>B` marker in the model id, which is the vendor stating the active count in the

@@ -1426,6 +1426,166 @@ class CatalogAggregator:
             pass
 
 
+# ---- What is on disk, for a model id ---------------------------------------
+#
+# The Server view reported `size_bytes: 0` and `quantization: null` for every
+# loaded model (#180) because nothing resolved a served model id back to its
+# weights. These do: one snapshot directory, one measured size, one quantization
+# with the source it came from. Cached, because the Server view polls and the
+# snapshot of a frontier MoE is tens of thousands of files.
+
+_DISK_CACHE_TTL = 300.0
+_disk_size_cache: dict[str, tuple[float, Optional[int]]] = {}
+_quantization_cache: dict[str, tuple[float, tuple[Optional[str], Optional[str]]]] = {}
+
+
+def _hf_cache_roots(models_dir: Optional[Path] = None) -> list[Path]:
+    """Every directory a model's weights can be under on this node."""
+    base = Path(models_dir) if models_dir else MODELS_DIR
+    roots = [base, base / "hub", base / "hf-cache" / "hub"]
+    env_home = os.environ.get("HF_HOME")
+    if env_home:
+        roots.append(Path(env_home) / "hub")
+    env_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if env_cache:
+        roots.append(Path(env_cache))
+    return roots
+
+
+def snapshot_dir_for(model_id: str, models_dir: Optional[Path] = None) -> Optional[Path]:
+    """The directory holding a model's weight files, across every layout we write.
+
+    HF cache (``models--org--name/snapshots/<rev>/``), flat HF cache, and the
+    direct ``org--name/`` our own downloader writes. When a cache entry has
+    several revisions the newest one is the answer: that is the one an engine
+    launched today resolved.
+    """
+    repo = (model_id or "").strip()
+    if not repo:
+        return None
+    slug = "models--" + repo.replace("/", "--")
+    direct = repo.replace("/", "--")
+    for root in _hf_cache_roots(models_dir):
+        for name in (slug, direct, repo):
+            candidate = root / name
+            try:
+                if not candidate.is_dir():
+                    continue
+            except OSError:
+                continue
+            snapshots = candidate / "snapshots"
+            if snapshots.is_dir():
+                revisions = [d for d in snapshots.iterdir() if d.is_dir()]
+                if not revisions:
+                    continue
+                return max(revisions, key=lambda d: d.stat().st_mtime)
+            return candidate
+    return None
+
+
+def _measure_dir_bytes(path: Path) -> int:
+    """Bytes on disk under *path*, counting a shared blob once.
+
+    An HF snapshot is a tree of symlinks into ``blobs/``, so following each link
+    and adding its target's size double-counts anything linked twice. Dedupe on
+    the resolved path: one stat per blob, not one per link.
+    """
+    seen: set = set()
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_dir():
+                continue
+            target = entry.resolve()
+            if target in seen:
+                continue
+            seen.add(target)
+            total += target.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def model_disk_size_bytes(model_id: str, models_dir: Optional[Path] = None) -> Optional[int]:
+    """Measured size of a model's weights on this node, or None if not found.
+
+    None rather than 0: a model whose snapshot is not on this disk has an unknown
+    size here, and 0 was read by the interface as a real, absurd measurement.
+    """
+    key = f"{model_id}|{models_dir or ''}"
+    hit = _disk_size_cache.get(key)
+    now = time.time()
+    if hit is not None and (now - hit[0]) < _DISK_CACHE_TTL:
+        return hit[1]
+    directory = snapshot_dir_for(model_id, models_dir)
+    size = None
+    if directory is not None:
+        try:
+            measured = _measure_dir_bytes(directory)
+            size = measured if measured > 0 else None
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("failed to measure %s on disk", model_id)
+            size = None
+    _disk_size_cache[key] = (now, size)
+    return size
+
+
+def _quantization_from_config(directory: Path) -> Optional[str]:
+    """Quantization the model's own ``config.json`` declares, or None."""
+    config_path = directory / "config.json"
+    try:
+        raw = json.loads(config_path.read_text())
+    except Exception:
+        return None
+    block = raw.get("quantization_config")
+    if not isinstance(block, dict):
+        return None
+    # modelopt checkpoints (the NVFP4 the fleet runs) say quant_algo; the
+    # transformers quantizers say quant_method.
+    for key in ("quant_algo", "quant_method", "quantization"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def model_quantization(model_id: str,
+                       models_dir: Optional[Path] = None) -> tuple[Optional[str], Optional[str]]:
+    """``(quantization, source)`` for a model id, or ``(None, None)``.
+
+    The catalog recipe is the first answer because it is the format AINode
+    launches the model with; the model's own ``config.json`` is next, read from
+    the snapshot on disk. The source travels with the value so the interface can
+    say where it came from rather than presenting all three as one fact.
+    """
+    key = f"{model_id}|{models_dir or ''}"
+    hit = _quantization_cache.get(key)
+    now = time.time()
+    if hit is not None and (now - hit[0]) < _DISK_CACHE_TTL:
+        return hit[1]
+
+    result: tuple[Optional[str], Optional[str]] = (None, None)
+    for table in (CURATED_CLUSTER_MODELS, FALLBACK_CATALOG):
+        for cid, info in (table or {}).items():
+            if model_id in (cid, getattr(info, "hf_repo", "")):
+                quant = getattr(info, "quantization", None)
+                if quant:
+                    result = (quant, "catalog")
+                break
+        if result[0]:
+            break
+
+    if not result[0]:
+        directory = snapshot_dir_for(model_id, models_dir)
+        if directory is not None:
+            from_config = _quantization_from_config(directory)
+            if from_config:
+                result = (from_config, "config.json")
+
+    _quantization_cache[key] = (now, result)
+    return result
+
+
 # ---- Model manager ---------------------------------------------------------
 
 

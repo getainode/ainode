@@ -52,6 +52,9 @@ class TestNodeAnnouncement:
             "distributed_mode", "distributed_instance_id", "distributed_peers",
             # GPU telemetry fan-out (0.4.12) + fabric IP for distributed launch (BUG D)
             "gpu_memory_used_mb", "gpu_memory_total_mb", "gpu_utilization", "gpu_temp",
+            # How many NVIDIA devices the node has: a four-V100 host announced
+            # one 32 GB GPU, and that was the fleet's GPU count and total VRAM.
+            "gpu_count",
             "fabric_ip",
             "instances",  # Phase 2: distributed instances this node heads
             # Live load progress, so a model loading on this node is drawn as
