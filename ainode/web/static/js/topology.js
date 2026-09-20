@@ -651,6 +651,19 @@
       const temp = Number(d.gpu_temp || 0);
       if (temp > 0) pairs.push({ label: 'Temp', value: temp.toFixed(0) + '°C' });
 
+      // Disk on the models filesystem, which is the one that fills. `warn` is
+      // the server's own verdict (/api/status -> disk.models), not a threshold
+      // recomputed here, so the tooltip and `ainode doctor` cannot disagree.
+      const disk = d.disk_models;
+      if (disk && disk.total_gb) {
+        pairs.push({
+          label: 'Disk',
+          value: disk.free_gb.toFixed(0) + ' / ' + disk.total_gb.toFixed(0) + ' GB free'
+            + (disk.warn ? '  LOW' : ''),
+          green: !disk.warn,
+        });
+      }
+
       if (d.model) pairs.push({ label: 'Model', value: this._shortText(d.model, 30) });
 
       const status = d.status || (d.engine_ready ? 'online' : 'idle');

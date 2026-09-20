@@ -189,6 +189,24 @@ def create_app(
     # already existed and none of it protocol-specific.
     app.router.add_post("/v1/messages", proxy_to_vllm)
     app.router.add_post("/v1/messages/count_tokens", proxy_to_vllm)
+    # The rest of what the engines actually serve. Every one of these is a path
+    # vLLM answers on the port behind this proxy and :3000 was answering 404 for,
+    # so a caller had to abandon fleet routing and address one engine directly to
+    # use it. Same handler, for the same reason /v1/messages is: the body carries
+    # a `model`, which is all the routing, failover and SSE passthrough below need.
+    #   /v1/responses: the OpenAI Responses API (streams; 0.27.1 serves it)
+    #   /tokenize, /detokenize: NOT under /v1 in vLLM's own route table, and
+    #                    served by chat AND pooling engines alike
+    #   /v1/rerank, /v1/score: pooling-model paths, live on the embedding engine
+    #                    beside /v1/embeddings (which keeps its own handler
+    #                    because it validates the body before forwarding)
+    # Verified against vLLM 0.27.1's /openapi.json on Spark-4 (chat engine) and
+    # the 0.17.0 pooling engine stacked beside it.
+    app.router.add_post("/v1/responses", proxy_to_vllm)
+    app.router.add_post("/tokenize", proxy_to_vllm)
+    app.router.add_post("/detokenize", proxy_to_vllm)
+    app.router.add_post("/v1/rerank", proxy_to_vllm)
+    app.router.add_post("/v1/score", proxy_to_vllm)
     # The decision endpoint. NOT a forwarded path and deliberately not on
     # proxy_to_vllm: it composes N grammar-constrained chat completions of its
     # own out of one request, so there is no caller body to forward. It routes
@@ -874,6 +892,47 @@ def peer_load_progress(node) -> dict:
     }
 
 
+# Free space below this fraction of a filesystem is reported as a warning. A node
+# pays for a model twice (the download, then whatever the engine caches beside
+# it), and running out mid-pull surfaces as an engine that died rather than as a
+# disk error, so the dashboard has to be able to see it coming. Same threshold
+# ``ainode doctor`` warns at.
+DISK_WARN_FRACTION = 0.15
+
+
+def disk_fields(config: NodeConfig) -> dict:
+    """Free and total space on the two directories a launch writes to.
+
+    The AINode home holds config, logs, the bench ledger and the secrets store;
+    the models dir holds the weights and is usually far bigger, and on our nodes
+    it is often a different filesystem. So both are reported, each with the
+    warning state already computed, rather than a single "disk" number that is
+    true of neither. A path we cannot stat is reported as null rather than zero:
+    "unknown" and "full" are different answers.
+    """
+    import shutil as _shutil
+
+    home = _ainode_home_path()
+    models = Path(getattr(config, "models_dir", "") or (home / "models"))
+    out: dict = {}
+    for key, path in (("home", home), ("models", models)):
+        try:
+            usage = _shutil.disk_usage(str(path))
+        except (OSError, ValueError):
+            out[key] = {"path": str(path), "total_gb": None, "free_gb": None,
+                        "free_fraction": None, "warn": False}
+            continue
+        fraction = (usage.free / usage.total) if usage.total else 0.0
+        out[key] = {
+            "path": str(path),
+            "total_gb": round(usage.total / (1024 ** 3), 1),
+            "free_gb": round(usage.free / (1024 ** 3), 1),
+            "free_fraction": round(fraction, 4),
+            "warn": fraction < DISK_WARN_FRACTION,
+        }
+    return out
+
+
 async def handle_status(request: web.Request) -> web.Response:
     """Return rich node status."""
     config: NodeConfig = request.app["config"]
@@ -955,6 +1014,11 @@ async def handle_status(request: web.Request) -> web.Response:
         "load_elapsed_seconds": progress["load_elapsed_seconds"],
         "expected_ready_minutes": progress["expected_ready_minutes"],
         "uptime": round(time.time() - start_time, 1),
+        # Free/total on the AINode home and the models dir, each with its own
+        # warning state (see disk_fields). The dashboard draws it on the node the
+        # topology has selected; a full models filesystem is the one resource
+        # failure that otherwise only shows up as a launch that died.
+        "disk": disk_fields(config),
         "version": __version__,
         "powered_by": "ainode.dev",
         "models_loaded": models_loaded,

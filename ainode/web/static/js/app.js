@@ -716,6 +716,18 @@ const AINode = {
           }
         });
       }
+      // DISK: only this node's, because /api/status is only ever about this
+      // node. A peer's filesystem is not in its announcement, so its tooltip
+      // simply has no Disk line rather than borrowing ours.
+      if (s.disk && s.disk.models) {
+        var localDiskId = s.node_id;
+        topoNodes.forEach(function (n) {
+          if (n.node_id === localDiskId || topoNodes.length === 1) {
+            n.disk_models = s.disk.models;
+          }
+        });
+      }
+
       // Pass engine_ready so the topology can drive the loading → real transition.
       // If no model is configured, the server is ready (no engine to wait for).
       var engineReady = !!(s && (s.engine_ready || !s.model));
