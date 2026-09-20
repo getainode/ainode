@@ -274,21 +274,32 @@ const AINodeBench = {
       this.paintTarget();
       return;
     }
+    // The option value is the INSTANCE, not the model id: the same model served on
+    // two nodes used to collapse into one option, so the picker could not express
+    // which copy to measure and the run was filed against whichever candidate
+    // routing took first (#197).
     select.innerHTML = usable.map(function (m) {
       var label = m.id + '  ·  ' + (m.node_hostname || '?') + ':' + m.port +
                   (m.ready ? '' : '  (not ready)');
-      return '<option value="' + m.id + '"' + (m.ready ? '' : ' disabled') + '>' +
-             label + '</option>';
+      return '<option value="' + AINodeBench.instanceKey(m) + '"' +
+             (m.ready ? '' : ' disabled') + '>' + label + '</option>';
     }).join('');
-    if (previous && usable.some(function (m) { return m.id === previous; })) {
+    if (previous && usable.some(function (m) { return AINodeBench.instanceKey(m) === previous; })) {
       select.value = previous;
     }
     this.paintTarget();
   },
 
+  instanceKey(m) {
+    return (m.id || '') + '@' + (m.node_id || '') + ':' + (m.port || '');
+  },
+
   selectedInstance() {
-    var id = (document.getElementById('bench-model') || {}).value;
-    return this.state.instances.filter(function (m) { return m.id === id; })[0] || null;
+    var key = (document.getElementById('bench-model') || {}).value;
+    var self = this;
+    return this.state.instances.filter(function (m) {
+      return self.instanceKey(m) === key;
+    })[0] || null;
   },
 
   paintTarget() {
@@ -326,6 +337,10 @@ const AINodeBench = {
     }
     var body = {
       model: inst.id,
+      // The instance the picker is pointing at, so the record's node attribution
+      // is the node the user aimed at (#197).
+      node_id: inst.node_id || '',
+      port: inst.port || null,
       sections: sections,
       depths: document.getElementById('bench-depths').value,
       streams: document.getElementById('bench-streams').value,

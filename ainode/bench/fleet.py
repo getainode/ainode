@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 from ainode.bench.measure import CTL_TIMEOUT, get_json, node_sample
 from ainode.metrics.collector import optional_float
@@ -286,23 +287,40 @@ def _owning_node(cluster, local_node_id, host, port):
     return None
 
 
-def resolve_target(app, model: str):
+def resolve_target(app, model: str, node_id: str = "", port: Optional[int] = None):
     """The (host, port) a bench of ``model`` must hit, or None if nothing serves it.
 
-    Delegates to the proxy's own ``_routing_candidates`` so a bench measures the
-    instance a chat request would have reached. Imported lazily: the route module
-    is registered *by* ``ainode.api.server``, so a module-level import would be a
-    cycle.
+    ``node_id`` / ``port`` are the instance the caller PICKED (the bench form
+    always sends both). Honored exactly, because a bench record is kept and
+    compared: routing on the model id alone took the local hop first, so a run
+    against the same model on two nodes could be filed under the wrong node
+    (#197). Without a pick it still delegates to the proxy's own
+    ``_routing_candidates``, so a bench measures the instance a chat request
+    would have reached. Imported lazily: the route module is registered *by*
+    ``ainode.api.server``, so a module-level import would be a cycle.
     """
-    from ainode.api.server import _routing_candidates
+    from ainode.api.server import _routing_candidates, pinned_candidate
 
     config = app["config"]
     cluster = app.get("cluster_state")
-    cands = _routing_candidates(cluster, model, config.node_id, config.api_port)
-    if not cands:
-        return None
-    host, port = cands[0]
-    node = _owning_node(cluster, config.node_id, host, port)
+    if node_id or port:
+        pinned = pinned_candidate(cluster, config, node_id, port)
+        if pinned is None:
+            return None
+        host, port = pinned
+    else:
+        cands = _routing_candidates(cluster, model, config.node_id, config.api_port)
+        if not cands:
+            return None
+        host, port = cands[0]
+    # A pinned node is known BY id, so name it from the cluster directly:
+    # _owning_node matches on the ports a node advertises, and a stacked instance
+    # the picker can see is not always in that set yet.
+    node = None
+    if node_id and cluster is not None:
+        node = cluster.get_node(node_id)
+    if node is None:
+        node = _owning_node(cluster, config.node_id, host, port)
     is_local = host == "localhost"
     return BenchTarget(
         model=model, host=host, port=port,

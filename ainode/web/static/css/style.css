@@ -2575,27 +2575,6 @@ select {
   box-shadow: none !important;
 }
 
-/* Shard button — purple accent to differentiate the cluster action */
-.downloads-shard-btn {
-  background: transparent;
-  color: #b794f6;
-  border: 1px solid rgba(139, 92, 246, 0.4);
-  font-weight: 600;
-  padding: 8px 18px;
-  font-size: 12px;
-  border-radius: var(--radius);
-  letter-spacing: 0.5px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.downloads-shard-btn:hover {
-  background: rgba(139, 92, 246, 0.1);
-  color: #c8acfc;
-  border-color: #8b5cf6;
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.25);
-}
-
 .fit-badge {
   display: inline-flex;
   align-items: center;
@@ -2982,6 +2961,16 @@ select {
   font-size: 13px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
+}
+
+/* The launch modal's node picker. .form-select is width:100%, which in the
+   flex footer would push the CTA off the end. */
+.md-node-select {
+  width: auto;
+  min-width: 140px;
+  margin-left: auto;
+  padding: 8px 12px;
+  font-size: 13px;
 }
 
 .md-cta {
@@ -4014,26 +4003,6 @@ select {
 .toast-close:hover {
   opacity: 1;
   color: var(--text-primary);
-}
-
-/* ============================================================
-   LOADING SKELETON — Green shimmer
-   ============================================================ */
-.skeleton {
-  background: linear-gradient(
-    90deg,
-    var(--bg-card) 25%,
-    rgba(118, 185, 0, 0.06) 50%,
-    var(--bg-card) 75%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-  border-radius: var(--radius-sm);
-}
-
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
 }
 
 /* ============================================================
@@ -5385,6 +5354,11 @@ select {
   background: var(--nvidia-green);
   box-shadow: 0 0 6px var(--nvidia-green-glow);
 }
+/* Models loaded, none serving yet. `idle` (nothing loaded) keeps the grey base. */
+.server-status-dot.loading {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
 .server-reachable-label {
   color: var(--text-muted);
   font-size: 12px;
@@ -5760,16 +5734,6 @@ select {
   font-size: 10px;
   margin-right: 4px;
 }
-.server-slider-stub {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  width: 100%;
-}
 .server-hint {
   color: var(--text-muted);
   font-size: 11px;
@@ -6144,12 +6108,28 @@ select {
 .chat-msg.user .chat-msg-stack { align-items: flex-end; }
 .chat-msg .chat-msg-stack .chat-msg-content { max-width: 100%; }
 
+/* The Quantize and AutoData form panels (#210: emitted with no rule at all). */
+.quantize-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
 .chat-msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .chat-msg-images img {
   max-height: 140px;
   max-width: 220px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-hover);
+}
+
+/* A reloaded turn whose images were never written to localStorage (#202). */
+.chat-msg-images-note {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
 }
 
 .chat-think {

@@ -28,7 +28,6 @@ const AINode = {
     // second off the numbers the last poll brought. Not a second poll.
     loadTickInterval: null,
     abortController: null,
-    shardingStatus: null,
     currentView: 'dashboard',
     modelsFilter: 'catalog',
     modelsSearch: '',
@@ -148,8 +147,62 @@ const AINode = {
     }
   },
 
+  // What actually goes to localStorage. Image attachments do NOT: they are data
+  // URLs up to 10 MB each and the quota is 5 to 10 MB per ORIGIN, so one image
+  // turn filled it, the QuotaExceededError escaped saveCurrentConversation, and
+  // nothing in that browser persisted again until the user deleted conversations
+  // by hand (#202). The stored turn keeps a COUNT; the live session keeps the
+  // bytes in memory, so the conversation on screen is unchanged and the images
+  // are still re-sent for the rest of this session.
+  storableConversations() {
+    return (this.state.conversations || []).map(function (c) {
+      var conv = Object.assign({}, c);
+      conv.messages = (c.messages || []).map(function (m) {
+        if (!m.images || !m.images.length) return m;
+        var msg = Object.assign({}, m);
+        delete msg.images;
+        msg.image_count = m.images.length;
+        return msg;
+      });
+      return conv;
+    });
+  },
+
+  // Never throws. A full or blocked localStorage is a normal condition, not a
+  // reason to lose the rest of the turn: evict the oldest conversation, retry,
+  // and say so once.
   saveConversations() {
-    localStorage.setItem('ainode_conversations', JSON.stringify(this.state.conversations));
+    for (;;) {
+      var payload;
+      try {
+        payload = JSON.stringify(this.storableConversations());
+      } catch (e) {
+        this.warnStorage('Could not serialize the chat history, so it is not being saved.');
+        return false;
+      }
+      try {
+        localStorage.setItem('ainode_conversations', payload);
+        this._storageWarning = null;
+        return true;
+      } catch (e) {
+        if ((this.state.conversations || []).length > 1) {
+          // Newest first, so the oldest is the one at the end.
+          var dropped = this.state.conversations.pop();
+          this.warnStorage('Browser storage is full: dropped the oldest conversation ("' +
+            ((dropped && dropped.title) || 'untitled') + '") to keep saving this one.');
+          continue;
+        }
+        this.warnStorage('Browser storage is full or blocked, so this conversation is ' +
+          'not being saved. Chat still works; the history will not survive a reload.');
+        return false;
+      }
+    }
+  },
+
+  warnStorage(message) {
+    if (this._storageWarning === message) return;  // once per distinct reason
+    this._storageWarning = message;
+    this.toast(message, 'error');
   },
 
   getCurrentConversation() {
@@ -349,10 +402,12 @@ const AINode = {
   },
 
   async refresh() {
+    // /api/sharding/status used to be polled here as well. Its one reader was the
+    // INSTANCES branch on active_sharding, a field the server never assigned, so
+    // this was a request every three seconds for a value nothing looked at (#210).
     var results = await Promise.all([
       this.fetchJSON('/api/status'),
       this.fetchJSON('/api/nodes'),
-      this.fetchJSON('/api/sharding/status'),
       this.fetchJSON('/api/cluster/resources'),
       this.fetchJSON('/v1/models'),   // federated fleet union (F1) — every node's model
     ]);
@@ -364,11 +419,10 @@ const AINode = {
     if (this.state.status) this.state.status._receivedAtMs = receivedAt;
     this.state.nodes = results[1]?.nodes || [];
     this.state.nodes.forEach(function (n) { n._receivedAtMs = receivedAt; });
-    this.state.shardingStatus = results[2];
-    this.state.clusterResources = results[3];
+    this.state.clusterResources = results[2];
     // Fleet-wide loaded models: ids from the federated /v1/models union, so the
     // chat dropdown + INSTANCES panel see models on ALL nodes, not just local.
-    this.state.fleetModels = ((results[4] && results[4].data) || []).map(function (m) { return m.id; });
+    this.state.fleetModels = ((results[3] && results[3].data) || []).map(function (m) { return m.id; });
 
     this.updateTopBar();
     this.updateClusterHero();
@@ -1026,6 +1080,8 @@ const AINode = {
         strategy: 'distributed',
         // Which payload times this one: the head is us.
         loadKey: 'local',
+        node_id: di.head_node_id || (s && s.node_id) || '',
+        api_port: di.api_port || null,
         tp_size: di.tensor_parallel_size,
         nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
         status: live ? 'READY' : 'STARTING',
@@ -1056,6 +1112,10 @@ const AINode = {
             // Timed by the node it runs on, so an instance coming up on a PEER
             // shows that peer's elapsed time here and not this node's.
             loadKey: 'node:' + (n.node_id || ''),
+            // The node and port this card IS: UNLOAD stops this copy and no
+            // other (#207).
+            node_id: n.node_id || '',
+            api_port: n.api_port || null,
             nodes: [host],
             status: n.engine_ready ? 'READY' : 'STARTING',
             badge: 'SINGLE',
@@ -1078,6 +1138,8 @@ const AINode = {
           // Node-level timing: the node publishes one load phase, for whichever
           // engine it is bringing up.
           loadKey: 'node:' + (n.node_id || ''),
+          node_id: n.node_id || '',
+          api_port: inst.api_port || null,
           nodes: [host + (inst.api_port ? ':' + inst.api_port : '')],
           // Use the stacked instance's OWN status, not the node's primary
           // readiness. n.engine_ready reflects the PRIMARY engine (and for the
@@ -1091,27 +1153,10 @@ const AINode = {
       });
     });
 
-    // Collect from sharding status (legacy — keep for pipeline/tensor runs
-    // that don't come through the cluster/resources distributed_instance)
-    var sharding = this.state.shardingStatus;
-    if (sharding && sharding.active_sharding && sharding.active_sharding.model) {
-      var sh = sharding.active_sharding;
-      var shardNodes = sh.shard_map ? Object.keys(sh.shard_map) : [];
-      var already = instances.find(function (inst) { return inst.model === sh.model; });
-      if (!already) {
-        instances.push({
-          model: sh.model,
-          strategy: sh.strategy || 'pipeline',
-          loadKey: 'local',
-          nodes: shardNodes,
-          status: live ? 'READY' : 'STARTING',
-          badge: (sh.strategy || 'pipeline').toUpperCase(),
-        });
-      } else {
-        already.strategy = sh.strategy || 'pipeline';
-        already.nodes = shardNodes.length > 0 ? shardNodes : already.nodes;
-      }
-    }
+    // There was a third source here: /api/sharding/status.active_sharding. That
+    // field was declared and read and never once assigned, so the branch behind
+    // it never ran; it is gone from the API too (#188). A distributed instance
+    // comes from /api/cluster/resources above.
 
     // Launching card (3c): a model is configured and the engine is spinning up
     // but hasn't registered as an instance yet — show its load phase so the
@@ -1121,6 +1166,8 @@ const AINode = {
         model: s.model,
         strategy: 'launching',
         loadKey: 'local',
+        node_id: s.node_id || '',
+        api_port: s.api_port || null,
         nodes: [s.node_id || 'local'],
         status: 'STARTING',
         badge: 'LAUNCHING',
@@ -1151,7 +1198,9 @@ const AINode = {
         '<span class="instance-nodes">' + nodeList + '</span>' +
         '</div>' +
         '<div class="instance-footer">' + statusHtml +
-        '<button class="instance-delete" data-model="' + self.esc(inst.model) + '">UNLOAD</button>' +
+        '<button class="instance-delete" data-model="' + self.esc(inst.model) + '"' +
+        ' data-node-id="' + self.esc(inst.node_id || '') + '"' +
+        ' data-api-port="' + (inst.api_port || '') + '">UNLOAD</button>' +
         '</div>' + barHtml +
         '</div>';
     }).join('');
@@ -1159,25 +1208,33 @@ const AINode = {
     container.querySelectorAll('.instance-delete').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
         e.stopPropagation();
-        var model = btn.dataset.model;
-        self.deleteInstance(model);
+        self.deleteInstance(btn.dataset.model, btn.dataset.nodeId,
+          btn.dataset.apiPort ? parseInt(btn.dataset.apiPort, 10) : null);
       });
     });
   },
 
-  async deleteInstance(model) {
+  // Stop the ONE instance this card belongs to. The card knows its node and its
+  // port (it renders the node pill from them), so the unload names them: a bare
+  // {model} posted to /api/models/unload used to fan out to every peer serving
+  // that id, so unloading one card took down every copy in the fleet (#207).
+  async deleteInstance(model, nodeId, apiPort) {
+    var body = { model: model };
+    if (nodeId) body.node_id = nodeId;
+    if (apiPort) body.api_port = apiPort;
     try {
-      var resp = await AINodeAuth.fetch('/api/models/unload', {
+      var resp = await AINodeAuth.fetch('/api/cluster/unload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: model }),
+        body: JSON.stringify(body),
       });
-      if (resp.ok) {
+      var data = await resp.json().catch(function () { return {}; });
+      if (resp.ok && data.stopped !== false) {
         this.toast('Instance stopped: ' + model, 'success');
         this.refresh();
       } else {
-        var data = await resp.json().catch(function () { return {}; });
-        this.toast(data.error || 'Failed to stop instance', 'error');
+        this.toast(data.error || ('Nothing was serving ' + model + ' there'), 'error');
+        this.refresh();
       }
     } catch (err) {
       this.toast('Error: ' + err.message, 'error');
@@ -1535,6 +1592,33 @@ const AINode = {
     el.style.display = '';
   },
 
+  // The ONE launch call every button in the product goes through: the right-panel
+  // LAUNCH, and the model-detail modal's Launch Model. One node stacks through
+  // /api/cluster/load (node_id == this node dispatches locally); two or more go
+  // distributed through /api/sharding/launch. Both are InstanceManager-aware.
+  // The detail modal used to post /api/engine/set-model instead, which stops
+  // whatever app["engine"] is serving, or launches nothing when there is no
+  // engine object, and reported success either way (#189).
+  async loadModelOnNodes(model, nodeIds, strategy, gmu) {
+    var endpoint, body;
+    if ((nodeIds || []).length > 1) {
+      endpoint = '/api/sharding/launch';
+      body = { model: model, strategy: strategy || 'tensor', node_ids: nodeIds };
+    } else {
+      endpoint = '/api/cluster/load';
+      var target = (nodeIds || [])[0] || (this.state.status && this.state.status.node_id);
+      body = { model: model, node_id: target };
+    }
+    if (gmu != null) body.gpu_memory_utilization = gmu;
+    var resp = await AINodeAuth.fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var data = await resp.json().catch(function () { return {}; });
+    return { ok: resp.ok && !data.error, endpoint: endpoint, body: body, data: data };
+  },
+
   async launchInstance() {
     var select = document.getElementById('launch-model');
     var model = select ? select.value : '';
@@ -1563,29 +1647,9 @@ const AINode = {
     if (launchBtn) { launchBtn.disabled = true; launchBtn.textContent = 'LAUNCHING...'; }
 
     try {
-      var endpoint, body;
-      if (nodeIds.length > 1) {
-        // Distributed launch on the chosen nodes (head = this node + the rest).
-        endpoint = '/api/sharding/launch';
-        body = { model: model, strategy: strategy, node_ids: nodeIds };
-        if (gmu != null) body.gpu_memory_utilization = gmu;
-      } else {
-        // Single node launch — route to the CHOSEN node via the cluster load
-        // route (node_id == this node dispatches locally), instead of always
-        // hitting the head's local engine regardless of the picked node.
-        endpoint = '/api/cluster/load';
-        var target = nodeIds[0] || (this.state.status && this.state.status.node_id);
-        body = { model: model, node_id: target };
-        if (gmu != null) body.gpu_memory_utilization = gmu;
-      }
-      var resp = await AINodeAuth.fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      var data = await resp.json();
-      if (data.error) {
-        this.toast(data.error, 'error');
+      var res = await this.loadModelOnNodes(model, nodeIds, strategy, gmu);
+      if (!res.ok) {
+        this.toast(res.data.error || 'Launch failed', 'error');
       } else {
         this.toast('Launched: ' + model, 'success');
         // Launch submitted — the hand-picked-nodes intent is consumed, so the next
@@ -1982,6 +2046,8 @@ const AINode = {
       return;
     }
     var n = (this.state.chatFleet || []).length;
+    // True as written: the request carries this instance as a pin and the proxy
+    // forwards there or fails, rather than re-deciding on the model id (#197).
     el.textContent = n + (n === 1 ? ' instance' : ' instances') + ' serving · routing to ' +
       inst.node_name + ':' + inst.port;
     el.className = 'chat-tool-status';
@@ -2331,6 +2397,17 @@ const AINode = {
     });
   },
 
+  // The pin the proxy honours: node id and engine port of the instance the user
+  // picked. Sent on every forwarded request the UI makes (chat here, the bench
+  // sends the same pair in its run body). See ainode/api/server.py::pinned_target
+  // and the README's "Pinning a request to one instance".
+  targetHeaders(inst, headers) {
+    var h = headers || {};
+    if (inst && inst.node_id) h['X-AINode-Node'] = inst.node_id;
+    if (inst && inst.port) h['X-AINode-Port'] = String(inst.port);
+    return h;
+  },
+
   async sendMessage() {
     var input = document.getElementById('chat-input');
     var text = input ? input.value.trim() : '';
@@ -2395,13 +2472,20 @@ const AINode = {
     var t = { send: performance.now(), firstAny: null, firstContent: null, firstThink: null, last: null };
     var chunks = 0, usage = null, finish = null, err = null, aborted = false;
 
+    var servedBy = null;
     try {
       var resp = await AINodeAuth.fetch('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // The picked instance, carried on the request. Without it the proxy routes
+        // on the model id and takes the local hop first, so with the same model on
+        // two nodes the answer came from an engine the user did not pick and the
+        // per-turn stats were filed against the wrong one (#197).
+        headers: this.targetHeaders(inst, { 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
         signal: this.state.abortController.signal,
       });
+      // Where it actually went, from the proxy rather than inferred from the pick.
+      servedBy = resp.headers.get('X-AINode-Served-By');
       if (!resp.ok) {
         var detail = '';
         try { detail = (await resp.text()).slice(0, 300); } catch (e) { detail = ''; }
@@ -2510,6 +2594,10 @@ const AINode = {
       chunks: chunks,
       finish_reason: finish,
       images: (userMsg.images || []).length,
+      // The instance that answered, as the proxy reported it. Kept next to the
+      // pick so a turn whose answer came from elsewhere is visible rather than
+      // silently mis-attributed.
+      served_by: servedBy,
       error: err,
     };
     assistantMsg.stats = stats;
@@ -2546,7 +2634,7 @@ const AINode = {
       overlay.className = 'chat-overlay';
       overlay.innerHTML = '<div class="chat-metrics-bar" id="chat-metrics-bar">' +
         '<span id="chat-metric-ttft">TTFT: --</span>' +
-        '<span id="chat-metric-tps">-- tok/s</span>' +
+        '<span id="chat-metric-tps">-- deltas/s</span>' +
         '<span id="chat-metric-tokens">0 deltas</span>' +
         '</div>' +
         '<div class="chat-messages" id="chat-messages"></div>';
@@ -2667,6 +2755,10 @@ const AINode = {
         inner += '<div class="chat-msg-images">' + msg.images.map(function (url) {
           return '<img src="' + url + '" alt="attached image">';
         }).join('') + '</div>';
+      } else if (msg.role === 'user' && msg.image_count) {
+        // A turn reloaded from history: the bytes were never stored (#202).
+        inner += '<div class="chat-msg-images-note">' + msg.image_count + ' image' +
+          (msg.image_count === 1 ? '' : 's') + ' sent, not kept in browser history</div>';
       }
       if (msg.role === 'assistant' && msg.reasoning) {
         inner += '<div class="chat-think" data-think-index="' + i + '">' +
@@ -2749,112 +2841,11 @@ const AINode = {
   //  DOWNLOADS VIEW (center-stage)
   // ========================================================================
 
-  renderLiveCatalog(container, loaded, gpuMem, filterPills, source) {
-    var self = this;
-    var titles = {
-      trending: '🔥 Trending Models',
-      openrouter: '🚀 Most Used in Production',
-      latest: '✨ Latest Releases',
-    };
-    var subtitles = {
-      trending: 'Hot on HuggingFace right now',
-      openrouter: 'Ranked by real API traffic on OpenRouter',
-      latest: 'Newest text-generation models on HuggingFace',
-    };
-
-    // Clear if switching from another mode
-    if (container.querySelector('#downloads-search') || container.querySelector('#hf-search-input')) {
-      container.innerHTML = '';
-    }
-
-    var needsToolbar = !container.querySelector('#live-catalog-title');
-    if (needsToolbar) {
-      container.innerHTML =
-        '<div class="downloads-header">' +
-        '<h2 class="view-title" id="live-catalog-title">' + titles[source] + '</h2>' +
-        '<div class="downloads-count" id="live-count">Loading...</div>' +
-        '</div>' +
-        '<div id="downloads-queue" class="downloads-queue"></div>' +
-        '<div class="downloads-toolbar">' +
-        '<div class="live-catalog-subtitle">' + subtitles[source] + '</div>' +
-        '<div class="pill-group downloads-filters" id="downloads-filters">' + filterPills + '</div>' +
-        '</div>' +
-        '<div id="downloads-results"><div class="downloads-empty">Fetching live data...</div></div>';
-    } else {
-      var titleEl = container.querySelector('#live-catalog-title');
-      if (titleEl) titleEl.textContent = titles[source];
-      var subEl = container.querySelector('.live-catalog-subtitle');
-      if (subEl) subEl.textContent = subtitles[source];
-      var pillsEl = container.querySelector('#downloads-filters');
-      if (pillsEl) pillsEl.innerHTML = filterPills;
-    }
-
-    var resultsContainer = container.querySelector('#downloads-results');
-    var countEl = container.querySelector('#live-count');
-
-    // Rebind filter pills
-    container.querySelectorAll('.downloads-filter').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        self.state.modelsFilter = btn.dataset.filter;
-        self.renderDownloads();
-      });
-    });
-
-    AINodeAuth.fetch('/api/models/' + source)
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        var models = data.models || [];
-        if (countEl) countEl.textContent = models.length + ' models';
-        if (!resultsContainer) return;
-        if (models.length === 0) {
-          resultsContainer.innerHTML = '<div class="downloads-empty">No data available from ' + source + '.</div>';
-          return;
-        }
-        var rows = models.map(function (m) {
-          var isLoaded = loaded.includes(m.hf_repo);
-          var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.hf_repo]);
-          var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
-          var paramsStr = m.params_b ? m.params_b + 'B params' : '';
-          var fits = gpuMem > 0 && m.size_gb > 0 && gpuMem >= (m.min_memory_gb || m.size_gb);
-          var fitBadge = (gpuMem > 0 && m.size_gb > 0) ? (fits ?
-            '<span class="fit-badge fits">Fits GPU</span>' :
-            '<span class="fit-badge no-fit">Too large</span>') : '';
-          var recBadge = m.recommended ? '<span class="fit-badge rec">Recommended</span>' : '';
-          var quantBadge = m.quantization ? '<span class="fit-badge quant">' + self.esc(m.quantization.toUpperCase()) + '</span>' : '';
-          var capBadges = self.renderCapabilityBadges(m);
-          var statusBadge = isLoaded ?
-            '<span class="model-badge loaded">Loaded</span>' :
-            isOnDisk ?
-            '<span class="model-badge loaded">Downloaded</span>' :
-            '<span class="model-badge available">Available</span>';
-          var ageStr = m.created_at ? self.relativeTime(m.created_at) : '';
-          var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' ⬇' : '';
-          var likesStr = m.likes ? '❤ ' + self.formatNumber(m.likes) : '';
-          var metaParts = [paramsStr, sizeStr, ageStr, downloadsStr, likesStr].filter(Boolean);
-          var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
-          var downloadBtn = isOnDisk ? '' :
-            '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>';
-          return '<div class="download-card" data-model-id="' + self.esc(m.hf_repo) + '">' +
-            '<div class="download-card-main">' +
-            '<div class="download-card-info">' +
-            '<div class="download-card-header">' +
-            '<div class="download-card-name">' + self.esc(m.name || m.hf_repo) + '</div>' +
-            '<div class="download-card-badges">' + recBadge + quantBadge + capBadges + fitBadge + statusBadge + '</div>' +
-            '</div>' +
-            '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
-            '<div class="download-card-desc">' + metaParts.join(' · ') + '</div>' +
-            '</div>' +
-            '<div class="download-card-actions">' + detailsBtn + downloadBtn + '</div>' +
-            '</div>' +
-            '</div>';
-        }).join('');
-        resultsContainer.innerHTML = '<div class="downloads-grid">' + rows + '</div>';
-        self.bindRepoDownloadButtons(resultsContainer);
-      })
-      .catch(function (err) {
-        if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Failed to fetch: ' + self.esc(err.message || 'network error') + '</div>';
-      });
-  },
+  // renderLiveCatalog lived here: a full second catalog view over
+  // /api/models/trending|openrouter|latest that nothing could reach, because
+  // nothing ever set modelsFilter to those values and liveCatalogBuffer was never
+  // populated (#210). The three endpoints are still registered and still work; a
+  // future discovery view should call them from a filter pill that exists.
 
   bindRepoDownloadButtons(container) {
     var self = this;
@@ -3406,28 +3397,6 @@ const AINode = {
     }
   },
 
-  updateDownloadProgress(hfRepo) {
-    var dl = (this.state.activeDownloads || {})[hfRepo];
-    if (!dl) return;
-    // Find all download cards for this model (regardless of which tab user is on)
-    document.querySelectorAll('[data-model-id="' + CSS.escape(hfRepo) + '"]').forEach(function (card) {
-      var actions = card.querySelector('.download-card-actions');
-      if (!actions) return;
-      var mins = Math.floor(dl.elapsed / 60);
-      var secs = dl.elapsed % 60;
-      var timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
-      var label = dl.status === 'failed' ? '⚠ Failed' :
-                  dl.status === 'completed' ? '✓ Downloaded' :
-                  'Downloading ' + timeStr;
-      actions.innerHTML =
-        '<div class="download-progress-block">' +
-          '<div class="download-progress-label">' + label + '</div>' +
-          (dl.status === 'downloading' ?
-            '<div class="download-progress-bar"><div class="download-progress-fill"></div></div>' : '') +
-        '</div>';
-    });
-  },
-
   renderCapabilityBadges(model) {
     var caps = model.capabilities || [];
     var defs = {
@@ -3455,9 +3424,10 @@ const AINode = {
 
   showModelDetail(repoOrId) {
     var self = this;
-    // Look up the model from our active source (catalog first, then live-catalog buffer)
+    // Look up the model in the catalog; an unknown repo falls back to HF search
+    // below. (A second pool was concatenated here from state.liveCatalogBuffer,
+    // which nothing ever filled.)
     var pool = (this.state.catalog || []).slice();
-    if (this.state.liveCatalogBuffer) pool = pool.concat(this.state.liveCatalogBuffer);
     var model = pool.find(function (m) {
       return m.hf_repo === repoOrId || m.id === repoOrId;
     });
@@ -3525,6 +3495,22 @@ const AINode = {
     // anyway, with a 409 nobody can read), and the live line says why.
     var prog = this.modelLoadProgress(repo);
     var loadKey = 'model:' + repo;
+    // Which node the launch lands on. The button goes through the same call the
+    // right-hand LAUNCH panel uses, so it needs the same thing that panel needs:
+    // a node. Defaults to this one; every member is offered, so a launch from the
+    // modal can stack on a peer instead of only ever on the head.
+    var launchNodes = (this.state.nodes || []).filter(function (n) { return n.node_id; });
+    var localNodeId = (this.state.status && this.state.status.node_id) || '';
+    var showLaunch = !prog.loading && !isLoaded && isDownloaded;
+    var nodePicker = (showLaunch && launchNodes.length > 1)
+      ? '<select class="form-select md-node-select" id="md-launch-node">' +
+        launchNodes.map(function (n) {
+          var label = n.node_name || n.hostname || n.node_id;
+          return '<option value="' + self.esc(n.node_id) + '"' +
+            (n.node_id === localNodeId ? ' selected' : '') + '>' + self.esc(label) + '</option>';
+        }).join('') + '</select>'
+      : '';
+
     var primaryCta = prog.loading
       ? '<button class="btn-nvidia md-cta" id="md-launch" disabled>Loading…</button>'
       : isLoaded
@@ -3564,6 +3550,7 @@ const AINode = {
           : '') +
         '<div class="md-footer">' +
           '<div class="md-footer-status">' + (prog.loading ? '◐ Coming up now' : isLoaded ? '● Model loaded and ready' : isDownloaded ? '◉ Downloaded, click Launch to run' : '○ Not yet downloaded') + '</div>' +
+          nodePicker +
           primaryCta +
         '</div>' +
       '</div>';
@@ -3593,27 +3580,39 @@ const AINode = {
       });
     }
 
-    // Launch downloaded model (set as active model + restart engine)
+    // Launch the downloaded model: the same one-call path as the right-hand
+    // LAUNCH panel, on the picked node, stacking instead of replacing. This used
+    // to post /api/engine/set-model, which stopped whatever the node was serving
+    // (including stacked instances it knew nothing about) or launched nothing at
+    // all, and toasted "engine restarting" either way (#189).
     var launchBtn = modal.querySelector('#md-launch');
     if (launchBtn && !launchBtn.disabled) {
-      launchBtn.addEventListener('click', function () {
+      launchBtn.addEventListener('click', async function () {
+        var nodeSel = modal.querySelector('#md-launch-node');
+        var nodeId = (nodeSel && nodeSel.value) || localNodeId || '';
+        var nodeLabel = nodeSel
+          ? nodeSel.options[nodeSel.selectedIndex].textContent
+          : ((self.state.status && (self.state.status.node_name || self.state.status.node_id)) || 'this node');
         launchBtn.disabled = true;
         launchBtn.textContent = 'Launching...';
-        AINodeAuth.fetch('/api/engine/set-model', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: repo }),
-        })
-        .then(function (r) { return r.json(); })
-        .then(function () {
-          self.toast('Launching ' + repo + ' — engine restarting', 'success');
+        try {
+          var res = await self.loadModelOnNodes(repo, nodeId ? [nodeId] : [], 'tensor', null);
+          if (!res.ok) {
+            self.toast(res.data.error || 'Failed to launch model', 'error');
+            launchBtn.disabled = false;
+            launchBtn.textContent = '▶ Launch Model';
+            return;
+          }
+          // Say what the handler actually did, not what we hoped it did.
+          var port = res.data.api_port ? ' :' + res.data.api_port : '';
+          self.toast('Loading ' + repo + ' on ' + nodeLabel + port, 'success');
           close();
-        })
-        .catch(function () {
-          self.toast('Failed to launch model', 'error');
+          self.refresh();
+        } catch (err) {
+          self.toast('Error: ' + err.message, 'error');
           launchBtn.disabled = false;
           launchBtn.textContent = '▶ Launch Model';
-        });
+        }
       });
     }
 
@@ -3979,13 +3978,15 @@ const AINode = {
       var actionBtn = onDisk
         ? '<button class="btn-sm downloads-delete-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Delete</button>'
         : '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Download</button>';
-      var shardBtn = '';
+      // A model that needs more than one node is pointed at the ONE launch path
+      // that can do it: the right-hand LAUNCH INSTANCE panel, which posts the
+      // picked node_ids and genuinely launches TP = node count. This card used to
+      // offer "Shard Across Cluster" / "Launch Sharded", which drew a fabricated
+      // plan and then performed a plain solo load on this node (#188).
       var needsCluster = !fits || (model.proven_tp || 1) > 1;
-      if (needsCluster && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb && !onDisk) {
-        shardBtn = '<button class="btn-sm downloads-shard-btn"' + (prog.loading ? ' disabled' : '') +
-          ' data-model-id="' + self.esc(model.id) + '">' +
-          (prog.loading ? 'Loading…' : 'Shard Across Cluster') + '</button>';
-      }
+      var clusterHint = (needsCluster && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb)
+        ? '<br><span class="download-card-tagline">Needs more than one node: download it, then launch it from LAUNCH INSTANCE with two or more nodes picked.</span>'
+        : '';
       var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(model.hf_repo || model.id) + '">Details</button>';
       return '<div class="download-card" data-model-id="' + self.esc(model.hf_repo || model.id) + '">' +
         '<div class="download-card-main">' +
@@ -3995,10 +3996,10 @@ const AINode = {
         '<div class="download-card-badges">' + verBadge + quantBadge + capabilityBadges + fitBadge + statusBadge + '</div>' +
         '</div>' +
         '<div class="download-card-repo">' + self.esc(model.hf_repo || model.id) + '</div>' +
-        '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + '</div>' +
+        '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + clusterHint + '</div>' +
         loadingRow +
         '</div>' +
-        '<div class="download-card-actions">' + detailsBtn + actionBtn + shardBtn + '</div>' +
+        '<div class="download-card-actions">' + detailsBtn + actionBtn + '</div>' +
         '</div>' +
         '</div>';
     }
@@ -4062,62 +4063,6 @@ const AINode = {
     // Bind download/delete/details + queue.
     self.bindRepoDownloadButtons(container);
     self.renderDownloadsQueue();
-
-    // Bind shard buttons
-    container.querySelectorAll('.downloads-shard-btn').forEach(function (btn) {
-      btn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        var modelId = btn.dataset.modelId;
-        btn.disabled = true;
-        btn.textContent = 'Planning...';
-        AINodeAuth.fetch('/api/sharding/plan?model=' + encodeURIComponent(modelId))
-          .then(function (r) { return r.json(); })
-          .then(function (data) {
-            if (data.error) { self.toast(data.error, 'error'); btn.disabled = false; btn.textContent = 'Shard Across Cluster'; return; }
-            var plan = data.plan;
-            var sm = plan.shard_map || {};
-            var h = '<div class="shard-preview">';
-            h += '<div class="shard-preview-title">Sharding Plan: ' + plan.strategy + '</div>';
-            h += '<div class="shard-preview-meta">World size: ' + plan.world_size + ' | TP: ' + plan.tensor_parallel_size + ' | PP: ' + plan.pipeline_parallel_size + ' | Memory: ' + plan.total_memory_required_gb + ' GB</div>';
-            Object.keys(sm).forEach(function (nid) {
-              var s = sm[nid];
-              h += '<div class="shard-node"><span class="shard-role ' + s.role + '">' + s.role.toUpperCase() + '</span> ' +
-                self.esc(nid) + '<span class="shard-detail">Layers ' + (s.layers || 'all') + ' | ~' + s.estimated_memory_gb + ' GB</span></div>';
-            });
-            h += '<div class="shard-actions"><button class="btn-nvidia btn-sm shard-launch-btn" data-model-id="' + self.esc(modelId) + '">Launch Sharded</button>' +
-              '<button class="btn-sm shard-cancel-btn">Cancel</button></div></div>';
-
-            var card = btn.closest('.download-card');
-            var existing = card.querySelector('.shard-preview');
-            if (existing) existing.remove();
-            var pe = document.createElement('div');
-            pe.innerHTML = h;
-            card.appendChild(pe.firstChild);
-            btn.disabled = false;
-            btn.textContent = 'Shard Across Cluster';
-
-            card.querySelector('.shard-launch-btn').addEventListener('click', function (ev) {
-              ev.stopPropagation();
-              var lb = ev.target;
-              lb.disabled = true;
-              lb.textContent = 'Launching...';
-              AINodeAuth.fetch('/api/sharding/launch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: modelId }),
-              }).then(function (r) { return r.json(); }).then(function (res) {
-                if (res.error) { self.toast(res.error, 'error'); lb.disabled = false; lb.textContent = 'Launch Sharded'; }
-                else { self.toast('Sharded model launching: ' + modelId, 'success'); self.refresh(); }
-              }).catch(function (err) { self.toast('Error: ' + err.message, 'error'); lb.disabled = false; lb.textContent = 'Launch Sharded'; });
-            });
-
-            card.querySelector('.shard-cancel-btn').addEventListener('click', function (ev) {
-              ev.stopPropagation();
-              card.querySelector('.shard-preview').remove();
-            });
-          }).catch(function (err) { self.toast('Error: ' + err.message, 'error'); btn.disabled = false; btn.textContent = 'Shard Across Cluster'; });
-      });
-    });
   },
 
   // ========================================================================
@@ -4811,13 +4756,21 @@ const AINode = {
         });
     }
 
+    // Seed from Config > Training Defaults. Those four fields saved to config.json
+    // and nothing read them, while the wizard opened on hardcoded lora / 3 / 4 /
+    // 2e-4 regardless of what the operator had set (#204).
+    var tcfg = this.state.configData.config
+      || (await this.fetchJSON('/api/config'))
+      || {};
+    this.state.configData.config = tcfg;
+
     var initial = Object.assign({
       base_model: modelList[0] ? modelList[0].id : '',
       dataset_id: '',
-      method: 'lora',
-      num_epochs: 3,
-      batch_size: 4,
-      learning_rate: 2e-4,
+      method: tcfg.training_default_method || 'lora',
+      num_epochs: tcfg.training_default_epochs || 3,
+      batch_size: tcfg.training_default_batch_size || 4,
+      learning_rate: tcfg.training_default_learning_rate || 2e-4,
       max_seq_length: 2048,
       lora_rank: 16,
       lora_alpha: 32,
@@ -5754,22 +5707,6 @@ const AINode = {
     return html;
   },
 
-  skeletonCards(n) {
-    return Array(n).fill('<div class="skeleton-card"><div class="skeleton" style="height:48px;margin-bottom:8px"></div><div class="skeleton" style="height:14px;width:60%"></div></div>').join('');
-  },
-
-  gaugeColor(pct) {
-    if (pct > 90) return '#ef4444';
-    if (pct > 70) return '#f59e0b';
-    return '#76b900';
-  },
-
-  tempColor(celsius) {
-    if (celsius > 85) return '#ef4444';
-    if (celsius > 70) return '#f59e0b';
-    return '#76b900';
-  },
-
   // ========================================================================
   //  CONFIG VIEW
   // ========================================================================
@@ -6670,12 +6607,18 @@ const AINode = {
     var html = '';
 
     // --- Top status bar ---
+    // The dot reads the API's own verdict. It used to be the literal class
+    // `running` next to the word "Running", true by tautology, so it stayed green
+    // with every engine dead (#206). Stop and mcp.json were toast-only stubs and
+    // are gone until something implements them.
+    var serverState = s.status || 'idle';
+    var stateLabel = serverState === 'running' ? 'Running'
+      : serverState === 'loading' ? 'Loading' : 'Idle';
     html += '<div class="server-status-bar">';
     html += '  <div class="server-status-left">';
-    html += '    <span class="server-status-indicator"><span class="server-status-dot running"></span> Running</span>';
-    html += '    <button class="btn-ghost server-btn-sm" id="server-toggle">Stop</button>';
+    html += '    <span class="server-status-indicator"><span class="server-status-dot ' +
+            this.esc(serverState) + '"></span> ' + stateLabel + '</span>';
     html += '    <button class="btn-ghost server-btn-sm" id="server-settings-btn">Server Settings</button>';
-    html += '    <button class="btn-ghost server-btn-sm" id="server-mcp-btn">mcp.json</button>';
     html += '  </div>';
     html += '  <div class="server-status-center">';
     html += '    <span class="server-reachable-label">Reachable at:</span>';
@@ -6892,17 +6835,12 @@ const AINode = {
         }
         else if (action === 'show-info') self._serverShowEmbedInfo(model);
         else if (action === 'copy-curl') self._serverShowCurl(model, btn.dataset.type || 'llm');
-        else if (action === 'preview') self.toast('Preview coming soon', 'info');
       });
     });
 
     // Top-bar buttons
-    var toggleBtn = document.getElementById('server-toggle');
-    if (toggleBtn) toggleBtn.addEventListener('click', function () { self.toast('Server toggle not yet implemented', 'info'); });
     var settingsBtn = document.getElementById('server-settings-btn');
     if (settingsBtn) settingsBtn.addEventListener('click', function () { self.navigate('config'); });
-    var mcpBtn = document.getElementById('server-mcp-btn');
-    if (mcpBtn) mcpBtn.addEventListener('click', function () { self.toast('mcp.json export coming soon', 'info'); });
     var loadBtn = document.getElementById('server-load-model');
     if (loadBtn) loadBtn.addEventListener('click', function () { self._openLoadModelModal(); });
 
@@ -7242,13 +7180,12 @@ const AINode = {
     html += '    <span class="mono">' + this.esc(model.node_hostname || '') + '</span>';
     html += '    <button class="server-copy-btn" data-copy="' + this.esc(model.node_hostname || '') + '">⧉</button>';
     html += '  </div>';
-    html += '  <div class="server-tab-pills server-info-tabs" id="server-info-tabs">';
-    html += '    <button class="server-tab-pill active" data-info-tab="info">Info</button>';
-    html += '    <button class="server-tab-pill" data-info-tab="load">Load</button>';
-    html += '    <button class="server-tab-pill" data-info-tab="inference">Inference</button>';
-    html += '  </div>';
+    // One tab, and everything on it is a read. The Load and Inference tabs that
+    // used to sit here were disabled inputs hardcoded to 4096 / -1 / 0.7 / 0.95 /
+    // 40: not this engine's max_model_len, not sampling defaults anything sends,
+    // and "GPU layers" is a llama.cpp idea vLLM has no equivalent for (#206).
     html += '  <div id="server-info-body">';
-    html += this._renderServerInfoTab('info', model, arch, fileName, sizeStr);
+    html += this._renderServerInfoTab(model, arch, fileName, sizeStr);
     html += '  </div>';
     html += '</div>';
 
@@ -7267,14 +7204,6 @@ const AINode = {
         var text = el.dataset.copy || '';
         if (!text) return;
         navigator.clipboard.writeText(text).then(function () { self.toast('Copied', 'success'); });
-      });
-    });
-    mount.querySelectorAll('[data-info-tab]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        mount.querySelectorAll('[data-info-tab]').forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        var body = document.getElementById('server-info-body');
-        if (body) body.innerHTML = self._renderServerInfoTab(btn.dataset.infoTab, model, arch, fileName, sizeStr);
       });
     });
   },
@@ -7296,24 +7225,8 @@ const AINode = {
     return '';
   },
 
-  _renderServerInfoTab(tab, model, arch, fileName, sizeStr) {
-    if (tab === 'load') {
-      return '<div class="server-info-section">' +
-        '<div class="server-info-row"><span class="label">Context length</span><input class="form-input server-slider-stub" type="number" value="4096" disabled></div>' +
-        '<div class="server-info-row"><span class="label">GPU layers</span><input class="form-input server-slider-stub" type="number" value="-1" disabled></div>' +
-        '<div class="server-info-row"><span class="label">Parallel</span><input class="form-input server-slider-stub" type="number" value="' + (model.parallel || 1) + '" disabled></div>' +
-        '<div class="server-hint">Load parameters are read-only for Docker-managed engines.</div>' +
-        '</div>';
-    }
-    if (tab === 'inference') {
-      return '<div class="server-info-section">' +
-        '<div class="server-info-row"><span class="label">Temperature</span><input class="form-input server-slider-stub" type="number" step="0.01" value="0.7" disabled></div>' +
-        '<div class="server-info-row"><span class="label">Top-p</span><input class="form-input server-slider-stub" type="number" step="0.01" value="0.95" disabled></div>' +
-        '<div class="server-info-row"><span class="label">Top-k</span><input class="form-input server-slider-stub" type="number" value="40" disabled></div>' +
-        '<div class="server-hint">Override these per-request via the API.</div>' +
-        '</div>';
-    }
-    // Info tab
+  // Every row here is a read off the instance or the catalog.
+  _renderServerInfoTab(model, arch, fileName, sizeStr) {
     var caps = (model.capabilities || []).map(function (c) { return '<span class="server-cap-badge">' + AINode.esc(c) + '</span>'; }).join('');
     return '<div class="server-info-section">' +
       '<div class="server-info-row"><span class="label">Model</span><span class="mono val">' + AINode.esc(model.id) + '</span></div>' +
@@ -7323,6 +7236,9 @@ const AINode = {
       '<div class="server-info-row"><span class="label">Arch</span><span class="val">' + AINode.esc(arch) + '</span></div>' +
       '<div class="server-info-row"><span class="label">Capabilities</span><span class="val">' + (caps || '—') + '</span></div>' +
       '<div class="server-info-row"><span class="label">Domain</span><span class="val">' + AINode.esc(model.type || 'llm') + '</span></div>' +
+      // The launch width off the instance record (tensor_parallel_size), which is
+      // the one real number the removed Load tab had.
+      '<div class="server-info-row"><span class="label">Parallel</span><span class="val">' + (model.parallel || 1) + '</span></div>' +
       '<div class="server-info-row"><span class="label">Size on disk</span><span class="val">' + AINode.esc(sizeStr) + '</span></div>' +
       '</div>';
   },

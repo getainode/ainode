@@ -119,8 +119,11 @@ def create_app(
     init_server_state(app)
     # Instantiate shared services
     collector = MetricsCollector()
-    dataset_manager = DatasetManager()
-    manager = TrainingManager(dataset_manager=dataset_manager)
+    # Both take the operator's configured directories, with the AINODE_HOME
+    # subpaths as the fallback: Config > Storage saved datasets_dir and
+    # training_dir and nothing read either of them (#204).
+    dataset_manager = DatasetManager(root=(config.datasets_dir or None))
+    manager = TrainingManager(dataset_manager=dataset_manager, config=config)
 
     # Build local node announcement for discovery
     announcement = _build_announcement(config, engine)
@@ -234,7 +237,11 @@ def create_app(
     # /api/models/{model_id} would otherwise swallow /api/models/card|caps.
     register_chat_routes(app)
 
-    register_model_routes(app)
+    # The manager reads and writes the SAME directory the engine mounts. It used
+    # to take the module constant, so changing Config > Models directory left
+    # downloads, Installed and Delete on the old path while launches used the new
+    # one (#205).
+    register_model_routes(app, models_dir=config.models_dir)
 
     register_onboarding_routes(app)
 
@@ -781,6 +788,89 @@ async def _on_cleanup(app: web.Application) -> None:
     if session and not session.closed:
         await session.close()
 
+# ---------------------------------------------------------------------------
+# Pinning a forwarded request to ONE instance (#197)
+# ---------------------------------------------------------------------------
+# The chat and bench pickers let a user choose an instance ("model @ node:port").
+# Routing on the model id alone then sent the request to the local hop first, so
+# with the same model on two nodes the answer, its stats and the "routing to"
+# line came from an engine the user did not pick. A caller pins the target with
+# these two headers (what the UI sends: a header costs nothing to forward and
+# leaves the OpenAI body untouched) or with an ``ainode_target`` field in the
+# body, which the proxy strips before forwarding. A pin is honored EXACTLY: one
+# candidate, no failover, because the point of pinning is that the answer is
+# attributable to that engine. Documented in the README under
+# "Pinning a request to one instance".
+TARGET_NODE_HEADER = "X-AINode-Node"
+TARGET_PORT_HEADER = "X-AINode-Port"
+TARGET_BODY_FIELD = "ainode_target"
+# Which instance actually answered, on every forwarded response.
+SERVED_BY_HEADER = "X-AINode-Served-By"
+
+
+def pinned_target(headers, body_obj: dict) -> tuple:
+    """The instance a caller pinned this request to, as ``(node_id, port)``.
+
+    Either part may be absent: a port with no node pins a stacked instance on
+    this node, a node with no port pins that node's primary engine port. Returns
+    ``(None, None)`` when the caller pinned nothing.
+    """
+    node = (headers.get(TARGET_NODE_HEADER) or "").strip()
+    port_raw = (headers.get(TARGET_PORT_HEADER) or "").strip()
+    target = body_obj.get(TARGET_BODY_FIELD) if isinstance(body_obj, dict) else None
+    if isinstance(target, str) and target.strip():
+        # "<node_id>" or "<node_id>:<port>"
+        head, _, tail = target.strip().rpartition(":")
+        node = node or (head if head else tail)
+        port_raw = port_raw or (tail if head else "")
+    elif isinstance(target, dict):
+        node = node or str(target.get("node_id") or target.get("node") or "").strip()
+        port_raw = port_raw or str(target.get("port") or target.get("api_port") or "").strip()
+    port = None
+    if port_raw:
+        try:
+            port = int(port_raw)
+        except ValueError:
+            port = None
+    return (node or None), port
+
+
+def pinned_candidate(cluster, config, node_id: Optional[str], port: Optional[int]):
+    """Resolve a pin to the single ``(host, port)`` to forward to, or None.
+
+    None means the node id is not in this node's cluster view (or has no fabric
+    IP), which the caller has to hear about: silently falling back to the local
+    hop is exactly the mis-attribution the pin exists to prevent.
+    """
+    if node_id and node_id != config.node_id:
+        node = cluster.get_node(node_id) if cluster is not None else None
+        host = (getattr(node, "fabric_ip", "") or "") if node is not None else ""
+        if not host:
+            return None
+        return (host, port or getattr(node, "api_port", None) or config.api_port)
+    return ("localhost", port or config.api_port)
+
+
+def cors_allowed_origin(config, origin: str) -> str:
+    """The value for ``Access-Control-Allow-Origin``, or "" to allow nothing.
+
+    localhost and 127.0.0.1 are always allowed: that is where the dashboard is
+    served from. ``config.cors_origins`` is a comma-separated allow-list ON TOP
+    of that, so an operator who types an origin into Config > Network actually
+    gets it, and ``*`` allows any origin. The field used to save and never be
+    read, which for a CORS setting is not a cosmetic bug (#204).
+    """
+    if not origin:
+        return ""
+    if origin.startswith(("http://localhost", "http://127.0.0.1")):
+        return origin
+    entries = [e.strip() for e in (getattr(config, "cors_origins", None) or "").split(",")]
+    entries = [e for e in entries if e]
+    if "*" in entries:
+        return origin
+    return origin if origin in entries else ""
+
+
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
     """Add CORS headers to every response so the dashboard can fetch freely."""
@@ -793,10 +883,14 @@ async def cors_middleware(request: web.Request, handler):
             resp = exc
 
     origin = request.headers.get("Origin", "")
-    allowed = origin if origin.startswith(("http://localhost", "http://127.0.0.1")) else ""
+    allowed = cors_allowed_origin(request.app.get("config"), origin)
     resp.headers["Access-Control-Allow-Origin"] = allowed
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    resp.headers["Access-Control-Allow-Headers"] = (
+        f"Content-Type, Authorization, {TARGET_NODE_HEADER}, {TARGET_PORT_HEADER}")
+    # The instance that actually answered is a response header, so a browser
+    # client has to be told it may read it.
+    resp.headers["Access-Control-Expose-Headers"] = SERVED_BY_HEADER
     return resp
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -1555,7 +1649,29 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     # serves this model (ready ones first), so a stale/ghost claim from a crashed
     # node doesn't 502 a request another node can serve. Built from cluster state.
     cluster = request.app.get("cluster_state")
-    candidates = _routing_candidates(cluster, model, config.node_id, config.api_port)
+    # An explicit pin wins over routing-by-model-id: the caller picked an
+    # instance, so that instance answers or nothing does (#197).
+    pin_node, pin_port = pinned_target(request.headers, body_obj)
+    pinned = None
+    if pin_node or pin_port:
+        pinned = pinned_candidate(cluster, config, pin_node, pin_port)
+        if pinned is None:
+            collector.record_request(model, 0.0, error=True)
+            return web.json_response(
+                {"error": {"type": "invalid_request_error",
+                           "message": (f"pinned node '{pin_node}' is not a member of this "
+                                       f"cluster, or has no fabric IP"),
+                           "code": "unknown_node"}},
+                status=404)
+        # The body field is ours, not vLLM's: strip it before forwarding. Only a
+        # request that actually used it pays for the re-serialize.
+        if isinstance(body_obj, dict) and TARGET_BODY_FIELD in body_obj:
+            body_obj.pop(TARGET_BODY_FIELD, None)
+            body_bytes = json.dumps(body_obj).encode("utf-8")
+    if pinned is not None:
+        candidates = [pinned]
+    else:
+        candidates = _routing_candidates(cluster, model, config.node_id, config.api_port)
     if not candidates:
         if model and model != "unknown" and cluster is not None and cluster.members():
             return web.json_response(
@@ -1578,11 +1694,15 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     refused_labels: list = []
     if multimodal:
         caps_index = instance_caps_index(request.app, model)
-        candidates, refused = order_by_vision(candidates, caps_index)
-        refused_labels = [node_label(caps_index, c) for c in refused]
-        if not candidates:
-            collector.record_request(model, 0.0, error=True)
-            return _no_multimodal_instance(model, refused_labels)
+        # A pinned request has one candidate by definition: reordering or
+        # dropping it would substitute our capability cache for the user's own
+        # choice. The engine's answer is the honest one there.
+        if pinned is None:
+            candidates, refused = order_by_vision(candidates, caps_index)
+            refused_labels = [node_label(caps_index, c) for c in refused]
+            if not candidates:
+                collector.record_request(model, 0.0, error=True)
+                return _no_multimodal_instance(model, refused_labels)
 
     # Build upstream request kwargs. Strip content-length: aiohttp recomputes it
     # from `data`, and forwarding the original alongside makes the upstream wait
@@ -1606,6 +1726,10 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     target = request.path_qs
     for host, port in candidates:
         vllm_url = f"http://{host}:{port}{target}"
+        # Which engine answered, in the caller's hands rather than inferred from
+        # the pick: routing can fail over, and a stats record that names the
+        # wrong node is worse than one that names none (#197).
+        served_by = f"{host}:{port}"
         try:
             async with session.request(request.method, vllm_url, **kwargs) as upstream:
                 is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")
@@ -1616,6 +1740,7 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                             "Content-Type": "text/event-stream",
                             "Cache-Control": "no-cache",
                             "X-Accel-Buffering": "no",
+                            SERVED_BY_HEADER: served_by,
                         },
                     )
                     await resp.prepare(request)
@@ -1643,6 +1768,7 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                 collector.record_request(model, (time.time() - start_time) * 1000, error=False)
                 return web.Response(
                     status=upstream.status, body=body,
+                    headers={SERVED_BY_HEADER: served_by},
                     content_type=upstream.headers.get("Content-Type", "application/json").split(";")[0].strip(),
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -2281,7 +2407,22 @@ async def handle_get_config(request: web.Request) -> web.Response:
 
 
 async def handle_set_model(request: web.Request) -> web.Response:
-    """POST /api/engine/set-model — switch to a different model and restart engine."""
+    """POST /api/engine/set-model: rewrite the BOOT model and restart that engine.
+
+    DESTRUCTIVE, and not a launch route. It stops whatever ``app["engine"]`` is
+    serving and restarts that one backend on the new model, with no
+    InstanceManager awareness: a node running stacked instances loses the one
+    attached to ``app["engine"]`` and keeps the rest unaccounted for. With no
+    engine object at all it saves the config and starts NOTHING, while still
+    answering ``{"status": "restarting"}``.
+
+    It exists for the boot-config use it was written for (change what
+    ``ainode start`` brings up next). Nothing in the UI calls it any more: the
+    Models view's detail modal used to, which is how a click on "Launch Model"
+    could stop a serving node or do nothing at all and report success either way
+    (#189). Launch through ``POST /api/cluster/load`` (one node, stacks) or
+    ``POST /api/sharding/launch`` (several).
+    """
     try:
         body = await request.json()
     except Exception:

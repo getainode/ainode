@@ -152,10 +152,18 @@ def launch_busy_error(busy: LaunchBusy) -> dict:
     }
 
 
-def register_model_routes(app: web.Application, manager: Optional[ModelManager] = None) -> None:
-    """Register model management routes on the aiohttp app."""
+def register_model_routes(app: web.Application, manager: Optional[ModelManager] = None,
+                          models_dir: Optional[str] = None) -> None:
+    """Register model management routes on the aiohttp app.
+
+    ``models_dir`` is the node's configured store (``config.models_dir``), the
+    SAME directory the engine backends mount. Built with neither argument the
+    manager used the module constant, so changing Config > Models directory
+    repointed launches and left downloads, Installed and Delete on the old path
+    (#205).
+    """
     if manager is None:
-        manager = ModelManager()
+        manager = ModelManager(models_dir=models_dir)
 
     app["model_manager"] = manager
     app["download_jobs"] = {}
@@ -170,8 +178,14 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     app.router.add_get("/api/models/latest", handle_latest_models)
     app.router.add_get("/api/models/openrouter", handle_openrouter_models)
     app.router.add_get("/api/models/ollama", handle_ollama_models)
-    app.router.add_get("/api/models/{model_id}", handle_get_model)
+    # Every LITERAL path under /api/models goes above the dynamic
+    # /api/models/{model_id}, which would otherwise swallow it: aiohttp 3.9+
+    # happens to resolve a plain resource first, but under registration-order
+    # resolution `downloaded` would answer "Model 'downloaded' not found" and the
+    # Installed list, the launch dropdown and the on-disk cards would all go
+    # quietly empty (#209). Same care as /api/models/card|caps in api/server.py.
     app.router.add_get("/api/models/downloaded", handle_list_downloaded)
+    app.router.add_get("/api/models/{model_id}", handle_get_model)
     app.router.add_post("/api/models/download-repo", handle_download_repo)
     app.router.add_post("/api/models/download-cancel", handle_cancel_download)
     app.router.add_get("/api/models/download/status", handle_download_status)
@@ -1634,11 +1648,23 @@ async def handle_model_load(request: web.Request) -> web.Response:
 
 
 async def handle_model_unload(request: web.Request) -> web.Response:
-    """POST /api/models/unload -- stop the current model (solo or distributed).
+    """POST /api/models/unload {model, api_port?, all?} -- stop ONE instance.
 
-    The dashboard DELETE button hits this endpoint. Calls engine.stop(), which
-    for EugrBackend tears down eugr's launch-cluster.sh, and for NvidiaBackend
-    stops the head container + fan-outs `docker stop` to peer workers over SSH.
+    The dashboard UNLOAD button hits this endpoint through
+    ``POST /api/cluster/unload`` with the card's own ``node_id`` and
+    ``api_port``, so it stops the copy the card belongs to. Calls engine.stop(),
+    which for EugrBackend tears down eugr's launch-cluster.sh, and for
+    NvidiaBackend stops the head container + fan-outs `docker stop` to peer
+    workers over SSH.
+
+    ``api_port`` picks the instance when a node stacks several (two instances of
+    the SAME model on one node are only told apart by their port).
+
+    The fan-out to every peer serving the model id is OPT-IN, behind
+    ``all: true``. It used to be what a plain ``{"model": X}`` did whenever this
+    node was not serving it, so UNLOAD on one instance card took down every copy
+    in the fleet (#207). A caller that wants one remote instance goes through
+    ``/api/cluster/unload`` with its node id.
 
     For distributed (head) mode, flips config back to "solo" so a subsequent
     launch defaults sanely.
@@ -1660,10 +1686,24 @@ async def handle_model_unload(request: web.Request) -> web.Response:
     # other stacked instances on this node serving. Falls through to the legacy
     # singleton teardown when no manager/model match (back-compat).
     manager = request.app.get("instances")
-    model = (body.get("model") or "").strip() if isinstance(body, dict) else ""
-    if manager is not None and model:
-        inst = manager.by_model(model)
+    if not isinstance(body, dict):
+        body = {}
+    model = (body.get("model") or "").strip()
+    try:
+        want_port = int(body.get("api_port") or body.get("port") or 0) or None
+    except (TypeError, ValueError):
+        want_port = None
+    if manager is not None and (model or want_port):
+        # The port wins when given: it names ONE instance even where the model id
+        # does not. A port that matches nothing falls through rather than
+        # stopping a neighbour by accident.
+        inst = manager.by_port(want_port) if want_port else None
+        if inst is not None and model and inst.record.model != model:
+            inst = None
+        if inst is None and not want_port:
+            inst = manager.by_model(model)
         if inst is not None:
+            model = model or inst.record.model
             try:
                 inst.backend.stop()
             except Exception as exc:
@@ -1695,6 +1735,17 @@ async def handle_model_unload(request: web.Request) -> web.Response:
                 "errors": errors,
             })
 
+    if want_port:
+        # A port was named and nothing on this node is serving on it. Falling
+        # through to the legacy singleton teardown below would stop the node's
+        # PRIMARY engine instead, which is the opposite of what naming a port
+        # asks for.
+        return web.json_response({
+            "stopped": False, "model": model, "api_port": want_port,
+            "scope": "port-miss",
+            "errors": errors + [f"no instance is serving on port {want_port}"],
+        })
+
     # Was THIS node actually serving the requested model? (back-compat: no model
     # given → stop whatever is local.) Only then is a local "stopped" truthful —
     # the old code returned stopped:true even when engine was None or serving a
@@ -1719,12 +1770,18 @@ async def handle_model_unload(request: web.Request) -> web.Response:
             errors.append(f"config clear: {exc}")
         return web.json_response({"stopped": True, "model": model, "scope": "local", "errors": errors})
 
-    # Not serving here. `fanout=0` marks a fan-out child — stop, don't recurse
-    # (prevents an unload broadcast storm). Otherwise the model lives on another
-    # node: fan the unload out to online peers (each peer's local unload is
-    # idempotent) so the head can unload a remote-node instance.
-    if request.query.get("fanout") == "0":
-        return web.json_response({"stopped": False, "model": model, "scope": "local-miss", "errors": errors})
+    # Not serving here. This endpoint is node-scoped: it answers for THIS node and
+    # stops there. `fanout=0` still means "do not recurse" (a fan-out child, or an
+    # older head calling us).
+    #
+    # The fleet-wide fan-out lives behind `all: true`. It was the default whenever
+    # this node was not serving the model, which made the UI's UNLOAD button stop
+    # every copy in the fleet (#207); a caller that wants one remote instance goes
+    # through /api/cluster/unload with its node id.
+    fanned_out = bool(body.get("all")) and request.query.get("fanout") != "0"
+    if not fanned_out:
+        return web.json_response({"stopped": False, "model": model, "scope": "local-miss",
+                                  "errors": errors})
 
     cluster = request.app.get("cluster_state")
     session = request.app.get("client_session")
