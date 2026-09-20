@@ -1,18 +1,22 @@
 """API key authentication middleware for aiohttp.
 
 The rule, in one place: **when auth is enabled every path under ``/api`` and
-``/v1`` needs the key.** The exceptions are the four things a caller with no key
+``/v1`` needs the key.** The exceptions are the five things a caller with no key
 must still be able to reach:
 
 * the static shell (``/``, ``/static/*``),
 * ``/api/health`` (liveness, for a probe that has no key),
 * ``/api/auth/status`` (so the UI can say "this node wants a key" instead of
   rendering an empty page),
+* ``/api/cluster/endpoint`` (node names, addresses and ports, nothing else: a
+  client whose configured node is down has to be able to ask a reachable one
+  where the rest of the fleet is, and the key it holds does not help it find an
+  address. It carries no model, no telemetry, no config and no key material.)
 * ``POST /api/cluster/join`` (a node joining this cluster does not have this
   cluster's key yet, so a single-use expiring join token is the credential
   instead; see ``api/cluster_join.py`` for the rate limit that replaces the key).
 
-The browser onboarding wizard used to be a fifth exemption, open while
+The browser onboarding wizard used to be one more exemption, open while
 ``config.onboarded`` was false. The wizard is gone (#208): it was unreachable on
 every deployed node, because the installer and every non-TTY start set
 ``onboarded`` before the server came up, and it never joined a cluster even when
@@ -43,7 +47,8 @@ def _hash_key(key: str) -> str:
 
 AUTH_FILE = AINODE_HOME / "auth.json"
 
-SKIP_PATHS: set[str] = {"/", "/api/health", "/api/auth/status", "/api/cluster/join"}
+SKIP_PATHS: set[str] = {"/", "/api/health", "/api/auth/status",
+                        "/api/cluster/endpoint", "/api/cluster/join"}
 SKIP_PREFIXES: tuple[str, ...] = ("/static/",)
 
 #: ``request`` key carrying the outcome of token validation for this request.
