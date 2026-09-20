@@ -226,6 +226,11 @@ class TestInstallerConfig:
         # The engine image is never spelled out in the installer.
         assert NVIDIA_VLLM_IMAGE not in text
 
+    def test_the_unit_search_list_is_overridable(self):
+        """The seam the wrapper tests rely on, and why it exists."""
+        text = INSTALL_SH.read_text()
+        assert "AINODE_UNIT_FILES:-/etc/systemd/system/ainode.service" in text
+
     def test_pre_pull_is_still_skippable(self):
         text = INSTALL_SH.read_text()
         assert 'AINODE_NVIDIA_IMAGE="${AINODE_NVIDIA_IMAGE:-}"' in text
@@ -243,11 +248,15 @@ def _stub_bin(dirpath: Path, name: str, body: str) -> None:
 
 
 def _sudo_env(tmp_path: Path, *, sudo_user: str | None, passwd_home: Path | None,
-              fake_root_home: Path, wrapper_home: str | None = None) -> dict:
+              fake_root_home: Path, wrapper_home: str | None = None,
+              unit_files: str = "") -> dict:
     """Environment for a wrapper run that looks like `sudo ainode update`.
 
     ``id -u`` is stubbed to 0 and HOME to root's, which is exactly what sudo
-    hands the wrapper; ``getent`` answers for the invoking user.
+    hands the wrapper; ``getent`` answers for the invoking user. ``unit_files``
+    pins the wrapper's unit-file search list (empty by default, meaning "no unit
+    anywhere") so these tests cannot read a REAL /etc/systemd/system/
+    ainode.service: the suite runs on the Sparks, which have one.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -272,6 +281,7 @@ def _sudo_env(tmp_path: Path, *, sudo_user: str | None, passwd_home: Path | None
         env.pop("SUDO_USER", None)
     if wrapper_home:
         env["AINODE_HOME"] = wrapper_home
+    env["AINODE_UNIT_FILES"] = unit_files
     return env
 
 
@@ -314,16 +324,15 @@ class TestSudoUpdateHomeResolution:
         root_home = tmp_path / "rootfake"
         user_home = tmp_path / "home" / "installer"
         unit_home = tmp_path / "somewhere" / "else" / ".ainode"
-        (root_home / ".config" / "systemd" / "user").mkdir(parents=True)
+        root_home.mkdir(parents=True)
         user_home.mkdir(parents=True)
-        (root_home / ".config" / "systemd" / "user" / "ainode.service").write_text(
-            "[Service]\nEnvironment=AINODE_HOME=%s\n" % unit_home
-        )
+        unit = tmp_path / "ainode.service"
+        unit.write_text("[Service]\nEnvironment=AINODE_HOME=%s\n" % unit_home)
 
         proc = self._run(
             wrapper,
             _sudo_env(tmp_path, sudo_user="installer", passwd_home=user_home,
-                      fake_root_home=root_home),
+                      fake_root_home=root_home, unit_files=str(unit)),
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert (unit_home / "image.env").exists()
@@ -377,6 +386,7 @@ class TestSudoUpdateHomeResolution:
         env["HOME"] = str(home)
         env.pop("AINODE_HOME", None)
         env.pop("SUDO_USER", None)
+        env["AINODE_UNIT_FILES"] = ""
 
         proc = self._run(wrapper, env)
         assert proc.returncode == 0, proc.stdout + proc.stderr

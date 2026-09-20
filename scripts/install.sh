@@ -488,7 +488,10 @@ resolve_latest_tag() {
 # unit bakes its AINODE_HOME in at install time, so ask the unit (issue #164).
 unit_ainode_home() {
     local f
-    local units="/etc/systemd/system/ainode.service \$HOME/.config/systemd/user/ainode.service"
+    # Overridable so the test suite can point this at a temp unit; a host that
+    # HAS a real /etc/systemd/system/ainode.service would otherwise answer for it
+    # (same reason install.sh itself takes \$SYS_CLASS_NET).
+    local units="\${AINODE_UNIT_FILES:-/etc/systemd/system/ainode.service \$HOME/.config/systemd/user/ainode.service}"
     for f in \$units; do
         [ -r "\$f" ] || continue
         sed -n 's/^Environment=AINODE_HOME=//p' "\$f" | tail -1
