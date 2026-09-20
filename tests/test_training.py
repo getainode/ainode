@@ -19,6 +19,21 @@ from ainode.training.engine import (
 from ainode.training.api_routes import setup_training_routes
 
 
+@pytest.fixture(autouse=True)
+def isolate_jobs_dir(tmp_path, monkeypatch):
+    """Keep the suite out of the developer's real ~/.ainode.
+
+    Every ``TrainingJob`` mkdirs its job dir in ``__init__``, so a test that only
+    means to check a config left a directory behind, and 6,000 of them had
+    accumulated by 0.5.25. AINODE_HOME moves with JOBS_DIR because
+    ``TrainingConfig.validate()`` confines an absolute output_dir to
+    ``AINODE_HOME/training``. A test that wants its own layout patches these
+    again on top.
+    """
+    monkeypatch.setattr(engine, "AINODE_HOME", tmp_path)
+    monkeypatch.setattr(engine, "JOBS_DIR", tmp_path / "training" / "jobs")
+
+
 # =============================================================================
 # TrainingConfig validation
 # =============================================================================
@@ -463,7 +478,11 @@ class TestManagerIntegration:
 
 @pytest.fixture
 def training_app():
-    """Create a minimal aiohttp app with training routes."""
+    """Create a minimal aiohttp app with training routes.
+
+    Job dirs land under the tmp AINODE_HOME of the autouse ``isolate_jobs_dir``
+    fixture, never under the developer's real one.
+    """
     app = web.Application()
     manager = TrainingManager()
     setup_training_routes(app, manager)
@@ -789,6 +808,10 @@ class TestMergeEndpoint:
         )
         # docker stop/rm during cancel → no-op (no daemon under test).
         monkeypatch.setattr("ainode.training.engine.subprocess.run", lambda *a, **k: None)
+        # The merge path preflights the train image; there is no daemon under test.
+        monkeypatch.setattr(
+            "ainode.training.engine._assert_image_present", lambda image: None
+        )
 
         resp2 = await training_client.post(f"/api/training/jobs/{job_id}/merge")
         merge_job_id = (await resp2.json())["merge_job_id"]
@@ -1040,3 +1063,119 @@ class TestMergeContainerCommand:
         merge_job = TrainingJob(TrainingConfig(base_model="m", dataset_path="__merge__"))
         with pytest.raises(RuntimeError, match="AINODE_HOST_HOME"):
             build_merge_command(merge_job, "base/model", tmp_path / "a", tmp_path / "b")
+
+
+# =============================================================================
+# A job the engine refuses to launch
+# =============================================================================
+
+
+class TestUnlaunchableJob:
+    """A submit the engine cannot honour used to answer 500 and leave a phantom
+    RUNNING job that blocked the queue forever (reproduced with a DDP submit in
+    container-spawn mode). It must answer 400, mark the job failed, and leave the
+    queue able to run the next job.
+    """
+
+    @pytest.fixture
+    def refusing_engine(self, monkeypatch):
+        """Make _build_command raise, the way container-mode DDP does."""
+        def boom(self, config_path):
+            raise RuntimeError("Distributed training (DDP / multi-node) is not supported")
+
+        monkeypatch.setattr(TrainingJob, "_build_command", boom)
+
+    @pytest.mark.asyncio
+    async def test_submit_answers_400_and_never_marks_running(
+        self, training_client, training_app, refusing_engine
+    ):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "distributed": True,
+                  "num_nodes": 2},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "not supported" in body["error"]
+
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(body["job_id"])
+        assert job.status == JobStatus.FAILED
+        assert job.start_time is None
+        assert job._process is None
+
+    @pytest.mark.asyncio
+    async def test_failed_start_does_not_wedge_the_queue(
+        self, training_client, training_app, monkeypatch
+    ):
+        manager: TrainingManager = training_app["training_manager"]
+
+        def boom(self, config_path):
+            raise RuntimeError("no launch path for this job")
+
+        monkeypatch.setattr(TrainingJob, "_build_command", boom)
+        resp = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert resp.status == 400
+        assert manager._active_job_id is None
+        assert manager.queue_size == 0
+
+        # The next job must be startable: nothing is holding the slot.
+        monkeypatch.setattr(TrainingJob, "_build_command",
+                            lambda self, config_path: [sys.executable, "-c", "pass"])
+        resp2 = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d2"},
+        )
+        assert resp2.status == 201
+        second = manager.get_job((await resp2.json())["job_id"])
+        assert second.status == JobStatus.RUNNING
+        assert manager._active_job_id == second.job_id
+        await manager.cancel_job(second.job_id)
+
+    @pytest.mark.asyncio
+    async def test_a_missing_train_image_is_a_400_not_a_docker_125(
+        self, training_client, training_app, monkeypatch
+    ):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setenv("AINODE_NO_WHEEL_FETCH", "1")
+        monkeypatch.setattr(
+            engine, "_assert_image_present",
+            lambda image: (_ for _ in ()).throw(RuntimeError(f"image {image} is not present")),
+        )
+        resp = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "is not present" in body["error"]
+        job = training_app["training_manager"].get_job(body["job_id"])
+        assert job.status == JobStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_the_logged_command_is_scrubbed(
+        self, training_client, training_app, monkeypatch
+    ):
+        """The job log is served by GET /api/training/jobs/{id}/logs."""
+        monkeypatch.setattr(
+            TrainingJob, "_build_command",
+            lambda self, config_path: [
+                sys.executable, "-c", "pass", "-e", "HF_TOKEN=hf_secret_value",
+            ],
+        )
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d",
+                  "hf_token": "hf_secret_value"},
+        )
+        job_id = (await resp.json())["job_id"]
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(job_id)
+
+        logged = "\n".join(job.logs)
+        assert "hf_secret_value" not in logged
+        assert "HF_TOKEN=***" in logged
+        # And it is not in the config on disk either.
+        assert "hf_secret_value" not in (job._job_dir / "config.json").read_text()
+        await manager.cancel_job(job_id)

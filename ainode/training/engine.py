@@ -45,6 +45,84 @@ QUANT_IMAGE = os.environ.get("AINODE_QUANT_IMAGE") or "ainode-quant:0.17.0-t5"
 TRAIN_IMAGE = os.environ.get("AINODE_TRAIN_IMAGE") or QUANT_IMAGE
 
 
+SECRET_ENV_KEYS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+# Config keys that must never be written to a job's on-disk config.
+SECRET_CONFIG_KEYS = ("hf_token",)
+
+
+def scrub_command(cmd: list[str]) -> list[str]:
+    """Return ``cmd`` with any secret env value replaced by ``***``.
+
+    Job logs are served verbatim by ``GET /api/training/jobs/{id}/logs``, and the
+    launch line used to carry ``-e HF_TOKEN=<real token>`` into them. Scrub at the
+    one place every launch line is logged rather than trusting each caller."""
+    out: list[str] = []
+    for arg in cmd:
+        masked = arg
+        for key in SECRET_ENV_KEYS:
+            if arg.startswith(f"{key}=") and len(arg) > len(key) + 1:
+                masked = f"{key}=***"
+                break
+        out.append(masked)
+    return out
+
+
+def _config_without_secrets(config: "TrainingConfig") -> dict:
+    """Job config as a dict with secrets stripped, for writing to disk."""
+    data = config.to_dict()
+    for key in SECRET_CONFIG_KEYS:
+        data.pop(key, None)
+    return data
+
+
+def _write_token_env_file(job_dir: Path, token: str) -> Optional[Path]:
+    """Write a 0600 docker ``--env-file`` carrying the HF token, or None.
+
+    The token used to travel two ways that both leaked it: serialized into the
+    job's ``config.json`` (mode 644, and read back by the API) and spelled out in
+    the ``-e HF_TOKEN=...`` argument of the launch line appended to the job log.
+    An env file keeps it off both, readable only by the service user."""
+    if not token:
+        return None
+    path = job_dir / "hf.env"
+    # Create restricted, then write, never a world-readable window.
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        for key in SECRET_ENV_KEYS:
+            fh.write(f"{key}={token}\n")
+    return path
+
+
+def _assert_image_present(image: str) -> None:
+    """Raise RuntimeError unless ``image`` is present in the local docker daemon.
+
+    Without this preflight a node that never built the training image answers
+    every training, quantize and merge job with ``docker`` exit 125 and a log the
+    operator has to decode."""
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "docker is not installed or not on PATH, so no GPU job container can "
+            f"be spawned (needed image: {image})."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"docker did not answer within 30s while checking for image {image}."
+        ) from exc
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Training image '{image}' is not present on this node, so the job "
+            "cannot start. Build it with: "
+            "docker build -f scripts/Dockerfile.quant -t "
+            f"{image} . (or point AINODE_TRAIN_IMAGE / AINODE_QUANT_IMAGE at an "
+            "image this node already has)."
+        )
+
+
 def _host_path(container_path: str) -> str:
     """Translate an AINODE_HOME path (orchestrator *container* view) to the host
     path so a docker ``-v`` SOURCE resolves on the host daemon. Mirrors
@@ -233,6 +311,12 @@ class TrainingConfig:
     use_gradient_checkpointing: bool = False
     distributed: bool = False
     num_nodes: int = 1
+    # Attention kernel the runner loads the model with. "eager" is the default
+    # because the memory-efficient SDPA kernels in the training image are built
+    # for sm80-sm100 and silently produce zeros forward / NaN backward on a GB10
+    # (sm121); see ainode/training/_run_training.py. "auto" hands the choice
+    # back to transformers.
+    attn_implementation: str = "eager"
     template_id: Optional[str] = None  # training template used
     hf_token: Optional[str] = None                  # Hugging Face token for gated models
     _resume_from_checkpoint: Optional[str] = None  # internal: checkpoint path for resume
@@ -351,17 +435,25 @@ class TrainingJob:
         self._job_dir.mkdir(parents=True, exist_ok=True)
 
     async def start(self) -> None:
-        """Launch the training subprocess."""
+        """Launch the training subprocess.
+
+        The job is marked RUNNING only once ``Popen`` has actually returned a
+        process. Setting RUNNING first (what this did until 0.5.26) left a
+        phantom RUNNING job with no process behind it whenever the command could
+        not be built. A DDP submit in container mode did exactly that, and the
+        phantom then blocked every later job in the queue.
+        """
         if self.status != JobStatus.PENDING:
             raise RuntimeError(f"Cannot start job in '{self.status.value}' state")
 
-        self.status = JobStatus.RUNNING
-        self.start_time = time.time()
         self._log(f"Starting {self.config.method} training on {self.config.base_model}")
 
-        # Write config to job directory for the training script
+        # Write config to job directory for the training script. The HF token is
+        # deliberately NOT serialized: this file is world-readable in the job dir
+        # and served indirectly through the job API. The spawned container gets
+        # the token through a 0600 env file instead.
         config_path = self._job_dir / "config.json"
-        config_path.write_text(json.dumps(self.config.to_dict(), indent=2))
+        config_path.write_text(json.dumps(_config_without_secrets(self.config), indent=2))
 
         # Build the training command OFF the event loop. _build_command can
         # shell out to a blocking `pip download` (peft wheel vendoring, up to a
@@ -369,10 +461,16 @@ class TrainingJob:
         # loop would freeze every concurrent request (live inference proxying
         # included) until it returns. run_in_executor keeps the loop responsive.
         loop = asyncio.get_event_loop()
-        cmd = await loop.run_in_executor(None, self._build_command, config_path)
-        self._log(f"Command: {' '.join(cmd)}")
-
         try:
+            cmd = await loop.run_in_executor(None, self._build_command, config_path)
+            # Never log a token: this log is served by GET /api/training/jobs/{id}/logs.
+            self._log(f"Command: {' '.join(scrub_command(cmd))}")
+
+            # Preflight the image before Popen. Without it a missing train image is
+            # a docker exit 125 the operator has to decode from the job log.
+            if cmd and cmd[0] == "docker":
+                await loop.run_in_executor(None, _assert_image_present, self._job_image())
+
             # Ensure output dir exists
             Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -384,13 +482,20 @@ class TrainingJob:
                 cwd=str(self._job_dir),
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
-            # Start monitoring in background
-            self._monitor_task = asyncio.create_task(self._monitor())
         except Exception as exc:
             self.status = JobStatus.FAILED
             self.end_time = time.time()
             self._log(f"Failed to start: {exc}")
             raise
+
+        # Popen returned: the job really is running now.
+        self.status = JobStatus.RUNNING
+        self.start_time = time.time()
+        self._monitor_task = asyncio.create_task(self._monitor())
+
+    def _job_image(self) -> str:
+        """Container image this job's spawned container runs."""
+        return QUANT_IMAGE if self.config.method == "quantize" else TRAIN_IMAGE
 
     async def stop(self) -> None:
         """Gracefully cancel a running job."""
@@ -543,8 +648,11 @@ class TrainingJob:
             "-v", f"{jobdir_host}:/job:ro",                   # config.json
             "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",     # persist HF pulls into the store
         ]
-        if token:
-            cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
+        # The token goes in through a 0600 env file, never as an -e argument: the
+        # launch line is appended to a job log the API serves.
+        env_file = _write_token_env_file(self._job_dir, token)
+        if env_file:
+            cmd += ["--env-file", str(env_file)]
         cmd += [QUANT_IMAGE, "python3", "/opt/ainode/run_quant.py", "--config", "/job/config.json"]
         return cmd
 
@@ -577,7 +685,7 @@ class TrainingJob:
         # Container-view config: remap absolute output_dir + dataset_path onto the
         # mounts. job.config.output_dir stays the orchestrator path (same host inode
         # via the /job mount) so handle_get_output/download resolve unchanged.
-        container_cfg = dict(c.to_dict())
+        container_cfg = _config_without_secrets(c)
         container_cfg["output_dir"] = "/job/output"
         # base_model may be an on-disk slug (what the GUI submits) — rewrite it to
         # the mounted weights path so AutoTokenizer.from_pretrained loads locally
@@ -617,8 +725,10 @@ class TrainingJob:
             "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",      # persist HF pulls into the store
             "-e", "AINODE_HOME=/job",                          # runner config fallback (relative datasets)
         ]
-        if token:
-            cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
+        # 0600 env file, not -e: the launch line lands in a log the API serves.
+        env_file = _write_token_env_file(self._job_dir, token)
+        if env_file:
+            cmd += ["--env-file", str(env_file)]
         # ponytail: peft (and bitsandbytes for qlora) aren't baked into the train
         # image yet — pip-shim them at launch. TODO(ponytail): bake peft +
         # bitsandbytes into the next quant/train-image build and drop this shim.
@@ -668,6 +778,11 @@ class TrainingJob:
             pass
         finally:
             self.end_time = time.time()
+            # The token env file exists only for the life of the container.
+            try:
+                (self._job_dir / "hf.env").unlink(missing_ok=True)
+            except OSError:
+                pass
 
     async def _push_to_hf(self) -> None:
         """After a quantize job completes, push the on-disk checkpoint to HF.
@@ -748,11 +863,12 @@ def build_merge_command(
     token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
     # Same slug→mount rewrite as training: a downloaded base passed as its on-disk
     # slug must load from /ainode-models/<slug>, not choke AutoTokenizer on the '--'.
+    # No hf_token in this file: the runner reads it from the env (see the 0600
+    # env file below); merge_config.json sits in a job dir the API can serve.
     merge_cfg = {
         "base_model": _resolve_base_model_mount(base_model) or base_model,
         "adapter_dir": "/adapter",
         "output_dir": f"/out/{merged_dir.name}",
-        "hf_token": token,
     }
     (job_dir / "merge_config.json").write_text(json.dumps(merge_cfg, indent=2))
 
@@ -766,8 +882,9 @@ def build_merge_command(
         "-v", f"{_host_path(str(AINODE_HOME / 'models'))}:/ainode-models",  # base weights / HF cache
         "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",
     ]
-    if token:
-        cmd += ["-e", f"HF_TOKEN={token}", "-e", f"HUGGING_FACE_HUB_TOKEN={token}"]
+    env_file = _write_token_env_file(job_dir, token)
+    if env_file:
+        cmd += ["--env-file", str(env_file)]
     # ponytail: peft pip-shim — bake it into the next train-image build and drop this.
     # Vendor the (pure-python) peft wheel so the merge runs offline; ';' not '&&'
     # so a pip hiccup never blocks the runner (broken DNS killed a live merge here).
@@ -813,30 +930,20 @@ TRAINING_TEMPLATES: list[dict] = [
         "recommended_lr": 3e-4,
         "estimated_time": "10-30 min (small dataset)",
     },
-    {
-        "id": "dpo-preference",
-        "name": "DPO / Preference learning",
-        "description": "Align a model with chosen/rejected preference pairs.",
-        "method": "lora",
-        "sample_shape": {"prompt": "str", "chosen": "str", "rejected": "str"},
-        "recommended_epochs": 1,
-        "recommended_batch_size": 2,
-        "recommended_lr": 5e-5,
-        "estimated_time": "1-3 hours",
-    },
-    {
-        "id": "distributed-ddp",
-        "name": "Distributed DDP (multi-node)",
-        "description": "Multi-node data-parallel full or LoRA fine-tune via torchrun.",
-        "method": "lora",
-        "sample_shape": {"text": "str"},
-        "recommended_epochs": 1,
-        "recommended_batch_size": 2,
-        "recommended_lr": 2e-4,
-        "distributed": True,
-        "estimated_time": "varies — scales with nodes",
-    },
 ]
+
+# Removed rather than shipped as decoration (0.5.26). Both offered a run the
+# product cannot do, and the DPO one was actively harmful:
+#
+#   dpo-preference  : there is no DPO trainer here. The runner would have
+#                     space-joined prompt/chosen/rejected into one SFT string and
+#                     trained the model ON the rejected answer.
+#   distributed-ddp : DDP has no launch path at all (multi-node raises in
+#                     container-spawn mode, and the host-venv torchrun path has
+#                     no rendezvous), so the tile only ever produced a failure.
+#
+# Put either back only together with an implementation and a proven run.
+RETIRED_TEMPLATE_IDS = ("dpo-preference", "distributed-ddp")
 
 
 def get_training_templates() -> list[dict]:
@@ -1035,8 +1142,15 @@ class TrainingManager:
             job = self._jobs.get(job_id)
             if job and job.status == JobStatus.PENDING:
                 self._queue.pop(0)
+                try:
+                    await job.start()
+                except Exception:
+                    # A job that never started is not the active job. Claiming the
+                    # slot first (what this did until 0.5.26) wedged the queue: the
+                    # phantom "active" id made every later start_next() return None.
+                    self._active_job_id = None
+                    raise
                 self._active_job_id = job_id
-                await job.start()
                 return job
             else:
                 self._queue.pop(0)  # Skip cancelled/missing jobs

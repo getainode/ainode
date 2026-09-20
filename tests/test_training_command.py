@@ -3,17 +3,29 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from ainode.training import engine as tr_engine
 from ainode.training.engine import (
     TrainingConfig,
     TrainingJob,
+    _assert_image_present,
     _resolve_base_model_mount,
     build_merge_command,
+    scrub_command,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_jobs_dir(tmp_path, monkeypatch):
+    """Every TrainingJob here mkdirs its job dir on construction. Without this the
+    suite grows empty directories under the developer's real ~/.ainode."""
+    monkeypatch.setattr(tr_engine, "JOBS_DIR", tmp_path / "training" / "jobs")
 
 
 def _job(**overrides) -> TrainingJob:
@@ -235,3 +247,139 @@ def test_detect_gpu_count_falls_back_to_one_without_torch():
     # Simulate ImportError from torch
     with patch.dict(sys.modules, {"torch": None}):
         assert tr_engine._detect_local_gpu_count() == 1
+
+
+# ---- Secret hygiene: the token never reaches disk or the job log ------------
+
+def test_container_config_carries_no_hf_token(monkeypatch, tmp_path):
+    """config.container.json sits in the job dir and is read back by the API. A
+    real token lived in it (mode 644) on spark1 until 0.5.26."""
+    job = _container_job(monkeypatch, tmp_path, hf_token="hf_secret_value")
+    job._build_container_command()
+    text = (job._job_dir / "config.container.json").read_text()
+    assert "hf_secret_value" not in text
+    assert "hf_token" not in json.loads(text)
+
+
+def test_container_command_passes_the_token_by_env_file(monkeypatch, tmp_path):
+    """-e HF_TOKEN=<token> ended up in the job log, which the API serves. The
+    token goes through a 0600 env file instead."""
+    job = _container_job(monkeypatch, tmp_path, hf_token="hf_secret_value")
+    cmd = job._build_container_command()
+
+    assert not any("hf_secret_value" in arg for arg in cmd)
+    assert "--env-file" in cmd
+    env_file = Path(cmd[cmd.index("--env-file") + 1])
+    assert env_file.parent == job._job_dir
+    assert oct(env_file.stat().st_mode)[-3:] == "600"
+    body = env_file.read_text()
+    assert "HF_TOKEN=hf_secret_value" in body
+    assert "HUGGING_FACE_HUB_TOKEN=hf_secret_value" in body
+
+
+def test_container_command_without_a_token_writes_no_env_file(monkeypatch, tmp_path):
+    job = _container_job(monkeypatch, tmp_path)
+    cmd = job._build_container_command()
+    assert "--env-file" not in cmd
+    assert not (job._job_dir / "hf.env").exists()
+
+
+def test_quant_command_passes_the_token_by_env_file(monkeypatch, tmp_path):
+    job = _container_job(
+        monkeypatch, tmp_path, method="quantize", dataset_path="",
+        scheme="awq", out_slug="m-awq", hf_token="hf_secret_value",
+    )
+    cmd = job._build_quant_command(job._job_dir / "config.json")
+    assert not any("hf_secret_value" in arg for arg in cmd)
+    assert "--env-file" in cmd
+
+
+def test_merge_config_carries_no_hf_token(monkeypatch, tmp_path):
+    merge_job = _container_job(monkeypatch, tmp_path)
+    cmd = build_merge_command(
+        merge_job, "org/model", tmp_path / "adapter", tmp_path / "out" / "merged",
+        "hf_secret_value",
+    )
+    cfg = json.loads((merge_job._job_dir / "merge_config.json").read_text())
+    assert "hf_token" not in cfg
+    assert not any("hf_secret_value" in arg for arg in cmd)
+    assert "--env-file" in cmd
+
+
+def test_scrub_command_masks_secret_env_values():
+    cmd = [
+        "docker", "run", "--rm",
+        "-e", "HF_TOKEN=hf_secret_value",
+        "-e", "HUGGING_FACE_HUB_TOKEN=hf_secret_value",
+        "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",
+        "image:tag",
+    ]
+    scrubbed = scrub_command(cmd)
+    assert "HF_TOKEN=***" in scrubbed
+    assert "HUGGING_FACE_HUB_TOKEN=***" in scrubbed
+    assert not any("hf_secret_value" in arg for arg in scrubbed)
+    # Non-secret env values and the rest of the argv are untouched.
+    assert "HF_HUB_CACHE=/ainode-models/hf-cache" in scrubbed
+    assert scrubbed[:3] == ["docker", "run", "--rm"]
+    assert scrubbed[-1] == "image:tag"
+
+
+def test_scrub_command_leaves_a_bare_key_alone():
+    assert scrub_command(["-e", "HF_TOKEN"]) == ["-e", "HF_TOKEN"]
+
+
+# ---- Image preflight --------------------------------------------------------
+
+def test_assert_image_present_accepts_an_existing_image(monkeypatch):
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return subprocess.CompletedProcess(args, 0, "[]", "")
+
+    monkeypatch.setattr(tr_engine.subprocess, "run", fake_run)
+    _assert_image_present("ainode-quant:test")
+    assert seen["args"] == ["docker", "image", "inspect", "ainode-quant:test"]
+
+
+def test_assert_image_present_names_the_image_and_the_build_step(monkeypatch):
+    """A node with no train image answered every job with docker exit 125."""
+    monkeypatch.setattr(
+        tr_engine.subprocess, "run",
+        lambda args, **kw: subprocess.CompletedProcess(args, 1, "", "No such image"),
+    )
+    with pytest.raises(RuntimeError) as exc:
+        _assert_image_present("ainode-quant:test")
+    message = str(exc.value)
+    assert "ainode-quant:test" in message
+    assert "scripts/Dockerfile.quant" in message
+    assert "AINODE_TRAIN_IMAGE" in message
+
+
+def test_assert_image_present_reports_a_missing_docker(monkeypatch):
+    def boom(args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(tr_engine.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="docker is not installed"):
+        _assert_image_present("ainode-quant:test")
+
+
+def test_job_image_follows_the_method(monkeypatch, tmp_path):
+    assert _container_job(monkeypatch, tmp_path)._job_image() == tr_engine.TRAIN_IMAGE
+    quant = _container_job(
+        monkeypatch, tmp_path, method="quantize", dataset_path="", scheme="awq",
+    )
+    assert quant._job_image() == tr_engine.QUANT_IMAGE
+
+
+# ---- Retired templates ------------------------------------------------------
+
+def test_retired_templates_are_not_offered():
+    """dpo-preference would have trained the model on the REJECTED answer (the
+    runner space-joins the fields into one SFT string), and distributed-ddp has no
+    launch path. Neither ships as a tile until it is implemented."""
+    ids = {t["id"] for t in tr_engine.get_training_templates()}
+    for retired in tr_engine.RETIRED_TEMPLATE_IDS:
+        assert retired not in ids
+    assert not any(t.get("distributed") for t in tr_engine.get_training_templates())

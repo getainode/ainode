@@ -59,7 +59,7 @@ GX10) and any NVIDIA GPU box. It ships as **one container** that bundles:
 - A GB10-patched vLLM with Ray for cross-node tensor/pipeline parallel
 - UDP node discovery for automatic clustering
 - NFS-shared model storage so you download once and use everywhere
-- Scripted fine-tuning (LoRA, QLoRA, full FT, DPO, distributed DDP)
+- Scripted fine-tuning on a node's own GPU (LoRA, QLoRA, full fine-tune)
 
 One `docker pull`, one systemd unit per box, done. No host Python venv,
 no source-built vLLM, no fragile runtime wiring.
@@ -110,19 +110,18 @@ the shared NFS cache; any node can load them instantly.
 
 ![Training overview](docs/images/training-overview.png)
 
-Three quick-start paths: **LoRA** (lightweight, most users), **Distributed
-DDP** (multi-node fine-tuning), **Full fine-tune** (single large-memory
-node). Track active + completed runs, GPU-hours, and jump into dataset
-management.
+Three quick-start paths: **LoRA** (lightweight, most users), **QLoRA**
+(4-bit base, for the biggest models), **Full fine-tune** (single
+large-memory node). Every run trains on the node's own GPU. Track active +
+completed runs, GPU-hours, and jump into dataset management.
 
 ### Training — templates
 
 ![Training templates](docs/images/training-templates.png)
 
 Starter recipes for instruction tuning (Alpaca), chat fine-tuning
-(ShareGPT), classification heads, DPO / preference learning, and
-multi-node DDP. Each template ships a working dataset schema so you
-can start training in minutes.
+(ShareGPT) and classification heads. Each template ships a working dataset
+schema so you can start training in minutes.
 
 ### Config — cluster
 
@@ -255,7 +254,7 @@ set the read token with `ainode config --hf-token hf_xxx`.
 | Multi-node auto-discovery (UDP broadcast) | ✅ |
 | Distributed tensor-parallel inference across nodes | ✅ (4-node verified — 487 GB aggregated VRAM) |
 | Cluster topology UI (members, VRAM aggregate, instance badges) | ✅ |
-| Browser-based fine-tuning (LoRA / QLoRA / Full + DDP) | ✅ |
+| Browser-based fine-tuning (LoRA / QLoRA / Full, single node) | ✅ |
 | Training artifact retrieval + download via API | ✅ |
 | LoRA adapter merge into base model | ✅ |
 | Checkpoint resume | ✅ |

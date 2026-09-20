@@ -38,3 +38,4 @@ Read the nearest child before editing in its subtree. Add a child only at folder
 | Path | Owns |
 |------|------|
 | `ainode/engine/AGENTS.md` | Distributed launch path + vLLM flag invariants (GB10/Blackwell footguns) |
+| `ainode/training/AGENTS.md` | Fine-tuning numerics (eager attention on sm121, pad-label masking, the NaN gate), job lifecycle and token handling |

@@ -4046,9 +4046,10 @@ const AINode = {
       { id: 'runs',       label: 'Runs',       icon: '&#9873;' },
       { id: 'templates',  label: 'Templates',  icon: '&#9641;' },
     ];
+    // No "Distributed Training" guide: multi-node DDP has no launch path yet, so
+    // the page only ever taught users to reach for a run that fails.
     var guides = [
       { id: 'beginners',    label: "Beginner's Guide" },
-      { id: 'distributed',  label: 'Distributed Training' },
       { id: 'pipeline',     label: 'Training Pipeline' },
       { id: 'standalone',   label: 'Standalone Training' },
     ];
@@ -4197,7 +4198,7 @@ const AINode = {
 
     var quickstart = [
       { id: 'lora', icon: 'L', title: 'Fine-tune with LoRA', desc: 'Small adapter weights. Recommended for most users — trains fast, stays memory-efficient.' },
-      { id: 'distributed', icon: 'D', title: 'Distributed Training', desc: 'Scale across multiple DGX Spark nodes with DDP + NCCL. Great for large datasets.' },
+      { id: 'qlora', icon: 'Q', title: 'Fine-tune with QLoRA', desc: '4-bit base + adapters. Same run as LoRA on a smaller memory budget, for the biggest models.' },
       { id: 'full', icon: 'F', title: 'Full Fine-tune', desc: 'Updates all weights. Highest quality, needs the most memory — use for single large-memory nodes.' },
     ].map(function (q) {
       return '<div class="quickstart-tile" data-qs="' + q.id + '">' +
@@ -4241,7 +4242,8 @@ const AINode = {
 
     container.querySelectorAll('[data-qs-btn]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        self.showNewRunWizard({ method: btn.dataset.qsBtn === 'full' ? 'full' : 'lora', distributed: btn.dataset.qsBtn === 'distributed' });
+        var picked = btn.dataset.qsBtn;
+        self.showNewRunWizard({ method: (picked === 'full' || picked === 'qlora') ? picked : 'lora' });
       });
     });
 
@@ -4800,7 +4802,7 @@ const AINode = {
       { n: 1, label: 'Base Model' },
       { n: 2, label: 'Dataset' },
       { n: 3, label: 'Method' },
-      { n: 4, label: 'Distribution' },
+      { n: 4, label: 'Run Name' },
       { n: 5, label: 'Review' },
     ];
 
@@ -4911,28 +4913,15 @@ const AINode = {
       '</div>';
   },
 
+  // Was "Distribution", with a multi-node DDP toggle. Multi-node training has no
+  // launch path (the container-spawn build refuses it, the host torchrun path has
+  // no rendezvous), so the toggle only ever produced a failed run. The step keeps
+  // the run name; put distribution back together with a working launch path.
   _renderWizardStep4() {
     var s = this.state.wizardState;
-    var nodeCount = (this.state.nodes || []).length || 1;
-    var dropdownMax = Math.max(1, nodeCount);
-    var nodesInput = '';
-    for (var i = 1; i <= Math.max(3, dropdownMax); i++) {
-      nodesInput += '<button type="button" class="node-dot' + (i === s.num_nodes ? ' active' : '') + '" data-nodes="' + i + '">' + i + '</button>';
-    }
-    return '<h3>Distribution</h3>' +
-      '<p class="panel-sub">Single node is the default. Enable distributed DDP to shard across multiple cluster nodes.</p>' +
-      '<div class="wizard-option-grid">' +
-        '<div class="wizard-option' + (!s.distributed ? ' active' : '') + '" data-dist="0">' +
-          '<div class="wizard-option-title">Single Node</div>' +
-          '<div class="wizard-option-sub">Run on this node\'s GPU(s).</div>' +
-        '</div>' +
-        '<div class="wizard-option' + (s.distributed ? ' active' : '') + '" data-dist="1">' +
-          '<div class="wizard-option-title">Multi-node DDP</div>' +
-          '<div class="wizard-option-sub">Data-parallel across ' + nodeCount + ' online node' + (nodeCount === 1 ? '' : 's') + '.</div>' +
-        '</div>' +
-      '</div>' +
-      (s.distributed ? '<div style="margin-top:16px"><label class="form-label">Number of nodes</label><div class="node-selector">' + nodesInput + '</div></div>' : '') +
-      '<div class="form-group" style="margin-top:16px"><label class="form-label">Run name (optional)</label><input type="text" id="wz-run-name" class="form-input" placeholder="alpaca-3b-epoch3" value="' + AINode.esc(s.run_name || '') + '"></div>';
+    return '<h3>Run Name</h3>' +
+      '<p class="panel-sub">Runs execute on this node\'s GPU. Name this one so you can find it in the Runs list.</p>' +
+      '<div class="form-group"><label class="form-label">Run name (optional)</label><input type="text" id="wz-run-name" class="form-input" placeholder="alpaca-3b-epoch3" value="' + AINode.esc(s.run_name || '') + '"></div>';
   },
 
   _renderWizardStep5() {
@@ -4958,7 +4947,6 @@ const AINode = {
         summaryRow('Learning rate', s.learning_rate) +
         summaryRow('Max seq len', s.max_seq_length) +
         summaryRow('Grad accum', s.gradient_accumulation_steps) +
-        summaryRow('Distributed', s.distributed ? (s.num_nodes + ' nodes') : 'single node') +
       '</div>' +
       '<div class="form-group" style="margin-top:16px"><label style="display:flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:12.5px"><input type="checkbox" id="wz-save-template"> Save as a custom template</label></div>';
   },
@@ -5032,19 +5020,6 @@ const AINode = {
     });
 
     // Step 4
-    document.querySelectorAll('.wizard-option[data-dist]').forEach(function (el) {
-      el.addEventListener('click', function () {
-        s.distributed = el.dataset.dist === '1';
-        if (!s.distributed) s.num_nodes = 1;
-        self.renderWizardStep();
-      });
-    });
-    document.querySelectorAll('.node-dot[data-nodes]').forEach(function (el) {
-      el.addEventListener('click', function () {
-        s.num_nodes = parseInt(el.dataset.nodes, 10);
-        self.renderWizardStep();
-      });
-    });
     var runName = document.getElementById('wz-run-name');
     if (runName) runName.addEventListener('input', function () { s.run_name = runName.value; });
   },
@@ -5297,13 +5272,6 @@ const AINode = {
         '<h3>What you need</h3><ul><li>A base model (start small: 3B params)</li><li>Training data (JSONL, JSON, CSV — a few hundred examples minimum)</li><li>An NVIDIA GPU (you have one!)</li></ul>' +
         '<h3>Recommended first run</h3><ol><li>Pick <code>Llama 3.2 3B Instruct</code> as base model</li><li>Upload an Alpaca-style JSONL (<code>instruction</code> / <code>output</code>)</li><li>Method: <strong>LoRA</strong></li><li>Epochs: 3, batch size: 4</li><li>Click Launch — monitor from the Runs tab</li></ol>' +
         '<h3>Why LoRA?</h3><p>Full fine-tuning updates every weight in the model — huge memory cost. LoRA trains small adapter matrices on top of the frozen base, giving 95%+ of the quality at a fraction of the memory.</p>',
-    },
-    distributed: {
-      title: 'Distributed Training',
-      html: '<h2>Multi-node DDP</h2><p>AINode uses <strong>PyTorch Distributed Data Parallel</strong> (DDP) over NCCL for multi-node training. Each node holds a copy of the model; gradients are all-reduced between nodes each step.</p>' +
-        '<h3>Requirements</h3><ul><li>2+ online AINode cluster members</li><li>Fast interconnect (10G+ recommended, 100G+ ideal)</li><li>Same model cached on every node</li><li>Shared dataset path or replicated data</li></ul>' +
-        '<h3>When to use it</h3><p>Your training time scales roughly linearly with nodes for data-parallel workloads. Use 2+ nodes when:</p>' +
-        '<ul><li>Your dataset is large (10k+ samples)</li><li>You want to cut wall-clock time</li><li>The model fits in a single node (for DDP — otherwise consider sharding)</li></ul>',
     },
     pipeline: {
       title: 'Training Pipeline',
