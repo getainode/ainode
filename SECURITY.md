@@ -53,10 +53,23 @@ says, Docker and the NVIDIA Container Toolkit, and the operating system.
 Report them anyway if you think we have the trade wrong, but know that they are
 decisions and are documented:
 
-- **A node listens on `0.0.0.0` with no auth by default.** AINode is an appliance
-  for a network you control. API-key auth exists (`/api/auth`, the Config view) and
-  is off until you turn it on. Do not put a node on a hostile network and expect the
-  default to defend it.
+- **A node listens on `0.0.0.0` with no auth by default.** AINode is an appliance for
+  a network you control. Do not put a node on a hostile network and expect the default
+  to defend it. What the default does owe you is honesty: the dashboard header and the
+  installer's summary both say "API open, no key set" rather than letting you assume a
+  password exists. Turn auth on in **Config, API access** or with `ainode auth enable`,
+  and with it on every path under `/api` and `/v1` wants the key except `/api/health`
+  (a probe has no key), `/api/auth/status` (so the UI can say a key is wanted instead
+  of rendering blank) and the static shell. `POST /api/onboarding/complete` is open
+  only while the node is not yet onboarded. Enabling auth from the browser stores the
+  key it mints, so the click cannot lock you out.
+- **`trust_remote_code` needs a key even on a node running open.** Setting it means a
+  later load executes the model repository's own `modeling_*.py` inside the engine
+  container, which mounts the host HF cache and the host SSH directory, so
+  `PATCH /api/config` will not set it for a caller that presents no API key (clearing
+  it is always allowed, so a client can put the node back). A curated catalog entry
+  whose recipe already declares it is the other way in, which is how the models that
+  genuinely need it stay one click.
 - **The engine port (8000, and 8001 upward for stacked models) is the vLLM container
   itself**, with no AINode routing, no auth and no rate limit in front of it.
 - **A distributed head SSHes into its peers** with the install user's key, and starts

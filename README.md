@@ -176,8 +176,9 @@ to:
 
 ```bash
 docker pull ghcr.io/getainode/ainode:latest      # newest release
-# or pin the release you want, which is what the installer does:
-docker pull ghcr.io/getainode/ainode:0.5.26
+# or pin a release, which is what the installer does. Tags are at
+# https://github.com/getainode/ainode/releases
+docker pull ghcr.io/getainode/ainode:X.Y.Z
 ```
 
 There is no Docker Hub mirror. An `argentaios/ainode` repository exists there and
@@ -857,8 +858,22 @@ ainode models                # List available models
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
+ainode doctor                # 21 checks over config, docker, GPUs, disk, ports, peers
 ainode logs -f               # Tail the engine log the configured backend writes
 ```
+
+`ainode doctor` is where to start on a node that is behaving oddly. One line per
+check with OK, WARN or FAIL and a one-line fix: the engine backend against what is
+actually on the node, `gpu_memory_utilization` against the stacked-load guard, the
+discovery port and `cluster_id` against what the installer writes, docker and the
+engine image, GPUs and whether the memory is unified, free space on the AINode home
+and the models dir, the pin in `image.env` against the running container and the
+newest published tag, the unit, ports 3000 / 8000 / 5679, peers and whether the fleet
+agrees on a release, the fabric interface, the secrets store's mode, and the sudo
+trap below. `--json` for machines, `--peer HOST` for the same report over SSH, a
+non-zero exit on any FAIL so it can gate a script, and `--fix` applies only the
+changes that cannot lose anything (create a directory, chmod the secrets store to
+0600, write the fleet discovery port) and then re-runs the checks.
 
 `ainode logs` resolves the log path from the backend and prints which file, and
 which backend, it is following: `nvidia-vllm.log` for a solo or stacked engine and
@@ -936,15 +951,32 @@ anything else that speaks OpenAI.
 ### Two ports, and which one you want
 
 Point your tools at **3000**. That is the only port AINode itself listens on, and
-everything it offers is there: `/v1` routed fleet-wide by model id with transport
-failover, `/v1/decide`, the Anthropic `/v1/messages` shape, the whole `/api` surface,
-the web UI, and the `ainode_*` Prometheus metrics on `/metrics`.
+everything it offers is there: the web UI, the whole `/api` surface, the `ainode_*`
+Prometheus metrics on `/metrics`, and every forwarded inference path, each routed
+fleet-wide on the body's `model` with transport failover. Forwarded today:
+`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`,
+`/v1/rerank`, `/v1/score`, the Anthropic `/v1/messages` and
+`/v1/messages/count_tokens`, and `/tokenize` and `/detokenize` (those two are not
+under `/v1`, because vLLM does not serve them there). `GET /v1/models` is the
+federated union and is answered here rather than forwarded, and `POST /v1/decide` is
+composed here out of grammar-constrained completions of its own.
 
 **8000** is the primary vLLM engine container, talking to you directly. It serves one
 model with no routing and no failover, it is closed until a model is loaded, and its
 `/metrics` is vLLM's own `vllm:*` set rather than AINode's. `:8000/api/...` is a 404.
 It is useful for looking straight at an engine and for nothing else. A stacked model
 gets 8001, 8002 and so on the same way.
+
+**Neither port asks for a credential until you turn one on.** That is what a private
+network wants and it is what this fleet runs, so the dashboard says so in the header
+("API open, no key set") and the installer prints the same words rather than letting
+you assume a password exists. Turn it on in **Config, API access** (the browser that
+flips the switch stores the key it mints, so enabling auth cannot lock you out) or
+with `ainode auth enable`. With auth on, every path under `/api` and `/v1` wants the
+key, with three deliberate exceptions: `/api/health` because a probe has no key,
+`/api/auth/status` so the UI can say a key is wanted instead of rendering blank, and
+the static shell. `POST /api/onboarding/complete` is open only while the node is not
+yet onboarded.
 
 ### Decisions: `POST /v1/decide`
 
