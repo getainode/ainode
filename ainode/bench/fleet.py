@@ -100,6 +100,44 @@ def _apply_catalog(mb: dict, pl: dict, info: dict) -> None:
                                   "container command line was not readable")
 
 
+def apply_flag_width(pl: dict) -> None:
+    """Correct ``tp`` / ``gpus`` from the launch flags the record already carries.
+
+    A SOLO launch across several cards in one box states its width nowhere else:
+    ``append_solo_instance`` writes ``tensor_parallel_size=1`` into every solo
+    instance record because the record describes how many NODES the launch spans,
+    and the node's announcement says "solo" for the same reason. The width lives
+    in ``--tensor-parallel-size`` inside the recipe's own flags, which is the
+    launch truth for a single-node TP launch (``_build_solo_docker_cmd`` renders
+    the flag from nowhere else).
+
+    So a record for castor's four V100s read ``tp: 1, gpus: 1`` beside its own
+    ``flags: [--tensor-parallel-size, 4]``: one record contradicting itself, and
+    the evidence a reader weighs before trusting a recipe. Read after the flags
+    are set, never before, and only ever upward from 1: a stated width is
+    evidence, a missing one stays 1 rather than being guessed (the rule
+    ``_target_tp`` already follows). A multi-node launch's ``tp`` is the node
+    count and is already right, and its flags carry the same number, so this
+    changes nothing there.
+    """
+    flags = [str(f) for f in (pl.get("flags") or [])]
+    stated = 0
+    for i, flag in enumerate(flags):
+        if flag == "--tensor-parallel-size" and i + 1 < len(flags):
+            raw = flags[i + 1]
+        elif flag.startswith("--tensor-parallel-size="):
+            raw = flag.split("=", 1)[1]
+        else:
+            continue
+        try:
+            stated = max(stated, int(raw))
+        except ValueError:
+            continue
+    if stated > int(pl.get("tp") or 1):
+        pl["tp"] = stated
+        pl["gpus"] = stated
+
+
 def _apply_live_config(pl: dict, cfg: dict) -> None:
     """Placement fields from a node's live ``/api/config``.
 
@@ -237,6 +275,9 @@ def describe_via_http(ainode, engine_url, model):
         warn.append(f"{model} is not in the AINode catalog; fill model metadata "
                     "(params_b, license, context) by hand")
 
+    # After the flags, because the width of a single-node TP launch is only
+    # stated there (see apply_flag_width).
+    apply_flag_width(pl)
     derive_arch(mb, model)
     return mb, pl, node_id, warn
 
@@ -488,6 +529,7 @@ async def describe_from_app(app, target: BenchTarget):
     else:
         warn.append(f"{target.model} is not in the AINode catalog; fill model metadata "
                     "(params_b, license, context) by hand")
+    apply_flag_width(pl)
     derive_arch(mb, target.model)
     return mb, pl, warn
 

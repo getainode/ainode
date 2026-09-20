@@ -23,7 +23,10 @@ NODES = {
     "Spark-2-DGX": "100.81.184.19",
     "Spark-3-DGX": "100.80.240.119",
     "Spark-4-GX10": "100.72.9.84",
-    "c4130-ai-01": "100.112.28.89",
+    # The node reports itself as "castor" over /api/server/status, and line
+    # ~197 matches this key against that name, so the old id meant every
+    # model on it resolved to no IP and never reached the dropdown.
+    "castor": "100.112.28.89",
 }
 STATUS_HOSTS = list(dict.fromkeys(NODES.values()))
 EXTRA = [
@@ -37,12 +40,6 @@ EXTRA = [
     {"label": "Qwen3.8-27B UD-Q4 llama.cpp @ m3-studio :8941", "url": "http://100.84.108.16:8941/v1",
      "meta": {"nodes": ["m3-studio"], "tp": 1, "engine": "llama.cpp", "quant": "UD-Q4",
               "repo": "unsloth/Qwen3.8-27B-GGUF"}},
-    {"label": "Qwen3.8-Flash-Next NVFP4 @ c4130 4xV100 TP4 MTP4 :8104", "url": "http://100.112.28.89:8104/v1",
-     "meta": {"nodes": ["c4130-ai-01"], "tp": 4, "quant": "NVFP4", "spec": "MTP-4",
-              "engine": "1Cat-vLLM (src build)"}},
-    {"label": "Qwen3.8-27B NVFP4 @ c4130 4xV100 TP4 128K :8101", "url": "http://100.112.28.89:8101/v1",
-     "meta": {"nodes": ["c4130-ai-01"], "tp": 4, "quant": "NVFP4",
-              "engine": "1Cat-vLLM (src build)", "repo": "unsloth/Qwen3.8-27B-NVFP4"}},
 ]
 
 # Hardware facts per host, for the model card. AINode nodes report gpu_name and
@@ -50,7 +47,7 @@ EXTRA = [
 # c4130 topology confirmed by `nvidia-smi topo -m`: PHB inside each NUMA pair,
 # SYS across, no NVLink.
 HOSTS = {
-    "100.112.28.89": {"node": "c4130-ai-01", "gpu": "Tesla V100 32GB", "gpus": 4, "vram_gb": 32.0,
+    "100.112.28.89": {"node": "castor", "gpu": "Tesla V100 32GB", "gpus": 4, "vram_gb": 32.0,
                       "link": "PCIe (PHB in-pair / SYS across, no NVLink)"},
     "100.84.108.16": {"node": "m3-studio", "gpu": "Apple M3 Ultra (unified)", "gpus": 1, "vram_gb": 512.0,
                       "link": "on-package"},
