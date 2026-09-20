@@ -103,8 +103,11 @@ COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 # -- Ports + volumes -------------------------------------------------------
-# 3000 = web UI, 8000 = OpenAI-compatible API, 5679/udp = discovery.
-EXPOSE 3000 8000 5679/udp
+# 3000 = web UI, 8000 = OpenAI-compatible API, 5679/udp = discovery,
+# 3443 = the same app over TLS when `ainode tls enable` has been run (the pair
+# lives in the bind-mounted /root/.ainode/tls). Documentation only: the unit runs
+# this image with --network=host, so nothing here is published or mapped.
+EXPOSE 3000 3443 8000 5679/udp
 
 # Persist config / models metadata / logs on the host via bind mount.
 VOLUME ["/root/.ainode"]

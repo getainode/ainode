@@ -1091,6 +1091,162 @@ def _restart_after_join() -> None:
     console.print("  Restart AINode on the HOST to apply:")
     console.print("    [bold]sudo systemctl restart ainode[/bold]")
 
+#: What to run on the HOST when `--tailscale` is asked for inside the container.
+#: The image ships no tailscale binary and the daemon socket is not mounted, so
+#: the operator runs the two commands themselves; the paths line up because
+#: $AINODE_HOME in the container IS the host's ~/.ainode bind mount.
+TAILSCALE_ON_THE_HOST = """\
+  This is the AINode container, which has no tailscale binary and no access to
+  the tailnet daemon. Run these two on the HOST instead:
+
+    sudo tailscale cert --cert-file {host_cert} --key-file {host_key} <your-node>.<tailnet>.ts.net
+    sudo chmod 600 {host_key}
+
+  ({host_dir} is the same directory as {cert_dir} in here, so the
+  server will read what tailscale writes.) Then, back in the container:
+
+    ainode tls enable --cert {cert} --key {key}
+
+  `tailscale status --json` on the host names the node: look for Self.DNSName."""
+
+
+def cmd_tls(args):
+    """Manage TLS on the API port."""
+    from ainode.tls import (
+        TLSConfig,
+        cert_paths,
+        certificate_info,
+        generate_self_signed,
+        install_pair,
+        load_tls_config,
+        save_tls_config,
+        tailscale_cert,
+        tailscale_dns_name,
+        tls_dir,
+    )
+    from ainode.tls.certs import tailscale_binary
+    from ainode.tls.config import DEFAULT_TLS_PORT, ensure_tls_dir
+
+    action = getattr(args, "tls_action", None)
+    config = NodeConfig.load()
+    tls = load_tls_config(config)
+
+    if action == "enable":
+        cert_arg = getattr(args, "cert", None)
+        key_arg = getattr(args, "key", None)
+        if bool(cert_arg) != bool(key_arg):
+            console.print("  [red]--cert and --key go together.[/red] "
+                          "Pass both, or neither to generate a self-signed pair.")
+            sys.exit(1)
+        port = int(getattr(args, "port", None) or tls.port or DEFAULT_TLS_PORT)
+        if port == int(config.web_port):
+            console.print(f"  [red]Port {port} is already the HTTP port.[/red] "
+                          "TLS needs its own port; 3443 is the default.")
+            sys.exit(1)
+        ensure_tls_dir()
+        default_cert, default_key = cert_paths()
+
+        if getattr(args, "tailscale", False):
+            if not tailscale_binary():
+                # AINODE_HOST_HOME is set by the systemd unit the installer
+                # renders, so the message can name the path as the OPERATOR sees
+                # it rather than the container's /root/.ainode.
+                host_tls = os.path.join(
+                    os.environ.get("AINODE_HOST_HOME") or str(AINODE_HOME), "tls")
+                console.print("  [yellow]No tailscale binary here.[/yellow]")
+                console.print(TAILSCALE_ON_THE_HOST.format(
+                    host_cert=os.path.join(host_tls, "cert.pem"),
+                    host_key=os.path.join(host_tls, "key.pem"),
+                    host_dir=host_tls, cert_dir=tls_dir(),
+                    cert=default_cert, key=default_key))
+                sys.exit(1)
+            name = tailscale_dns_name()
+            if not name:
+                console.print("  [red]Could not read this node's MagicDNS name[/red] "
+                              "from `tailscale status --json`. Is tailscaled up?")
+                sys.exit(1)
+            try:
+                tailscale_cert(name, default_cert, default_key)
+            except RuntimeError as exc:
+                console.print(f"  [red]{exc}[/red]")
+                console.print("  HTTPS must be enabled for the tailnet "
+                              "(Tailscale admin console > DNS > HTTPS Certificates).")
+                sys.exit(1)
+            console.print(f"  [green]Installed a Let's Encrypt certificate for "
+                          f"{name}.[/green]")
+        elif cert_arg:
+            try:
+                installed_cert, installed_key = install_pair(cert_arg, key_arg)
+            except FileNotFoundError as exc:
+                console.print(f"  [red]No such file: {exc}[/red]")
+                sys.exit(1)
+            default_cert, default_key = installed_cert, installed_key
+            console.print(f"  [green]Installed the pair into {tls_dir()}.[/green]")
+            console.print("  Copied rather than referenced, because the server runs "
+                          "in a container that only sees this directory.")
+        else:
+            try:
+                made = generate_self_signed(default_cert, default_key)
+            except RuntimeError as exc:
+                console.print(f"  [red]{exc}[/red]")
+                sys.exit(1)
+            console.print("  [green]Generated a self-signed certificate.[/green]")
+            console.print(f"  Valid {made['days']} days, via {made['tool']}.")
+            console.print(f"  Names: {', '.join(made['sans'])}")
+
+        new = TLSConfig(enabled=True, cert_file=str(default_cert),
+                        key_file=str(default_key), port=port)
+        written = save_tls_config(new)
+        console.print()
+        console.print(f"  Cert: {new.cert_file}")
+        console.print(f"  Key:  {new.key_file} (mode 0600)")
+        console.print(f"  Wrote the tls block to {written}")
+        console.print()
+        console.print(f"  [bold]Restart the node to open port {port}.[/bold] "
+                      "The listener is built at boot.")
+        console.print("    sudo systemctl restart ainode   (or `docker restart ainode`)")
+        console.print(f"  HTTP on {config.web_port} is untouched: every client in a "
+                      "fleet keeps using it.")
+        if new.cert_file and certificate_info(new.cert_file).get("self_signed"):
+            console.print("  A self-signed certificate needs `curl -k`, or the cert "
+                          "added to the client's trust store.")
+        console.print("  Made in Texas")
+
+    elif action == "disable":
+        save_tls_config(TLSConfig(enabled=False, cert_file=tls.cert_file,
+                                  key_file=tls.key_file, port=tls.port))
+        console.print("  [yellow]TLS disabled.[/yellow] The certificate is left in "
+                      f"{tls_dir()}; nothing is deleted.")
+        console.print("  Restart the node to close the port.")
+        console.print("  Made in Texas")
+
+    elif action == "status":
+        state = "[green]enabled[/green]" if tls.enabled else "[dim]disabled[/dim]"
+        console.print(f"  TLS:  {state}")
+        console.print(f"  Port: {tls.port}  (HTTP stays on {config.web_port})")
+        if not tls.cert_file:
+            console.print("  Cert: none configured")
+        else:
+            info = certificate_info(tls.cert_file)
+            console.print(f"  Cert: {tls.cert_file}")
+            if not info.get("exists"):
+                console.print("        [red]missing[/red]")
+            elif info.get("error"):
+                console.print(f"        [yellow]{info['error']}[/yellow]")
+            else:
+                kind = "self-signed" if info.get("self_signed") else "CA-issued"
+                console.print(f"        {kind}, expires {info['expires']} "
+                              f"({info['days_left']} days left)")
+                if info.get("sans"):
+                    console.print(f"        names: {', '.join(info['sans'])}")
+        if not tls.enabled:
+            console.print("  Enable it: ainode tls enable")
+        console.print("  Made in Texas")
+
+    else:
+        console.print("  Usage: ainode tls {enable|disable|status}")
+        console.print("  enable [--cert PATH --key PATH] [--tailscale] [--port N]")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1236,6 +1392,30 @@ def main():
         "--verbose", action="store_true",
         help="Also print every image that is kept, and why")
     prune_parser.set_defaults(func=cmd_prune_images)
+
+    # tls
+    tls_parser = subparsers.add_parser(
+        "tls", help="Serve HTTPS on a second port (HTTP keeps its own)")
+    tls_sub = tls_parser.add_subparsers(dest="tls_action")
+    tls_enable = tls_sub.add_parser(
+        "enable",
+        help="Turn TLS on, generating a self-signed certificate when none is given",
+    )
+    tls_enable.add_argument("--cert", metavar="PATH",
+                            help="Use this certificate (copied into <AINODE_HOME>/tls/)")
+    tls_enable.add_argument("--key", metavar="PATH",
+                            help="Use this private key (copied into <AINODE_HOME>/tls/)")
+    tls_enable.add_argument(
+        "--tailscale", action="store_true",
+        help="Get a real Let's Encrypt certificate for this node's MagicDNS name "
+             "via `tailscale cert` (what a Mac client with App Transport Security "
+             "needs)",
+    )
+    tls_enable.add_argument("--port", type=int,
+                            help="TLS port (default 3443; must not be the HTTP port)")
+    tls_sub.add_parser("disable", help="Stop serving HTTPS (the pair is kept)")
+    tls_sub.add_parser("status", help="Show TLS state, certificate and expiry")
+    tls_parser.set_defaults(func=cmd_tls)
 
     # doctor: node health report. Exits non-zero on any FAIL so it can gate a
     # script; see ainode/cli/doctor.py for what each check means.

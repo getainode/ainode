@@ -246,6 +246,28 @@ class NodeConfig:
     # CORS
     cors_origins: Optional[str] = None  # comma-separated list
 
+    # TLS for the API port. A nested block rather than four flat keys because it
+    # is one decision: either this node serves HTTPS on its own port or it does
+    # not. Shape and defaults live in ainode/tls/config.py::TLSConfig; written by
+    # `ainode tls enable` (which writes the block surgically, so nothing else in
+    # config.json is rewritten) and read at boot by api/server.py::listener_plan.
+    #   {"enabled": true, "port": 3443,
+    #    "cert_file": "/root/.ainode/tls/cert.pem",
+    #    "key_file": "/root/.ainode/tls/key.pem"}
+    # web_port stays plain HTTP whatever this says: every client in the fleet
+    # talks to :3000, so TLS is an ADDITIONAL listener and never a replacement.
+    tls: Dict = field(default_factory=dict)
+
+    # Per-client limits on /v1. Off by default, because a home node behind one
+    # user needs nothing and the limiter would only be one more thing to explain.
+    # Shape and defaults live in ainode/ratelimit/middleware.py::RateLimitConfig.
+    #   {"enabled": true, "requests_per_minute": 600, "burst": 60,
+    #    "max_inflight": 8}
+    # max_inflight is the one that matters on a GPU node: a single client opening
+    # 200 concurrent completions occupies every engine in the cluster, and no
+    # request-per-minute figure stops it, because it is one burst.
+    rate_limit: Dict = field(default_factory=dict)
+
     # Training defaults
     training_default_method: str = "lora"       # lora | full | qlora
     training_default_epochs: int = 3

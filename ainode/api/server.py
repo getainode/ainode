@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import socket
+import ssl
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -28,6 +30,14 @@ from ainode.auth.middleware import (
     is_authenticated,
 )
 from ainode.auth.api_routes import register_auth_routes
+from ainode.ratelimit.middleware import (
+    RateLimitConfig,
+    RateLimiter,
+    rate_limit_middleware,
+    rate_limit_status_fields,
+)
+from ainode.tls.certs import certificate_info, ssl_context
+from ainode.tls.config import TLSConfig, load_tls_config
 from ainode.metrics.collector import MetricsCollector, optional_float
 from ainode.metrics.api_routes import register_metrics_routes
 from ainode.training.engine import TrainingManager
@@ -114,8 +124,13 @@ def create_app(
 
     auth_config = AuthConfig.load()
 
+    # Order matters. The rate limiter is LAST, so it runs innermost: by then the
+    # auth middleware has stamped the API key id, which is what the limiter keys
+    # its buckets on, and a request with no key on a node that requires one has
+    # already been refused without spending anybody's budget.
     app = web.Application(
-        middlewares=[cors_middleware, request_log_middleware, auth_middleware],
+        middlewares=[cors_middleware, request_log_middleware, auth_middleware,
+                     rate_limit_middleware],
         client_max_size=_client_max_bytes(config),
     )
     init_server_state(app)
@@ -133,6 +148,9 @@ def create_app(
 
     app["config"] = config
     app["auth_config"] = auth_config
+    # Per-client limits on /v1. Off unless config.json says otherwise, so a node
+    # that never heard of the block behaves exactly as it did before.
+    app["rate_limiter"] = RateLimiter(config=RateLimitConfig.from_config(config))
     app["engine"] = engine
     # Seed the InstanceManager with the boot engine as the PRIMARY instance, so
     # a later solo load APPENDS on the next port (8001…) instead of colliding
@@ -1327,7 +1345,51 @@ async def handle_status(request: web.Request) -> web.Response:
         "auth": auth_status_fields(request.app),
         # Recorded shapes this node cannot serve right now, with the reason.
         "degraded_instances": degraded,
+        # Whether anything here speaks HTTPS, and until when. The dashboard's API
+        # access panel used to state "there is no TLS on these ports" as a fact;
+        # it reads this instead, so the panel cannot be wrong once a node has a
+        # certificate.
+        "tls": tls_status_fields(config),
+        # The per-client limits, in the same words the doctor prints.
+        "rate_limit": rate_limit_status_fields(request.app),
     })
+
+
+def tls_status_fields(config: NodeConfig) -> dict:
+    """Whether this node serves HTTPS, on which port, and until when.
+
+    One place, so /api/status, the dashboard panel and ``ainode doctor`` cannot
+    end up saying three different things. ``cert_expires`` is the earliest expiry
+    in the certificate file (see ``tls.certs.certificate_info``) and is null
+    whenever TLS is off or the file cannot be read, never a guess.
+    """
+    tls: TLSConfig = load_tls_config(config)
+    fields: dict = {
+        "enabled": bool(tls.enabled),
+        "port": int(tls.port),
+        "cert_file": tls.cert_file,
+        "cert_expires": None,
+        "cert_days_left": None,
+        "self_signed": None,
+        "label": "HTTP only, no TLS on this node",
+    }
+    if not tls.enabled:
+        return fields
+    if not tls.cert_file:
+        fields["label"] = "TLS enabled with no certificate configured"
+        return fields
+    info = certificate_info(tls.cert_file)
+    fields["cert_expires"] = info.get("expires")
+    fields["cert_days_left"] = info.get("days_left")
+    fields["self_signed"] = info.get("self_signed")
+    if not info.get("exists"):
+        fields["label"] = f"TLS enabled but {tls.cert_file} is not there"
+    elif info.get("error"):
+        fields["label"] = f"TLS enabled, certificate unreadable: {info['error']}"
+    else:
+        kind = "self-signed" if info.get("self_signed") else "CA-issued"
+        fields["label"] = f"HTTPS on {tls.port}, {kind} certificate"
+    return fields
 
 
 def auth_status_fields(app: web.Application) -> dict:
@@ -2863,9 +2925,108 @@ async def handle_patch_config(request: web.Request) -> web.Response:
     })
 
 
+def listener_plan(config: NodeConfig) -> list[tuple[str, int, Optional[ssl.SSLContext]]]:
+    """The sockets this node should open: ``[(host, port, ssl context or None)]``.
+
+    The HTTP entry is always first and always there. TLS adds a SECOND entry and
+    never replaces it: every client in the fleet, the peer proxy included, talks
+    to :3000, so a node that switched ports when TLS came on would drop out of
+    its own cluster.
+
+    TLS is skipped, loudly, when the block is enabled but unusable (a missing
+    pair, an unreadable key, the same port as HTTP). A node with a broken
+    certificate serves HTTP and logs why; it does not fail to boot, because the
+    dashboard is how an operator fixes the certificate.
+    """
+    plan: list[tuple[str, int, Optional[ssl.SSLContext]]] = [
+        (config.host, int(config.web_port), None)
+    ]
+    tls: TLSConfig = load_tls_config(config)
+    if not tls.enabled:
+        return plan
+    if int(tls.port) == int(config.web_port):
+        logger.error("TLS port %d is the HTTP port: serving HTTP only", tls.port)
+        return plan
+    if not tls.files_present():
+        logger.error(
+            "TLS is enabled but the pair is missing (cert=%s key=%s): serving "
+            "HTTP only. Run `ainode tls enable` to make one.",
+            tls.cert_file or "unset", tls.key_file or "unset",
+        )
+        return plan
+    try:
+        context = ssl_context(tls.cert_file, tls.key_file)
+    except (ssl.SSLError, OSError, ValueError) as exc:
+        logger.error("TLS is enabled but %s / %s cannot be loaded (%s): serving "
+                     "HTTP only", tls.cert_file, tls.key_file, exc)
+        return plan
+    plan.append((config.host, int(tls.port), context))
+    return plan
+
+
+async def start_sites(runner: web.AppRunner,
+                      plan: list[tuple[str, int, Optional[ssl.SSLContext]]]) -> int:
+    """Open every socket in ``plan`` on ``runner``; return how many opened.
+
+    A TLS port that cannot be bound (something else is already on it) is logged
+    and skipped, for the same reason a bad certificate is: the HTTP port is how
+    the operator reaches the dashboard that fixes it. A failure on the HTTP entry
+    is raised, exactly as ``web.run_app`` would: a node with no HTTP port is not
+    a node.
+    """
+    started = 0
+    for host, port, context in plan:
+        site = web.TCPSite(runner, host, port, ssl_context=context)
+        try:
+            await site.start()
+        except OSError as exc:
+            if context is None:
+                raise
+            logger.error("TLS port %d could not be opened (%s): serving HTTP only",
+                         port, exc)
+            continue
+        started += 1
+        logger.info("Serving %s on %s:%d",
+                    "HTTPS" if context else "HTTP", host or "0.0.0.0", port)
+    return started
+
+
+async def _serve_forever(app: web.Application,
+                         plan: list[tuple[str, int, Optional[ssl.SSLContext]]]) -> None:
+    """Run ``app`` on every socket in ``plan`` until a signal says stop.
+
+    aiohttp's ``run_app`` opens exactly one site, and TLS needs a second with its
+    own context, so this is the multi-listener path. It installs the same signal
+    handling ``run_app`` does, because the cleanup hooks (discovery sender, client
+    session) have to run on the SIGTERM that `docker stop` sends.
+    """
+    runner = web.AppRunner(app)
+    await runner.setup()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass  # not POSIX, or not the main thread
+    try:
+        await start_sites(runner, plan)
+        await stop.wait()
+    finally:
+        await runner.cleanup()
+
+
 def run_server(config: Optional[NodeConfig] = None, engine=None) -> None:
     """Start the API server (blocking)."""
     if config is None:
         config = NodeConfig()
     app = create_app(config=config, engine=engine)
-    web.run_app(app, host=config.host, port=config.web_port, print=None)
+    plan = listener_plan(config)
+    if len(plan) == 1:
+        # The path every node without TLS takes, unchanged.
+        web.run_app(app, host=config.host, port=config.web_port, print=None)
+        return
+    try:
+        asyncio.run(_serve_forever(app, plan))
+    except KeyboardInterrupt:
+        pass

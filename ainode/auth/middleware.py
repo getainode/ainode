@@ -23,9 +23,11 @@ every deployed node, because the installer and every non-TTY start set
 reached.
 
 Every request is stamped with ``request["authenticated"]`` -- True only when a
-Bearer token matched a stored key hash. Handlers read it through
+Bearer token matched a stored key hash -- and with ``request["api_key_id"]``, the
+id of the key that matched. Handlers read the first through
 ``is_authenticated()`` to gate the few fields that are dangerous even when auth
-is switched off (``trust_remote_code``; see ``TRUST_REMOTE_CODE_RULE``).
+is switched off (``trust_remote_code``; see ``TRUST_REMOTE_CODE_RULE``); the rate
+limiter reads the second so a keyed caller gets its own budget.
 """
 
 from __future__ import annotations
@@ -53,6 +55,13 @@ SKIP_PREFIXES: tuple[str, ...] = ("/static/",)
 
 #: ``request`` key carrying the outcome of token validation for this request.
 AUTHENTICATED_KEY = "authenticated"
+
+#: ``request`` key carrying the id of the API key this request presented, or "".
+#: Set by the same validation pass as AUTHENTICATED_KEY, so anything downstream
+#: can tell WHICH key called without hashing the token again. The rate limiter
+#: keys its buckets on it (ainode/ratelimit/middleware.py::client_key): two
+#: callers behind one NAT are two clients when they hold different keys.
+API_KEY_ID_KEY = "api_key_id"
 
 #: Printed back to any caller refused a ``trust_remote_code`` escalation, and
 #: quoted in the CHANGELOG. One sentence of rule, one of how to comply.
@@ -111,13 +120,29 @@ class AuthConfig:
         """The stored keys as the UI may see them: ids only, never a hash."""
         return [{"id": entry.get("id", "")} for entry in self.api_keys]
 
-    def validate_token(self, token: str) -> bool:
+    def identify_token(self, token: str) -> tuple[bool, str]:
+        """``(matched, key id)`` for ``token``, in one constant-time pass.
+
+        The id is what lets anything downstream tell WHICH key called, which is
+        how the rate limiter gives each key its own budget. It comes back "" for
+        a key entry stored without an id, so the two answers are independent: a
+        match with no id is still a match.
+        """
+        if not token:
+            return False, ""
         token_hash = _hash_key(token)
         for entry in self.api_keys:
             stored = entry.get("key_hash") or entry.get("key", "")
             if hmac.compare_digest(token_hash, stored):
-                return True
-        return False
+                return True, str(entry.get("id") or "")
+        return False, ""
+
+    def validate_token(self, token: str) -> bool:
+        return self.identify_token(token)[0]
+
+    def key_id_for_token(self, token: str) -> str:
+        """The id of the stored key ``token`` matches, or "" for no match."""
+        return self.identify_token(token)[1]
 
     def enable(self) -> dict:
         """Turn auth on, minting a first key only when there is none.
@@ -178,10 +203,13 @@ async def auth_middleware(request: web.Request, handler):
     auth_cfg: AuthConfig | None = request.app.get("auth_config")
     token = bearer_token(request)
     # Stamped on every request, enabled or not: handlers gate on it (see
-    # is_authenticated) even when the node is running open.
-    request[AUTHENTICATED_KEY] = bool(
-        token and auth_cfg is not None and auth_cfg.validate_token(token)
-    )
+    # is_authenticated) even when the node is running open. The key id goes on
+    # with it so the rate limiter can count a keyed caller as itself rather than
+    # as its address (see API_KEY_ID_KEY).
+    matched, key_id = (auth_cfg.identify_token(token) if auth_cfg is not None
+                       else (False, ""))
+    request[AUTHENTICATED_KEY] = matched
+    request[API_KEY_ID_KEY] = key_id
     if auth_cfg is None or not auth_cfg.enabled:
         return await handler(request)
     if _should_skip(request):
