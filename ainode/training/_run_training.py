@@ -14,15 +14,39 @@ All three methods are DDP-aware. When launched via ``torchrun``, the
 ``WORLD_SIZE`` / ``RANK`` / ``LOCAL_RANK`` env vars are honoured by
 HuggingFace ``Trainer`` automatically — this script just has to avoid
 duplicate setup on non-rank-zero workers (logging, final save, etc.).
+
+Two numerics invariants live here, both paid for by the 2026-07-06 run that
+"completed" with a 100 percent NaN adapter:
+
+* Attention runs EAGER by default. The training image's memory-efficient SDPA
+  kernels are built for sm80-sm100; on a GB10 (sm121) the cutlassF forward and
+  the cutlassB backward both refuse to launch, the forward then returns zeros
+  (loss lands exactly on ln(vocab) = 11.93) and the backward returns NaN.
+* Pad positions are masked out of the labels (-100) and padding is dynamic per
+  batch. Labels that copy the padded ``input_ids`` make the model predict pad
+  for most of every sequence, which is a meaningless objective and a huge
+  gradient.
+
+A run whose loss or grad_norm goes non-finite now FAILS with
+``AINODE_ERROR:NAN_LOSS`` instead of saving NaN weights and reporting success.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
+
+# Log every step for this many steps before falling back to the configured
+# cadence, so the loss curve the UI draws is real from the start.
+WARM_LOGGING_STEPS = 20
+
+
+class NonFiniteLoss(RuntimeError):
+    """Raised from the training loop when loss or grad_norm goes non-finite."""
 
 
 def _is_main_process() -> bool:
@@ -35,6 +59,113 @@ def _log(msg: str) -> None:
     """Print only from rank-0 to avoid N duplicate lines in multi-GPU runs."""
     if _is_main_process():
         print(msg, flush=True)
+
+
+def _is_finite(value) -> bool:
+    """True for a real finite number; True for anything that is not a number
+    (so a callback never trips on a string or a dict in the log payload)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True
+    return math.isfinite(value)
+
+
+def _non_finite_metrics(logs: dict) -> list[str]:
+    """Names of the numeric metrics in ``logs`` that are NaN or inf."""
+    watched = ("loss", "grad_norm", "eval_loss", "train_loss")
+    return [k for k in watched if k in logs and not _is_finite(logs[k])]
+
+
+def assert_finite_metrics(logs: dict, step: int) -> None:
+    """Raise NonFiniteLoss if a logged metric is NaN or inf.
+
+    One non-finite gradient is terminal for a run: Adam writes NaN into the
+    adapter and every later step keeps it there. The 2026-07-06 job logged
+    grad_norm 3.3e6 then NaN, kept going for 30 more steps, saved a 100 percent
+    NaN adapter and reported COMPLETED."""
+    bad = _non_finite_metrics(logs or {})
+    if bad:
+        detail = ", ".join(f"{k}={logs[k]}" for k in bad)
+        raise NonFiniteLoss(f"non-finite {detail} at step {step}")
+
+
+def build_prompt_texts(examples: dict) -> list[str]:
+    """Flatten one batch of dataset rows into training strings."""
+    if "text" in examples:
+        return list(examples["text"])
+    if "instruction" in examples and "output" in examples:
+        return [
+            f"### Instruction:\n{inst}\n\n### Response:\n{out}"
+            for inst, out in zip(examples["instruction"], examples["output"])
+        ]
+    if "prompt" in examples and "completion" in examples:
+        return [f"{p}{c}" for p, c in zip(examples["prompt"], examples["completion"])]
+    keys = [k for k in examples.keys() if isinstance(examples[k][0], str)]
+    return [
+        " ".join(examples[k][i] for k in keys)
+        for i in range(len(examples[keys[0]]))
+    ]
+
+
+def make_tokenize_fn(tokenizer, max_seq_length: int):
+    """Return the batched ``dataset.map`` function used for every method.
+
+    Truncates but NEVER pads: the collator pads each batch to its own longest row
+    and pads the labels with -100. Padding to ``max_length`` here and copying
+    ``input_ids`` into ``labels`` (what this did until 0.5.26) asked the model to
+    predict the pad token at ~90 percent of every position, which pinned the loss
+    at ln(vocab) and blew the gradient up by six orders of magnitude."""
+
+    def tokenize_fn(examples):
+        texts = build_prompt_texts(examples)
+        enc = tokenizer(
+            texts,
+            truncation=True,
+            max_length=max_seq_length,
+        )
+        masks = enc.get("attention_mask")
+        labels = []
+        for i, ids in enumerate(enc["input_ids"]):
+            mask = masks[i] if masks is not None else None
+            if mask is None:
+                labels.append(list(ids))
+            else:
+                # -100 is the ignore_index of the causal-LM loss. Anything the
+                # attention mask already excludes must not be a training target.
+                labels.append([
+                    (tok if m == 1 else -100) for tok, m in zip(ids, mask)
+                ])
+        enc["labels"] = labels
+        return enc
+
+    return tokenize_fn
+
+
+def _scan_saved_weights(output_dir: Path) -> list[str]:
+    """Read back every ``*.safetensors`` file just written and return a
+    ``file:tensor`` description for each tensor holding a non-finite value.
+
+    Cheap (the adapter is a few MB) and the only check that speaks for the
+    artifact itself rather than for the loss curve."""
+    try:
+        import torch
+        from safetensors.torch import load_file
+    except ImportError:
+        return []
+
+    bad: list[str] = []
+    for path in sorted(output_dir.glob("*.safetensors")):
+        try:
+            tensors = load_file(str(path))
+        except Exception as exc:  # unreadable is a different failure, not NaN
+            _log(f"WARNING: could not scan {path.name} for NaN: {exc}")
+            continue
+        for name, tensor in tensors.items():
+            if not tensor.is_floating_point():
+                continue
+            if not bool(torch.isfinite(tensor).all()):
+                count = int((~torch.isfinite(tensor)).sum())
+                bad.append(f"{path.name}:{name} ({count} non-finite)")
+    return bad
 
 
 def main() -> None:
@@ -115,6 +246,7 @@ def main() -> None:
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
+            DataCollatorForSeq2Seq,
             TrainingArguments,
             Trainer,
             TrainerCallback,
@@ -148,9 +280,28 @@ def main() -> None:
     warmup_steps = int(config.get("warmup_steps", 0))
     weight_decay = float(config.get("weight_decay", 0.0))
     use_gradient_checkpointing = bool(config.get("use_gradient_checkpointing", False))
+    logging_steps = max(1, int(config.get("logging_steps", 10)))
+    # "eager" is the default for the reason in the module docstring. "auto" hands
+    # the choice back to transformers; any other value is passed through as-is
+    # (an operator overriding this owns the numerics).
+    attn_implementation = (config.get("attn_implementation") or "eager").strip()
+    attn_kwargs = {} if attn_implementation == "auto" else {
+        "attn_implementation": attn_implementation
+    }
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     _log(f"Method: {method} · world_size={world_size} · rank={os.environ.get('RANK', '0')}")
+    _log(
+        f"torch={torch.__version__} cuda_available={torch.cuda.is_available()} "
+        f"attn_implementation={attn_implementation}"
+    )
+    if torch.cuda.is_available():
+        _log(
+            f"GPU: {torch.cuda.get_device_name(0)} "
+            f"sm{''.join(str(n) for n in torch.cuda.get_device_capability(0))}"
+        )
+    else:
+        _log("WARNING: CUDA is not available: training will run on CPU and be very slow.")
 
     _log(f"Loading tokenizer: {base_model}")
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -191,6 +342,7 @@ def main() -> None:
             quantization_config=quant_cfg,
             device_map={"": int(os.environ.get("LOCAL_RANK", "0"))} if world_size > 1 else "auto",
             trust_remote_code=True,
+            **attn_kwargs,
         )
         model = prepare_model_for_kbit_training(
             model, use_gradient_checkpointing=use_gradient_checkpointing
@@ -219,6 +371,7 @@ def main() -> None:
             torch_dtype=torch.bfloat16,
             device_map={"": int(os.environ.get("LOCAL_RANK", "0"))} if world_size > 1 else "auto",
             trust_remote_code=True,
+            **attn_kwargs,
         )
         if use_gradient_checkpointing:
             model.gradient_checkpointing_enable()
@@ -242,6 +395,7 @@ def main() -> None:
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             device_map=None if world_size > 1 else "auto",
+            **attn_kwargs,
         )
         if use_gradient_checkpointing:
             model.gradient_checkpointing_enable()
@@ -264,32 +418,16 @@ def main() -> None:
     else:
         dataset = load_dataset(dataset_path, split="train")
 
-    def tokenize_fn(examples):
-        if "text" in examples:
-            texts = examples["text"]
-        elif "instruction" in examples and "output" in examples:
-            texts = [
-                f"### Instruction:\n{inst}\n\n### Response:\n{out}"
-                for inst, out in zip(examples["instruction"], examples["output"])
-            ]
-        elif "prompt" in examples and "completion" in examples:
-            texts = [f"{p}{c}" for p, c in zip(examples["prompt"], examples["completion"])]
-        else:
-            keys = [k for k in examples.keys() if isinstance(examples[k][0], str)]
-            texts = [
-                " ".join(examples[k][i] for k in keys)
-                for i in range(len(examples[keys[0]]))
-            ]
-
-        return tokenizer(
-            texts,
-            truncation=True,
-            max_length=max_seq_length,
-            padding="max_length",
-        )
-
+    tokenize_fn = make_tokenize_fn(tokenizer, max_seq_length)
     dataset = dataset.map(tokenize_fn, batched=True, remove_columns=dataset.column_names)
-    dataset = dataset.map(lambda x: {"labels": x["input_ids"]})
+    if len(dataset) > 0:
+        first = dataset[0]
+        supervised = sum(1 for lab in first["labels"] if lab != -100)
+        _log(
+            f"Tokenized {len(dataset)} samples · first sample: "
+            f"{supervised}/{len(first['labels'])} positions supervised "
+            f"(dynamic padding, pad labels -100)"
+        )
 
     # Split into train / eval if requested
     eval_dataset = None
@@ -308,6 +446,11 @@ def main() -> None:
             self.total_epochs = total_epochs
 
         def on_log(self, _args, state, control, logs=None, **kwargs):
+            # A non-finite loss or gradient means the run is already dead: every
+            # later step feeds NaN into Adam and the saved adapter is all NaN.
+            # Abort here so the job FAILS instead of "completing" with junk.
+            # Runs on every rank: a NaN on rank 3 is still a dead run.
+            assert_finite_metrics(logs or {}, state.global_step)
             # Only rank-0 emits progress so the parent process doesn't
             # see N copies per step.
             if not _is_main_process():
@@ -330,13 +473,35 @@ def main() -> None:
                     )
                 print(f"AINODE_PROGRESS:{json.dumps(payload)}", flush=True)
 
+    class WarmLoggingCallback(TrainerCallback):
+        """Log every step for the first ``WARM_LOGGING_STEPS``, then drop to the
+        configured cadence. The early steps are where a run goes wrong, and the
+        browser's loss curve is drawn from exactly these log events."""
+
+        def __init__(self, steady_steps: int):
+            self.steady_steps = steady_steps
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step < WARM_LOGGING_STEPS:
+                return
+            # transformers 5.x reads state.logging_steps in DefaultFlowCallback;
+            # older releases read args.logging_steps. Set both.
+            if getattr(state, "logging_steps", None) == 1:
+                state.logging_steps = self.steady_steps
+            if getattr(args, "logging_steps", None) == 1:
+                args.logging_steps = self.steady_steps
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
         learning_rate=learning_rate,
         bf16=True,
-        logging_steps=10,
+        logging_steps=1,  # WarmLoggingCallback raises this after WARM_LOGGING_STEPS
+        # Trainer replaces a NaN/inf loss with the running mean by default, which
+        # is exactly how a dead run reported a plausible-looking 0.0 loss and
+        # "completed". Keep the real number so the NaN guard can see it.
+        logging_nan_inf_filter=False,
         save_strategy="epoch",
         save_total_limit=2,
         report_to=["wandb"] if wandb_project else ["none"],
@@ -357,13 +522,28 @@ def main() -> None:
         greater_is_better=False if eval_dataset else None,
     )
 
-    trainer = Trainer(
+    # Dynamic padding per batch, with pad positions kept out of the loss. This is
+    # the collator half of the label masking done in tokenize_fn: it pads the
+    # labels with -100 rather than with the pad token.
+    collator = DataCollatorForSeq2Seq(
+        tokenizer,
+        padding=True,
+        pad_to_multiple_of=8,
+        label_pad_token_id=-100,
+    )
+    trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        callbacks=[ProgressCallback(num_epochs)],
+        data_collator=collator,
+        callbacks=[ProgressCallback(num_epochs), WarmLoggingCallback(logging_steps)],
     )
+    try:
+        trainer = Trainer(processing_class=tokenizer, **trainer_kwargs)
+    except TypeError:
+        # transformers < 4.46 spells it `tokenizer=`.
+        trainer = Trainer(tokenizer=tokenizer, **trainer_kwargs)
 
     # Configure W&B if requested
     if wandb_project:
@@ -375,6 +555,17 @@ def main() -> None:
     _log("Starting training...")
     try:
         trainer.train(resume_from_checkpoint=resume_from_checkpoint or None)
+    except NonFiniteLoss as exc:
+        print(
+            f"AINODE_ERROR:NAN_LOSS: training diverged: {exc}. Nothing was saved; "
+            f"a NaN adapter is worse than no adapter. Most likely causes: a "
+            f"learning rate too high for this model (currently {learning_rate}), "
+            f"or an attention kernel that does not support this GPU. The default "
+            f"attn_implementation is 'eager' for that reason, and this run used "
+            f"'{attn_implementation}'.",
+            file=sys.stderr, flush=True,
+        )
+        sys.exit(1)
     except RuntimeError as exc:
         err_str = str(exc)
         # Provide actionable messages for the most common GPU errors
@@ -412,6 +603,21 @@ def main() -> None:
         _log(f"Saving model to {output_dir}")
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
+
+        # Last line of defence: the 2026-07-06 run reported success with an
+        # adapter that was 100 percent NaN. Refuse to call a run complete
+        # without reading back what it wrote.
+        bad_tensors = _scan_saved_weights(Path(output_dir))
+        if bad_tensors:
+            print(
+                "AINODE_ERROR:NAN_WEIGHTS: the saved weights contain non-finite "
+                "values, so this run produced nothing usable: "
+                + "; ".join(bad_tensors[:5])
+                + (f" (and {len(bad_tensors) - 5} more)" if len(bad_tensors) > 5 else ""),
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+
         print(
             f"AINODE_PROGRESS:{json.dumps({'epoch': num_epochs, 'loss': 0, 'progress': 100.0})}",
             flush=True,

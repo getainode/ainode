@@ -83,6 +83,10 @@ exclude = ["tests*", "ops*", "scripts*"]
 testpaths = ["tests"]
 norecursedirs = ["bench/harness/tasks", "*.egg", ".*", "_darcs", "build", "CVS",
                  "dist", "graft", "node_modules", "venv", "{arch}"]
+# `gpu` marks a test that executes a real training/inference run on a CUDA device.
+# Every such test also carries its own skipif, so a bare `pytest tests/` on a Mac
+# or a CI runner collects them and skips them; on a GPU node they run.
+markers = ["gpu: needs a CUDA GPU (and torch/transformers/peft) to run"]
 
 [tool.ruff]
 target-version = "py310"

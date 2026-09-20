@@ -138,8 +138,17 @@ async def handle_submit_job(request: web.Request) -> web.Response:
             {"error": str(exc)}, status=400
         )
 
-    # Attempt to start if nothing is running
-    await manager.start_next()
+    # Attempt to start if nothing is running. A job the engine refuses to launch
+    # (unsupported shape, missing training image) raises here: answer 400 with the
+    # reason instead of the 500 the browser used to get, and report the job as it
+    # actually ended up (failed, never running) so the queue is not left wedged.
+    try:
+        await manager.start_next()
+    except RuntimeError as exc:
+        return web.json_response(
+            {"error": str(exc), "job_id": job.job_id, "status": job.status.value},
+            status=400,
+        )
 
     return web.json_response(job.get_status(), status=201)
 
@@ -362,7 +371,12 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
     async def _merge_in_container() -> None:
         """Slim orchestrator (no peft/torch): spawn a GPU container to merge,
         streaming its stdout so the AINODE_PROGRESS protocol keeps working."""
-        from ainode.training.engine import build_merge_command
+        from ainode.training.engine import (
+            TRAIN_IMAGE,
+            _assert_image_present,
+            build_merge_command,
+            scrub_command,
+        )
         # build_merge_command can shell out to a blocking `pip download` (peft
         # wheel vendoring, up to 120s on a cold cache) — build it OFF the loop so
         # a slow/unreachable network can't freeze the whole API server.
@@ -370,7 +384,10 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
             None, build_merge_command, merge_job, job.config.base_model,
             adapter_dir, merged_dir, job.config.hf_token,
         )
-        merge_job._log("Merge command: " + " ".join(cmd))
+        # scrub_command, not the raw argv: this log is served by
+        # GET /api/training/jobs/{id}/logs.
+        merge_job._log("Merge command: " + " ".join(scrub_command(cmd)))
+        await loop.run_in_executor(None, _assert_image_present, TRAIN_IMAGE)
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
@@ -381,6 +398,11 @@ async def handle_merge_adapter(request: web.Request) -> web.Response:
                 merge_job._log(line)
                 merge_job._parse_progress(line)
         rc = await proc.wait()
+        # The token env file exists only for the life of the container.
+        try:
+            (merge_job._job_dir / "hf.env").unlink(missing_ok=True)
+        except OSError:
+            pass
         if rc != 0:
             raise RuntimeError(f"merge container exited with code {rc}")
 
