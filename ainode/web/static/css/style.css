@@ -2721,6 +2721,19 @@ select {
   box-shadow: 0 0 10px rgba(236, 132, 44, 0.3);
 }
 
+/* Speech to text: the other kind of model that is not chat. Same treatment as
+   Embedding for the same reason, in its own hue so the two do not read alike. */
+.cap-speech {
+  background: rgba(96, 165, 250, 0.12);
+  color: #7ab4fb;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  font-family: var(--font-mono);
+}
+.cap-speech:hover {
+  background: rgba(96, 165, 250, 0.2);
+  box-shadow: 0 0 10px rgba(96, 165, 250, 0.3);
+}
+
 /* Card info icon */
 .card-info-icon {
   color: var(--text-muted);

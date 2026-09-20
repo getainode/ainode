@@ -566,6 +566,54 @@ def test_a_failed_load_beside_a_head_does_not_clear_the_heads_model(monkeypatch)
     assert cfg.distributed_mode == "head"
 
 
+def test_a_launch_refused_over_a_missing_engine_image_says_which_image(monkeypatch):
+    """A recipe can pin an engine image a node has never had, and the answer used to
+    be "Failed to launch engine", which names nothing anyone can act on. The backend
+    puts the reason in ``launch_error`` (see backends/base.py) and the load route
+    reports it verbatim, the way the training preflight does."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+    from ainode.engine.backends.nvidia import engine_image_missing_message
+
+    image = "ghcr.io/getainode/ainode-whisper:0.17.0-t5"
+    app = _head_app(monkeypatch)
+
+    def image_less_backend(cfg_, instance_id="", on_ready=None):
+        backend = _FakeBackend(cfg_, instance_id)
+        backend.start = lambda: False
+        backend.launch_error = engine_image_missing_message(
+            image, detail="manifest unknown")
+        return backend
+
+    monkeypatch.setattr(backends_mod, "get_backend", image_less_backend)
+    out = mr.append_solo_instance(app, "openai/whisper-large-v3-turbo", 0.06,
+                                  persist=False)
+    assert out["ok"] is False and out["status"] == 500
+    assert image in out["error"]
+    assert "docker pull" in out["error"]
+    assert out["error"] != "Failed to launch engine"
+
+
+def test_a_launch_that_failed_for_another_reason_keeps_the_old_wording(monkeypatch):
+    """The generic sentence is still the answer when the backend has nothing to add:
+    only a backend that KNOWS the reason replaces it."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+
+    app = _head_app(monkeypatch)
+
+    def dead_backend(cfg_, instance_id="", on_ready=None):
+        backend = _FakeBackend(cfg_, instance_id)
+        backend.start = lambda: False
+        return backend
+
+    monkeypatch.setattr(backends_mod, "get_backend", dead_backend)
+    out = mr.append_solo_instance(app, "openai/whisper-large-v3-turbo", 0.06,
+                                  persist=False)
+    assert out["ok"] is False
+    assert out["error"] == "Failed to launch engine"
+
+
 def test_the_same_node_before_a_restart_behaves_identically(monkeypatch, tmp_path):
     """With the head IN the manager, `len(others)` already said stacked. The port rule
     has to agree with it, or the fix would have swapped one wrong answer for another."""

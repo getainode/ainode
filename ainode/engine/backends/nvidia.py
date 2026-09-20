@@ -77,6 +77,58 @@ logger = logging.getLogger(__name__)
 # to sed-repoint this source — the nvcr→scitrera drift that once broke a node.
 NVIDIA_VLLM_IMAGE = os.environ.get("NVIDIA_VLLM_IMAGE") or "scitrera/dgx-spark-vllm:0.17.0-t5"
 
+# Engine images this repo BUILDS, keyed by repository (a tag moves, the repo does
+# not). Only so a missing-image refusal can name the Dockerfile that makes one:
+# a recipe can pin an image that exists nowhere yet, and "Failed to launch engine"
+# sends the operator to the wrong problem. Same reasoning as the training image's
+# preflight (training/engine.py::assert_job_image_present, #192).
+ENGINE_IMAGE_DOCKERFILES = {
+    "ghcr.io/getainode/ainode-whisper": "scripts/Dockerfile.whisper",
+    "ainode-whisper": "scripts/Dockerfile.whisper",
+}
+
+
+def image_repo(image: str) -> str:
+    """An image ref with its tag removed.
+
+    The tag is after the LAST colon of the last path segment only, so a registry
+    port (``localhost:5000/ainode-whisper``) is not mistaken for one.
+    """
+    prefix, _, last = image.rpartition("/")
+    name = last.rsplit(":", 1)[0] if ":" in last else last
+    return f"{prefix}/{name}" if prefix else name
+
+
+def engine_image_missing_message(image: str, detail: str = "") -> str:
+    """Why a launch could not start when the reason is the engine image.
+
+    Names the image, says what docker said about it, and gives the fixes in the
+    order they apply on a real node: pull the tag the recipe pins, build it from
+    the Dockerfile in this repo when there is one, or point the instance at an
+    image the node already has. A caller reports this verbatim, so it is one
+    paragraph of plain sentences and never a traceback.
+    """
+    dockerfile = ENGINE_IMAGE_DOCKERFILES.get(image_repo(image))
+    parts = [
+        f"Engine image '{image}' is not on this node and could not be pulled, so "
+        f"the engine was not launched."
+    ]
+    if detail:
+        parts.append(f"docker said: {detail}")
+    fixes = [f"docker pull {image}"]
+    if dockerfile:
+        fixes.append(
+            f"or build it on this node: docker build -f {dockerfile} "
+            f"-t {image} . (it is published by CI, so a pull is the usual answer)"
+        )
+    fixes.append(
+        "or load the model with an engine_image this node already has (the "
+        "catalog recipe's value is only a default), or set $NVIDIA_VLLM_IMAGE "
+        "to change the fleet default"
+    )
+    parts.append("Fix it with one of: " + "; ".join(fixes) + ".")
+    return " ".join(parts)
+
 # Workarounds below (forced --enforce-eager, the NVFP4 MARLIN env) are bugs in
 # the PINNED 0.17 build, not in vLLM generally. Newer engines (0.27.1, which
 # Nemotron 3.5 Lightning and Qwen3.8 require) fix them upstream and are actively
@@ -172,6 +224,9 @@ class NvidiaBackend(EngineBackend):
         # Epoch seconds when this backend last issued a launch: the bind wait
         # reports the CONTAINER's life from it, not the wait's own age (#96).
         self._launched_at: Optional[float] = None
+        # Operator-facing reason the last launch step refused, or "". Read through
+        # the base class's ``launch_error`` by the load routes.
+        self._launch_error: str = ""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_file: Path = LOGS_DIR / "nvidia-vllm.log"
         self._distributed_log: Path = LOGS_DIR / "nvidia-distributed.log"
@@ -727,6 +782,15 @@ class NvidiaBackend(EngineBackend):
         return self._launched_at
 
     @property
+    def launch_error(self) -> str:
+        """Why the last launch step refused, in the operator's words (see base class).
+
+        Set by ``ensure_image``, which is the one launch step whose failure an
+        operator can always act on, and cleared by it as soon as an image is there.
+        """
+        return self._launch_error
+
+    @property
     def process(self) -> Optional[subprocess.Popen]:
         return self._process
 
@@ -1131,8 +1195,14 @@ class NvidiaBackend(EngineBackend):
         entrypoint probe degrades too, since ``docker inspect`` on a missing
         image returns nothing and we silently fall back to a default prefix.
         Observed 2026-08-25 loading a recipe model onto a fresh node.
+
+        Every failure here also records ``launch_error``, so the load route answers
+        with the image and the fix rather than "Failed to launch engine": a recipe
+        pinning an image the node has never had is the one launch failure an
+        operator can always resolve, and only if they are told which image it was.
         """
         if self._image_present(image):
+            self._launch_error = ""
             return True
         logger.info("Engine image %s not present; pulling (this can take several "
                     "minutes for a ~20 GB image)", image)
@@ -1141,15 +1211,20 @@ class NvidiaBackend(EngineBackend):
                                  capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             logger.error("Timed out pulling engine image %s after %ss", image, timeout)
+            self._launch_error = engine_image_missing_message(
+                image, detail=f"the pull did not finish within {timeout:.0f}s")
             return False
         except Exception as exc:
             logger.error("Could not pull engine image %s: %s", image, exc)
+            self._launch_error = engine_image_missing_message(image, detail=str(exc))
             return False
         if out.returncode != 0:
-            logger.error("Failed to pull engine image %s: %s", image,
-                         (out.stderr or out.stdout or "").strip()[-400:])
+            said = (out.stderr or out.stdout or "").strip()[-400:]
+            logger.error("Failed to pull engine image %s: %s", image, said)
+            self._launch_error = engine_image_missing_message(image, detail=said)
             return False
         logger.info("Pulled engine image %s", image)
+        self._launch_error = ""
         return True
 
     def _image_entrypoint(self, image: str) -> List[str]:

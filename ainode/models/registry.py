@@ -128,13 +128,13 @@ class ModelInfo:
     created_at: str = ""
     downloads: int = 0
     likes: int = 0
-    # Capabilities, inferred from HF tags or model ID, except "embedding", which
-    # is only ever stated by a curated entry: it is not a feature added on top of
-    # chat but the whole of what the model does, and the interface reads it to draw
-    # an Embedding chip instead of chat controls and to keep the entry out of the
-    # chat model picker.
+    # Capabilities, inferred from HF tags or model ID, except "embedding" and
+    # "speech", which are only ever stated by a curated entry: neither is a feature
+    # added on top of chat but the whole of what the model does, and the interface
+    # reads them to draw an Embedding or Speech chip instead of chat controls and to
+    # keep the entry out of the chat model picker.
     capabilities: list = None  # ["vision", "tool_use", "reasoning", "code",
-    #                             "multilingual", "embedding"]
+    #                             "multilingual", "embedding", "speech"]
     architecture: str = ""
     format: str = ""  # "safetensors", "gguf", "awq", etc.
     # ---- Launch recipe (proven config, applied automatically on load) --------
@@ -564,6 +564,69 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         ],
         # 1.2 GB of weights and no KV cache worth the name: 6 percent of a GB10 is
         # enough, which is what makes this a model you leave running.
+        recommended_gmu=0.06,
+    ),
+    "whisper-large-v3-turbo": ModelInfo(
+        id="whisper-large-v3-turbo",
+        name="Whisper Large v3 Turbo",
+        hf_repo="openai/whisper-large-v3-turbo",
+        size_gb=1.6,
+        description=(
+            "Speech to text: 809M parameters, 99 languages, transcription only. "
+            "Served by vLLM on POST /v1/audio/transcriptions, which AINode routes "
+            "across the fleet the way it routes a chat completion, except that the "
+            "model id arrives as a multipart form field beside the audio file "
+            "instead of in a JSON body. 1.6 GB of weights and a 448-token decoder "
+            "window, so at 6 percent of a GB10 it stacks beside a chat model and "
+            "one instance serves every node. Turbo is a transcription model and "
+            "cannot translate: vLLM's own note says so, and /v1/audio/translations "
+            "is proxied for the ASR models that can. Needs an engine image with "
+            "vLLM's audio extras (librosa, soundfile): no image on the fleet ships "
+            "them, and vLLM imports soundfile at module scope as soon as the served "
+            "model reports the transcription task, so the stock image dies at "
+            "startup before it binds a port. The image below is the stock GB10 "
+            "build plus those two libraries, published by CI from "
+            "scripts/Dockerfile.whisper, so a node pulls it the way it pulls any "
+            "other engine image."
+        ),
+        quantization=None, min_memory_gb=4, family="whisper", params_b=0.81,
+        arch="dense",
+        # Not verified, and deliberately not dressed up as it: the engine has not
+        # served on this hardware yet. Both nodes with room to stack were full
+        # when it was tried (2026-09-19: CUDA out of memory at context creation on
+        # a node with 3 GB free), and a True flip needs a bench record to name,
+        # which needs a speech section in the bench. Both are follow-ups.
+        proven_tp=1, verified=False, recommended=True, curated=True,
+        # 448 is Whisper's decoder window, which is what the engine reports as
+        # max_model_len. The 30-second audio chunk is an encoder property and is
+        # not a context length.
+        context_length=448, license="MIT",
+        format="safetensors",
+        # Not a chat capability: this model answers the two audio paths and no
+        # chat path, so the interface reads it the way it reads "embedding".
+        capabilities=["speech"],
+        # Published by .github/workflows/publish-whisper-image.yml, so LAUNCH works
+        # on a node that has never built anything: an entry pinning a hand-built
+        # tag is a button that fails everywhere else, which is the defect the
+        # training image had before CI published it (#192). The tag is the BASE
+        # engine image's tag, not an AINode version, because this image tracks the
+        # engine it derives from and an AINode release does not rebuild it.
+        engine_image="ghcr.io/getainode/ainode-whisper:0.17.0-t5",
+        # A recipe dtype is explicit, so this is the recipe saying auto rather
+        # than inheriting a node's fp8 default: fp8 KV buys nothing across a
+        # 448-token window and is not a combination anyone has proven on an
+        # encoder-decoder model here.
+        kv_cache_dtype="auto",
+        extra_vllm_args=[
+            # Pinning a non-default engine image turns OFF the backend's
+            # automatic GB10 workaround (nvidia.py::_legacy_gb10_args), and this
+            # image is the 0.17 build that workaround exists for, so the recipe
+            # states it: FlashInfer's prefill kernel illegal-instructions under
+            # CUDA-graph capture on GB10.
+            "--enforce-eager",
+        ],
+        # 1.6 GB of weights and a tiny KV cache: 6 percent of a GB10 is enough,
+        # which is what makes this a model you leave running beside a chat model.
         recommended_gmu=0.06,
     ),
     "deepseek-v4-flash-dspark": ModelInfo(

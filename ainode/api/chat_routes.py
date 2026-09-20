@@ -727,12 +727,31 @@ async def probe_caps(session, host: str, port: int, model: str) -> dict:
     return caps
 
 
+#: Catalog capability that means the model answers the speech-to-text paths
+#: (``/v1/audio/transcriptions``, ``/v1/audio/translations``) and has no chat
+#: endpoint at all. Stated by a curated entry, never inferred from a name, for
+#: the same reason ``embedding`` is: it is the whole of what the model does.
+SPEECH_CAPABILITY = "speech"
+
+
+def catalog_capabilities(model: str) -> list:
+    """The capabilities the catalog states for this model id or repo."""
+    info = catalog_entry(model)
+    return [str(c) for c in (getattr(info, "capabilities", None) or [])]
+
+
 async def handle_model_caps(request: web.Request) -> web.Response:
     """GET /api/models/caps?model=<id>[&node_id=][&port=][&fresh=1]
 
     Cached per (node, port, model) because each probe is a real engine request;
     ``fresh=1`` drops the cached answer first, which is what you want after an
     engine relaunch changed the flags.
+
+    A speech model is answered from the catalog and never probed: both probes are
+    chat completions, and a Whisper engine serves no chat path, so probing one
+    would spend two request timeouts to learn that a transcription model does not
+    take a tools array. ``vision`` and ``tools`` stay null there, which is what
+    they are: not refused, never asked.
     """
     model = (request.query.get("model") or "").strip()
     if not model:
@@ -749,20 +768,29 @@ async def handle_model_caps(request: web.Request) -> web.Response:
             {"error": {"message": f"'{model}' is not being served by any node",
                        "type": "model_not_found"}}, status=404)
 
-    cache = caps_cache(app)
-    key = (entry["node_id"], entry["port"], model)
-    if request.query.get("fresh"):
-        cache.pop(key, None)
-    if key not in cache:
-        cache[key] = await probe_caps(app.get("client_session"),
-                                      entry["host"], entry["port"], model)
-        cache[key]["probed"] = True
-    caps = dict(cache[key])
+    speech = SPEECH_CAPABILITY in catalog_capabilities(model)
+    if speech:
+        caps = {"vision": None, "tools": None,
+                "vision_error": None, "tools_error": None, "probed": False}
+    else:
+        cache = caps_cache(app)
+        key = (entry["node_id"], entry["port"], model)
+        if request.query.get("fresh"):
+            cache.pop(key, None)
+        if key not in cache:
+            cache[key] = await probe_caps(app.get("client_session"),
+                                          entry["host"], entry["port"], model)
+            cache[key]["probed"] = True
+        caps = dict(cache[key])
     caps.update({
         "model": model,
         "node_id": entry["node_id"],
         "node_name": entry["node_name"],
         "port": entry["port"],
+        # Speech to text: stated by the catalog, not probed. The engine serves
+        # /v1/audio/transcriptions and /v1/audio/translations and no chat path,
+        # so the two chat probes above are not asked of it at all.
+        "speech": speech,
         # Reasoning is never probed: one prompt cannot separate "will not think"
         # from "did not think this time". The client marks it from turns seen.
         "reasoning": None,

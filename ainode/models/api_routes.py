@@ -851,7 +851,14 @@ def append_solo_instance(app, model: str, gmu=None, *, overrides=None, persist: 
         return {"ok": False, "error": f"Launch failed: {exc}", "status": 500}
     if not ok:
         _clear()
-        return {"ok": False, "error": "Failed to launch engine", "status": 500}
+        # The backend's own words when it has them: a launch refused because the
+        # recipe's engine image is not on this node and could not be pulled is
+        # fixable, and only if the answer names the image (see
+        # backends/base.py::launch_error).
+        return {"ok": False,
+                "error": (getattr(backend, "launch_error", "")
+                          or "Failed to launch engine"),
+                "status": 500}
 
     manager.add(InstanceRecord(
         instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
@@ -1721,7 +1728,11 @@ async def handle_model_load(request: web.Request) -> web.Response:
                 return web.json_response({"error": f"Launch failed: {exc}"}, status=500)
             if not success:
                 _clear_model_claim()
-                return web.json_response({"error": "Failed to launch engine"}, status=500)
+                # Same reason as the solo path: report the backend's own sentence
+                # when it has one, because a missing engine image names its fix.
+                return web.json_response(
+                    {"error": (getattr(engine, "launch_error", "")
+                               or "Failed to launch engine")}, status=500)
             asyncio.get_event_loop().create_task(hold_launch_slot_until_bound(
                 request.app, getattr(config, "api_port", 8000), engine, label))
             handed_off = True

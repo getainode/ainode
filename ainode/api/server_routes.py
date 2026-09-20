@@ -182,6 +182,8 @@ ENDPOINT_CATALOG = {
         {"method": "POST", "path": "/v1/chat/completions", "description": "Chat completions (OpenAI)"},
         {"method": "POST", "path": "/v1/completions", "description": "Text completions (OpenAI)"},
         {"method": "POST", "path": "/v1/embeddings", "description": "Generate embeddings (OpenAI-compatible): routed by model id to the node serving it, or in-process via sentence-transformers when no node does"},
+        {"method": "POST", "path": "/v1/audio/transcriptions", "description": "Speech to text (OpenAI-compatible): multipart, with the model id as a form field beside the audio file, routed to the node serving that model"},
+        {"method": "POST", "path": "/v1/audio/translations", "description": "Speech to English text, for the ASR models that translate (whisper-large-v3-turbo transcribes only)"},
     ],
     "anthropic": [
         {"method": "POST", "path": "/v1/messages", "description": "Anthropic Messages API, forwarded to the node serving the requested model"},
@@ -234,6 +236,11 @@ def _local_parallel(app, model: str, port: int) -> int:
 #: picker (`app.js::refreshChatFleet`) and out of the card's chat controls.
 _LLM_KIND = ("llm", ("chat", "completions"))
 _EMBED_KIND = ("embed", ("embeddings",))
+#: A speech-to-text instance is the same story: an ordinary stacked vLLM instance
+#: whose model happens to answer the two audio paths and no chat path, so only the
+#: catalog entry knows, and the browser needs `type` to keep it out of the chat
+#: and bench pickers the way it keeps an embedding model out.
+_SPEECH_KIND = ("speech", ("transcriptions", "translations"))
 
 
 def serving_kind(model: str) -> tuple[str, list]:
@@ -252,7 +259,12 @@ def serving_kind(model: str) -> tuple[str, list]:
             for cid, info in (table or {}).items():
                 if model in (getattr(info, "hf_repo", ""), cid):
                     caps = list(getattr(info, "capabilities", None) or [])
-                    kind = _EMBED_KIND if "embedding" in caps else _LLM_KIND
+                    if "embedding" in caps:
+                        kind = _EMBED_KIND
+                    elif "speech" in caps:
+                        kind = _SPEECH_KIND
+                    else:
+                        kind = _LLM_KIND
                     return kind[0], list(kind[1])
     except Exception:  # pragma: no cover - defensive
         logger.exception("failed to read the catalog for %s", model)
