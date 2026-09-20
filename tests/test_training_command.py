@@ -366,11 +366,94 @@ def test_assert_image_present_reports_a_missing_docker(monkeypatch):
 
 
 def test_job_image_follows_the_method(monkeypatch, tmp_path):
-    assert _container_job(monkeypatch, tmp_path)._job_image() == tr_engine.TRAIN_IMAGE
+    """Both job kinds run the same build, and each reads its own override first."""
+    monkeypatch.setattr(tr_engine, "_image_present", lambda image: False)
+    monkeypatch.setenv("AINODE_TRAIN_IMAGE", "train/override:1")
+    monkeypatch.setenv("AINODE_QUANT_IMAGE", "quant/override:1")
+    assert _container_job(monkeypatch, tmp_path)._job_image() == "train/override:1"
     quant = _container_job(
         monkeypatch, tmp_path, method="quantize", dataset_path="", scheme="awq",
     )
-    assert quant._job_image() == tr_engine.QUANT_IMAGE
+    assert quant._job_image() == "quant/override:1"
+
+
+# ---- Image resolution order (issue #192) ------------------------------------
+
+def test_image_candidates_prefer_the_override_then_ghcr_then_the_local_tag(monkeypatch):
+    monkeypatch.setenv("AINODE_TRAIN_IMAGE", "operator/pinned:9")
+    monkeypatch.delenv("AINODE_QUANT_IMAGE", raising=False)
+    assert tr_engine.job_image_candidates("lora") == [
+        "operator/pinned:9",
+        tr_engine.ghcr_train_image(),
+        tr_engine.LOCAL_TRAIN_IMAGE,
+    ]
+
+
+def test_image_candidates_without_an_override_are_ghcr_then_local(monkeypatch):
+    monkeypatch.delenv("AINODE_TRAIN_IMAGE", raising=False)
+    monkeypatch.delenv("AINODE_QUANT_IMAGE", raising=False)
+    assert tr_engine.job_image_candidates("lora") == [
+        tr_engine.ghcr_train_image(),
+        tr_engine.LOCAL_TRAIN_IMAGE,
+    ]
+
+
+def test_the_release_tag_is_the_running_version():
+    """The engine looks for the tag publish-train-image.yml publishes for this
+    release, so the version in the tag is the version of the running package."""
+    from ainode import __version__
+    assert tr_engine.ghcr_train_image() == f"ghcr.io/getainode/ainode-train:{__version__}"
+
+
+def test_a_quantize_job_reads_its_own_override_first(monkeypatch):
+    monkeypatch.setenv("AINODE_TRAIN_IMAGE", "train/override:1")
+    monkeypatch.setenv("AINODE_QUANT_IMAGE", "quant/override:1")
+    assert tr_engine.job_image_candidates("quantize")[0] == "quant/override:1"
+    assert tr_engine.job_image_candidates("lora")[0] == "train/override:1"
+
+
+def test_resolution_picks_the_first_image_the_node_has(monkeypatch):
+    monkeypatch.delenv("AINODE_TRAIN_IMAGE", raising=False)
+    monkeypatch.delenv("AINODE_QUANT_IMAGE", raising=False)
+    # A Spark: no release image pulled, the June hand-built tag present.
+    monkeypatch.setattr(
+        tr_engine, "_image_present",
+        lambda image: image == tr_engine.LOCAL_TRAIN_IMAGE,
+    )
+    assert tr_engine.resolve_job_image("lora") == tr_engine.LOCAL_TRAIN_IMAGE
+    assert tr_engine.assert_job_image_present("lora") == tr_engine.LOCAL_TRAIN_IMAGE
+
+
+def test_resolution_falls_back_to_the_preferred_candidate_when_nothing_is_there(monkeypatch):
+    """resolve_job_image never raises: it builds an argv, and the preflight is
+    what rejects the job."""
+    monkeypatch.delenv("AINODE_TRAIN_IMAGE", raising=False)
+    monkeypatch.setattr(tr_engine, "_image_present", lambda image: False)
+    assert tr_engine.resolve_job_image("lora") == tr_engine.ghcr_train_image()
+
+
+def test_the_preflight_names_all_three_candidates(monkeypatch):
+    """The whole point of #192: a fresh node used to get docker exit 125."""
+    monkeypatch.setenv("AINODE_TRAIN_IMAGE", "operator/pinned:9")
+    monkeypatch.setattr(tr_engine, "_image_present", lambda image: False)
+    with pytest.raises(RuntimeError) as exc:
+        tr_engine.assert_job_image_present("lora")
+    message = str(exc.value)
+    assert "operator/pinned:9" in message
+    assert tr_engine.ghcr_train_image() in message
+    assert tr_engine.LOCAL_TRAIN_IMAGE in message
+    assert "docker pull" in message
+    assert "scripts/Dockerfile.quant" in message
+
+
+def test_a_broken_docker_is_reported_as_a_broken_docker(monkeypatch):
+    """Not as "no training image": the operator would go build an image they have."""
+    def boom(args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(tr_engine.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="docker is not installed"):
+        tr_engine.assert_job_image_present("lora")
 
 
 # ---- Retired templates ------------------------------------------------------

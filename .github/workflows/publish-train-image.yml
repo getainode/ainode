@@ -1,0 +1,204 @@
+name: publish-train-image
+# Build + publish the AINode TRAINING job image (scripts/Dockerfile.quant) to GHCR
+# as ghcr.io/getainode/ainode-train:<version>.
+#
+# Why this workflow exists: training, quantize and merge jobs do not run in the
+# slim orchestrator (no torch), they spawn this image. Until 0.5.27 it was
+# hand-built on each Spark and published nowhere, so on any node that had not
+# built it every job died with docker exit 125. The engine now resolves its job
+# image as AINODE_TRAIN_IMAGE, then ghcr.io/getainode/ainode-train:<ainode
+# version>, then the local hand-built ainode-quant tag (see
+# ainode/training/engine.py::job_image_candidates), so a tag published here is
+# what a fresh node uses.
+#
+# COST, read before running: the image is the vLLM base plus llm-compressor,
+# about 22 GB, and the build plus the push takes well over an hour on a Spark.
+# Nothing triggers it by accident: a 'train-v*' tag or a manual dispatch only.
+# A normal AINode release does NOT need a rebuild.
+#
+# How to run it
+#
+#   Publish for a release (the usual case):
+#     git tag train-v0.5.27 && git push origin train-v0.5.27
+#   VERSION comes from the tag with 'train-v' stripped, and must match
+#   pyproject.toml, because that is the tag the engine looks for.
+#
+#   Manual build, no push (smoke test the Dockerfile):
+#     gh workflow run publish-train-image.yml -f push=false -f version=0.5.27
+#
+#   Serve more AINode versions from one build (cheap: same digest, extra tags,
+#   the layers are already in the registry so nothing is re-uploaded):
+#     gh workflow run publish-train-image.yml -f push=true -f version=0.5.27 \
+#       -f alias_versions=0.5.28,0.5.29
+#
+# Self-hosted runner prerequisites are the same as publish-image.yml: labels
+# [self-hosted, dgx-spark, aarch64], docker + nvidia-container-toolkit, the
+# runner user in the docker group, and GITHUB_TOKEN with packages:write.
+
+on:
+  push:
+    tags:
+      - 'train-v*'
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the image to GHCR? (false = build-only smoke test)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      version:
+        description: "Image version tag (must match pyproject.toml for the engine to find it)"
+        required: true
+        default: "0.5.27"
+        type: string
+      alias_versions:
+        description: "Extra AINode versions to tag this same image with (comma separated, optional)"
+        required: false
+        default: ""
+        type: string
+      base_image:
+        description: "Base image for Dockerfile.quant"
+        required: false
+        default: "scitrera/dgx-spark-vllm:0.17.0-t5"
+        type: string
+
+jobs:
+  build:
+    runs-on: [self-hosted, dgx-spark, aarch64]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPO: ghcr.io/getainode/ainode-train
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version and push mode
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag-triggered: train-v0.5.27 -> 0.5.27, always push.
+            ref="${{ github.ref_name }}"
+            version="${ref#train-v}"
+            push="true"
+          else
+            version="${{ inputs.version }}"
+            push="${{ inputs.push }}"
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::Could not determine a version to tag the image with."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "TRAIN_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Resolved version=$version push=$push (event=${{ github.event_name }})"
+
+      # The engine looks for ghcr.io/getainode/ainode-train:<running ainode
+      # version>, so a tag that does not match pyproject.toml publishes an image
+      # no node will ask for. Hard failure on a tag push; a manual dispatch may
+      # legitimately (re)build for an older version, so there it only warns.
+      - name: Check the version against pyproject.toml
+        run: |
+          pyproj_version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$pyproj_version" = "$TRAIN_VERSION" ]; then
+            echo "Version match: $pyproj_version"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error::pyproject.toml version ($pyproj_version) does not match the tag version ($TRAIN_VERSION)."
+            exit 1
+          else
+            echo "::warning::pyproject.toml is $pyproj_version but this build tags $TRAIN_VERSION." \
+                 "Only a node running AINode $TRAIN_VERSION will resolve this image by default."
+          fi
+
+      - name: Resolve base image
+        id: base
+        run: |
+          base="${{ inputs.base_image }}"
+          if [ -z "$base" ]; then
+            base=$(grep -m1 '^ARG BASE=' scripts/Dockerfile.quant | sed -E 's/^ARG BASE=//')
+          fi
+          echo "image=$base" >> "$GITHUB_OUTPUT"
+          echo "Base image: $base"
+
+      # About 22 GB and well over an hour from cold. Layers are cached per runner,
+      # so a rebuild that only changes _run_quant.py is fast.
+      - name: Build the train image
+        run: |
+          docker build \
+            -f scripts/Dockerfile.quant \
+            --build-arg BASE="${{ steps.base.outputs.image }}" \
+            -t "${IMAGE_REPO}:${TRAIN_VERSION}" \
+            -t "${IMAGE_REPO}:latest" \
+            .
+
+      # No GPU needed: the runner's --help path imports nothing CUDA-bound, and
+      # llmcompressor is the one thing this image adds over the base.
+      - name: Smoke test the image
+        run: |
+          # No arguments: the image's CMD is the quant runner's --help, and its
+          # ENTRYPOINT is empty, so any argument here would REPLACE that command.
+          docker run --rm "${IMAGE_REPO}:${TRAIN_VERSION}" | head -5
+          # llmcompressor is the one thing this image adds over the base, and the
+          # runner needs torch and transformers. Versions come from
+          # importlib.metadata, because not all three expose __version__.
+          docker run --rm --entrypoint python3 "${IMAGE_REPO}:${TRAIN_VERSION}" -c "import importlib.metadata as md, llmcompressor, torch, transformers; print('llmcompressor', md.version('llmcompressor'), 'torch', md.version('torch'), 'transformers', md.version('transformers'))"
+
+      - name: Report the image size
+        run: |
+          docker image inspect "${IMAGE_REPO}:${TRAIN_VERSION}" \
+            --format '{{.Size}}' | awk '{printf "image size: %.1f GB\n", $1/1000000000}'
+
+      - name: Login to GHCR
+        if: steps.vars.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the train image
+        if: steps.vars.outputs.push == 'true'
+        run: |
+          docker push "${IMAGE_REPO}:${TRAIN_VERSION}"
+          docker push "${IMAGE_REPO}:latest"
+
+      # One build can answer for several AINode releases: the digest is already in
+      # the registry, so an alias tag uploads nothing but the manifest.
+      - name: Push alias version tags
+        if: steps.vars.outputs.push == 'true' && inputs.alias_versions != ''
+        run: |
+          IFS=',' read -ra aliases <<< "${{ inputs.alias_versions }}"
+          for alias in "${aliases[@]}"; do
+            alias="$(echo "$alias" | tr -d '[:space:]')"
+            if [ -z "$alias" ]; then
+              continue
+            fi
+            echo "tagging ${IMAGE_REPO}:${alias}"
+            docker tag "${IMAGE_REPO}:${TRAIN_VERSION}" "${IMAGE_REPO}:${alias}"
+            docker push "${IMAGE_REPO}:${alias}"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "## AINode train image"
+            echo ""
+            echo "**Tag:** \`${IMAGE_REPO}:${TRAIN_VERSION}\`"
+            echo "**Base:** \`${{ steps.base.outputs.image }}\`"
+            echo "**Pushed:** \`${{ steps.vars.outputs.push }}\`"
+            echo ""
+            if [ "${{ steps.vars.outputs.push }}" = "true" ]; then
+              echo "A node running AINode \`${TRAIN_VERSION}\` resolves this image with no"
+              echo "configuration. Any other node needs the pull plus the override:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "docker pull ${IMAGE_REPO}:${TRAIN_VERSION}"
+              echo "sudo systemctl set-environment AINODE_TRAIN_IMAGE=${IMAGE_REPO}:${TRAIN_VERSION}"
+              echo "\`\`\`"
+            else
+              echo "_Build-only smoke test: GHCR was not touched._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

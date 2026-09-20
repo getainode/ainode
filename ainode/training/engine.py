@@ -21,6 +21,9 @@ from ainode.core.config import AINODE_HOME
 
 TRAINING_DIR = AINODE_HOME / "training"
 JOBS_DIR = TRAINING_DIR / "jobs"
+# Per-job state file, written at every status transition and read back at
+# startup. The job registry is rebuilt from these.
+STATUS_FILENAME = "status.json"
 
 
 class TrainingMethod(str, Enum):
@@ -37,12 +40,51 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-QUANT_IMAGE = os.environ.get("AINODE_QUANT_IMAGE") or "ainode-quant:0.17.0-t5"
-# LoRA / adapter-merge jobs run in a spawned GPU container too — the slim
-# orchestrator image has no torch/peft/datasets. Default to the quant image
-# (torch 2.10 / transformers 5.10 / datasets 5.0 / accelerate 1.13; peft is
-# pip-shimmed at launch, see _build_container_command). Override per-deploy.
-TRAIN_IMAGE = os.environ.get("AINODE_TRAIN_IMAGE") or QUANT_IMAGE
+# Every training, quantize and merge job runs in a spawned GPU container: the
+# slim orchestrator image has no torch/peft/datasets. Which image that is has
+# three answers, tried in this order (see job_image_candidates):
+#
+#   1. AINODE_TRAIN_IMAGE / AINODE_QUANT_IMAGE, an operator's explicit override.
+#   2. ghcr.io/getainode/ainode-train:<this AINode version>, the release image,
+#      published by .github/workflows/publish-train-image.yml on a train-v* tag.
+#   3. ainode-quant:0.17.0-t5, the tag the four Sparks built by hand in June
+#      2026 and nothing else in the world has.
+#
+# Until 0.5.27 only (3) existed and CI published nothing, so every training,
+# quantize and merge job on a node that had not built it died with docker exit
+# 125 and a log the operator had to decode.
+LOCAL_TRAIN_IMAGE = "ainode-quant:0.17.0-t5"
+GHCR_TRAIN_REPO = "ghcr.io/getainode/ainode-train"
+
+
+def ghcr_train_image() -> str:
+    """The release train image for the AINode version this process is running."""
+    try:
+        from ainode import __version__
+    except ImportError:  # pragma: no cover - the package importing itself
+        return f"{GHCR_TRAIN_REPO}:latest"
+    return f"{GHCR_TRAIN_REPO}:{__version__}"
+
+
+def job_image_candidates(method: str = "lora") -> list[str]:
+    """Container images a job of ``method`` should try, best first.
+
+    A pure function of the environment and the running version, so the order is
+    testable without a docker daemon. The quantize and training images are the
+    same build; their env overrides are read in the order that matches the job."""
+    env_keys = (
+        ("AINODE_QUANT_IMAGE", "AINODE_TRAIN_IMAGE") if method == "quantize"
+        else ("AINODE_TRAIN_IMAGE", "AINODE_QUANT_IMAGE")
+    )
+    candidates: list[str] = []
+    for key in env_keys:
+        value = (os.environ.get(key) or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+    for value in (ghcr_train_image(), LOCAL_TRAIN_IMAGE):
+        if value not in candidates:
+            candidates.append(value)
+    return candidates
 
 
 SECRET_ENV_KEYS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
@@ -136,6 +178,61 @@ def _assert_image_present(image: str) -> None:
         )
 
 
+def _image_present(image: str) -> bool:
+    """True when the local docker daemon already has ``image``.
+
+    A broken docker (absent, or not answering) is NOT a missing image and is
+    re-raised by the caller, so an operator never reads "no training image" when
+    the real problem is the daemon."""
+    _assert_image_present(image)
+    return True
+
+
+def resolve_job_image(method: str = "lora") -> str:
+    """First candidate image this node actually has, else the preferred one.
+
+    Never raises: it is called while BUILDING the launch command, and a command
+    with a missing image in it is caught a moment later by
+    ``assert_job_image_present``. Returning the preferred candidate keeps the
+    argv (and every test that pins it) meaningful on a machine with no docker."""
+    candidates = job_image_candidates(method)
+    for image in candidates:
+        try:
+            if _image_present(image):
+                return image
+        except RuntimeError:
+            continue
+    return candidates[0]
+
+
+def assert_job_image_present(method: str = "lora") -> str:
+    """Return the image a ``method`` job will run, or raise naming every candidate.
+
+    The preflight that replaced ``docker`` exit 125. The message names all three
+    resolution steps, because which one an operator should fix depends on the
+    node: a release node pulls the ghcr tag, a Spark built the local tag by hand,
+    and a custom deploy sets the override."""
+    candidates = job_image_candidates(method)
+    for image in candidates:
+        try:
+            if _image_present(image):
+                return image
+        except RuntimeError as exc:
+            message = str(exc)
+            if "docker is not installed" in message or "did not answer" in message:
+                raise
+    tried = "\n".join(f"  {n}. {image}" for n, image in enumerate(candidates, 1))
+    raise RuntimeError(
+        "No training image is present on this node, so the job cannot start. "
+        f"Tried, in order:\n{tried}\n"
+        f"Fix it with one of: docker pull {ghcr_train_image()} (the release image, "
+        "published by .github/workflows/publish-train-image.yml); docker build -f "
+        f"scripts/Dockerfile.quant -t {LOCAL_TRAIN_IMAGE} . (about 22 GB, an hour "
+        "on a Spark); or set AINODE_TRAIN_IMAGE / AINODE_QUANT_IMAGE to an image "
+        "this node already has."
+    )
+
+
 def _host_path(container_path: str) -> str:
     """Translate an AINODE_HOME path (orchestrator *container* view) to the host
     path so a docker ``-v`` SOURCE resolves on the host daemon. Mirrors
@@ -148,6 +245,31 @@ def _host_path(container_path: str) -> str:
     if container_path == home or container_path.startswith(home + os.sep):
         return host_home.rstrip("/") + container_path[len(home):]
     return container_path
+
+
+# Where a resumed job sees the job directory it is resuming FROM.
+RESUME_MOUNT = "/src"
+
+
+def _resume_mount_for(checkpoint: Path) -> tuple[Path, str]:
+    """Return (directory to mount at ``/src``, container path of the checkpoint).
+
+    Resume handed the container the orchestrator's own checkpoint path with
+    nothing mounted behind it, so HF answered "Can't find a valid checkpoint" and
+    the button could not work in container mode. Mount the whole SOURCE JOB dir,
+    not just the checkpoint: a checkpoint is resumed together with the sibling
+    files of its run, and mounting one level up costs nothing (read-only).
+
+    A checkpoint outside the jobs tree (a job with a hand-set ``output_dir``)
+    falls back to its own parent, which is the least that still resolves."""
+    try:
+        relative = checkpoint.relative_to(JOBS_DIR)
+    except ValueError:
+        return checkpoint.parent, f"{RESUME_MOUNT}/{checkpoint.name}"
+    parts = relative.parts
+    if len(parts) < 2:
+        return checkpoint.parent, f"{RESUME_MOUNT}/{checkpoint.name}"
+    return JOBS_DIR / parts[0], RESUME_MOUNT + "/" + "/".join(parts[1:])
 
 
 def _loadable_dir(d: Path) -> Optional[Path]:
@@ -425,7 +547,7 @@ class TrainingJob:
     def __init__(self, config: TrainingConfig, job_id: Optional[str] = None):
         self.job_id: str = job_id or uuid.uuid4().hex[:12]
         self.config = config
-        self.status: JobStatus = JobStatus.PENDING
+        self._status: JobStatus = JobStatus.PENDING
         self.progress: float = 0.0
         self.current_epoch: int = 0
         self.current_loss: Optional[float] = None
@@ -434,6 +556,19 @@ class TrainingJob:
         self.logs: collections.deque[str] = collections.deque(maxlen=5000)
         self._process: Optional[subprocess.Popen] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        # Set when this job was rebuilt from its directory rather than submitted
+        # in this process, with a sentence saying what the rebuild concluded and
+        # from what. Served with the job so nothing reads a reconstruction as a
+        # measurement.
+        self.note: Optional[str] = None
+        self.restored: bool = False
+        # Resolved container image, memoized: resolution asks the docker daemon,
+        # and the command builder and the preflight must agree on the answer.
+        self._image: Optional[str] = None
+        # Called with this job when its monitored process exits, so the manager
+        # can release the GPU slot and start the next queued job without waiting
+        # for a submit (until 0.5.27 the queue only advanced from an HTTP call).
+        self._on_exit = None
         # Explicit override for the spawned GPU container name. Set by callers
         # whose container is spawned outside the normal start() path (merge jobs),
         # so stop() can still `docker kill` it. None → derive from method/job_id.
@@ -446,6 +581,48 @@ class TrainingJob:
         # Job working directory
         self._job_dir = JOBS_DIR / self.job_id
         self._job_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def status(self) -> JobStatus:
+        return self._status
+
+    @status.setter
+    def status(self, value: JobStatus) -> None:
+        """Every status change writes the job's status file.
+
+        A setter rather than a call at each transition because there are eight
+        places that move a job's status (engine, monitor, merge runner) and one of
+        them forgetting is exactly how the registry would drift from the disk
+        again."""
+        changed = value != self._status
+        self._status = value
+        if changed:
+            self._write_status()
+
+    def _write_status(self) -> None:
+        """Persist this job to ``<job dir>/status.json``.
+
+        The registry is rebuilt from these files at startup. Until 0.5.27 the job
+        table lived only in ``TrainingManager._jobs``, so a restart emptied the
+        Runs table, zeroed the stats tiles and 404'd merge, resume, logs and
+        artifact download for every job that came before, while the job dirs sat
+        on disk the whole time.
+
+        Secrets are stripped exactly as ``config.json`` strips them: this file
+        lives in a directory the job API reads."""
+        payload = self.get_status()
+        payload["config"] = _config_without_secrets(self.config)
+        payload["written_at"] = time.time()
+        payload["schema"] = 1
+        try:
+            self._job_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._job_dir / (STATUS_FILENAME + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=2))
+            tmp.replace(self._job_dir / STATUS_FILENAME)
+        except OSError as exc:
+            # A job that cannot write its status file still runs; it just will not
+            # survive a restart. Never take the run down for it.
+            self.logs.append(f"WARNING: could not write {STATUS_FILENAME}: {exc}")
 
     async def start(self) -> None:
         """Launch the training subprocess.
@@ -482,7 +659,7 @@ class TrainingJob:
             # Preflight the image before Popen. Without it a missing train image is
             # a docker exit 125 the operator has to decode from the job log.
             if cmd and cmd[0] == "docker":
-                await loop.run_in_executor(None, _assert_image_present, self._job_image())
+                await loop.run_in_executor(None, self._assert_job_image)
 
             # Ensure output dir exists
             Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
@@ -499,16 +676,29 @@ class TrainingJob:
             self.status = JobStatus.FAILED
             self.end_time = time.time()
             self._log(f"Failed to start: {exc}")
+            self._write_status()
             raise
 
         # Popen returned: the job really is running now.
         self.status = JobStatus.RUNNING
         self.start_time = time.time()
+        self._write_status()
         self._monitor_task = asyncio.create_task(self._monitor())
 
     def _job_image(self) -> str:
-        """Container image this job's spawned container runs."""
-        return QUANT_IMAGE if self.config.method == "quantize" else TRAIN_IMAGE
+        """Container image this job's spawned container runs, memoized.
+
+        Resolution asks the docker daemon which candidate is present, so the image
+        baked into the launch command and the one the preflight checks must be the
+        same answer, not two probes that could disagree."""
+        if self._image is None:
+            self._image = resolve_job_image(self.config.method)
+        return self._image
+
+    def _assert_job_image(self) -> str:
+        """Preflight this job's image, raising if the node has none of them."""
+        self._image = assert_job_image_present(self.config.method)
+        return self._image
 
     async def stop(self) -> None:
         """Gracefully cancel a running job."""
@@ -585,6 +775,11 @@ class TrainingJob:
             "end_time": self.end_time,
             "elapsed_seconds": elapsed,
             "config": _config_for_api(self.config),
+            # Set only on a job rebuilt from its directory: what the rebuild
+            # concluded and from what. A reader must be able to tell a recorded
+            # status from a reconstructed one.
+            "restored": self.restored,
+            "note": self.note,
         }
 
     def _build_command(self, config_path: Path) -> list[str]:
@@ -605,7 +800,7 @@ class TrainingJob:
 
         # In the shipped (slim) orchestrator container there is no torch/peft, so
         # the in-process `python -m ...` path is dead on arrival. Spawn a GPU
-        # container from TRAIN_IMAGE instead — same pattern as quantize.
+        # container from the resolved train image instead, same pattern as quantize.
         if os.environ.get("AINODE_IN_CONTAINER"):
             if needs_ddp:
                 raise RuntimeError(
@@ -666,7 +861,10 @@ class TrainingJob:
         env_file = _write_token_env_file(self._job_dir, token)
         if env_file:
             cmd += ["--env-file", str(env_file)]
-        cmd += [QUANT_IMAGE, "python3", "/opt/ainode/run_quant.py", "--config", "/job/config.json"]
+        cmd += [
+            self._job_image(), "python3", "/opt/ainode/run_quant.py",
+            "--config", "/job/config.json",
+        ]
         return cmd
 
     def _build_container_command(self) -> list[str]:
@@ -721,6 +919,18 @@ class TrainingJob:
             # exists()-gated resolution.
             if (AINODE_HOME / "datasets" / ds).exists():
                 container_cfg["dataset_path"] = "/ainode-datasets/" + ds.lstrip("/")
+        # Resume: the checkpoint belongs to ANOTHER job, whose directory is not
+        # mounted and whose path is an orchestrator path this container cannot
+        # resolve. Mount that job dir read-only at /src and rewrite the path into
+        # it. Without both halves HF raises "Can't find a valid checkpoint" and
+        # resume simply cannot work in container mode (it never did until 0.5.27).
+        resume_mount: list[str] = []
+        checkpoint = (c._resume_from_checkpoint or "").strip()
+        if checkpoint:
+            source_dir, container_checkpoint = _resume_mount_for(Path(checkpoint))
+            container_cfg["_resume_from_checkpoint"] = container_checkpoint
+            resume_mount = ["-v", f"{_host_path(str(source_dir))}:{RESUME_MOUNT}:ro"]
+
         (self._job_dir / "config.container.json").write_text(json.dumps(container_cfg, indent=2))
 
         models_host = _host_path(str(AINODE_HOME / "models"))
@@ -735,6 +945,7 @@ class TrainingJob:
             "-v", f"{models_host}:/ainode-models",             # RW: HF cache + on-disk weights
             "-v", f"{datasets_host}:/ainode-datasets:ro",      # training data
             "-v", f"{jobdir_host}:/job",                       # runner + config + output
+            *resume_mount,                                     # RO: source job dir of a resume
             "-e", "HF_HUB_CACHE=/ainode-models/hf-cache",      # persist HF pulls into the store
             "-e", "AINODE_HOME=/job",                          # runner config fallback (relative datasets)
         ]
@@ -754,17 +965,23 @@ class TrainingJob:
             steps.append(_pip_install_step("bitsandbytes", self._job_dir, vendor=False))
         prep = " ; ".join(steps)
         cmd += [
-            TRAIN_IMAGE, "sh", "-c",
+            self._job_image(), "sh", "-c",
             f"{prep} ; python3 /job/_run_training.py --config /job/config.container.json",
         ]
         return cmd
 
     async def _monitor(self) -> None:
-        """Read subprocess output and update progress."""
+        """Read subprocess output and update progress.
+
+        Also the one place that knows a job has ENDED, so it is where the queue
+        advances: until 0.5.27 ``start_next`` only ran from an HTTP submit or
+        resume, so a queued job sat pending until somebody submitted another one.
+        """
         proc = self._process
         if proc is None or proc.stdout is None:
             return
 
+        cancelled = False
         loop = asyncio.get_event_loop()
         try:
             while True:
@@ -788,7 +1005,7 @@ class TrainingJob:
                     self.status = JobStatus.FAILED
                     self._log(f"Training process exited with code {rc}")
         except asyncio.CancelledError:
-            pass
+            cancelled = True
         finally:
             self.end_time = time.time()
             # The token env file exists only for the life of the container.
@@ -796,6 +1013,26 @@ class TrainingJob:
                 (self._job_dir / "hf.env").unlink(missing_ok=True)
             except OSError:
                 pass
+            # end_time and the final progress land after the status transition
+            # that wrote the file, so write the finished record once more.
+            self._write_status()
+
+        # A cancel already released the slot through cancel_job, and awaiting
+        # anything in a task that is being cancelled is asking for trouble.
+        if not cancelled:
+            await self._notify_exit()
+
+    async def _notify_exit(self) -> None:
+        """Tell the manager this job's process is gone, so the queue can move on."""
+        callback = self._on_exit
+        if callback is None:
+            return
+        try:
+            await callback(self)
+        except Exception as exc:
+            # A job that ended is ended: a failure to start the NEXT one is
+            # reported on this job's log, never raised out of the monitor task.
+            self._log(f"WARNING: could not start the next queued job: {exc}")
 
     async def _push_to_hf(self) -> None:
         """After a quantize job completes, push the on-disk checkpoint to HF.
@@ -853,7 +1090,7 @@ def build_merge_command(
     """Spawn a GPU container to merge a LoRA/QLoRA adapter into its base model.
 
     The slim orchestrator has no peft/torch, so — like training and quantize —
-    the merge runs in TRAIN_IMAGE. Copies the self-contained _run_merge.py into
+    the merge runs in the resolved train image. Copies the self-contained _run_merge.py into
     the merge job dir, mounts the adapter RO, the merged-output parent RW, and the
     models store (HF cache), and pip-shims peft at launch. Foreground: the caller
     streams AINODE_PROGRESS and the exit code signals completion."""
@@ -903,7 +1140,7 @@ def build_merge_command(
     # so a pip hiccup never blocks the runner (broken DNS killed a live merge here).
     peft_step = _pip_install_step("peft", job_dir, vendor=True)
     cmd += [
-        TRAIN_IMAGE, "sh", "-c",
+        merge_job._job_image(), "sh", "-c",
         f"{peft_step} ; python3 /job/_run_merge.py --config /job/merge_config.json",
     ]
     return cmd
@@ -924,7 +1161,14 @@ TRAINING_TEMPLATES: list[dict] = [
     {
         "id": "sharegpt-chat",
         "name": "Chat fine-tune (ShareGPT format)",
-        "description": "Multi-turn conversation tuning — human/gpt turns.",
+        # Truthful as of 0.5.27: the runner has a conversations branch that renders
+        # each row with the tokenizer's own chat template (from/value and
+        # role/content both accepted). Before that this tile advertised a shape
+        # tokenization raised IndexError on, and it is what AutoData writes.
+        "description": (
+            "Multi-turn conversation tuning on human/gpt turns, rendered with the "
+            "model's own chat template. This is what AutoData writes."
+        ),
         "method": "lora",
         "sample_shape": {"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]},
         "recommended_epochs": 2,
@@ -981,14 +1225,255 @@ def _detect_local_gpu_count() -> int:
     return 1
 
 
+# ---------------------------------------------------------------------------
+# Rebuilding the job registry from disk
+# ---------------------------------------------------------------------------
+
+# Files that say a run actually produced weights. Checked in the job's output dir
+# for a job dir written before status.json existed.
+ARTIFACT_MARKERS = (
+    "adapter_model.safetensors",
+    "adapter_model.bin",
+    "adapter_config.json",
+    "model.safetensors",
+    "pytorch_model.bin",
+)
+
+
+def _completed_artifact(job_dir: Path, config: TrainingConfig) -> Optional[str]:
+    """Path of the artifact that says this job finished, or None.
+
+    Best-effort, and only used for a job directory written before there was a
+    status file. A LoRA / full run leaves its weights under ``output/``; a merge
+    leaves a ``merged*/`` directory; a quantize job writes into the models store
+    rather than its job dir, so its checkpoint is looked up by ``out_slug``."""
+    if config.method == "quantize":
+        if not config.out_slug:
+            return None
+        checkpoint = AINODE_HOME / "models" / config.out_slug
+        return str(checkpoint) if (checkpoint / "config.json").exists() else None
+
+    candidates = []
+    if config.output_dir:
+        candidates.append(Path(config.output_dir))
+    candidates.append(job_dir / "output")
+    for out in candidates:
+        if not out.is_dir():
+            continue
+        for name in ARTIFACT_MARKERS:
+            if (out / name).exists():
+                return str(out / name)
+        # A checkpoint-N subdir is a run that got somewhere, even if the final
+        # save never happened.
+        for pattern in ("*.safetensors", "checkpoint-*/*.safetensors"):
+            for hit in sorted(out.glob(pattern)):
+                return str(hit)
+    for merged in sorted(job_dir.glob("merged*")):
+        if (merged / "config.json").exists():
+            return str(merged)
+    return None
+
+
+def _newest_mtime(job_dir: Path) -> Optional[float]:
+    """Newest modification time in the job dir, one level deep.
+
+    The only timestamp a legacy job dir really carries. Used as ``end_time`` so
+    the Runs table can sort; ``start_time`` stays unset, because a duration
+    nobody recorded must not be invented (``stats()`` counts GPU hours from it)."""
+    newest: Optional[float] = None
+    try:
+        entries = [job_dir, *job_dir.iterdir()]
+    except OSError:
+        return None
+    for entry in entries:
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest:
+            newest = mtime
+    return newest
+
+
+def _config_data_from_disk(job_dir: Path) -> Optional[dict]:
+    """Config of a job dir with no status file, from whatever it wrote.
+
+    ``config.json`` is written by ``start()``; a merge job only ever writes
+    ``merge_config.json``, so reconstruct the shape the merge path submits."""
+    config_path = job_dir / "config.json"
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text())
+            if isinstance(data, dict) and data.get("base_model"):
+                return data
+        except (OSError, json.JSONDecodeError):
+            return None
+    merge_path = job_dir / "merge_config.json"
+    if merge_path.exists():
+        try:
+            data = json.loads(merge_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if isinstance(data, dict):
+            return {
+                "base_model": data.get("base_model") or "unknown",
+                "dataset_path": "__merge__",
+                "method": "lora",
+                "output_dir": data.get("output_dir"),
+                "run_name": f"merge-{job_dir.name}",
+                "description": "merge job, rebuilt from merge_config.json",
+            }
+    return None
+
+
+def load_job_from_dir(job_dir: Path) -> Optional[TrainingJob]:
+    """Rebuild one job from its directory, or None if that directory is not a job.
+
+    A directory with neither a status file nor a config is NOT a run: the suite
+    left 6,000 empty job dirs under the developer's ~/.ainode before 0.5.26, and
+    resurrecting those as failed jobs would be a fabricated history.
+
+    Three cases:
+
+    * a status file with a terminal status: restored as recorded;
+    * a status file saying RUNNING: that process died with the restart, so the
+      job is FAILED with a note (a phantom RUNNING job also blocks the queue);
+    * no status file: a best-effort status from what is on disk, COMPLETED if
+      the run left weights behind, FAILED otherwise, always with a note saying
+      so. `start_time` stays unset so no invented duration reaches GPU hours.
+    """
+    if not job_dir.is_dir():
+        return None
+    data: dict = {}
+    status_path = job_dir / STATUS_FILENAME
+    if status_path.exists():
+        try:
+            loaded = json.loads(status_path.read_text())
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            data = {}
+
+    config_data = data.get("config") or _config_data_from_disk(job_dir)
+    if not isinstance(config_data, dict) or not config_data.get("base_model"):
+        return None
+    try:
+        config = TrainingConfig.from_dict(config_data)
+    except (TypeError, ValueError):
+        return None
+
+    job = TrainingJob(config, job_id=job_dir.name)
+    job.restored = True
+    recorded = data.get("status")
+    note: Optional[str]
+
+    if recorded:
+        try:
+            status = JobStatus(recorded)
+        except ValueError:
+            status = JobStatus.FAILED
+        note = data.get("note")
+        job.progress = float(data.get("progress") or 0.0)
+        job.current_epoch = int(data.get("current_epoch") or 0)
+        loss = data.get("current_loss")
+        job.current_loss = float(loss) if isinstance(loss, (int, float)) else None
+        job.start_time = data.get("start_time")
+        job.end_time = data.get("end_time")
+        if status in (JobStatus.RUNNING, JobStatus.PENDING):
+            # The process behind it is gone: this instance did not start it.
+            note = (
+                f"was {status.value} when AINode last stopped; the process did not "
+                "survive the restart, so this run is recorded as failed"
+            )
+            status = JobStatus.FAILED
+            job.end_time = job.end_time or _newest_mtime(job_dir)
+    else:
+        artifact = _completed_artifact(job_dir, config)
+        if artifact:
+            status = JobStatus.COMPLETED
+            note = (
+                "rebuilt from disk: no status file (this job ran before AINode "
+                f"0.5.27 wrote one), reported completed because {artifact} exists"
+            )
+            job.progress = 100.0
+        else:
+            status = JobStatus.FAILED
+            note = (
+                "rebuilt from disk: no status file (this job ran before AINode "
+                "0.5.27 wrote one) and no weights in its output dir, so it is "
+                "reported failed"
+            )
+            if config.dataset_path == "__merge__":
+                # A merge before 0.5.27 wrote into the SOURCE run's directory and
+                # its merge_config.json records only the container path, so its
+                # own job dir cannot say whether it worked.
+                note += (
+                    ". This is a merge job, and a merge before 0.5.27 wrote into "
+                    "the source run's directory, so its own job dir cannot show "
+                    "the merged model even if the merge succeeded"
+                )
+        job.end_time = _newest_mtime(job_dir)
+
+    job.note = note
+    job.logs.append(
+        f"[rebuilt] {job.job_id} restored from {job_dir}"
+        + (f": {note}" if note else "")
+    )
+    job.logs.append(
+        "[rebuilt] the live log of this run belonged to the process that wrote it "
+        "and is not on disk"
+    )
+    # Assigning through the property persists the corrected record, so the next
+    # restart reads a real status file instead of guessing again.
+    job.status = status
+    job._write_status()
+    return job
+
+
+def load_jobs_from_disk(jobs_dir: Optional[Path] = None) -> list[TrainingJob]:
+    """Rebuild every job under ``jobs_dir`` (default ``JOBS_DIR``), oldest first."""
+    root = jobs_dir or JOBS_DIR
+    if not root.is_dir():
+        return []
+    jobs: list[TrainingJob] = []
+    for entry in sorted(root.iterdir()):
+        try:
+            job = load_job_from_dir(entry)
+        except Exception:  # a single unreadable job dir must not break startup
+            job = None
+        if job is not None:
+            jobs.append(job)
+    jobs.sort(key=lambda j: (j.start_time or j.end_time or 0.0))
+    return jobs
+
+
 class TrainingManager:
     """Manage training jobs — one active at a time (GPU shared with inference)."""
 
-    def __init__(self, dataset_manager=None):
+    def __init__(self, dataset_manager=None, rehydrate: bool = True):
         self._jobs: dict[str, TrainingJob] = {}
         self._queue: list[str] = []  # job_ids in queue order
         self._active_job_id: Optional[str] = None
         self.dataset_manager = dataset_manager
+        # The registry is the job dirs on disk, not this process's memory. A
+        # manager built without rehydration is a manager whose history is gone,
+        # which is what every restart used to do.
+        if rehydrate:
+            self.rebuild_from_disk()
+
+    def rebuild_from_disk(self) -> int:
+        """Load every job under JOBS_DIR into the registry. Returns how many.
+
+        Called at construction. Nothing here is started or adopted: a job that was
+        RUNNING when the process stopped comes back FAILED, because its process
+        went with the restart (and a phantom RUNNING job blocks the queue)."""
+        found = 0
+        for job in load_jobs_from_disk():
+            if job.job_id in self._jobs:
+                continue
+            self._jobs[job.job_id] = job
+            found += 1
+        return found
 
     # ------------------------------------------------------------------
     # Stats / estimates
@@ -1106,6 +1591,9 @@ class TrainingManager:
         job = TrainingJob(config)
         self._jobs[job.job_id] = job
         self._queue.append(job.job_id)
+        # Queued is a state worth surviving a restart: write the record now rather
+        # than at the first transition.
+        job._write_status()
         return job
 
     def list_jobs(self) -> list[dict]:
@@ -1155,6 +1643,9 @@ class TrainingManager:
             job = self._jobs.get(job_id)
             if job and job.status == JobStatus.PENDING:
                 self._queue.pop(0)
+                # The monitor calls this back when the process exits, which is
+                # what makes the queue advance on its own.
+                job._on_exit = self._job_exited
                 try:
                     await job.start()
                 except Exception:
@@ -1169,6 +1660,17 @@ class TrainingManager:
                 self._queue.pop(0)  # Skip cancelled/missing jobs
 
         return None
+
+    async def _job_exited(self, job: "TrainingJob") -> None:
+        """Release the GPU slot a finished job held and start the next queued one.
+
+        Called from the job's own monitor task when its process exits. Before
+        0.5.27 ``start_next`` ran only from ``POST /api/training/jobs`` and the
+        resume route, so a queue with two jobs in it ran the first and then sat
+        there: the second only started if a human submitted a third."""
+        if self._active_job_id == job.job_id:
+            self._active_job_id = None
+        await self.start_next()
 
     @property
     def active_job(self) -> Optional[TrainingJob]:
