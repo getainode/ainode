@@ -168,7 +168,10 @@ async def _probe_loaded_models(
 
 ENDPOINT_CATALOG = {
     "lmstudio": [
-        {"method": "GET", "path": "/api/v1/models", "description": "List loaded models"},
+        # No /api/v1/* route is registered anywhere, so the GET row that used to
+        # sit here (unmarked, next to three `planned` siblings) handed the reader
+        # a curl that 404s (#206). The federated list is GET /v1/models, in the
+        # OpenAI tab.
         {"method": "POST", "path": "/api/v1/chat/completions", "description": "Chat completion", "status": "planned"},
         {"method": "POST", "path": "/api/v1/completions", "description": "Text completion", "status": "planned"},
         {"method": "POST", "path": "/api/v1/embeddings", "description": "Generate embeddings", "status": "planned"},
@@ -481,13 +484,28 @@ async def handle_server_status(request: web.Request) -> web.Response:
             recent.popleft()
         last_minute = len(recent)
 
+    # The Server view's status dot reads this. It was the literal "running",
+    # true by tautology (we are answering the request), so the dot stayed green
+    # with every engine in the fleet dead (#206). Report what the instance
+    # records already say instead: "running" when at least one model is serving,
+    # "loading" when models are loaded but none are ready yet, "idle" when none
+    # are loaded at all.
+    ready = sum(1 for m in loaded_models if m.get("ready"))
+    if ready:
+        status = "running"
+    elif loaded_models:
+        status = "loading"
+    else:
+        status = "idle"
+
     return web.json_response({
-        "status": "running",
+        "status": status,
         "host": host,
         "port": web_port,
         "reachable_at": _reachable_urls(host, web_port),
         "uptime_seconds": uptime,
         "loaded_models": loaded_models,
+        "models_ready": ready,
         "request_count_total": total,
         "request_count_last_minute": last_minute,
     })

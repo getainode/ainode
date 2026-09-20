@@ -25,6 +25,46 @@ JOBS_DIR = TRAINING_DIR / "jobs"
 # startup. The job registry is rebuilt from these.
 STATUS_FILENAME = "status.json"
 
+# Config > Storage saves `datasets_dir` and `training_dir`; until 0.5.27 nothing
+# read either, so both fields saved and did nothing (#204). One home for the
+# answer: every path in this module goes through datasets_dir() / jobs_dir(),
+# which return the operator's directory when there is one and the AINODE_HOME
+# subpath when there is not. Set once from the app's config at startup, so a
+# TrainingJob built anywhere resolves the same directories the API does.
+_DIR_OVERRIDES: dict[str, Optional[Path]] = {"datasets": None, "training": None}
+
+
+def configure_dirs(config) -> None:
+    """Point this module at the configured datasets / training directories."""
+    for key, attr in (("datasets", "datasets_dir"), ("training", "training_dir")):
+        raw = (getattr(config, attr, None) or "").strip() if config is not None else ""
+        _DIR_OVERRIDES[key] = Path(raw).expanduser() if raw else None
+
+
+def datasets_dir() -> Path:
+    """Where uploaded datasets live: config.datasets_dir, else AINODE_HOME/datasets.
+
+    The fallback is built per call, not cached at import, so a test (or a process
+    that moves AINODE_HOME) still redirects it.
+    """
+    return _DIR_OVERRIDES["datasets"] or (AINODE_HOME / "datasets")
+
+
+def training_dir() -> Path:
+    """Where runs write: config.training_dir, else AINODE_HOME/training."""
+    root = _DIR_OVERRIDES["training"]
+    return root if root is not None else (AINODE_HOME / "training")
+
+
+def jobs_dir() -> Path:
+    """Per-job directories under the training root.
+
+    Falls back to the module-level ``JOBS_DIR`` rather than recomputing it, so a
+    test that monkeypatches that constant still redirects every job.
+    """
+    root = _DIR_OVERRIDES["training"]
+    return (root / "jobs") if root is not None else JOBS_DIR
+
 
 class TrainingMethod(str, Enum):
     LORA = "lora"
@@ -262,14 +302,15 @@ def _resume_mount_for(checkpoint: Path) -> tuple[Path, str]:
 
     A checkpoint outside the jobs tree (a job with a hand-set ``output_dir``)
     falls back to its own parent, which is the least that still resolves."""
+    jobs_root = jobs_dir()
     try:
-        relative = checkpoint.relative_to(JOBS_DIR)
+        relative = checkpoint.relative_to(jobs_root)
     except ValueError:
         return checkpoint.parent, f"{RESUME_MOUNT}/{checkpoint.name}"
     parts = relative.parts
     if len(parts) < 2:
         return checkpoint.parent, f"{RESUME_MOUNT}/{checkpoint.name}"
-    return JOBS_DIR / parts[0], RESUME_MOUNT + "/" + "/".join(parts[1:])
+    return jobs_root / parts[0], RESUME_MOUNT + "/" + "/".join(parts[1:])
 
 
 def _loadable_dir(d: Path) -> Optional[Path]:
@@ -485,9 +526,9 @@ class TrainingConfig:
             elif ds.startswith("/") and not self.dataset_id:
                 # Absolute paths are only accepted under the known datasets dir
                 # unless the path was resolved via a registered dataset_id.
-                datasets_dir = str(AINODE_HOME / "datasets")
-                if not ds.startswith(datasets_dir):
-                    errors.append(f"dataset_path absolute paths must be under {datasets_dir}")
+                allowed_root = str(datasets_dir())
+                if not ds.startswith(allowed_root):
+                    errors.append(f"dataset_path absolute paths must be under {allowed_root}")
 
         if self.method not in ("lora", "full", "qlora", "quantize"):
             errors.append(f"method must be 'lora', 'qlora', 'full' or 'quantize', got '{self.method}'")
@@ -526,7 +567,7 @@ class TrainingConfig:
             if ".." in out:
                 errors.append("output_dir must not contain '..'")
             elif out.startswith("/"):
-                allowed_prefix = str(AINODE_HOME / "training")
+                allowed_prefix = str(training_dir())
                 if not out.startswith(allowed_prefix):
                     errors.append(f"output_dir absolute paths must be under {allowed_prefix}")
 
@@ -575,11 +616,12 @@ class TrainingJob:
         self._container_name_override: Optional[str] = None
 
         # Set output directory
+        jobs_root = jobs_dir()
         if self.config.output_dir is None:
-            self.config.output_dir = str(JOBS_DIR / self.job_id / "output")
+            self.config.output_dir = str(jobs_root / self.job_id / "output")
 
         # Job working directory
-        self._job_dir = JOBS_DIR / self.job_id
+        self._job_dir = jobs_root / self.job_id
         self._job_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -904,10 +946,10 @@ class TrainingJob:
         base_mount = _resolve_base_model_mount(c.base_model)
         if base_mount:
             container_cfg["base_model"] = base_mount
-        datasets_dir = str(AINODE_HOME / "datasets")
+        datasets_root = str(datasets_dir())
         ds = c.dataset_path or ""
-        if ds.startswith(datasets_dir):
-            container_cfg["dataset_path"] = "/ainode-datasets/" + ds[len(datasets_dir):].lstrip("/")
+        if ds.startswith(datasets_root):
+            container_cfg["dataset_path"] = "/ainode-datasets/" + ds[len(datasets_root):].lstrip("/")
         elif ds and not ds.startswith("/") and not ds.startswith("~"):
             # Relative dataset_path (e.g. "alpaca.jsonl" — exactly what the New Run
             # wizard's placeholder suggests) resolves against ~/.ainode/datasets on
@@ -917,7 +959,7 @@ class TrainingJob:
             # Leave it untouched otherwise, so a HF hub repo id ("tatsu-lab/alpaca")
             # still passes through to load_dataset(). Mirrors _run_training.py's own
             # exists()-gated resolution.
-            if (AINODE_HOME / "datasets" / ds).exists():
+            if (datasets_dir() / ds).exists():
                 container_cfg["dataset_path"] = "/ainode-datasets/" + ds.lstrip("/")
         # Resume: the checkpoint belongs to ANOTHER job, whose directory is not
         # mounted and whose path is an orchestrator path this container cannot
@@ -934,7 +976,7 @@ class TrainingJob:
         (self._job_dir / "config.container.json").write_text(json.dumps(container_cfg, indent=2))
 
         models_host = _host_path(str(AINODE_HOME / "models"))
-        datasets_host = _host_path(datasets_dir)
+        datasets_host = _host_path(datasets_root)
         jobdir_host = _host_path(str(self._job_dir))
         token = c.hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
 
@@ -1450,11 +1492,17 @@ def load_jobs_from_disk(jobs_dir: Optional[Path] = None) -> list[TrainingJob]:
 class TrainingManager:
     """Manage training jobs — one active at a time (GPU shared with inference)."""
 
-    def __init__(self, dataset_manager=None, rehydrate: bool = True):
+    def __init__(self, dataset_manager=None, config=None, rehydrate: bool = True):
         self._jobs: dict[str, TrainingJob] = {}
         self._queue: list[str] = []  # job_ids in queue order
         self._active_job_id: Optional[str] = None
         self.dataset_manager = dataset_manager
+        # A manager built with a config decides where this module's directories
+        # are, for every job it goes on to create (#204). BEFORE the rehydrate
+        # below: that scans the training root, and the configured one is the only
+        # root whose jobs this node actually owns.
+        if config is not None:
+            configure_dirs(config)
         # The registry is the job dirs on disk, not this process's memory. A
         # manager built without rehydration is a manager whose history is gone,
         # which is what every restart used to do.
@@ -1462,13 +1510,13 @@ class TrainingManager:
             self.rebuild_from_disk()
 
     def rebuild_from_disk(self) -> int:
-        """Load every job under JOBS_DIR into the registry. Returns how many.
+        """Load every job under the training root into the registry, returning how many.
 
         Called at construction. Nothing here is started or adopted: a job that was
         RUNNING when the process stopped comes back FAILED, because its process
         went with the restart (and a phantom RUNNING job blocks the queue)."""
         found = 0
-        for job in load_jobs_from_disk():
+        for job in load_jobs_from_disk(jobs_dir()):
             if job.job_id in self._jobs:
                 continue
             self._jobs[job.job_id] = job

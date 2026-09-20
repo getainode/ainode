@@ -178,8 +178,24 @@ async def handle_start_run(request: web.Request) -> web.Response:
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    target = resolve_target(request.app, opts.model)
+    # The instance the form picked, carried through instead of re-derived. A bench
+    # record is kept and compared, so its node attribution has to be the node the
+    # user aimed at rather than whichever candidate routing would have taken first
+    # (#197). Absent from the body (a script, an older client), the resolver falls
+    # back to routing order as before.
+    pick_node = str(body.get("node_id") or "").strip()
+    try:
+        pick_port = int(body.get("port") or 0) or None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "port must be an integer"}, status=400)
+    target = resolve_target(request.app, opts.model, node_id=pick_node, port=pick_port)
     if target is None:
+        if pick_node or pick_port:
+            return web.json_response(
+                {"error": f"node '{pick_node or 'local'}' is not a member of this cluster, "
+                          "or has no fabric IP. Pick the instance again: the fleet view "
+                          "has moved on since the form was drawn."},
+                status=404)
         return web.json_response(
             {"error": f"'{opts.model}' is not loaded on any node. The bench measures "
                       "what is already serving; it never loads a model."},

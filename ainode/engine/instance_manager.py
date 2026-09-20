@@ -41,6 +41,17 @@ class InstanceManager:
                 return inst
         return None
 
+    def by_port(self, api_port: int) -> Optional[Instance]:
+        """The instance serving on ``api_port``, or None.
+
+        The port is what tells two stacked instances of the same model apart, so
+        it is how an unload names the ONE copy it means (#207).
+        """
+        for inst in self._instances.values():
+            if inst.record.api_port == api_port:
+                return inst
+        return None
+
     def remove(self, instance_id: str) -> Optional[Instance]:
         return self._instances.pop(instance_id, None)
 

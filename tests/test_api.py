@@ -154,7 +154,11 @@ async def test_server_status(client):
     resp = await client.get("/api/server/status")
     assert resp.status == 200
     data = await resp.json()
-    assert data["status"] == "running"
+    # Nothing is loaded on this app, and the Server view's dot reads this field
+    # (#206): it used to be the literal "running", true by tautology, and stayed
+    # green with every engine in the fleet dead.
+    assert data["status"] == "idle"
+    assert data["models_ready"] == 0
     assert "reachable_at" in data and isinstance(data["reachable_at"], list)
     assert len(data["reachable_at"]) >= 1
     assert "loaded_models" in data

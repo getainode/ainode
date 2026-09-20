@@ -1,66 +1,33 @@
-"""API routes for model sharding — plan, launch, and monitor distributed inference."""
+"""API routes for model sharding: launch a model across nodes, and report state.
+
+There is no plan/preview route. ``GET /api/sharding/plan`` used to render one from
+``ShardingPlanner``, whose size estimate is a name-keyed table plus params x 2
+bytes (an NVFP4 27B came out as 54 GB) and whose layer range is size_gb / 2, and
+the Models view drew a "sharding plan" from it that the launch it offered then
+ignored (#188). The real multi-node launch is POST /api/sharding/launch with the
+node_ids the right-panel launch picker sends.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from typing import Optional
 
 from aiohttp import web
 
 from ainode.auth.middleware import is_authenticated
 from ainode.core.config import DEFAULT_DISTRIBUTED_EXECUTOR
 from ainode.discovery.cluster import ClusterState
-from ainode.engine.sharding import ShardingPlanner, ShardingStrategy, ShardingConfig
 from ainode.engine.ray_setup import get_ray_status
 
 logger = logging.getLogger(__name__)
 
-# Module-level state for active sharding session
-_active_sharding: Optional[ShardingConfig] = None
-
 
 def register_sharding_routes(app: web.Application) -> None:
     """Register sharding API endpoints on the aiohttp app."""
-    app.router.add_get("/api/sharding/plan", handle_sharding_plan)
     app.router.add_post("/api/sharding/launch", handle_sharding_launch)
     app.router.add_get("/api/sharding/status", handle_sharding_status)
-
-
-async def handle_sharding_plan(request: web.Request) -> web.Response:
-    """GET /api/sharding/plan?model=X — preview sharding plan for a model.
-
-    Query params:
-        model (required): HuggingFace model ID
-        strategy (optional): tensor_parallel, pipeline_parallel, auto (default: auto)
-    """
-    model = request.query.get("model")
-    if not model:
-        return web.json_response({"error": "model parameter required"}, status=400)
-
-    strategy_str = request.query.get("strategy", "auto")
-    try:
-        strategy = ShardingStrategy(strategy_str)
-    except ValueError:
-        return web.json_response(
-            {"error": f"Invalid strategy: {strategy_str}. Use: auto, tensor_parallel, pipeline_parallel"},
-            status=400,
-        )
-
-    cluster: ClusterState = request.app["cluster_state"]
-    planner = ShardingPlanner()
-
-    try:
-        config = planner.plan_sharding(model, cluster, strategy)
-    except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=422)
-
-    return web.json_response({
-        "plan": config.to_dict(),
-        "can_fit": planner.can_fit_model(model, cluster),
-        "cluster_nodes": len(cluster.get_nodes(include_offline=False)),
-    })
 
 
 async def handle_sharding_launch(request: web.Request) -> web.Response:
@@ -87,8 +54,6 @@ async def handle_sharding_launch(request: web.Request) -> web.Response:
     """
     from ainode.core.config import NodeConfig
     from ainode.engine.backends import get_backend
-
-    global _active_sharding
 
     try:
         body = await request.json()
@@ -369,7 +334,6 @@ async def handle_sharding_status(request: web.Request) -> web.Response:
         ray["source"] = "ray_probe"
 
     result = {
-        "active_sharding": _active_sharding.to_dict() if _active_sharding else None,
         "engine_running": engine_running,
         "engine_ready": engine_ready,
         "ray": ray,

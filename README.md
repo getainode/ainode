@@ -990,6 +990,30 @@ key, with three deliberate exceptions: `/api/health` because a probe has no key,
 the static shell. `POST /api/onboarding/complete` is open only while the node is not
 yet onboarded.
 
+### Pinning a request to one instance
+
+By default a forwarded request is routed on its `model`, cheapest hop first, so
+with the same model served on two nodes either one may answer. To address ONE
+instance, send its node id and engine port:
+
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-AINode-Node: spark3' \
+  -H 'X-AINode-Port: 8001' \
+  -d '{"model":"Qwen/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}]}'
+```
+
+A client that cannot set headers can pin in the body instead, with
+`"ainode_target": {"node_id": "spark3", "port": 8001}` or the short
+`"ainode_target": "spark3:8001"`; AINode strips the field before forwarding. A
+port on its own pins a stacked instance on the node you asked. A pin is honoured
+exactly: that instance answers or the request fails, with no failover to another
+copy, and an unknown node id is a 404 rather than a quiet fall back to the local
+engine. Every forwarded response carries `X-AINode-Served-By: <host>:<port>`,
+which is where the request actually went. The node ids are in `/api/nodes`, and
+the web UI's chat and bench pickers send this pair for you.
+
 ### Decisions: `POST /v1/decide`
 
 A decision endpoint rather than a chat one. You hand over a state, an optional
