@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from ainode.cluster.netdev import resolve_cluster_interface
-from ainode.core.config import LOGS_DIR, NodeConfig
+from ainode.core.config import AINODE_HOME, CONFIG_FILE, LOGS_DIR, NodeConfig
 from ainode.core.gpu import detect_gpu
 from ainode.engine.backends.base import EngineBackend
 
@@ -61,11 +61,33 @@ NCCL_INIT_SHARED_PATH = NCCL_INIT_SHARED_DIR / "nccl-env-init.sh"
 NCCL_INIT_CONTAINER_PATH = "/mnt/shared-models/.ainode/nccl-env-init.sh"
 
 
+def _config_file_for_display() -> str:
+    """``CONFIG_FILE`` as the OPERATOR sees it, not as this process sees it.
+
+    Inside the container AINODE_HOME is ``/root/.ainode``, which does not exist on
+    the host; the systemd unit sets ``AINODE_HOST_HOME`` to the host directory it
+    bind-mounted there. An error telling somebody to edit a path that is not on
+    their filesystem is worse than one that names no path at all, so translate
+    (same rule, and the same reason, as ``NvidiaBackend._host_path``).
+    """
+    host_home = os.environ.get("AINODE_HOST_HOME")
+    text = str(CONFIG_FILE)
+    home = str(AINODE_HOME)
+    if host_home and (text == home or text.startswith(home + os.sep)):
+        return host_home.rstrip("/") + text[len(home):]
+    return text
+
+
 # Guidance for the one failure mode a user hits by installing AINode the
 # wrong way: `pip install ainode` on a bare host, then `ainode start`. This
 # backend shells out to `vllm serve`, so with no vLLM on PATH there is
 # nothing to launch. Single source of truth: the CLI's pre-flight guard
 # prints the same text (issue #61).
+# Naming the config file is the other half of the guidance: this backend runs at
+# all only because something SET "engine_backend": "eugr" (the default is
+# "nvidia"), and on a container install that file is on the host under a
+# different path than the one the message used to hardcode. Say which file to
+# edit so the fix is one command away, not a hunt (issue #164).
 NO_VLLM_MESSAGE = (
     "AINode runs as a container image, and this host has no vLLM install.\n"
     "  `ainode start` outside the container has nothing to launch the engine with.\n"
@@ -74,7 +96,12 @@ NO_VLLM_MESSAGE = (
     "      curl -fsSL https://ainode.dev/install | bash\n"
     "\n"
     "  Or, to run the engine in Docker from this host checkout, set\n"
-    '  "engine_backend": "nvidia" in ~/.ainode/config.json and start again.'
+    '  "engine_backend": "nvidia" in ~/.ainode/config.json and start again.\n'
+    "\n"
+    f"  This node reads its config from: {_config_file_for_display()}\n"
+    '  The eugr backend is only selected when that file says\n'
+    '  "engine_backend": "eugr"; every other value, and no value at all,\n'
+    "  means the nvidia backend, which needs no vLLM on this host."
 )
 
 

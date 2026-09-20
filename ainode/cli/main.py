@@ -15,7 +15,13 @@ from rich.table import Table
 from rich.text import Text
 
 from ainode import __version__
-from ainode.core.config import NodeConfig, ensure_dirs, AINODE_HOME, LOGS_DIR
+from ainode.core.config import (
+    AINODE_HOME,
+    DEFAULT_ENGINE_BACKEND,
+    LOGS_DIR,
+    NodeConfig,
+    ensure_dirs,
+)
 
 console = Console()
 
@@ -243,7 +249,7 @@ def cmd_start(args):
 
     from ainode.engine.backends import get_backend
     from ainode.engine.backends.eugr import NO_VLLM_MESSAGE, EugrBackendError
-    backend_name = (config.engine_backend or "eugr").lower()
+    backend_name = (config.engine_backend or DEFAULT_ENGINE_BACKEND).lower()
 
     # Host start guard (issue #61). The eugr backend drives `vllm serve`
     # directly. It is the in-container path, NOT a way to run a container
@@ -518,17 +524,49 @@ def cmd_config(args):
     console.print()
 
 
+def _engine_log_file(config):
+    """The log file THIS node's configured backend actually writes.
+
+    Each backend owns its own filename: the nvidia backend writes
+    ``nvidia-vllm.log`` (``nvidia-distributed.log`` when this node is a
+    distributed head), the eugr backend writes ``vllm.log``. So ask the backend
+    instead of hardcoding one of them here. Hardcoding ``vllm.log`` is why
+    ``ainode logs -f`` tailed a long-dead file on every node running the default
+    backend, and why every documented ``ainode logs -f | grep ...`` step read
+    nothing (issue #164).
+
+    Falls back to ``vllm.log`` for a config naming a backend this build does not
+    know: `ainode logs` must still show something rather than raise.
+    """
+    try:
+        from ainode.engine.backends import get_backend
+        return get_backend(config).log_path
+    except Exception:
+        return VLLM_LOG
+
+
 def cmd_logs(args):
-    """Show or tail vLLM logs."""
-    log_file = VLLM_LOG
+    """Show or tail the engine log the configured backend writes."""
+    config = NodeConfig.load()
+    backend_name = (config.engine_backend or DEFAULT_ENGINE_BACKEND).lower()
+    log_file = _engine_log_file(config)
 
     if not log_file.exists():
-        console.print("  [dim]No log file found at[/dim] ~/.ainode/logs/vllm.log")
+        console.print(f"  [dim]No log file found at[/dim] {log_file}")
+        console.print(
+            f"  [dim]({backend_name} backend; it writes that file once an engine"
+            " starts.)[/dim]"
+        )
+        present = sorted(f.name for f in LOGS_DIR.glob("*.log")) if LOGS_DIR.exists() else []
+        if present:
+            console.print(f"  [dim]Logs present in {LOGS_DIR}:[/dim] {', '.join(present)}")
         console.print("  [dim]Start AINode first: [bold]ainode start[/bold][/dim]")
         return
 
     if args.follow:
-        console.print(f"  [dim]Tailing {log_file} (Ctrl+C to stop)[/dim]\n")
+        console.print(
+            f"  [dim]Tailing {log_file} ({backend_name} backend; Ctrl+C to stop)[/dim]\n"
+        )
         try:
             import subprocess
             proc = subprocess.Popen(
@@ -548,7 +586,10 @@ def cmd_logs(args):
         if not lines:
             console.print("  [dim]Log file is empty.[/dim]")
             return
-        console.print(f"  [dim]Last {len(lines)} lines of {log_file}:[/dim]\n")
+        console.print(
+            f"  [dim]Last {len(lines)} lines of {log_file}"
+            f" ({backend_name} backend):[/dim]\n"
+        )
         for line in lines:
             console.print(f"  {line.rstrip()}")
         console.print()

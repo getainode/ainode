@@ -12,11 +12,13 @@ from ainode.engine.backends import (
 
 
 class TestEngineBackendFactory:
-    def test_default_backend_is_eugr(self):
+    def test_default_backend_is_nvidia(self):
+        """The shipped image has no vLLM, so the default must be the backend
+        that runs the engine in its own container (issue #164)."""
         config = NodeConfig()
-        assert config.engine_backend == "eugr"
+        assert config.engine_backend == "nvidia"
         backend = get_backend(config)
-        assert isinstance(backend, EugrBackend)
+        assert isinstance(backend, NvidiaBackend)
 
     def test_explicit_eugr(self):
         config = NodeConfig(engine_backend="eugr")

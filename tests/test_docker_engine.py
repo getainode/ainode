@@ -41,8 +41,9 @@ def _cfg(**overrides) -> NodeConfig:
 
 
 def test_build_engine_returns_docker_engine():
+    """This backend is reached by asking for it: the default is nvidia (#164)."""
     from ainode.engine.backends import get_backend
-    assert isinstance(get_backend(_cfg()), de.DockerEngine)
+    assert isinstance(get_backend(_cfg(engine_backend="eugr")), de.DockerEngine)
 
 
 def test_start_rejects_unknown_mode():
