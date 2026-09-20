@@ -499,7 +499,15 @@ def test_the_announcement_with_the_new_fields_still_fits():
         load_elapsed_seconds=195.3, expected_ready_minutes=12.0,
     )
 
-    assert len(ann.to_json().encode()) < MAX_ANNOUNCEMENT_BYTES
+    size = len(ann.to_json().encode())
+    assert size < MAX_ANNOUNCEMENT_BYTES
+
+    # Room for the signing work still in flight: discovery signing adds a `sig`
+    # (about 75 bytes) and an `ainode_version` (about 6) on top of everything
+    # here. Asserted so the telemetry fields cannot be the reason that lands over
+    # the ceiling, since nothing at the receiving end would say why a node had
+    # vanished.
+    assert size + 81 < MAX_ANNOUNCEMENT_BYTES
 
 
 def test_a_null_telemetry_figure_survives_the_wire():
