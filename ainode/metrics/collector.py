@@ -6,6 +6,24 @@ from collections import defaultdict, deque
 from typing import Any, Optional
 
 
+def optional_float(value: Any) -> Optional[float]:
+    """``float(value)``, or None for anything that is not a number.
+
+    One home for the rule every telemetry surface follows: a figure the node
+    could not measure stays None, all the way from NVML to the browser. Written
+    as ``float(x or 0)`` it becomes a claim instead, and nothing downstream can
+    tell that zero apart from a measurement: an idle GPU on a node that is
+    serving (#176), a full node on a part that reports host RAM (#175), a fleet
+    with all its memory free (#174), a bench record asserting all three.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class MetricsCollector:
     """Thread-safe metrics collector for AINode.
 

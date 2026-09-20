@@ -423,6 +423,57 @@ async def test_cluster_resources_counts_every_gpu(client, app):
     assert data["total_gpus"] == 6  # four plus one plus the local node
 
 
+# ------------------------------------------------ a bench record's telemetry --
+#
+# The same coercion lived in the bench's own telemetry reader, where it is worse:
+# `bench/SCHEMA.md` says a missing measurement is never filled with an estimate,
+# and a 0 written there is a published record claiming an idle GPU during a run.
+
+class TestBenchTelemetryReader:
+    def _read(self, node, collector=None):
+        from ainode.bench.fleet import cluster_nodes_reader
+
+        app = {
+            "config": SimpleNamespace(node_id="local"),
+            "cluster_state": SimpleNamespace(members=lambda: [node]),
+            "metrics_collector": collector,
+        }
+        return cluster_nodes_reader(app, node.node_id)()
+
+    def test_a_node_that_cannot_measure_writes_no_number(self):
+        sample = self._read(_node(node_id="peer-quiet", gpu_memory_gb=122.0))
+
+        assert sample["gpu_util_pct"] is None
+        assert sample["gpu_mem_used_gb"] is None
+        assert sample["gpu_mem_total_gb"] == 122.0
+
+    def test_a_measurement_is_still_recorded(self):
+        sample = self._read(_node(
+            node_id="peer-busy", gpu_memory_gb=128.0,
+            gpu_memory_used_mb=64.0 * 1024, gpu_memory_total_mb=128.0 * 1024,
+            gpu_utilization=88.0, gpu_temp=41.0))
+
+        assert sample["gpu_util_pct"] == 88
+        assert sample["gpu_mem_used_gb"] == 64.0
+        assert sample["temp_c"] == 41
+
+    def test_the_peak_block_omits_what_was_never_measured(self):
+        """`result()` drops None keys, so a run on a node with no utilisation
+        counter reports no utilisation rather than a peak of 0."""
+        from ainode.bench.measure import Telemetry
+
+        telemetry = Telemetry(read=lambda: {
+            "gpu_util_pct": None, "temp_c": 39,
+            "gpu_mem_used_gb": None, "gpu_mem_total_gb": 121.7})
+        telemetry.samples.append(telemetry._read())
+
+        block = telemetry.result()
+
+        assert "gpu_util_pct" not in block
+        assert "gpu_mem_used_gb" not in block
+        assert block["temp_c"] == 39
+
+
 # ------------------------------------------- the announcement's byte ceiling --
 
 def test_the_announcement_with_the_new_fields_still_fits():

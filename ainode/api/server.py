@@ -24,7 +24,7 @@ from ainode.auth.middleware import (
     is_authenticated,
 )
 from ainode.auth.api_routes import register_auth_routes
-from ainode.metrics.collector import MetricsCollector
+from ainode.metrics.collector import MetricsCollector, optional_float
 from ainode.metrics.api_routes import register_metrics_routes
 from ainode.training.engine import TrainingManager
 from ainode.training.api_routes import setup_training_routes
@@ -1143,20 +1143,6 @@ def auth_status_fields(app: web.Application) -> dict:
     return {"enabled": enabled, "key_count": key_count, "label": label}
 
 
-def _as_optional_float(value) -> Optional[float]:
-    """``float(value)``, or None for anything that is not a number.
-
-    Unlike ``float(x or 0)``, a missing telemetry figure stays missing instead of
-    becoming a zero every view downstream renders as a measurement (#176).
-    """
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _node_host(node, local_id: Optional[str]) -> str:
     """The address a caller can REACH this node on.
 
@@ -1226,20 +1212,20 @@ async def handle_nodes(request: web.Request) -> web.Response:
             # idle GPU on a node that was serving, on every node in the fleet
             # (#176), and a percentage computed from host RAM read as a full node
             # whatever the user did (#175).
-            used_mb = _as_optional_float(getattr(n, "gpu_memory_used_mb", None))
-            total_mb = _as_optional_float(getattr(n, "gpu_memory_total_mb", None))
-            util = _as_optional_float(getattr(n, "gpu_utilization", None))
-            temp = _as_optional_float(getattr(n, "gpu_temp", None))
+            used_mb = optional_float(getattr(n, "gpu_memory_used_mb", None))
+            total_mb = optional_float(getattr(n, "gpu_memory_total_mb", None))
+            util = optional_float(getattr(n, "gpu_utilization", None))
+            temp = optional_float(getattr(n, "gpu_temp", None))
             gpu_count = int(getattr(n, "gpu_count", 1) or 1)
             memory_kind = "unified" if n.unified_memory else "dedicated"
             if n.node_id == local_id and collector is not None:
                 try:
                     m = collector.get_gpu_metrics() or {}
                     if not m.get("error"):
-                        used_mb = _as_optional_float(m.get("memory_used_mb"))
-                        total_mb = _as_optional_float(m.get("memory_total_mb")) or total_mb
-                        util = _as_optional_float(m.get("utilization_percent"))
-                        temp = _as_optional_float(m.get("temperature_c"))
+                        used_mb = optional_float(m.get("memory_used_mb"))
+                        total_mb = optional_float(m.get("memory_total_mb")) or total_mb
+                        util = optional_float(m.get("utilization_percent"))
+                        temp = optional_float(m.get("temperature_c"))
                         gpu_count = int(m.get("gpu_count") or gpu_count)
                         memory_kind = str(m.get("memory_kind") or memory_kind)
                 except Exception:
@@ -1712,12 +1698,12 @@ async def handle_cluster_resources(request: web.Request) -> web.Response:
         """(used_gb, total_gb) for one node, either None when unknown."""
         total_gb = float(getattr(node, "gpu_memory_gb", 0) or 0) or None
         if node.node_id == local_id and local_metrics and not local_metrics.get("error"):
-            used_mb = _as_optional_float(local_metrics.get("memory_used_mb"))
-            total_mb = _as_optional_float(local_metrics.get("memory_total_mb"))
+            used_mb = optional_float(local_metrics.get("memory_used_mb"))
+            total_mb = optional_float(local_metrics.get("memory_total_mb"))
             if total_mb:
                 total_gb = total_mb / 1024
             return ((used_mb / 1024 if used_mb is not None else None), total_gb)
-        used_mb = _as_optional_float(getattr(node, "gpu_memory_used_mb", None))
+        used_mb = optional_float(getattr(node, "gpu_memory_used_mb", None))
         return ((used_mb / 1024 if used_mb is not None else None), total_gb)
 
     available_vram = 0.0

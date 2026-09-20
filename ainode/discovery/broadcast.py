@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
+from ainode.metrics.collector import optional_float
+
 
 class NodeStatus(str, Enum):
     """Health status of a discovered node."""
@@ -29,21 +31,6 @@ logger = logging.getLogger(__name__)
 # fully populated announcement still fits, because this payload has grown field
 # by field (telemetry, instances, load progress) and nothing else would notice.
 MAX_ANNOUNCEMENT_BYTES = 4096
-
-
-def _as_float(value) -> Optional[float]:
-    """``float(value)``, or None when the sender had nothing to report.
-
-    A telemetry figure the node cannot measure must stay None all the way to the
-    peer's dashboard: coerced to 0.0 it becomes a claim (an idle GPU, an empty
-    node) that nothing downstream can tell apart from a measurement (#176).
-    """
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 @dataclass
@@ -217,10 +204,10 @@ class BroadcastSender:
                                 # A figure the node cannot measure travels as
                                 # null, so a peer draws n/a rather than a zero it
                                 # would read as an idle node (#176).
-                                self.announcement.gpu_memory_used_mb = _as_float(m.get("memory_used_mb"))
-                                self.announcement.gpu_memory_total_mb = _as_float(m.get("memory_total_mb"))
-                                self.announcement.gpu_utilization = _as_float(m.get("utilization_percent"))
-                                self.announcement.gpu_temp = _as_float(m.get("temperature_c"))
+                                self.announcement.gpu_memory_used_mb = optional_float(m.get("memory_used_mb"))
+                                self.announcement.gpu_memory_total_mb = optional_float(m.get("memory_total_mb"))
+                                self.announcement.gpu_utilization = optional_float(m.get("utilization_percent"))
+                                self.announcement.gpu_temp = optional_float(m.get("temperature_c"))
                                 if m.get("gpu_count"):
                                     self.announcement.gpu_count = int(m["gpu_count"])
                         except Exception:
