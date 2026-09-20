@@ -862,18 +862,30 @@ def main():
     auth_sub.add_parser("new-key", help="Generate a new API key")
     auth_parser.set_defaults(func=cmd_auth)
 
-    # doctor — health report. Stub for v0.4.x; full impl in v0.5.0.
+    # doctor: node health report. Exits non-zero on any FAIL so it can gate a
+    # script; see ainode/cli/doctor.py for what each check means.
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Run a cluster/node health report (stub — v0.5.0 for full report)",
+        help="Check this node: config, docker, GPUs, disk, image, service, ports, peers",
     )
-    doctor_parser.add_argument("--peer", help="Run doctor against a remote peer over SSH (v0.5.0)")
-    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable output (v0.5.0)")
-    doctor_parser.add_argument("--fix", action="store_true", help="Offer per-item auto-fix prompts (v0.5.0)")
+    doctor_parser.add_argument(
+        "--peer",
+        metavar="HOST",
+        help="Run the same report on a peer over SSH and print its answer",
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true",
+        help="Emit the report as JSON instead of one line per check",
+    )
+    doctor_parser.add_argument(
+        "--fix", action="store_true",
+        help="Apply only the safe fixes (missing dirs, secrets-store mode, "
+             "discovery port) and list the rest",
+    )
 
     def _cmd_doctor(a):
-        # Lazy import — the module is dependency-free today but a future
-        # full impl will pull in ainode.cluster.hca_discovery etc.
+        # Lazy import: the doctor reaches into the cluster, engine and secrets
+        # modules, and `ainode --help` should not pay for any of them.
         from ainode.cli.doctor import cmd_doctor
         return cmd_doctor(a)
 

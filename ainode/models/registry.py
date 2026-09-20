@@ -50,6 +50,33 @@ def _download_max_workers() -> int:
 from ainode.core.config import AINODE_HOME, HF_CACHE_MOUNT, MODELS_DIR  # noqa: E402
 
 
+def find_model_dir(models_dir, hf_repo: str) -> Optional[Path]:
+    """Return the on-disk dir holding ``hf_repo``, across every layout we support.
+
+    A model can live as: direct ``org--name`` (our downloader), flat HF
+    ``models--org--name``, HF cache ``hub/models--org--name``, or out-of-band
+    ``hf-cache/hub/models--org--name`` (HF_HOME downloads). Every caller must
+    detect all of them, otherwise an on-disk model reads as "not downloaded" -
+    which is why the list lives here and not at the call sites (the registry's
+    catalog view, the list_available scan, and ``ainode doctor`` all ask this).
+    """
+    models_dir = Path(models_dir)
+    hf_slug = "models--" + hf_repo.replace("/", "--")
+    candidates = [
+        models_dir / hf_repo.replace("/", "--"),  # org--name
+        models_dir / hf_slug,
+        models_dir / "hub" / hf_slug,
+        models_dir / "hf-cache" / "hub" / hf_slug,
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.exists() and any(candidate.iterdir()):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 @dataclass
 class ModelInfo:
     """Metadata for a model in the catalog."""
@@ -1665,25 +1692,8 @@ class ModelManager:
         return self.models_dir / self._repo_to_dirname(info.hf_repo)
 
     def _find_model_dir(self, info: ModelInfo) -> Optional[Path]:
-        """Return the on-disk dir for a model across every layout we support.
-
-        A model can live as: direct ``org--name`` (our downloader), flat HF
-        ``models--org--name``, HF cache ``hub/models--org--name``, or out-of-band
-        ``hf-cache/hub/models--org--name`` (HF_HOME downloads). Catalog entries
-        (incl. the curated cluster models) must detect all of them — otherwise an
-        on-disk model reads as "not downloaded". Mirrors the list_available scan.
-        """
-        hf_slug = "models--" + info.hf_repo.replace("/", "--")
-        candidates = [
-            self.models_dir / self._repo_to_dirname(info.hf_repo),  # org--name
-            self.models_dir / hf_slug,
-            self.models_dir / "hub" / hf_slug,
-            self.models_dir / "hf-cache" / "hub" / hf_slug,
-        ]
-        for d in candidates:
-            if d.exists() and any(d.iterdir()):
-                return d
-        return None
+        """Return the on-disk dir for a model across every layout we support."""
+        return find_model_dir(self.models_dir, info.hf_repo)
 
     def _is_downloaded_info(self, info: ModelInfo) -> bool:
         return self._find_model_dir(info) is not None
