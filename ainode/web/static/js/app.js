@@ -1944,7 +1944,11 @@ const AINode = {
     } else {
       this.state.chatFleetError = null;
       this.state.chatFleet = (data.loaded_models || [])
-        .filter(function (m) { return m.id && m.type !== 'embed'; })
+        // Chat-capable instances only. An embedding or speech instance answers
+        // its own path and 400s a chat completion, so offering it in the chat
+        // picker offers a conversation the engine cannot have. A row with no type
+        // at all is a chat engine (serving_kind's own default).
+        .filter(function (m) { return m.id && (m.type || 'llm') === 'llm'; })
         .map(function (m) {
           return {
             model: m.id,
@@ -3436,6 +3440,9 @@ const AINode = {
       // /v1/embeddings only, which is why the card hides the chat controls for
       // one and the chat picker never lists it.
       embedding:    { label: 'Embedding',    icon: '≣',  cls: 'cap-embedding' },
+      // The same, for a speech-to-text model: it answers /v1/audio/transcriptions
+      // and /v1/audio/translations, and no chat path.
+      speech:       { label: 'Speech',       icon: '🎙', cls: 'cap-speech' },
     };
     var self = this;
     var repo = model.hf_repo || model.id;
@@ -3487,6 +3494,7 @@ const AINode = {
       code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
       multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
       embedding:    { label: 'Embedding',    icon: '≣',  cls: 'cap-embedding' },
+      speech:       { label: 'Speech',       icon: '🎙', cls: 'cap-speech' },
     };
     var caps = (m.capabilities || []).map(function (c) {
       var d = capDefs[c]; if (!d) return '';
@@ -3494,8 +3502,10 @@ const AINode = {
     }).join('');
     // An embedding model answers /v1/embeddings and nothing else, so "Use in New
     // Chat" would open a chat against an engine that 400s every message. The card
-    // says where the vectors are instead.
+    // says where the vectors are instead. A speech model is the same story on the
+    // two audio paths.
     var isEmbedding = (m.capabilities || []).indexOf('embedding') !== -1;
+    var isSpeech = (m.capabilities || []).indexOf('speech') !== -1;
 
     var sizeStr = m.size_gb ? '~' + Math.round(m.size_gb) + ' GB' : (m.size || 'size unknown');
     var downloadsStr = m.downloads ? self.formatNumber(m.downloads) : '—';
@@ -3542,7 +3552,9 @@ const AINode = {
       : isLoaded
         ? (isEmbedding
             ? '<span class="md-cta-note">Serving POST /v1/embeddings</span>'
-            : '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>')
+            : isSpeech
+              ? '<span class="md-cta-note">Serving POST /v1/audio/transcriptions</span>'
+              : '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>')
         : isDownloaded
           ? '<button class="btn-nvidia md-cta" id="md-launch" data-hf-repo="' + self.esc(repo) + '">▶ Launch Model</button>'
           : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
@@ -6722,6 +6734,7 @@ const AINode = {
     var portStr = (m.port && m.port !== 8000) ? ' · :' + m.port : '';
     var type = m.type || 'llm';
     var isEmbed = type === 'embed';
+    var isSpeech = type === 'speech';
     var ready = m.ready !== false;
     // Remote instances (loaded on a peer) can't be ejected from here — the eject
     // endpoint only targets this node's local InstanceManager (F2).
@@ -6735,9 +6748,14 @@ const AINode = {
     var dimsMeta = isEmbed && m.dimensions
       ? '  <span class="server-meta">· ' + m.dimensions + 'd</span>'
       : '';
+    // "Open in Chat" is only offered for an instance that serves chat. An
+    // embedding row gets its vectors panel; a speech row gets neither, and its
+    // copy-curl button (below, keyed on `type`) hands over the audio call.
     var primaryIconBtn = isEmbed
       ? '  <button class="server-icon-btn" data-action="show-info" data-model="' + this.esc(id) + '" title="Embedding info">ℹ</button>'
-      : '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>';
+      : isSpeech
+        ? ''
+        : '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>';
     var statusBadge = ready
       ? '<span class="server-badge ready">READY</span>'
       : '<span class="server-badge">STARTING</span>';
@@ -6902,6 +6920,12 @@ const AINode = {
       curl = 'curl ' + primary + '/v1/embeddings \\\n' +
         '  -H "Content-Type: application/json" \\\n' +
         '  -d \'{"model":"' + modelId + '","input":"The quick brown fox"}\'';
+    } else if (modelType === 'speech') {
+      // multipart, not JSON: the model id is a form field beside the file, which
+      // is what the fleet router reads to pick the node.
+      curl = 'curl ' + primary + '/v1/audio/transcriptions \\\n' +
+        '  -F model=' + modelId + ' \\\n' +
+        '  -F file=@sample.wav';
     } else {
       curl = 'curl ' + primary + '/v1/chat/completions \\\n' +
         '  -H "Content-Type: application/json" \\\n' +

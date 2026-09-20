@@ -998,7 +998,11 @@ fleet-wide on the body's `model` with transport failover. Forwarded today:
 `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`,
 `/v1/rerank`, `/v1/score`, the Anthropic `/v1/messages` and
 `/v1/messages/count_tokens`, and `/tokenize` and `/detokenize` (those two are not
-under `/v1`, because vLLM does not serve them there). `GET /v1/models` is the
+under `/v1`, because vLLM does not serve them there). The speech-to-text pair,
+`/v1/audio/transcriptions` and `/v1/audio/translations`, is forwarded too, and is
+the one pair that is not JSON: they are multipart uploads, so the model id rides
+beside the audio file as a form field, and that field is what picks the node.
+`GET /v1/models` is the
 federated union and is answered here rather than forwarded, and `POST /v1/decide` is
 composed here out of grammar-constrained completions of its own.
 
