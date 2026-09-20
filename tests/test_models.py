@@ -106,19 +106,21 @@ class TestCatalog:
 
     def test_curated_models_carry_proven_config(self, manager):
         cat = manager.get_catalog_map()
-        seventyb = cat["llama-3.3-70b-nvfp4"]
-        assert seventyb.proven_tp == 2 and seventyb.verified is True
         big = cat["qwen3-235b-a22b-nvfp4"]
         assert big.proven_tp == 4 and big.verified is True
-        # an unverified curated entry still carries a proven_tp default but verified=False
+        # proven_tp says how many nodes to launch on and is independent of whether
+        # anybody has run it: the 70B needs two nodes and has no bench record, so it
+        # carries the node count and NOT the verified flag (#201).
+        seventyb = cat["llama-3.3-70b-nvfp4"]
+        assert seventyb.proven_tp == 2 and seventyb.verified is False
         assert cat["qwen3.5-397b-a17b-nvfp4"].verified is False
         # fields reach the dict the API serializes
-        d = seventyb.to_dict()
-        assert d["proven_tp"] == 2 and d["verified"] is True
+        d = big.to_dict()
+        assert d["proven_tp"] == 4 and d["verified"] is True
 
 
 # ---------------------------------------------------------------------------
-# Aggregator tests (unit — mocked, no network)
+# Aggregator tests (unit level: mocked, no network)
 # ---------------------------------------------------------------------------
 
 class TestAggregator:
@@ -158,7 +160,7 @@ class TestAggregator:
 
 
 # ---------------------------------------------------------------------------
-# Manager — list / info tests
+# Manager: list / info tests
 # ---------------------------------------------------------------------------
 
 class TestManagerList:
@@ -581,7 +583,7 @@ class _FakeHfHub:
         dest = Path(local_dir) / filename
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(self._files[filename])
-        with self._lock:  # workers run in parallel now — guard the records
+        with self._lock:  # workers run in parallel now, so guard the records
             self.downloaded.append(filename)
             self.revisions.append(revision)
         if self._after_file is not None:
@@ -627,7 +629,7 @@ class TestCancellableRepoDownload:
         # Every listed file was actually fetched.
         assert set(fake.downloaded) == set(files.keys())
         # Commit pinning: every file was fetched at the SINGLE sha resolved once
-        # from repo_info — not an unpinned per-file resolve of a moving `main`.
+        # from repo_info, not an unpinned per-file resolve of a moving `main`.
         assert set(fake.revisions) == {fake.sha}
 
     def test_cancel_between_files_sets_cancelled_and_removes_dir(self, tmp_path):

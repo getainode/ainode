@@ -1,23 +1,24 @@
-# AGENTS.md — AINode
+# AGENTS.md: AINode
 
-Turn any NVIDIA GPU into a local AI platform (inference + fine-tuning in the browser); ships as one container image per node — web UI, API, vLLM engine, and cross-node orchestrator are version-locked together.
-State / architecture / decisions / "why": Obsidian Vault → `AINode` (cluster ops: `Titanium Lab`). Claude-specific config: `CLAUDE.md`.
+Turn any NVIDIA GPU into a local AI platform (inference and fine-tuning in the browser). One AINode container per node holds the web UI, the API and the cross-node orchestrator; the vLLM engine is a SEPARATE container per loaded model, from the image that model's catalog recipe pins.
+State / architecture / decisions / "why": Obsidian Vault, `AINode` (cluster ops: `Titanium Lab`). Claude-specific config: `CLAUDE.md`.
 
-## DOX — Read Before Editing
+## DOX: Read Before Editing
 
-> Boundary (canonical): Obsidian Vault → `Systems/Claude Code Harness/DOX — Ownership Charter & Pilot`.
+> Boundary (canonical): Obsidian Vault, `Systems/Claude Code Harness/DOX, Ownership Charter & Pilot`.
 
-- Before editing any path, walk this repo's `AGENTS.md` chain from root to the target folder and obey the **nearest** one as the local edit contract. Re-read in-session — don't trust memory.
+- Before editing any path, walk this repo's `AGENTS.md` chain from root to the target folder and obey the **nearest** one as the local edit contract. Re-read in-session, and don't trust memory.
 - After a change that alters an **edit contract** (local rules, commands, invariants, structure), update the affected `AGENTS.md`. Do **not** touch docs for ordinary code changes.
-- One home per fact: **edit-rule/command → `AGENTS.md` · Claude-only config → `CLAUDE.md` · state/decisions/architecture/why → Obsidian Vault.** Link across layers, never copy.
+- One home per fact: **an edit rule or command goes in `AGENTS.md` · Claude-only config in `CLAUDE.md` · state, decisions, architecture and why in the Obsidian Vault.** Link across layers, never copy.
 - This file is imperative + operational only. Anything describing *why/history/state* belongs in the Vault.
 
 ## Operational source of truth
 
-- All work on `fable/*` branches (renamed from `codex/*` 2026-08-15 — the old prefix came from OpenAI Codex; no CI keys on either, so existing `codex/*` branches are fine to leave). PRs required — **never push directly to `main`**.
-- Build/test: `pip install -e ".[dev]"` → `pytest tests/` · lint `ruff check`. Base image: `scripts/build-base-image.sh`; app image: `docker build -f scripts/Dockerfile.ainode`.
+- All work on `fable/*` branches (renamed from `codex/*` 2026-08-15, because the old prefix came from OpenAI Codex; no CI keys on either, so existing `codex/*` branches are fine to leave). PRs required, and **never push directly to `main`**.
+- Build/test: `pip install -e ".[dev]"`, then `pytest tests/` · lint `ruff check`. App image: `docker build -f scripts/Dockerfile.ainode` (it is `FROM python:3.12-slim`, and `scripts/build-base-image.sh` is not an input to it). Installer: `scripts/install.sh --dry-run` renders config.json, the unit and the wrapper and touches nothing else.
 - **Do not delete `tests/conftest.py`'s `isolate_netdev` fixture.** `ainode.cluster.netdev` reads the real host and caches per process, so without it any test pinning `cluster_interface=` to a Spark NIC name passes on a Mac and fails on the Linux CI runner (autodetect resolves it to `eth0`). A test that wants detection to fire monkeypatches `netdev.SYS_CLASS_NET` and `netdev._run_command` itself.
-- **A `verified=True` flip in `ainode/models/registry.py` comes with `verified_on` (ISO date) and `verified_record` (a filename under `bench/results/`).** The flag on its own is a claim a reader cannot check, and the catalog carried a set of them from earlier eras with no record behind any of them. An entry marked verified before the bench existed keeps both fields empty and says so in a comment above it. That is the one allowed shape without a record, and the UI reports it as "marked verified before the bench existed" rather than as a tested model. `tests/test_catalog_provenance.py` fails on a `verified_record` naming a file that is not there.
+- **A `verified=True` flip in `ainode/models/registry.py` comes with `verified_on` (ISO date) and `verified_record` (a filename under `bench/results/`), and there is no exemption.** The flag on its own is a claim a reader cannot check, and "verified" is what a user reads before trusting a recipe on their own hardware. The catalog carried six entries wearing it from earlier eras with no record behind any of them, and the guard could not catch that because it only asserted on entries that already named a record (#201). `tests/test_catalog_provenance.py` asserts BOTH directions over the whole catalog now: a `verified_record` must name a file that exists, and a `verified=True` entry must name one. An entry nobody has run is `verified=False`, which is an honest state and not a demotion.
+- **A throughput or latency figure in a catalog `description` requires that entry to name its `verified_record`.** Six descriptions quoted tok/s figures no record contained, and a description is read as a promise about the reader's own hardware. `tests/test_catalog_provenance.py` fails on a description matching `tok/s`, `tokens/s`, `texts/s` or `t/s` on an entry with no record.
 - Measured numbers live **only** in `bench/results/*.json` (format: `bench/SCHEMA.md`; never fill a missing measurement with an estimate). The README's "Models tested on AINode" table is generated: add a result file, then `python3 scripts/render-bench-table.py`. Never hand-edit between the `bench-table` markers; `tests/test_bench_table.py` fails on drift.
 - The benchmark itself is `ainode/bench/` (stdlib-only measurement + the `/api/bench` routes + the report renderer). `scripts/ainode-bench.py` and `bench/report.py` are thin CLI shims over it: change the package, not the shims. In-product runs land in `~/.ainode/bench/results/`; copy one into `bench/results/` by hand to publish it.
 - **The harness bench (`ainode/bench/harness/`, `scripts/ainode-bench.py harness`) must never let a harness see the hidden tests.** `bench/harness/tasks/<slug>/tests/` is copied into the working directory only after the agent CLI has exited and removed again before the next attempt; a task with a `*_test.py` at its root is a load error. Those vendored files are also excluded from pytest collection (`norecursedirs` in `pyproject.toml`) and from ruff (`extend-exclude`) because they import a module that only exists inside a run, and because they are upstream's text kept verbatim. Adapter `command()` / `env()` / `config()` stay pure functions of the request so `tests/test_bench_harness.py` can pin every harness's exact argv; `run()` lives once in the base class. **An adapter for an agent that keeps state under `$HOME` points it at the run's own directory** (`DSH_HOME`, the XDG vars, `CLAUDE_CONFIG_DIR`): a bench run never reads or writes the operator's own agent profile, both so runs cannot poison each other and so a personal `settings.json` full of hooks is not inside the measurement. Adapters and flags: `bench/harness/README.md`.
@@ -35,11 +36,11 @@ State / architecture / decisions / "why": Obsidian Vault → `AINode` (cluster o
 - **`ainode update` verifies before it claims anything, and only then reclaims.** The host wrapper (`scripts/install.sh`) waits for this node's own `/api/status` to report the version it just installed and exits non-zero otherwise: it printed "Update complete" for an update that never applied. Only after that does it remove the images that release replaced, via `ainode prune-images` in the container that is now up. Prune decisions live in `core/image_prune.py` as a pure function of a `docker images` listing (`--images-from` replays another node's listing and touches nothing), removals go by `repo:tag` and never by image id (one image, three mirrored tags), only AINode's own app repos are ever considered, and `keep` generations of releases are kept so `ainode update <older>` has something to roll back to (#184).
 - **Cluster update job state is on disk** (`<AINODE_HOME>/cluster-updates.json`), because the master self-stops as the last step of the job it is reporting on (#182). Every mutation persists. Whether a node came BACK on the target version is answered at poll time from the version on the wire, never from the job record.
 - Handoffs use the threadmaster-handoff runbook; ops state lives in `ops/` (runbooks under `ops/runbooks/`).
-- Distribution is `docker pull` only — end users never hand-edit vLLM commands; the engine emits flags (see `engine/AGENTS.md`).
+- Distribution is `docker pull` only, from GHCR (there is no Docker Hub mirror), and end users never hand-edit vLLM commands: the engine emits the flags (see `engine/AGENTS.md`).
 
 ## Child DOX Index
 
-Read the nearest child before editing in its subtree. Add a child only at folders with non-obvious/dangerous constraints — not one per folder (see the charter).
+Read the nearest child before editing in its subtree. Add a child only at folders with non-obvious or dangerous constraints, not one per folder (see the charter).
 
 | Path | Owns |
 |------|------|

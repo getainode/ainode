@@ -1,4 +1,4 @@
-"""Model registry and manager — dynamic catalog + download/delete/recommend.
+"""Model registry and manager: dynamic catalog + download/delete/recommend.
 
 The catalog is now assembled dynamically from live sources (HuggingFace Hub,
 Ollama library, NVIDIA NIM) with a 24-hour on-disk cache and a small static
@@ -107,11 +107,13 @@ class ModelInfo:
     proven_tp: int = 0
     verified: bool = False
     # Provenance for that flag. ``verified=True`` on its own says nothing a reader
-    # can check, so a flip to True comes with the date it was proven (ISO
-    # YYYY-MM-DD) and the bench record that proves it (a filename under
-    # bench/results/). An entry marked verified before the bench existed keeps
-    # both empty, which is how the UI tells "tested, here is the record" from
-    # "somebody said so once".
+    # can check, so it comes with the date it was proven (ISO YYYY-MM-DD) and the
+    # bench record that proves it (a filename under bench/results/). Both fields
+    # are REQUIRED with the flag now (issue #201): six entries carried it from
+    # before the bench existed with nothing behind it, and "verified" is what a
+    # user reads to decide whether a recipe will come up on their hardware, so an
+    # entry nobody can check is worse than an honest unverified one. The
+    # provenance test asserts over the whole catalog in both directions.
     verified_on: str = ""
     verified_record: str = ""
     # Roughly how long this model takes to reach READY on this hardware, in
@@ -120,7 +122,7 @@ class ModelInfo:
     # None on an entry nobody has launched. A node's own launch-times ledger
     # (<AINODE_HOME>/launch-times.json) beats this seed wherever it has an entry.
     typical_ready_minutes: Optional[float] = None
-    # True for our hand-picked CURATED_CLUSTER_MODELS — drives the "Catalog"
+    # True for our hand-picked CURATED_CLUSTER_MODELS. Drives the "Catalog"
     # (known-good to grab) list, separate from on-disk / HF-sweep entries.
     curated: bool = False
     created_at: str = ""
@@ -257,7 +259,7 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 # ---- Curated cluster models (always discoverable) --------------------------
 #
 # The live HF sweep (top-downloads) misses the frontier/NVFP4 models this GB10
-# cluster actually runs — so they were undiscoverable in the catalog and only
+# cluster actually runs, so they were undiscoverable in the catalog and only
 # appeared once already on disk. These curated entries are ALWAYS merged into
 # the catalog (see ModelManager.get_catalog) so an operator can find + download
 # them. NVFP4 is native on Blackwell; these run distributed (TP=N) across nodes.
@@ -271,7 +273,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
     # --- Recipe-carrying models (need a newer engine + model-specific flags) ---
     # Both were validated end-to-end on the GB10 fleet 2026-08-13/15; the flag
     # sets below are the vendor/community recipes verbatim. They require vLLM
-    # 0.27.1 — hence engine_image. Do NOT add --enforce-eager: it's a 0.17-era
+    # 0.27.1, hence engine_image. Do NOT add --enforce-eager: it's a 0.17-era
     # workaround and only costs throughput here (see nvidia.py module header).
     "ornith-1.5-35b-a3b-nvfp4": ModelInfo(
         id="ornith-1.5-35b-a3b-nvfp4",
@@ -280,7 +282,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=23.5,
         description=(
             "Qwen3.5-MoE coding/agentic reasoner (3B active/token) with built-in MTP "
-            "speculative decoding — 40 tok/s single-stream and 269 tok/s across 16 "
+            "speculative decoding: 40 tok/s single-stream and 269 tok/s across 16 "
             "streams on one GB10, decode holding 34 tok/s at 120K context. 19/19 on the "
             "fresh-agent rubric (tools, parallel tool calls, executed code, needle at "
             "100K). 262K context, MIT. Launched text-only: the vision tower's warmup "
@@ -300,11 +302,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         extra_vllm_args=[
             "--enable-prefix-caching",
             # Qwen3.5 arch carries a vision tower; the checkpoint bakes calibrated fp8
-            # KV scales, which vLLM applies regardless — stated explicitly so the
+            # KV scales, which vLLM applies regardless, stated explicitly so the
             # served-from-HF-cache path never guesses.
             "--kv-cache-dtype", "auto",
             "--reasoning-parser", "qwen3",
-            # Template emits <tool_call><function=..><parameter=..> — qwen3_coder on
+            # Template emits <tool_call><function=..><parameter=..>, so qwen3_coder on
             # 0.27.1 (the card's qwen3_xml is the newer name for the same syntax).
             "--tool-call-parser", "qwen3_coder",
             "--enable-auto-tool-choice",
@@ -324,7 +326,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         hf_repo="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
         size_gb=21.0,
         description=(
-            "MoE hybrid Mamba-2 (3B active/token) with DSpark speculative decoding — "
+            "MoE hybrid Mamba-2 (3B active/token) with DSpark speculative decoding: "
             "104 tok/s single-stream and 504 tok/s across 16 streams on one GB10, the "
             "fastest model on this hardware. 1M context. The sub-agent workhorse. "
             "Text only (no vision). First launch also pulls the 1.3 GB DSpark drafter."
@@ -361,7 +363,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         size_gb=23.4,
         description=(
             "Dense 27B native vision-language model (images + video) with built-in MTP "
-            "speculative decoding — 19 tok/s single-stream on one GB10 (dense is "
+            "speculative decoding: 19 tok/s single-stream on one GB10 (dense is "
             "bandwidth-bound; batching reaches 147 tok/s at 16 streams). 262K context, "
             "excellent instruction-following and tool use. The quality-and-eyes model. "
             "Use temperature 0 for OCR/transcription."
@@ -380,7 +382,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         engine_image="vllm/vllm-openai:v0.27.1",
         extra_vllm_args=[
             "--enable-prefix-caching",
-            # Vision models must NOT get fp8 KV on GB10 — it corrupts generation
+            # Vision models must NOT get fp8 KV on GB10: it corrupts generation
             # (proven 2026-07-06). The automatic fp8→auto downgrade only fires
             # when the model is on local disk (it reads config.json), and this
             # one serves straight from the HF cache, so state it explicitly.
@@ -787,20 +789,22 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and
     # stack several per node. proven_tp=1 (no distribution). verified=True is set
-    # ONLY after a real completion was observed on the cluster, and a flip to True
-    # now carries verified_on + verified_record with it (root AGENTS.md). The
-    # entries below predate the bench, which is why they say so instead of naming
-    # a record.
+    # ONLY after a real completion was observed on the cluster, and it carries
+    # verified_on + verified_record with it (root AGENTS.md). The entries below
+    # carried the flag from before the bench existed with no record behind it, and
+    # descriptions quoting tok/s figures no record contains; both are gone (#201).
+    # They are honest unverified entries until somebody runs one and lands a
+    # record.
     "qwen3.5-9b-awq": ModelInfo(
         id="qwen3.5-9b-awq",
         name="Qwen3.5 9B (AWQ-4bit)",
         hf_repo="QuantTrio/Qwen3.5-9B-AWQ",
         size_gb=12.0,
-        description="Fast dense 9B, AWQ-4bit (awq_marlin). ~19 tok/s single-stream on one GB10. Great default chat model.",
+        description="Fast dense 9B, AWQ-4bit (awq_marlin). Fits one GB10 with room to stack. Nobody has benchmarked it here, so there is no throughput figure to quote.",
         quantization="AWQ", min_memory_gb=14, family="qwen", params_b=9.0,
         arch="dense",
-        # verified before the bench existed; no record
-        proven_tp=1, verified=True,
+        # No bench record: unverified until somebody runs it (#201).
+        proven_tp=1, verified=False,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
     "qwen3.5-4b-awq": ModelInfo(
@@ -808,11 +812,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Qwen3.5 4B (AWQ-4bit)",
         hf_repo="QuantTrio/Qwen3.5-4B-AWQ",
         size_gb=4.0,
-        description="Tiny dense 4B, AWQ-4bit. ~15 tok/s single-stream (dense AWQ is dequant-bound on GB10, not size-bound — the MoE is the fast pick). Lowest memory / highest QPS for batched routes.",
+        description="Tiny dense 4B, AWQ-4bit. Dense AWQ is dequant-bound on GB10 rather than size-bound, so a small MoE is usually the faster pick. Lowest memory of the tier. No bench record here yet.",
         quantization="AWQ", min_memory_gb=6, family="qwen", params_b=4.0,
         arch="dense",
-        # verified before the bench existed; no record
-        proven_tp=1, verified=True,
+        # No bench record: unverified until somebody runs it (#201).
+        proven_tp=1, verified=False,
         context_length=262144, license="Apache 2.0", format="awq",
     ),
     "qwen3.5-35b-a3b-awq": ModelInfo(
@@ -820,11 +824,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Qwen3.5 35B-A3B MoE (AWQ-4bit)",
         hf_repo="QuantTrio/Qwen3.5-35B-A3B-AWQ",
         size_gb=24.0,
-        description="MoE (3B active/token), AWQ-4bit. ~27 tok/s single-stream on one GB10 — fast decode AND large-model quality. The flagship single-node model.",
+        description="MoE (3B active/token), AWQ-4bit. Reads 3B of weights per token, so decode stays fast at 35B of quality, and it fits one node. No bench record here yet.",
         quantization="AWQ", min_memory_gb=28, family="qwen", params_b=35.0,
         active_params_b=3.0, arch="moe",
-        # verified before the bench existed; no record
-        proven_tp=1, verified=True,
+        # No bench record: unverified until somebody runs it (#201).
+        proven_tp=1, verified=False,
         context_length=262144, license="Apache 2.0", recommended=True, format="awq",
     ),
     "llama-3.1-8b-nvfp4": ModelInfo(
@@ -832,11 +836,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Llama 3.1 8B Instruct (NVFP4)",
         hf_repo="nvidia/Llama-3.1-8B-Instruct-NVFP4",
         size_gb=6.0,
-        description="Dense 8B, Blackwell-native NVFP4 — ~18 tok/s single-stream on one GB10 (dense is bandwidth-bound). Solid general-purpose chat model, light enough to stack.",
+        description="Dense 8B, Blackwell-native NVFP4. Dense decode is bandwidth-bound on GB10. Solid general-purpose chat model, light enough to stack. No bench record here yet.",
         quantization="NVFP4", min_memory_gb=8, family="llama", params_b=8.0,
         arch="dense",
-        # verified before the bench existed; no record
-        proven_tp=1, verified=True,
+        # No bench record: unverified until somebody runs it (#201).
+        proven_tp=1, verified=False,
         context_length=131072, license="Llama 3.1", recommended=True, format="nvfp4",
     ),
     # --- Community daily-driver MoE picks (DGX Spark forum + r/LocalLLaMA, 2026) ---
@@ -845,11 +849,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Nemotron Cascade 2 30B-A3B (NVFP4)",
         hf_repo="chankhavu/Nemotron-Cascade-2-30B-A3B-NVFP4",
         size_gb=18.0,
-        description="NVIDIA's distilled hybrid (mamba+attention) MoE, 3B active. Blackwell-native NVFP4 — ~32 tok/s single-stream on one GB10 (eager-on; the ~60 t/s Spark forum reports need CUDA graphs/eager-off). Fast daily driver, great for stacking.",
+        description="NVIDIA's distilled hybrid (mamba plus attention) MoE, 3B active, Blackwell-native NVFP4. Light enough to stack. Nobody has benchmarked this build here, so the Spark forum's figures are theirs and not ours.",
         quantization="NVFP4", min_memory_gb=22, family="nemotron", params_b=30.0,
         active_params_b=3.0, arch="moe",
-        # verified before the bench existed; no record
-        proven_tp=1, verified=True,
+        # No bench record: unverified until somebody runs it (#201).
+        proven_tp=1, verified=False,
         context_length=131072, license="NVIDIA Open Model", recommended=True, format="nvfp4",
     ),
     "minimax-m2.7-awq": ModelInfo(
@@ -857,7 +861,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="MiniMax-M2.7 (AWQ-4bit)",
         hf_repo="demon-zombie/MiniMax-M2.7-AWQ-4bit",
         size_gb=120.0,
-        description="The community's top agentic-coding pick — 'Sonnet at home'. Large MoE (A10B active), AWQ-4bit. ~42 tok/s across 2 Sparks (TP=2). fp8 KV recommended.",
+        description="The community's top agentic-coding pick, 'Sonnet at home'. Large MoE (A10B active), AWQ-4bit, needs two nodes. fp8 KV recommended. Never launched here, so there is no throughput figure to quote.",
         quantization="AWQ", min_memory_gb=130, family="minimax", params_b=230.0,
         active_params_b=10.0, arch="moe",
         proven_tp=2, verified=False,
@@ -881,7 +885,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Qwen3.5-397B-A17B (NVFP4)",
         hf_repo="nvidia/Qwen3.5-397B-A17B-NVFP4",
         size_gb=468.0,
-        description="Frontier MoE (A17B active) — the cluster's design point. Distributed TP=4. NVFP4.",
+        description="Frontier MoE (A17B active), the cluster's design point. Distributed TP=4. NVFP4.",
         quantization="NVFP4", min_memory_gb=500, family="qwen", params_b=397.0,
         active_params_b=17.0, arch="moe",
         proven_tp=4, verified=False,
@@ -914,11 +918,11 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="Llama 3.3 70B Instruct (NVFP4)",
         hf_repo="nvidia/Llama-3.3-70B-Instruct-NVFP4",
         size_gb=80.0,
-        description="Dense 70B, NVFP4. Fits TP=2; bandwidth-bound single-stream on GB10.",
+        description="Dense 70B, NVFP4. Fits TP=2. Dense decode is bandwidth-bound on GB10, and nobody has measured this one here.",
         quantization="NVFP4", min_memory_gb=88, family="llama", params_b=70.0,
         arch="dense",
-        # verified before the bench existed; no record
-        proven_tp=2, verified=True,
+        # No bench record: unverified until somebody runs it (#201).
+        proven_tp=2, verified=False,
         context_length=131072, license="Llama 3.3", recommended=True, format="nvfp4",
     ),
     "glm-5.1": ModelInfo(
@@ -938,7 +942,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         name="GLM-5.2 NVFP4 REAP-504B",
         hf_repo="madeby561/GLM-5.2-NVFP4-REAP-504B",
         size_gb=309.0,
-        description="REAP-pruned GLM-5.2 MoE, NVFP4 for GB10. ~309 GB on disk — needs the cluster's pooled memory (TP=4). DeepSeek Sparse Attention. NOT yet load-tested on GB10.",
+        description="REAP-pruned GLM-5.2 MoE, NVFP4 for GB10. ~309 GB on disk, needs the cluster's pooled memory (TP=4). DeepSeek Sparse Attention. NOT yet load-tested on GB10.",
         quantization="NVFP4", min_memory_gb=360, family="glm", params_b=504.0,
         # MoE per the card; REAP pruning moves the active count, which the id
         # does not state, so active_params_b stays unset rather than guessed.
@@ -949,7 +953,7 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
 }
 
 
-# Backward-compat alias — external code may still import MODEL_CATALOG.
+# Backward-compat alias: external code may still import MODEL_CATALOG.
 MODEL_CATALOG: dict[str, ModelInfo] = FALLBACK_CATALOG
 
 
@@ -1612,7 +1616,7 @@ class ModelManager:
             if not models:
                 models = list(FALLBACK_CATALOG.values())
             merged = {m.id: m for m in models}
-            # Always merge the curated cluster models — the live HF sweep misses
+            # Always merge the curated cluster models, because the live HF sweep misses
             # them, so without this they're undiscoverable until already on disk.
             # Skip any whose hf_repo a live entry already covers (don't clobber).
             existing_repos = {m.hf_repo.lower() for m in merged.values()}
@@ -1659,7 +1663,7 @@ class ModelManager:
             results.append(entry)
 
         # Merge in downloaded-but-not-in-catalog entries. HF's cache layout is
-        # models_dir/hub/models--<org>--<name>/ — skip control dirs like
+        # models_dir/hub/models--<org>--<name>/, skipping control dirs like
         # .locks, xet, blobs, snapshots and anything not prefixed `models--`.
         scan_roots = [
             self.models_dir,
@@ -1826,7 +1830,7 @@ class ModelManager:
             local_dir=str(local_dir),
             local_dir_use_symlinks=False,
             # Cap parallel file connections so a fat model pull can't monopolise
-            # the uplink (ponytail: bounds parallelism, not absolute byte-rate —
+            # the uplink (ponytail: bounds parallelism, not absolute byte-rate,
             # upgrade to a tc/trickle shaper if a single stream still saturates).
             max_workers=_download_max_workers(),
         )
@@ -1894,7 +1898,7 @@ class ModelManager:
                 size_gb = _safetensors_size_gb(getattr(m, "safetensors", None))
                 sf = getattr(m, "safetensors", None)
                 total_params = getattr(sf, "total", 0) if sf else 0
-                # Quant/engine from repo name — drives the badge AND the
+                # Quant/engine from repo name, which drives the badge AND the
                 # "can it run on vLLM/GB10" filter (MLX=Apple, GGUF=llama.cpp).
                 quant = ""
                 for tag, label in (
@@ -1924,7 +1928,7 @@ class ModelManager:
                     "likes": getattr(m, "likes", 0),
                     "in_catalog": repo_l in catalog_repos,
                 })
-            # Always surface curated matches for the query — HF's download-sorted
+            # Always surface curated matches for the query, because HF's download-sorted
             # page often ranks our vetted pick past the limit, so inject it.
             ql = query.lower()
             have = {r["hf_repo"].lower() for r in results}

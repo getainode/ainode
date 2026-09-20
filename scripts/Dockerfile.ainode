@@ -1,26 +1,29 @@
 # syntax=docker/dockerfile:1.6
 #
-# AINode orchestrator image — slim Python container.
+# AINode orchestrator image: slim Python container.
 #
 # Design (slice nvidia-vllm-engine, D5):
 #   AINode's OWN container is a lean Python-only orchestrator. It does NOT
 #   embed CUDA, vLLM, or NCCL. The inference engine runs in a SEPARATE
-#   container (`nvcr.io/nvidia/vllm:26.02-py3` for the NVIDIA backend;
-#   `ghcr.io/getainode/ainode-base` for the eugr backend — built via
-#   scripts/build-base-image.sh + the legacy Dockerfile path).
+#   container, one per loaded model, from the catalog recipe's `engine_image`
+#   or else NVIDIA_VLLM_IMAGE in ainode/engine/backends/nvidia.py. The eugr
+#   backend is opt-in and wants `ghcr.io/getainode/ainode-base`, built by
+#   scripts/build-base-image.sh; that image is NOT an input to this one, and
+#   nothing here declares an ARG for it.
 #
 # Build:
 #   docker build -f scripts/Dockerfile.ainode -t ainode:dev .
 #
 # Target image size: ~500-800 MB (python:3.12-slim is ~120 MB, + docker-cli
-# + iproute2 + Python deps).
+# + iproute2 + Python deps). Measured at 364 MB for 0.5.x.
 #
-# Published at ghcr.io/getainode/ainode:<version> (mirrored to argentos/ainode).
+# Published at ghcr.io/getainode/ainode:<version>, and nowhere else. The Docker
+# Hub mirror this header used to name stopped at 0.4.7 (issue #200).
 
 FROM python:3.12-slim AS ainode
 
 LABEL org.opencontainers.image.source="https://github.com/getainode/ainode"
-LABEL org.opencontainers.image.description="AINode — local AI platform orchestrator (slim Python container; spawns NVIDIA vLLM engine in a separate container)."
+LABEL org.opencontainers.image.description="AINode, a local AI platform orchestrator (slim Python container; spawns the vLLM engine in a separate container)."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ENV AINODE_HOME=/root/.ainode \
@@ -69,8 +72,8 @@ RUN apt-get update \
 # -- Python deps -----------------------------------------------------------
 # Project + its runtime deps from pyproject.toml (aiohttp, pynvml, psutil,
 # rich, huggingface_hub). Plus:
-#   paramiko   — SSH library used by the future cluster-join flow.
-#   hf_transfer — Rust parallel downloader for HuggingFace models
+#   paramiko:    SSH library used by the future cluster-join flow.
+#   hf_transfer: Rust parallel downloader for HuggingFace models
 #                (2–5× faster than the Python default on fat pipes).
 # Install hf_transfer + paramiko BEFORE the project so they land in a
 # lower, cache-friendly layer.
