@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AINode installer — v0.4.1 container-native.
+# AINode installer, container-native. The release is resolved at run time.
 #
 # Usage:
 #   curl -fsSL https://ainode.dev/install | bash
@@ -12,6 +12,10 @@
 # --job worker  Worker node: no model, no engine on startup. Announces itself
 #               to the cluster and waits for the head to assign work.
 # (default)     Solo node: standalone, pick a model via the web UI.
+# --dry-run     Render config.json, the systemd unit and the host wrapper into
+#               $AINODE_HOME and stop. Pulls nothing, starts nothing, needs no
+#               docker, no GPU and no sudo. Use it to see exactly what an
+#               install would write; the test suite runs the same path.
 
 set -euo pipefail
 
@@ -20,19 +24,23 @@ set -euo pipefail
 # the caller pins them explicitly). Leaving these empty is the signal to resolve.
 AINODE_VERSION="${AINODE_VERSION:-}"
 AINODE_IMAGE="${AINODE_IMAGE:-}"
-# NVIDIA official vLLM engine image — pre-pulled so first dashboard launch
-# doesn't hit a 5–10 min download. Override with AINODE_NVIDIA_IMAGE=skip to
-# suppress, or a custom tag for testing.
-AINODE_NVIDIA_IMAGE="${AINODE_NVIDIA_IMAGE:-nvcr.io/nvidia/vllm:26.02-py3}"
+# The vLLM ENGINE image, pre-pulled so the first model launch is not the thing
+# that waits on a multi-GB download. Empty (the default) means "ask the AINode
+# image we just pulled", which keeps ONE home for the value: NVIDIA_VLLM_IMAGE in
+# ainode/engine/backends/nvidia.py, the same constant the backend launches from.
+# Installs up to 0.5.25 pre-pulled nvcr.io/nvidia/vllm:26.02-py3 here instead:
+# ~15 GB plus an NGC login for an image no code path has ever run (issue #164).
+# Set a tag to pre-pull a different one, or "skip" to pull no engine image.
+AINODE_NVIDIA_IMAGE="${AINODE_NVIDIA_IMAGE:-}"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
 AINODE_PEERS="${AINODE_PEERS:-}"           # comma-separated IPs
 AINODE_SSH_USER="${AINODE_SSH_USER:-$USER}"
 AINODE_JOB="${AINODE_JOB:-solo}"          # solo | master | worker
 SETUP_SSH="false"
 USER_MODE="false"
+DRY_RUN="false"
 
-# NGC / HF token locations (read-only hints; we never write these).
-NGC_TOKEN_FILE="${NGC_TOKEN_FILE:-/etc/ainode/ngc.token}"
+# HF token location (read-only hint; we never write it).
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-$HOME/.cache/huggingface/token}"
 
 # -- Arg parsing ------------------------------------------------------------
@@ -49,8 +57,9 @@ while [ $# -gt 0 ]; do
             ;;
         --setup-ssh) SETUP_SSH="true" ;;
         --user)      USER_MODE="true" ;;
+        --dry-run)   DRY_RUN="true" ;;
         -h|--help)
-            sed -n '1,20p' "$0"; exit 0 ;;
+            sed -n '1,18p' "$0"; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;
     esac
     shift
@@ -129,27 +138,39 @@ detect_cluster_interface() {
 }
 
 # -- 1. Preflight -----------------------------------------------------------
-log "Checking prerequisites"
-[ "$(uname -s)" = "Linux" ] || die "AINode requires Linux (detected $(uname -s))"
-command -v docker >/dev/null 2>&1 || die "docker not found. Install: https://docs.docker.com/engine/install/"
-docker info >/dev/null 2>&1 || die "docker daemon not reachable — run 'sudo systemctl start docker' or add \$USER to the 'docker' group"
+# Every check here is about the machine being installed ON, so a dry run (which
+# only renders files into $AINODE_HOME) skips the lot: no Linux, no docker, no
+# GPU and no sudo needed to see what an install would write.
+preflight() {
+    log "Checking prerequisites"
+    [ "$(uname -s)" = "Linux" ] || die "AINode requires Linux (detected $(uname -s))"
+    command -v docker >/dev/null 2>&1 || die "docker not found. Install: https://docs.docker.com/engine/install/"
+    docker info >/dev/null 2>&1 || die "docker daemon not reachable. Run 'sudo systemctl start docker' or add \$USER to the 'docker' group"
 
-# /mnt/shared-models is required by the v0.4.9 systemd unit (--mount type=bind
-# fails loudly if the source doesn't exist). Surface the setup requirement
-# here instead of waiting for first-start to fail with a cryptic docker error.
-# For clusters: make this an NFS mount from the master's model storage. For
-# single-node: a directory is enough. See CHANGELOG v0.4.9 for context.
-# TODO(v0.4.10): once the NCCL init shim is baked into ainode-base, this
-# path becomes optional and the precheck can be dropped.
-if [ ! -d /mnt/shared-models ]; then
-    die "AINode v0.4.9+ requires /mnt/shared-models to exist for the per-node NCCL init shim.\n  Create it before re-running this installer:\n    sudo mkdir -p /mnt/shared-models\n  For clusters, mount shared model storage there (NFS from master recommended)."
-fi
+    # /mnt/shared-models is required by the v0.4.9 systemd unit (--mount
+    # type=bind fails loudly if the source doesn't exist). Surface the setup
+    # requirement here instead of waiting for first-start to fail with a cryptic
+    # docker error. For clusters: make this an NFS mount from the master's model
+    # storage. For single-node: a directory is enough.
+    # TODO(v0.4.10): the NCCL init shim this exists for is eugr-backend only and
+    # the default backend never reads the path. Drop the mount and this check
+    # together.
+    if [ ! -d /mnt/shared-models ]; then
+        die "AINode v0.4.9+ requires /mnt/shared-models to exist for the per-node NCCL init shim.\n  Create it before re-running this installer:\n    sudo mkdir -p /mnt/shared-models\n  For clusters, mount shared model storage there (NFS from master recommended)."
+    fi
 
-# GPU check (nvidia-container-toolkit). AINode targets NVIDIA GB10; skip if
-# missing, let the container fail fast with a clear error.
-if ! docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-    warn "Could not run a GPU container. Install nvidia-container-toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/"
-    warn "Continuing — AINode will error at start time if the GPU isn't accessible."
+    # GPU check (nvidia-container-toolkit). AINode targets NVIDIA GB10; skip if
+    # missing, let the container fail fast with a clear error.
+    if ! docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+        warn "Could not run a GPU container. Install nvidia-container-toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/"
+        warn "Continuing anyway. AINode will error at start time if the GPU isn't accessible."
+    fi
+}
+
+if [ "$DRY_RUN" = "true" ]; then
+    log "Dry run: skipping prerequisite checks (nothing is pulled or started)"
+else
+    preflight
 fi
 
 # -- 2. Create config dir, pull image, write initial config ----------------
@@ -171,60 +192,56 @@ fi
 # Derive the banner version from the pinned tag when not otherwise set.
 [ -n "$AINODE_VERSION" ] || AINODE_VERSION="${AINODE_IMAGE##*:}"
 
-log "Pulling $AINODE_IMAGE (AINode orchestrator; slim — ~500 MB)"
-docker pull "$AINODE_IMAGE"
+if [ "$DRY_RUN" = "true" ]; then
+    log "Dry run: would pull $AINODE_IMAGE (AINode orchestrator, slim, ~400 MB)"
+else
+    log "Pulling $AINODE_IMAGE (AINode orchestrator, slim, ~400 MB)"
+    docker pull "$AINODE_IMAGE"
 
-# Pin the image for the systemd unit's EnvironmentFile so `ainode update` can
-# swap it later without re-rendering the unit. Written atomically (temp+rename)
-# so the unit never reads a half-written line.
-printf 'AINODE_IMAGE=%s\n' "$AINODE_IMAGE" > "$AINODE_HOME/image.env.tmp"
-mv -f "$AINODE_HOME/image.env.tmp" "$AINODE_HOME/image.env"
+    # Pin the image for the systemd unit's EnvironmentFile so `ainode update`
+    # can swap it later without re-rendering the unit. Written atomically
+    # (temp+rename) so the unit never reads a half-written line.
+    printf 'AINODE_IMAGE=%s\n' "$AINODE_IMAGE" > "$AINODE_HOME/image.env.tmp"
+    mv -f "$AINODE_HOME/image.env.tmp" "$AINODE_HOME/image.env"
+fi
 
-# -- 2a. NGC login (for nvcr.io/nvidia/vllm image pull) -------------------
-# The NVIDIA engine backend requires a pull from NGC. Non-interactive login
-# prefers a token file or env var; otherwise prints a clear next-step.
-nvidia_image_pulled() {
-    docker image inspect "$AINODE_NVIDIA_IMAGE" >/dev/null 2>&1
-}
-
-ngc_login_noninteractive() {
-    local key=""
-    if [ -n "${NGC_API_KEY:-}" ]; then
-        key="$NGC_API_KEY"
-    elif [ -r "$NGC_TOKEN_FILE" ]; then
-        key="$(tr -d '[:space:]' < "$NGC_TOKEN_FILE")"
-    fi
-    if [ -z "$key" ]; then
-        return 1
-    fi
-    # NGC uses a literal '$oauthtoken' as the username (single-quoted on
-    # purpose — it is NOT a shell variable). See
-    # https://docs.nvidia.com/ngc/gpu-cloud/ngc-private-registry-user-guide/.
-    echo "$key" | docker login nvcr.io -u '$oauthtoken' --password-stdin >/dev/null 2>&1
+# -- 2a. Pre-pull the ENGINE image ------------------------------------------
+# AINode is two images, not one: this slim orchestrator, plus a vLLM ENGINE
+# container per loaded model. Pre-pulling the engine here is the difference
+# between "click Launch, wait a couple of minutes" and "click Launch, wait
+# twenty". Which image that is comes out of the AINode image we just pulled, so
+# the installer cannot drift from the code that launches it.
+resolve_engine_image() {
+    docker run --rm --entrypoint python3 "$AINODE_IMAGE" -c \
+        'from ainode.engine.backends.nvidia import NVIDIA_VLLM_IMAGE as i; print(i)' \
+        2>/dev/null | tr -d '[:space:]'
 }
 
 if [ "$AINODE_NVIDIA_IMAGE" = "skip" ]; then
-    warn "Skipping NVIDIA vLLM image pre-pull (AINODE_NVIDIA_IMAGE=skip)"
-elif nvidia_image_pulled; then
-    log "NVIDIA vLLM image already present: $AINODE_NVIDIA_IMAGE"
+    warn "Skipping the engine image pre-pull (AINODE_NVIDIA_IMAGE=skip)."
+    warn "  The first model launch pulls it instead."
+elif [ "$DRY_RUN" = "true" ]; then
+    log "Dry run: skipping the engine image pre-pull"
 else
-    log "Pulling NVIDIA vLLM engine image: $AINODE_NVIDIA_IMAGE"
-    log "  (~15 GB; takes 5–10 minutes on a 1 Gbps link. One-time operation.)"
-    if ngc_login_noninteractive; then
-        log "  NGC login: OK (from NGC_API_KEY or $NGC_TOKEN_FILE)"
-    else
-        warn "NGC credentials not found in \$NGC_API_KEY or $NGC_TOKEN_FILE."
-        warn "  Pre-pull skipped. The NVIDIA engine backend will fail until you"
-        warn "  run:"
-        warn "     docker login nvcr.io"
-        warn "  (username: \$oauthtoken   password: your NGC API key from https://ngc.nvidia.com)"
+    if [ -z "$AINODE_NVIDIA_IMAGE" ]; then
+        AINODE_NVIDIA_IMAGE="$(resolve_engine_image || true)"
     fi
-    if docker pull "$AINODE_NVIDIA_IMAGE"; then
-        log "  NVIDIA vLLM image pulled: $AINODE_NVIDIA_IMAGE"
+    if [ -z "$AINODE_NVIDIA_IMAGE" ]; then
+        warn "Could not read the default engine image out of $AINODE_IMAGE."
+        warn "  Skipping the pre-pull; the first model launch pulls it."
+    elif docker image inspect "$AINODE_NVIDIA_IMAGE" >/dev/null 2>&1; then
+        log "Engine image already present: $AINODE_NVIDIA_IMAGE"
     else
-        warn "  docker pull $AINODE_NVIDIA_IMAGE failed (likely 401 / unauthenticated)."
-        warn "  Fix:  docker login nvcr.io   (see https://ngc.nvidia.com for an API key)"
-        warn "  Continuing — AINode will still install; the NVIDIA engine will error until the pull succeeds."
+        log "Pulling the vLLM engine image: $AINODE_NVIDIA_IMAGE"
+        log "  (~8.5 GB to download, ~22 GB on disk. Minutes on a fast link,"
+        log "   longer on a slow one. One-time: the first model launch pays for"
+        log "   it otherwise.)"
+        if docker pull "$AINODE_NVIDIA_IMAGE"; then
+            log "  Engine image pulled: $AINODE_NVIDIA_IMAGE"
+        else
+            warn "  docker pull $AINODE_NVIDIA_IMAGE failed."
+            warn "  AINode still installs; the first model launch retries the pull."
+        fi
     fi
 fi
 
@@ -268,10 +285,36 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
         log "Cluster interface: none detected (AINode re-detects at startup; edit cluster_interface in ~/.ainode/config.json to pin one)"
     fi
 
+    # Three of these are load-bearing enough to be written out rather than left
+    # to the code defaults, so the file says what this node is doing:
+    #
+    #   engine_backend "nvidia" runs each model as its own vLLM container. It is
+    #   the code default now too, but a fresh install is where getting it wrong
+    #   costs the most: up to 0.5.25 the default was "eugr", which execs a `vllm`
+    #   binary the shipped image does not contain, so every Launch click on a
+    #   new node answered HTTP 500 until somebody hand-edited this file (#164).
+    #
+    #   model null means NO model on this node yet, which is what the comment above
+    #   has always claimed and the file never said: leaving the key out inherits
+    #   NodeConfig's default, so every fresh node booted straight into a launch of
+    #   meta-llama/Llama-3.2-3B-Instruct that nobody asked for. That repo is
+    #   gated, so on a node without HF access it fails with a 401 the user cannot
+    #   place, and on a node WITH access it downloads 6 GB and reserves 0.6 of the
+    #   GPU before the user has picked anything.
+    #
+    #   gpu_memory_utilization 0.6 leaves room for a SECOND model. vLLM reserves
+    #   this fraction of the node's memory for its KV cache however small the
+    #   model is, and the stacked-load guard (models/api_routes.py) refuses a
+    #   load whose total would pass 0.90. At the 0.9 this installer used to
+    #   write, every stacked load on a brand-new node was a 409; 0.6 still gives
+    #   a single model ~73 GB of cache on a 122 GB GB10 and leaves 0.30 for one
+    #   stacked neighbour.
     cat > "$AINODE_HOME/config.json" << CONFIG
 {
   "node_name": "$(hostname)",
   "onboarded": true,
+  "model": null,
+  "engine_backend": "nvidia",
   "distributed_mode": "${DIST_MODE}",
   "peer_ips": [${PEER_IPS}],
   "cluster_id": "ainode-cluster",
@@ -280,16 +323,18 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
   "api_port": 8000,
   "web_port": 3000,
   "discovery_port": 5679,
-  "gpu_memory_utilization": 0.9
+  "gpu_memory_utilization": 0.6
 }
 CONFIG
     log "Node configured as: $AINODE_JOB (distributed_mode=$DIST_MODE)"
 fi
 
 # -- 3. Optional passwordless SSH bootstrap ---------------------------------
-# Needed only for distributed (multi-node) mode: the head runs eugr's
-# launcher which SSHes into each peer and `docker run`s a worker container.
-if [ "$SETUP_SSH" = "true" ] || [ -n "$AINODE_PEERS" ]; then
+# Needed only for distributed (multi-node) mode: the head SSHes into each peer
+# and `docker run`s an engine container there (engine/backends/nvidia.py).
+if [ "$DRY_RUN" = "true" ] && { [ "$SETUP_SSH" = "true" ] || [ -n "$AINODE_PEERS" ]; }; then
+    log "Dry run: skipping the passwordless SSH bootstrap"
+elif [ "$SETUP_SSH" = "true" ] || [ -n "$AINODE_PEERS" ]; then
     log "Setting up passwordless SSH for distributed mode"
     if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
         ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" >/dev/null
@@ -331,10 +376,15 @@ if [ "$USER_MODE" = "true" ]; then
     UNIT_DIR="$HOME/.config/systemd/user"
 fi
 
-mkdir -p "$UNIT_DIR"
+[ "$DRY_RUN" = "true" ] || mkdir -p "$UNIT_DIR"
 
-# ExecStart references ${AINODE_IMAGE} (escaped so systemd — not this shell —
-# expands it). The pinned Environment default is overridden by image.env, so
+# The unit is rendered to a staging path first, then moved into place (a dry run
+# leaves it in $AINODE_HOME and moves nothing).
+UNIT_STAGING="/tmp/ainode.service"
+[ "$DRY_RUN" = "true" ] && UNIT_STAGING="$AINODE_HOME/ainode.service"
+
+# ExecStart references ${AINODE_IMAGE}, escaped so systemd expands it rather
+# than this shell. The pinned Environment default is overridden by image.env, so
 # `ainode update` swaps the image without re-rendering this unit.
 EXEC_START="/usr/bin/docker run --rm --name ainode \
  --network=host --gpus all --ipc=host --shm-size=64g --pid=host \
@@ -351,7 +401,7 @@ EXEC_START="/usr/bin/docker run --rm --name ainode \
  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
  \${AINODE_IMAGE}"
 
-cat > /tmp/ainode.service << UNIT
+cat > "$UNIT_STAGING" << UNIT
 [Unit]
 Description=AINode — Local AI inference platform
 Documentation=https://ainode.dev
@@ -378,13 +428,15 @@ Environment=AINODE_HOME=${AINODE_HOME}
 WantedBy=${WANTED_BY}
 UNIT
 
-if [ "$USER_MODE" = "true" ]; then
-    mv /tmp/ainode.service "$UNIT_DIR/ainode.service"
+if [ "$DRY_RUN" = "true" ]; then
+    log "Dry run: unit rendered at $UNIT_STAGING (not installed, systemd untouched)"
+elif [ "$USER_MODE" = "true" ]; then
+    mv "$UNIT_STAGING" "$UNIT_DIR/ainode.service"
     systemctl --user daemon-reload
     systemctl --user enable --now ainode.service
-    log "  (consider: sudo loginctl enable-linger $USER  — so the service survives logout)"
+    log "  (consider: sudo loginctl enable-linger $USER, so the service survives logout)"
 else
-    sudo mv /tmp/ainode.service "$UNIT_DIR/ainode.service"
+    sudo mv "$UNIT_STAGING" "$UNIT_DIR/ainode.service"
     sudo systemctl daemon-reload
     sudo systemctl enable --now ainode.service
 fi
@@ -395,17 +447,25 @@ fi
 # operations that must happen outside the container), and forwards every
 # other command to `docker exec ainode ainode ...` so users never need to
 # type the docker command themselves.
-log "Installing /usr/local/bin/ainode host wrapper"
 WRAPPER_PATH="/usr/local/bin/ainode"
 WRAPPER_SUDO="sudo"
-[ -w "$(dirname "$WRAPPER_PATH")" ] && WRAPPER_SUDO=""
+if [ "$DRY_RUN" = "true" ]; then
+    WRAPPER_PATH="$AINODE_HOME/ainode-wrapper"
+    WRAPPER_SUDO=""
+    log "Dry run: rendering the host wrapper at $WRAPPER_PATH"
+else
+    [ -w "$(dirname "$WRAPPER_PATH")" ] && WRAPPER_SUDO=""
+    log "Installing $WRAPPER_PATH host wrapper"
+fi
 
 $WRAPPER_SUDO tee "$WRAPPER_PATH" >/dev/null <<WRAPPER
 #!/usr/bin/env bash
-# AINode host wrapper — installed by install.sh. Not user-editable.
+# AINode host wrapper, installed by install.sh. Not user-editable.
 set -euo pipefail
 AINODE_IMAGE="\${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
-AINODE_HOME="\${AINODE_HOME:-\$HOME/.ainode}"
+# NOT resolved to \$HOME/.ainode here: see resolve_ainode_home below. Under sudo
+# \$HOME is root's, and pinning the image into /root/.ainode is a silent no-op.
+AINODE_HOME_ENV="\${AINODE_HOME:-}"
 AINODE_SERVICE="ainode.service"
 
 # Resolve the highest numeric GHCR tag anonymously (public image).
@@ -419,6 +479,57 @@ resolve_latest_tag() {
     echo "\$tags" | tr ',' '\\n' \\
         | grep -oE '"[0-9]+\\.[0-9]+\\.[0-9]+"' | tr -d '"' \\
         | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+
+# Which .ainode does the running service actually read? \`sudo ainode update\`
+# used to answer "/root/.ainode", because the wrapper resolved \$HOME after sudo
+# had already changed it: the pull succeeded, image.env was written where nothing
+# reads it, and systemd restarted the OLD image with nothing said about it. The
+# unit bakes its AINODE_HOME in at install time, so ask the unit (issue #164).
+unit_ainode_home() {
+    local f
+    # Overridable so the test suite can point this at a temp unit; a host that
+    # HAS a real /etc/systemd/system/ainode.service would otherwise answer for it
+    # (same reason install.sh itself takes \$SYS_CLASS_NET).
+    local units="\${AINODE_UNIT_FILES:-/etc/systemd/system/ainode.service \$HOME/.config/systemd/user/ainode.service}"
+    for f in \$units; do
+        [ -r "\$f" ] || continue
+        sed -n 's/^Environment=AINODE_HOME=//p' "\$f" | tail -1
+        return 0
+    done
+    return 0
+}
+
+# Home directory of \$1, without trusting \$HOME.
+user_home() {
+    local u="\$1" h=""
+    if command -v getent >/dev/null 2>&1; then
+        h="\$(getent passwd "\$u" 2>/dev/null | cut -d: -f6 || true)"
+    fi
+    if [ -z "\$h" ]; then
+        h="\$(eval printf '%s' "~\$u" 2>/dev/null || true)"
+        [ "\$h" = "~\$u" ] && h=""
+    fi
+    [ -n "\$h" ] || return 1
+    printf '%s\n' "\$h"
+}
+
+# The .ainode whose image.env systemd reads. Non-zero exit means "cannot tell",
+# and the caller must refuse rather than write a file nothing will read.
+resolve_ainode_home() {
+    local h
+    if [ -n "\$AINODE_HOME_ENV" ]; then
+        printf '%s\n' "\$AINODE_HOME_ENV"; return 0
+    fi
+    h="\$(unit_ainode_home)"
+    if [ -n "\$h" ]; then printf '%s\n' "\$h"; return 0; fi
+    if [ "\$(id -u)" = "0" ] && [ -n "\${SUDO_USER:-}" ] && [ "\$SUDO_USER" != "root" ]; then
+        if h="\$(user_home "\$SUDO_USER")"; then
+            printf '%s\n' "\$h/.ainode"; return 0
+        fi
+        return 1
+    fi
+    printf '%s\n' "\$HOME/.ainode"
 }
 
 is_user_mode() {
@@ -446,6 +557,18 @@ case "\${1:-}" in
             PULL_IMAGE="\$AINODE_IMAGE"
             echo "!! Could not resolve a version — pulling \$PULL_IMAGE"
         fi
+        # Resolve WHERE to pin it before pulling anything: a sudo-ainode-update
+        # that cannot tell must say so, not write /root/.ainode and
+        # report success while systemd relaunches the old image.
+        if ! AINODE_HOME="\$(resolve_ainode_home)"; then
+            echo "XX Cannot tell which .ainode this service reads." >&2
+            echo "   Running as root via sudo (SUDO_USER=\${SUDO_USER:-unset}) with no" >&2
+            echo "   resolvable home and no systemd unit naming an AINODE_HOME, so" >&2
+            echo "   pinning the image would write a file nothing reads." >&2
+            echo "   Re-run as the install user, or name it:" >&2
+            echo "     sudo AINODE_HOME=/home/<user>/.ainode ainode update" >&2
+            exit 1
+        fi
         echo "==> Pulling \$PULL_IMAGE"
         docker pull "\$PULL_IMAGE"
         # Pin it for the systemd unit's EnvironmentFile, then restart. Written
@@ -453,6 +576,7 @@ case "\${1:-}" in
         mkdir -p "\$AINODE_HOME"
         printf 'AINODE_IMAGE=%s\n' "\$PULL_IMAGE" > "\$AINODE_HOME/image.env.tmp"
         mv -f "\$AINODE_HOME/image.env.tmp" "\$AINODE_HOME/image.env"
+        echo "==> Pinned \$PULL_IMAGE in \$AINODE_HOME/image.env"
         echo "==> Restarting \$AINODE_SERVICE"
         if is_user_mode || systemctl is-active --quiet "\$AINODE_SERVICE" 2>/dev/null; then
             restart_service
@@ -471,7 +595,10 @@ restart) run on the host; everything else is forwarded to the container.
 Usage: ainode <command> [args...]
 
 Host-side:
-  update                  docker pull \$AINODE_IMAGE and restart service
+  update [version]        pull the release and pin it for the systemd unit,
+                          then restart. Under sudo the image is pinned in the
+                          .ainode the UNIT reads, not root's; override with
+                          AINODE_HOME=/home/<user>/.ainode if it guesses wrong.
   --version               print the wrapper's pinned image tag
 
 Container-side (forwarded via docker exec):
@@ -492,9 +619,12 @@ HELP
         if docker exec ainode true 2>/dev/null; then
             exec docker exec -it ainode ainode "\$@"
         else
+            # Same sudo trap as update: mount the .ainode the unit uses.
+            CONF_HOME="\$(resolve_ainode_home || true)"
+            [ -n "\$CONF_HOME" ] || CONF_HOME="\$HOME/.ainode"
             exec docker run --rm -it \\
                 --entrypoint ainode \\
-                -v "\$HOME/.ainode":/root/.ainode \\
+                -v "\$CONF_HOME":/root/.ainode \\
                 "\$AINODE_IMAGE" "\$@"
         fi
         ;;
@@ -504,6 +634,16 @@ WRAPPER
 $WRAPPER_SUDO chmod +x "$WRAPPER_PATH"
 
 # -- Banner -----------------------------------------------------------------
+if [ "$DRY_RUN" = "true" ]; then
+    printf '\n'
+    log "Dry run complete. Rendered under $AINODE_HOME:"
+    log "  config.json      the node config an install would write"
+    log "  ainode.service   the systemd unit (not installed)"
+    log "  ainode-wrapper   the /usr/local/bin/ainode host wrapper"
+    printf '\n'
+    exit 0
+fi
+
 printf '\n'
 printf '    \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
 printf '    \033[1;32m  AINode v%s installed!\033[0m\n' "${AINODE_VERSION}"
@@ -515,5 +655,5 @@ printf '    Status:  ainode status\n'
 printf '    Logs:    ainode logs -f\n'
 printf '    Update:  ainode update\n'
 printf '\n'
-printf '    Powered by \033[0;34margentos.ai\033[0m\n'
+printf '    Made in Texas\n'
 printf '\n'

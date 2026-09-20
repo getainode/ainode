@@ -12,7 +12,7 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
-from ainode.core.config import NodeConfig
+from ainode.core.config import DEFAULT_ENGINE_BACKEND, NodeConfig
 from ainode.core.gpu import detect_gpu, GPUInfo
 from ainode.web.serve import get_index_html, get_onboarding_html, get_static_path
 from ainode.models.api_routes import register_model_routes
@@ -150,7 +150,9 @@ def create_app(
     # backend manages its own Ray lifecycle via run_cluster.sh at model-load time;
     # running `ray start` here fights with that (session-name mismatch on peer
     # nodes, port conflicts on port 6379). Disable the autostart loop in that case.
-    _engine_backend_for_ray = (getattr(config, "engine_backend", None) or "eugr").lower()
+    _engine_backend_for_ray = (
+        getattr(config, "engine_backend", None) or DEFAULT_ENGINE_BACKEND
+    ).lower()
     app["ray_autostart_state"] = RayAutostartState(enabled=(_engine_backend_for_ray == "eugr"))
 
     app.on_startup.append(_on_startup)

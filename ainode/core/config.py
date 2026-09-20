@@ -19,6 +19,12 @@ TRAINING_DIR = AINODE_HOME / "training"
 # it from here instead of spelling the path a second time.
 HF_CACHE_MOUNT = "/root/.cache/huggingface"
 
+# The engine backend a node uses when nothing says otherwise. One home for the
+# value: every caller that reads ``config.engine_backend`` defensively falls back
+# to THIS, so a config.json with the key missing or empty behaves exactly like a
+# fresh NodeConfig instead of picking a different backend per call site.
+DEFAULT_ENGINE_BACKEND = "nvidia"
+
 
 @dataclass
 class NodeConfig:
@@ -37,9 +43,20 @@ class NodeConfig:
     # Engine
     engine_strategy: str = "pip"  # "pip" | "docker"
     # Which Docker-engine backend to use when engine_strategy == "docker".
-    #   "eugr"   — eugr/spark-vllm-docker (v0.4.x default)
-    #   "nvidia" — NVIDIA's nvcr.io/nvidia/vllm (v0.5.0+, opt-in)
-    engine_backend: str = "eugr"
+    #   "nvidia": one vLLM engine CONTAINER per instance, from
+    #             $NVIDIA_VLLM_IMAGE or the catalog recipe's engine_image
+    #             (engine/backends/nvidia.py). THE DEFAULT, because it is the
+    #             only backend a node installed the documented way can run: the
+    #             shipped image is python:3.12-slim plus this package
+    #             (scripts/Dockerfile.ainode), with no vllm binary, no ray and
+    #             no eugr launcher in it.
+    #   "eugr":   eugr/spark-vllm-docker's launch-cluster.sh plus a `vllm` on
+    #             PATH (the v0.4.x default). Still supported, but OPT-IN: it
+    #             only works where something actually ships vLLM, so a config
+    #             has to ask for it by name.
+    # This defaulted to "eugr" through 0.5.25, which is why a fresh install could
+    # not load any model until somebody hand-edited config.json (issue #164).
+    engine_backend: str = DEFAULT_ENGINE_BACKEND
     model: str = "meta-llama/Llama-3.2-3B-Instruct"
     models_dir: str = str(MODELS_DIR)
     # Optional API aliases for /v1/models — emitted as ``--served-model-name a b c``.

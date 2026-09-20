@@ -156,7 +156,13 @@ def test_start_solo_translates_missing_vllm_into_a_backend_error(monkeypatch):
 
 
 def test_no_vllm_message_text():
-    """The exact guidance. Pinned so CLI and backend cannot drift apart."""
+    """The exact guidance. Pinned so CLI and backend cannot drift apart.
+
+    It names THIS node's config file as well as the fix, because on a container
+    install the file is on the host under a path the old text did not mention.
+    """
+    from ainode.engine.backends.eugr import _config_file_for_display
+
     assert NO_VLLM_MESSAGE == (
         "AINode runs as a container image, and this host has no vLLM install.\n"
         "  `ainode start` outside the container has nothing to launch the "
@@ -166,5 +172,10 @@ def test_no_vllm_message_text():
         "      curl -fsSL https://ainode.dev/install | bash\n"
         "\n"
         "  Or, to run the engine in Docker from this host checkout, set\n"
-        '  "engine_backend": "nvidia" in ~/.ainode/config.json and start again.'
+        '  "engine_backend": "nvidia" in ~/.ainode/config.json and start again.\n'
+        "\n"
+        f"  This node reads its config from: {_config_file_for_display()}\n"
+        '  The eugr backend is only selected when that file says\n'
+        '  "engine_backend": "eugr"; every other value, and no value at all,\n'
+        "  means the nvidia backend, which needs no vLLM on this host."
     )
