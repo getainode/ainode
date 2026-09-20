@@ -1,7 +1,8 @@
 """Shared pytest fixtures.
 
-Three are global, all there to keep the suite from reading or touching the machine
-it runs on: netdev isolation and the boot-reconcile guard (per test), and the
+Four are global, all there to keep the suite from reading or touching the machine
+it runs on: netdev isolation, the metrics-store redirect and the boot-reconcile
+guard (per test), and the
 engine-container guard (per session, at the bottom of this file).
 
 ``isolate_netdev``: ``ainode.cluster.netdev`` reads the
@@ -16,6 +17,13 @@ nothing, and clear the resolution cache around every test. A host with no
 detectable interface resolves to the configured name unchanged, which is the
 behavior those tests already assert. Tests that WANT detection to fire
 monkeypatch these same two seams with their own fakes.
+
+``isolate_metrics_store``: ``ainode.metrics.store.default_store_path`` resolves
+``AINODE_HOME`` at call time and pytest does not set it, so without this every
+test that starts an application would open, sample into and prune the operator's
+own ``~/.ainode/metrics.db``. Point it at a temporary file instead. A test that
+cares about the path hands one to ``MetricsStore`` directly, which this does not
+touch.
 
 ``no_boot_reconcile``: ``create_app``'s startup schedules the instance replay,
 whose first step asks docker which engine containers this node is already
@@ -33,6 +41,26 @@ import shutil
 import subprocess
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_metrics_store(monkeypatch, tmp_path_factory):
+    """Keep the on-disk sample store out of the operator's real AINODE_HOME.
+
+    ``ainode.metrics.store.default_store_path`` resolves ``AINODE_HOME`` at call
+    time and pytest does not set it, so without this every test that starts an
+    application would open, sample into and prune the developer's own
+    ``~/.ainode/metrics.db``. Point it at a temporary file per test instead. A
+    test that cares about the path hands one to ``MetricsStore`` directly, which
+    this does not touch.
+    """
+    from ainode.metrics import store as metrics_store
+
+    home = tmp_path_factory.mktemp("ainode_metrics_home")
+    monkeypatch.setattr(
+        metrics_store, "default_store_path", lambda: home / "metrics.db"
+    )
+    yield
 
 
 @pytest.fixture(autouse=True)

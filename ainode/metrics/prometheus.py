@@ -9,21 +9,41 @@ Deliberately does *not* depend on ``prometheus_client``. The exposition
 format is small, well-specified, and inline-able — adding a third-party
 dep would cost more than it saves.
 
+Every series takes the identity labels the route passes in (``node``,
+``node_id``). Without them a fleet scraped into one Prometheus produces four
+``ainode_gpu_temperature_celsius`` series told apart only by the scraper's own
+``instance`` label, which is an address and not a machine. The labels are an
+argument rather than something read here, so ``render(collector)`` still renders
+exactly what it always did.
+
 Format reference: https://prometheus.io/docs/instrumenting/exposition_formats/
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping, Optional, Sequence
 
-from ainode.metrics.collector import MetricsCollector
+from ainode.metrics.collector import MetricsCollector, optional_float
 
 _CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 
-def render(collector: MetricsCollector) -> str:
-    """Render the collector's current snapshot as Prometheus text format."""
+def render(
+    collector: MetricsCollector,
+    labels: Optional[Mapping[str, Any]] = None,
+    store: Any = None,
+    models: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> str:
+    """Render the collector's current snapshot as Prometheus text format.
+
+    *labels* are stamped on every series (see the module docstring). *store* is a
+    :class:`~ainode.metrics.store.MetricsStore`, whose own size and oldest sample
+    are exported as ``ainode_metrics_retention_*``: a retention layer nobody can
+    see the state of is one that silently stops. *models* is what this node is
+    serving, so a fleet scrape can answer which box has which model loaded.
+    """
     snapshot = collector.get_snapshot()
+    base = dict(labels or {})
     lines: list[str] = []
 
     # -- Uptime --------------------------------------------------------------
@@ -31,7 +51,7 @@ def render(collector: MetricsCollector) -> str:
     lines += [
         "# HELP ainode_uptime_seconds Seconds since the AINode process started.",
         "# TYPE ainode_uptime_seconds counter",
-        f"ainode_uptime_seconds {uptime}",
+        _fmt("ainode_uptime_seconds", uptime, base),
         "",
     ]
 
@@ -45,19 +65,19 @@ def render(collector: MetricsCollector) -> str:
     lines += [
         "# HELP ainode_requests_total Total inference requests processed.",
         "# TYPE ainode_requests_total counter",
-        f"ainode_requests_total {total}",
+        _fmt("ainode_requests_total", total, base),
         "",
         "# HELP ainode_request_errors_total Total inference requests that failed.",
         "# TYPE ainode_request_errors_total counter",
-        f"ainode_request_errors_total {errors}",
+        _fmt("ainode_request_errors_total", errors, base),
         "",
         "# HELP ainode_tokens_generated_total Total tokens generated across all requests.",
         "# TYPE ainode_tokens_generated_total counter",
-        f"ainode_tokens_generated_total {tokens_generated}",
+        _fmt("ainode_tokens_generated_total", tokens_generated, base),
         "",
         "# HELP ainode_tokens_per_second Average tokens-per-second over the process lifetime.",
         "# TYPE ainode_tokens_per_second gauge",
-        f"ainode_tokens_per_second {tokens_per_second}",
+        _fmt("ainode_tokens_per_second", tokens_per_second, base),
         "",
     ]
 
@@ -69,9 +89,10 @@ def render(collector: MetricsCollector) -> str:
             "# TYPE ainode_requests_by_model_total counter",
         ]
         for model_name, count in by_model.items():
-            lines.append(
-                f'ainode_requests_by_model_total{{model="{_escape(model_name)}"}} {int(count)}'
-            )
+            lines.append(_fmt(
+                "ainode_requests_by_model_total", int(count),
+                {**base, "model": model_name},
+            ))
         lines.append("")
 
     # Latency summary (p50 / p95 / p99 are pre-computed by the collector)
@@ -82,13 +103,15 @@ def render(collector: MetricsCollector) -> str:
     ]
     for pct_key, quantile in (("p50", "0.5"), ("p95", "0.95"), ("p99", "0.99")):
         value = float(latency.get(pct_key, 0.0) or 0.0)
-        lines.append(
-            f'ainode_request_latency_milliseconds{{quantile="{quantile}"}} {value}'
-        )
+        lines.append(_fmt(
+            "ainode_request_latency_milliseconds", value,
+            {**base, "quantile": quantile},
+        ))
     # Also emit count + sum so Prometheus recording rules can compute
     # additional aggregates (avg = sum/count) if a scraper wants them.
-    lines.append(f"ainode_request_latency_milliseconds_count {total}")
-    lines.append("ainode_request_latency_milliseconds_sum 0")  # exact sum not tracked
+    lines.append(_fmt("ainode_request_latency_milliseconds_count", total, base))
+    # exact sum not tracked
+    lines.append(_fmt("ainode_request_latency_milliseconds_sum", 0, base))
     lines.append("")
 
     # -- GPU -----------------------------------------------------------------
@@ -103,28 +126,28 @@ def render(collector: MetricsCollector) -> str:
             lines += [
                 "# HELP ainode_gpu_utilization_percent GPU utilization (0-100).",
                 "# TYPE ainode_gpu_utilization_percent gauge",
-                f"ainode_gpu_utilization_percent {float(util)}",
+                _fmt("ainode_gpu_utilization_percent", float(util), base),
                 "",
             ]
         if used is not None:
             lines += [
                 "# HELP ainode_gpu_memory_used_bytes GPU memory in use (bytes).",
                 "# TYPE ainode_gpu_memory_used_bytes gauge",
-                f"ainode_gpu_memory_used_bytes {int(used) * 1024 * 1024}",
+                _fmt("ainode_gpu_memory_used_bytes", int(used) * 1024 * 1024, base),
                 "",
             ]
         if total_mem is not None:
             lines += [
                 "# HELP ainode_gpu_memory_total_bytes Total GPU memory (bytes).",
                 "# TYPE ainode_gpu_memory_total_bytes gauge",
-                f"ainode_gpu_memory_total_bytes {int(total_mem) * 1024 * 1024}",
+                _fmt("ainode_gpu_memory_total_bytes", int(total_mem) * 1024 * 1024, base),
                 "",
             ]
         if temp is not None:
             lines += [
                 "# HELP ainode_gpu_temperature_celsius GPU temperature (C).",
                 "# TYPE ainode_gpu_temperature_celsius gauge",
-                f"ainode_gpu_temperature_celsius {float(temp)}",
+                _fmt("ainode_gpu_temperature_celsius", float(temp), base),
                 "",
             ]
     else:
@@ -133,9 +156,12 @@ def render(collector: MetricsCollector) -> str:
         lines += [
             "# HELP ainode_gpu_available Whether the GPU is queryable via pynvml (1=yes, 0=no).",
             "# TYPE ainode_gpu_available gauge",
-            "ainode_gpu_available 0",
+            _fmt("ainode_gpu_available", 0, base),
             "",
         ]
+
+    lines += _model_lines(models, base)
+    lines += _retention_lines(store, base)
 
     # Build info — useful for Grafana dashboards to pin panels to a version.
     from ainode import __version__
@@ -143,7 +169,7 @@ def render(collector: MetricsCollector) -> str:
     lines += [
         "# HELP ainode_build_info AINode build metadata (value is always 1).",
         "# TYPE ainode_build_info gauge",
-        f'ainode_build_info{{version="{_escape(__version__)}"}} 1',
+        _fmt("ainode_build_info", 1, {**base, "version": __version__}),
         "",
     ]
 
@@ -153,6 +179,119 @@ def render(collector: MetricsCollector) -> str:
 def content_type() -> str:
     """Return the Prometheus exposition Content-Type header value."""
     return _CONTENT_TYPE
+
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+
+def _model_lines(
+    models: Optional[Sequence[Mapping[str, Any]]],
+    base: Mapping[str, Any],
+) -> list[str]:
+    """One gauge per model this node is serving, or nothing.
+
+    The counters above answer "how many requests did this model take". Nothing
+    answered "which node has it loaded right now", which is the question a fleet
+    dashboard asks first, so an operator had to open four dashboards to find out.
+    A node serving nothing emits no series rather than a zero: there is no model
+    to label, and a placeholder label value would invent one.
+    """
+    if not models:
+        return []
+    lines = [
+        "# HELP ainode_model_loaded A model this node currently has an engine for "
+        "(value is always 1).",
+        "# TYPE ainode_model_loaded gauge",
+    ]
+    for entry in models:
+        model = str(entry.get("model") or "")
+        if not model:
+            continue
+        extra = {**base, "model": model}
+        status = str(entry.get("status") or "")
+        if status:
+            extra["status"] = status
+        port = optional_float(entry.get("port"))
+        if port is not None:
+            extra["port"] = str(int(port))
+        lines.append(_fmt("ainode_model_loaded", 1, extra))
+    lines.append("")
+    return lines
+
+
+def _retention_lines(store: Any, base: Mapping[str, Any]) -> list[str]:
+    """What the on-disk sample store is holding and costing.
+
+    Cheap and honest: four numbers off one SQLite query, answering whether
+    retention is on, whether it is broken, how big the file has become and how
+    far back it reaches. ``oldest_sample`` is omitted on an empty store rather
+    than exported as 0, which every dashboard would draw as January 1970.
+    """
+    if store is None:
+        return []
+    try:
+        stats = store.stats()
+    except Exception:
+        return []
+    if not isinstance(stats, Mapping):
+        return []
+
+    lines = [
+        "# HELP ainode_metrics_retention_enabled Whether samples are being kept on "
+        "disk (1=yes, 0=no).",
+        "# TYPE ainode_metrics_retention_enabled gauge",
+        _fmt("ainode_metrics_retention_enabled",
+             1 if stats.get("available") else 0, base),
+        "",
+        "# HELP ainode_metrics_retention_degraded Whether a read or write to the "
+        "sample store has failed (1=yes, 0=no).",
+        "# TYPE ainode_metrics_retention_degraded gauge",
+        _fmt("ainode_metrics_retention_degraded",
+             1 if stats.get("degraded") else 0, base),
+        "",
+        "# HELP ainode_metrics_retention_db_bytes Size on disk of the sample store, "
+        "including its write-ahead log.",
+        "# TYPE ainode_metrics_retention_db_bytes gauge",
+        _fmt("ainode_metrics_retention_db_bytes",
+             int(optional_float(stats.get("db_bytes")) or 0), base),
+        "",
+        "# HELP ainode_metrics_retention_samples Raw samples currently held.",
+        "# TYPE ainode_metrics_retention_samples gauge",
+        _fmt("ainode_metrics_retention_samples",
+             int(optional_float(stats.get("samples")) or 0), base),
+        "",
+        "# HELP ainode_metrics_retention_downsampled_samples One-minute roll-up rows "
+        "currently held.",
+        "# TYPE ainode_metrics_retention_downsampled_samples gauge",
+        _fmt("ainode_metrics_retention_downsampled_samples",
+             int(optional_float(stats.get("downsampled")) or 0), base),
+        "",
+    ]
+
+    oldest = optional_float(stats.get("oldest_sample"))
+    if oldest is not None:
+        lines += [
+            "# HELP ainode_metrics_retention_oldest_sample_timestamp_seconds Unix "
+            "time of the oldest sample still held.",
+            "# TYPE ainode_metrics_retention_oldest_sample_timestamp_seconds gauge",
+            _fmt("ainode_metrics_retention_oldest_sample_timestamp_seconds",
+                 oldest, base),
+            "",
+        ]
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+def _fmt(name: str, value: Any, labels: Optional[Mapping[str, Any]] = None) -> str:
+    """One exposition line. No braces at all when there are no labels."""
+    if not labels:
+        return f"{name} {value}"
+    rendered = ",".join(f'{key}="{_escape(val)}"' for key, val in labels.items())
+    return f"{name}{{{rendered}}} {value}"
 
 
 def _escape(value: Any) -> str:

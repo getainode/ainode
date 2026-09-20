@@ -1,0 +1,137 @@
+# Prometheus scrape config for an AINode fleet.
+#
+# Every AINode node serves the exposition format at GET /metrics on its web port
+# (3000 by default), from ainode/metrics/prometheus.py. Nothing in AINode scrapes
+# it: the endpoint has existed since 0.4 and, until something like this file was
+# pointed at it, no series ever left the node.
+#
+# Drop this in as prometheus.yml, or paste the scrape_configs block into an
+# existing one. Tested against Prometheus 2.x and VictoriaMetrics; the format is
+# text/plain version=0.0.4, which every Prometheus-compatible scraper reads.
+#
+#   prometheus --config.file=docs/prometheus-scrape.yml
+#
+# What a node exports
+#
+#   ainode_uptime_seconds                        counter, resets on restart
+#   ainode_requests_total                        counter
+#   ainode_request_errors_total                  counter
+#   ainode_tokens_generated_total                counter
+#   ainode_tokens_per_second                     gauge, mean over process life
+#   ainode_requests_by_model_total{model}        counter
+#   ainode_request_latency_milliseconds{quantile}  summary, p50 p95 p99
+#   ainode_gpu_utilization_percent               gauge, ABSENT on unified memory
+#   ainode_gpu_memory_used_bytes                 gauge, ABSENT when nothing measured it
+#   ainode_gpu_memory_total_bytes                gauge
+#   ainode_gpu_temperature_celsius               gauge
+#   ainode_gpu_available                         gauge, 0 when NVML would not answer
+#   ainode_model_loaded{model,status,port}       gauge, 1 per engine on this node
+#   ainode_metrics_retention_enabled             gauge
+#   ainode_metrics_retention_degraded            gauge, 1 after a store write failed
+#   ainode_metrics_retention_db_bytes            gauge
+#   ainode_metrics_retention_samples             gauge
+#   ainode_metrics_retention_downsampled_samples gauge
+#   ainode_metrics_retention_oldest_sample_timestamp_seconds  gauge, ABSENT when empty
+#   ainode_build_info{version}                   gauge, always 1
+#
+# A figure the node could not measure is ABSENT from the exposition, never 0.
+# That is deliberate and it is the same rule the rest of the telemetry follows:
+# on a DGX Spark (GB10) the driver exposes no GPU utilisation counter and NVML
+# reports no per-device memory usage, so ainode_gpu_utilization_percent is simply
+# not there. A 0 would draw as an idle GPU on a node that is serving.
+#
+# Two consequences for anything built on this:
+#
+#   * Alert on absent(), not on == 0. `absent(ainode_gpu_utilization_percent)`
+#     is true on every Spark in the fleet, forever, and that is correct.
+#   * A Grafana panel wants "Connect null values: never". Joining across a gap
+#     invents the reading that was missing.
+#
+# Every series carries node="<node name>" and node_id="<stable id>" from the
+# node's own config. Prefer those over the scraper's `instance` label: instance
+# is an address and changes when a node moves, node_id does not.
+
+global:
+  # Matches AINode's own sampling cadence (the metrics.interval_seconds config
+  # key, 15 s by default), so a scrape and a stored sample line up.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    fleet: ainode
+
+scrape_configs:
+  - job_name: ainode
+    metrics_path: /metrics
+    scheme: http
+
+    # If the nodes have an API key set (ainode auth enable, or Config > API
+    # access in the dashboard) then /metrics needs it too: it is not on the
+    # unauthenticated path list, because it reports what the node is doing and
+    # which models it holds. Uncomment and point at a file holding the key.
+    #
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/ainode.key
+
+    static_configs:
+      # One target per node, on its web port. Replace with your own addresses.
+      - targets:
+          - 100.122.26.9:3000    # Spark-1
+          - 100.85.4.222:3000    # Spark-2
+          - 100.80.240.119:3000  # Spark-3
+          - 100.71.16.165:3000   # Spark-4
+
+    relabel_configs:
+      # Keep the address as a separate label, so `instance` can be overwritten
+      # below by the node's own name without losing how it was reached.
+      - source_labels: [__address__]
+        target_label: address
+
+    metric_relabel_configs:
+      # Make `instance` the node's own name where the node states one. A fleet
+      # dashboard then reads Spark-3 rather than 100.80.240.119:3000, and a node
+      # that changes address keeps its identity in every existing panel.
+      - source_labels: [node]
+        regex: (.+)
+        target_label: instance
+        replacement: $1
+
+# Recording and alerting rules worth having. Put them in their own file and add
+# it to rule_files above; they are here so the reasoning stays next to the
+# series it is about.
+#
+# groups:
+#   - name: ainode
+#     rules:
+#       # Retention stopped writing. The node keeps serving, so nothing else
+#       # tells you the history is no longer being kept.
+#       - alert: AINodeMetricsRetentionDegraded
+#         expr: ainode_metrics_retention_degraded == 1
+#         for: 10m
+#         annotations:
+#           summary: "{{ $labels.node }} cannot write its metrics store"
+#
+#       # The store is bigger than the retention should allow. Either retention
+#       # is misconfigured or a prune has been failing quietly.
+#       - alert: AINodeMetricsStoreLarge
+#         expr: ainode_metrics_retention_db_bytes > 500 * 1024 * 1024
+#         for: 1h
+#
+#       # A node restarted. ainode_uptime_seconds is a counter that resets, so
+#       # resets() counts restarts over the window.
+#       - alert: AINodeRestarting
+#         expr: resets(ainode_uptime_seconds[1h]) > 2
+#         for: 5m
+#
+#       # Errors as a share of traffic, rather than an absolute count that grows
+#       # forever and alerts on a node that has been healthy for a month.
+#       - record: ainode:request_error_ratio5m
+#         expr: >
+#           rate(ainode_request_errors_total[5m])
+#             / clamp_min(rate(ainode_requests_total[5m]), 0.001)
+#
+#       # Temperature is real on a GB10 even though utilisation is not, so this
+#       # one works on every node in the fleet.
+#       - alert: AINodeGPUHot
+#         expr: ainode_gpu_temperature_celsius > 85
+#         for: 10m
