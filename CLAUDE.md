@@ -24,10 +24,16 @@ that image ships, configured by env AINode computes from the host's fabric inter
 
 ## Distribution
 
-AINode publishes ONE image, `ghcr.io/getainode/ainode:<version>`, to GHCR and nowhere
-else. There is no Docker Hub mirror: `argentaios/ainode` there stops at 0.4.7 and the
-CI mirror step points at a namespace that 404s. CI builds on a self-hosted aarch64
-runner (a Spark) via `.github/workflows/publish-image.yml`.
+AINode publishes ONE orchestrator image, `ghcr.io/getainode/ainode:<version>`, to GHCR
+and nowhere else. There is no Docker Hub mirror: `argentaios/ainode` there stops at
+0.4.7 and the CI mirror step points at a namespace that 404s. CI builds on a
+self-hosted aarch64 runner (a Spark) via `.github/workflows/publish-image.yml`.
+
+Two job/engine images are published beside it, each on its own trigger and its own tag
+scheme, because neither tracks an AINode release: `ainode-train:<ainode version>`
+(`publish-train-image.yml`, a `train-v*` tag) and
+`ainode-whisper:<base engine tag>` (`publish-whisper-image.yml`, a `whisper-v*` tag),
+which is the engine image the speech-to-text catalog entry pins.
 
 A node runs two images at minimum: that orchestrator plus an engine container per
 loaded model, pulled on first launch (the installer pre-pulls the default one).
@@ -89,6 +95,9 @@ scripts/
 ├── Dockerfile.ainode         # FROM python:3.12-slim + pip install /src
 ├── Dockerfile.quant          # The training/quantization job image (~22 GB), published
 │                             #   by publish-train-image.yml as ainode-train:<version>
+├── Dockerfile.whisper        # The speech engine image: the default engine build plus
+│                             #   vLLM's audio extras, published by
+│                             #   publish-whisper-image.yml as ainode-whisper:<base tag>
 ├── docker-entrypoint.sh      # exec ainode start --in-container
 ├── install.sh                # End-user installer (--dry-run renders and stops)
 └── build-base-image.sh       # eugr base; not an input to Dockerfile.ainode

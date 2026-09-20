@@ -1272,3 +1272,96 @@ def test_unreadable_config_keeps_fp8_default(tmp_path):
     cfg = _write_model_dir(tmp_path, config_json=False)
     cfg.kv_cache_dtype = "fp8"
     assert _kv_dtype_arg(NvidiaBackend(cfg)) == "fp8"
+
+
+# --------------------------------------------------- the engine-image preflight
+#
+# A catalog recipe can pin an engine image a node has never had (the speech entry
+# pins the published whisper build), and a pull can fail. The launch then returned
+# False with the reason only in this process's log, so the API answered "Failed to
+# launch engine", which names nothing an operator can act on. These pin the
+# sentence and the plumbing that carries it, the same way the training image's
+# preflight is pinned in tests/test_training_command.py.
+
+
+def test_image_repo_strips_a_tag_but_not_a_registry_port():
+    from ainode.engine.backends.nvidia import image_repo
+
+    assert image_repo("ghcr.io/getainode/ainode-whisper:0.17.0-t5") == \
+        "ghcr.io/getainode/ainode-whisper"
+    assert image_repo("ainode-whisper:0.17.0-t5") == "ainode-whisper"
+    assert image_repo("ainode-whisper") == "ainode-whisper"
+    # A port is not a tag: splitting on the last colon of the whole ref would turn
+    # localhost:5000/x into localhost.
+    assert image_repo("localhost:5000/ainode-whisper") == "localhost:5000/ainode-whisper"
+    assert image_repo("localhost:5000/ainode-whisper:0.17.0-t5") == \
+        "localhost:5000/ainode-whisper"
+
+
+def test_a_missing_image_message_names_the_image_the_pull_and_the_dockerfile():
+    from ainode.engine.backends.nvidia import engine_image_missing_message
+
+    msg = engine_image_missing_message(
+        "ghcr.io/getainode/ainode-whisper:0.17.0-t5",
+        detail="manifest unknown")
+    assert "ghcr.io/getainode/ainode-whisper:0.17.0-t5" in msg
+    assert "docker pull ghcr.io/getainode/ainode-whisper:0.17.0-t5" in msg
+    # The repo builds this one, so the message can offer the build as well.
+    assert "scripts/Dockerfile.whisper" in msg
+    assert "manifest unknown" in msg
+    # And the override, which is the answer on a node that has a different image.
+    assert "engine_image" in msg and "NVIDIA_VLLM_IMAGE" in msg
+
+
+def test_a_missing_image_this_repo_does_not_build_offers_no_dockerfile():
+    from ainode.engine.backends.nvidia import engine_image_missing_message
+
+    msg = engine_image_missing_message("vllm/vllm-openai:v0.27.1")
+    assert "vllm/vllm-openai:v0.27.1" in msg
+    assert "docker pull vllm/vllm-openai:v0.27.1" in msg
+    assert "Dockerfile" not in msg
+
+
+def test_a_failed_pull_records_the_reason_on_the_backend(tmp_path, monkeypatch):
+    cfg = NodeConfig(model="openai/whisper-large-v3-turbo", models_dir=str(tmp_path),
+                     engine_image="ghcr.io/getainode/ainode-whisper:0.17.0-t5")
+    backend = NvidiaBackend(cfg)
+    monkeypatch.setattr(backend, "_image_present", lambda image: False)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: mock.Mock(returncode=1, stdout="", stderr="manifest unknown"))
+
+    assert backend.ensure_image(cfg.engine_image) is False
+    assert "ghcr.io/getainode/ainode-whisper:0.17.0-t5" in backend.launch_error
+    assert "manifest unknown" in backend.launch_error
+
+
+def test_a_pull_timeout_records_a_reason_too(tmp_path, monkeypatch):
+    cfg = NodeConfig(model="m/m", models_dir=str(tmp_path),
+                     engine_image="ghcr.io/getainode/ainode-whisper:0.17.0-t5")
+    backend = NvidiaBackend(cfg)
+    monkeypatch.setattr(backend, "_image_present", lambda image: False)
+
+    def _timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="docker pull", timeout=30)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+    assert backend.ensure_image(cfg.engine_image, timeout=30) is False
+    assert "ghcr.io/getainode/ainode-whisper:0.17.0-t5" in backend.launch_error
+
+
+def test_an_image_that_is_there_leaves_no_reason_behind(tmp_path, monkeypatch):
+    """Cleared on success, so a stale sentence is never reported for a later
+    failure that had nothing to do with the image."""
+    cfg = NodeConfig(model="m/m", models_dir=str(tmp_path))
+    backend = NvidiaBackend(cfg)
+    backend._launch_error = "something older"
+    monkeypatch.setattr(backend, "_image_present", lambda image: True)
+
+    assert backend.ensure_image("whatever:1") is True
+    assert backend.launch_error == ""
+
+
+def test_every_backend_answers_launch_error():
+    """The base class defines it, so a load route can ask any backend."""
+    assert EngineBackend.launch_error.fget(object()) == ""

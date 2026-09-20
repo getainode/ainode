@@ -413,11 +413,36 @@ def test_the_catalog_entry_is_shaped_for_a_stacked_speech_model():
     # The audio extras are not in any fleet image, so the recipe pins the build
     # that has them, and pinning a non-default image turns off the backend's
     # automatic GB10 workaround, so the recipe states that too.
-    assert info.engine_image == "ainode-whisper:0.17.0-t5"
+    assert info.engine_image == "ghcr.io/getainode/ainode-whisper:0.17.0-t5"
     assert "--enforce-eager" in info.extra_vllm_args
     # Stated, not inherited: a node's fp8 KV default is not a combination anyone
     # has proven on an encoder-decoder model here.
     assert info.kv_cache_dtype == "auto"
+
+
+def test_the_entry_pins_an_image_a_fresh_node_can_pull():
+    """The point of publishing it: an entry pinning a hand-built tag is a LAUNCH
+    button that fails on every node but the one that built it. The tag is the base
+    engine image's tag, and the Dockerfile that builds it states the same base, so
+    the two cannot drift apart silently."""
+    from pathlib import Path
+
+    from ainode.engine.backends.nvidia import ENGINE_IMAGE_DOCKERFILES, image_repo
+
+    info = CURATED_CLUSTER_MODELS["whisper-large-v3-turbo"]
+    assert info.engine_image.startswith("ghcr.io/getainode/")
+    repo, _, tag = info.engine_image.rpartition(":")
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = root / ENGINE_IMAGE_DOCKERFILES[image_repo(info.engine_image)]
+    assert dockerfile.exists()
+    base = [line for line in dockerfile.read_text().splitlines()
+            if line.startswith("ARG BASE=")]
+    assert base, "the Dockerfile has to state its base as ARG BASE= for CI to read"
+    assert base[0].rpartition(":")[2] == tag, (
+        f"{repo} is tagged {tag} but the Dockerfile builds on {base[0]}")
+    workflow = root / ".github" / "workflows" / "publish-whisper-image.yml"
+    assert workflow.exists()
+    assert repo in workflow.read_text()
 
 
 def test_the_speech_entry_is_the_only_one_in_the_catalog():

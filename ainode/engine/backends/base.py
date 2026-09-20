@@ -138,6 +138,21 @@ class EngineBackend(abc.ABC):
         """
         return None
 
+    @property
+    def launch_error(self) -> str:
+        """Why the last launch attempt did not start, in the operator's words, or "".
+
+        A launch returns a bool, so the reason used to live only in this process's
+        log while the API answered "Failed to launch engine", which names nothing
+        anyone can act on. A missing engine image is the common case and the one
+        that reads as a product defect: a catalog recipe pins an image, the node
+        has never had it, the pull fails, and the dashboard says the engine failed
+        to launch. A backend that knows the reason puts the sentence here and the
+        load routes report it verbatim. Cleared when the step that sets it later
+        succeeds, so a stale reason is never attributed to a fresh failure.
+        """
+        return ""
+
     def activity_mark(self) -> Optional[float]:
         """Epoch seconds when this engine last showed ACTIVITY, or None.
 

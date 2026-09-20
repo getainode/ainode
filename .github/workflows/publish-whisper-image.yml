@@ -40,10 +40,13 @@ name: publish-whisper-image
 # [self-hosted, dgx-spark, aarch64], docker installed, the runner user in the
 # docker group, and GITHUB_TOKEN with packages:write.
 #
-# After the FIRST publish the GHCR package is private, so a node pulling it
-# anonymously gets a manifest-unknown error that reads like a missing tag. Make
-# the ainode-whisper package public in the org's package settings once, the way
-# ainode and ainode-train are.
+# Check the package is PUBLIC after a first publish. This org's first push landed
+# public (verified 2026-09-20 with an anonymous ghcr.io token: the manifest for
+# 0.17.0-t5 answered 200), but a package that lands private fails an anonymous
+# `docker pull` with `manifest unknown`, which reads like a missing tag rather than
+# a permission. The check is cheap:
+#   TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:getainode/ainode-whisper:pull&service=ghcr.io" | jq -r .token)
+#   curl -sI -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/getainode/ainode-whisper/manifests/0.17.0-t5
 
 on:
   push:

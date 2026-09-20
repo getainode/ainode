@@ -585,9 +585,9 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "them, and vLLM imports soundfile at module scope as soon as the served "
             "model reports the transcription task, so the stock image dies at "
             "startup before it binds a port. The image below is the stock GB10 "
-            "build plus those two libraries, built from scripts/Dockerfile.whisper "
-            "on the node that serves it; publishing it to a registry is a "
-            "follow-up."
+            "build plus those two libraries, published by CI from "
+            "scripts/Dockerfile.whisper, so a node pulls it the way it pulls any "
+            "other engine image."
         ),
         quantization=None, min_memory_gb=4, family="whisper", params_b=0.81,
         arch="dense",
@@ -605,10 +605,13 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
         # Not a chat capability: this model answers the two audio paths and no
         # chat path, so the interface reads it the way it reads "embedding".
         capabilities=["speech"],
-        # Local build, not published (same shape as the DSpark entry above). The
-        # tag keeps the base image's version so it is obvious which build it
-        # derives from.
-        engine_image="ainode-whisper:0.17.0-t5",
+        # Published by .github/workflows/publish-whisper-image.yml, so LAUNCH works
+        # on a node that has never built anything: an entry pinning a hand-built
+        # tag is a button that fails everywhere else, which is the defect the
+        # training image had before CI published it (#192). The tag is the BASE
+        # engine image's tag, not an AINode version, because this image tracks the
+        # engine it derives from and an AINode release does not rebuild it.
+        engine_image="ghcr.io/getainode/ainode-whisper:0.17.0-t5",
         # A recipe dtype is explicit, so this is the recipe saying auto rather
         # than inheriting a node's fp8 default: fp8 KV buys nothing across a
         # 448-token window and is not a combination anyone has proven on an
