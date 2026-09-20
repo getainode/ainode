@@ -292,3 +292,106 @@ def test_catalog_recipe_surfaces_extra_env_when_a_model_carries_it():
             "VLLM_NVFP4_GEMM_BACKEND": "flashinfer-b12x"}
     finally:
         del reg.CURATED_CLUSTER_MODELS["probe-b12x"]
+
+
+# --- two entries, one checkpoint: the V100 Flash-Next lane (castor) -----------
+#
+# qwen3.8-flash-next-nvfp4-v100 is the first catalog entry to share an hf_repo
+# with another one. The GB10 entry pins an aarch64 nightly at TP=2 in the mp
+# shape; this one pins a local SM70 build on four Volta cards in one box. Neither
+# recipe runs on the other's hardware, so which entry a load resolves to is the
+# whole question, and it must not be an accident of dict order.
+
+V100_FLASH_ID = "qwen3.8-flash-next-nvfp4-v100"
+FLASH_REPO = "nvidia/Qwen3.8-Flash-Next-NVFP4"
+
+
+def test_the_v100_flash_next_lane_resolves_by_its_catalog_id():
+    recipe = catalog_recipe(V100_FLASH_ID)
+    assert recipe["engine_image"] == "onecat-vllm:1.5.0-mm"
+    assert recipe["kv_cache_dtype"] == "auto"
+    assert recipe["kv_cache_dtype_explicit"] is True
+    assert recipe["max_model_len"] == 262144
+    assert recipe["trust_remote_code"] is True
+    assert recipe["gpu_memory_utilization"] == 0.94
+    # No distributed shape: this is four cards in ONE box, a solo launch.
+    assert "distributed_executor" not in recipe
+    a = recipe["extra_vllm_args"]
+    assert a[a.index("--tensor-parallel-size") + 1] == "4"
+    assert a[a.index("--attention-backend") + 1] == "FLASH_ATTN_V100"
+    assert a[a.index("--max-num-seqs") + 1] == "4"
+    assert a[a.index("--tool-call-parser") + 1] == "qwen3_coder"
+    assert a[a.index("--speculative-config") + 1] == (
+        '{"method":"qwen4_exp_mtp","num_speculative_tokens":4}')
+
+
+def test_the_shared_repo_id_still_answers_with_the_gb10_entry():
+    """A bare repo id cannot say which hardware is asking, so it keeps answering
+    with the GB10 entry it always answered with. The V100 entry's description
+    says so, because a repo-id load of it on Volta would fetch an aarch64
+    nightly that cannot run there."""
+    assert catalog_recipe(FLASH_REPO) == catalog_recipe("qwen3.8-flash-next-nvfp4")
+    assert catalog_recipe(FLASH_REPO)["engine_image"].startswith("vllm/vllm-openai:nightly-")
+    assert catalog_recipe(FLASH_REPO) != catalog_recipe(V100_FLASH_ID)
+
+
+def test_an_id_match_beats_a_repo_match_whatever_the_dict_order():
+    """The id pass runs first, so an entry whose id is another entry's repo id
+    cannot be shadowed by dict order."""
+    from ainode.models.registry import ModelInfo
+    import ainode.models.registry as reg
+    shared = "org/probe-shared-xz1"
+    reg.CURATED_CLUSTER_MODELS["probe-repo-first"] = ModelInfo(
+        id="probe-repo-first", name="a", hf_repo=shared, size_gb=1.0,
+        description="d", engine_image="image:repo-match")
+    reg.CURATED_CLUSTER_MODELS[shared] = ModelInfo(
+        id=shared, name="b", hf_repo="org/other-xz1", size_gb=1.0,
+        description="d", engine_image="image:id-match")
+    try:
+        assert catalog_recipe(shared)["engine_image"] == "image:id-match"
+    finally:
+        del reg.CURATED_CLUSTER_MODELS["probe-repo-first"]
+        del reg.CURATED_CLUSTER_MODELS[shared]
+
+
+def test_the_v100_flash_next_recipe_renders_a_four_card_solo_command(tmp_path, monkeypatch):
+    """End to end on the argv: the entry's recipe, loaded by catalog id, serves
+    the on-disk weights at TP=4 on the Volta backend with MTP on, and carries
+    none of the GB10 workarounds."""
+    from ainode.models.api_routes import RECIPE_CONFIG_KEYS
+
+    monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+    # A solo load derives the on-disk dir from the model string it is given, so a
+    # catalog-id load looks for a directory of that name. On castor that is a
+    # relative symlink beside the weights (see the entry's description).
+    weights = tmp_path / V100_FLASH_ID
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+
+    recipe = catalog_recipe(V100_FLASH_ID)
+    cfg_kwargs = {k: recipe[k] for k in RECIPE_CONFIG_KEYS if k in recipe}
+    cfg = NodeConfig(model=V100_FLASH_ID, models_dir=str(tmp_path), api_port=8000,
+                     gpu_memory_utilization=recipe["gpu_memory_utilization"],
+                     **cfg_kwargs)
+    b = NvidiaBackend(cfg)
+    b._image_entrypoint = lambda image: ["vllm"]  # type: ignore[assignment]
+    joined = " ".join(b._build_solo_docker_cmd("c"))
+
+    assert "onecat-vllm:1.5.0-mm serve /ainode-models/" + V100_FLASH_ID in joined
+    assert f"--served-model-name {V100_FLASH_ID}" in joined
+    assert "--tensor-parallel-size 4" in joined
+    assert "--attention-backend FLASH_ATTN_V100" in joined
+    assert "--kv-cache-dtype auto" in joined
+    assert "--max-model-len 262144" in joined
+    assert "--gpu-memory-utilization 0.94" in joined
+    assert "--max-num-seqs 4" in joined
+    assert "--trust-remote-code" in joined
+    assert '{"method":"qwen4_exp_mtp","num_speculative_tokens":4}' in joined
+    # A local SM70 build is not the pinned GB10 default, so none of the 0.17-era
+    # GB10 workarounds may ride along.
+    assert "--enforce-eager" not in joined
+    assert "VLLM_ATTENTION_BACKEND" not in joined
+    # Volta cannot do fp8 KV, and the node default is fp8: the recipe's auto has
+    # to be what reaches the engine.
+    assert "--kv-cache-dtype fp8" not in joined

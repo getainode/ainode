@@ -509,12 +509,25 @@ def catalog_recipe(model: str) -> dict:
     ``extra_volumes``, ``distributed_executor``, ``kv_cache_dtype``,
     ``max_model_len``, ``trust_remote_code``, ``gpu_memory_utilization``:
     each present only when the entry actually states it.
+
+    A CATALOG ID WINS OVER AN HF REPO, in two passes rather than one. Two entries
+    may share a checkpoint and pin different recipes for different hardware
+    (``qwen3.8-flash-next-nvfp4`` on GB10 at TP=2 against
+    ``qwen3.8-flash-next-nvfp4-v100`` on four Volta cards at TP=4, one nightly
+    aarch64 image against one local SM70 build). The id is the only handle that
+    names one of them, so resolving it must not depend on which entry the dict
+    happens to reach first. The repo id stays ambiguous by nature and answers
+    with the first entry declaring it, which is why an entry in that position
+    says in its own description that its lane is addressed by id.
     """
     from ainode.models.registry import CURATED_CLUSTER_MODELS
     m = (model or "").strip()
     if not m:
         return {}
-    for info in CURATED_CLUSTER_MODELS.values():
+    # The id pass, which is one dict lookup, then the repo pass over everything.
+    by_id = {i.id: i for i in CURATED_CLUSTER_MODELS.values()}
+    exact = by_id.get(m)
+    for info in ([exact] if exact is not None else CURATED_CLUSTER_MODELS.values()):
         if m in (info.id, info.hf_repo):
             recipe = {}
             if getattr(info, "engine_image", ""):

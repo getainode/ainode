@@ -849,6 +849,88 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "TORCH_EXTENSIONS_DIR": f"{_DSPARK_JIT_ROOT}/torch_extensions",
         },
     ),
+    "qwen3.8-flash-next-nvfp4-v100": ModelInfo(
+        id="qwen3.8-flash-next-nvfp4-v100",
+        name="Qwen3.8-Flash-Next (NVFP4, 4x V100)",
+        hf_repo="nvidia/Qwen3.8-Flash-Next-NVFP4",
+        size_gb=133.0,
+        description=(
+            "The same frontier MoE checkpoint as qwen3.8-flash-next-nvfp4 (125B "
+            "total, 6B active/token, plus a 51B PLE n-gram embedding and a 4B MTP "
+            "module), served on ONE Dell C4130 across FOUR Tesla V100 32 GB cards "
+            "at TP=4, which is the point of this entry. Volta (SM70) was dropped "
+            "from mainline vLLM in 0.20, so the engine image below is NOT a "
+            "registry image and is NOT published anywhere: it is the 1Cat-vLLM "
+            "1.5.0 release wheel with upstream PR 458 (Leonccaa) cherry-picked to "
+            "remove the SM70 Qwen4Exp multimodal gate, built on castor from "
+            "/home/sem/build-full.sh plus /home/sem/inner-build.sh over the pinned "
+            "source in /home/sem/onecat-src/1Cat-vLLM. Only castor holds it. Moving "
+            "it to another node is a docker save of the tag, the way "
+            "/home/sem/onecat-vllm-src-full.tar.gz carries the src-full image the "
+            "pollux entry pins; rebuilding takes about a day. On the plain 1.5.0 "
+            "wheel the same command needs --language-model-only or 1Cat raises "
+            "NotImplementedError for Qwen4Exp multimodal on SM70. This image does "
+            "not, so the vision tower loads, and this entry does not claim vision "
+            "because nothing here has served an image through it. MTP speculative "
+            "decoding IS on, unlike the GB10 entry: --enable-expert-parallel is not "
+            "needed for it here, so the flag that hangs on GB10 never comes up. "
+            "126 GB of weights against 4x32 GB of dedicated VRAM leaves almost no "
+            "headroom, which is why the reservation is 0.94 and max-num-seqs is 4. "
+            "ADDRESS THIS LANE BY ITS CATALOG ID: it shares nvidia/Qwen3.8-Flash-"
+            "Next-NVFP4 with the GB10 entry above, and a load posted as the repo id "
+            "resolves to that one (a GB10 nightly image, TP=2, the mp shape), which "
+            "is not runnable on Volta."
+        ),
+        quantization="NVFP4 (mixed, FP8 PLE)", min_memory_gb=126,
+        family="qwen", params_b=125.0,
+        active_params_b=6.0, arch="moe",
+        proven_tp=1, verified=False, recommended=False, curated=True,
+        context_length=262144, license="Apache 2.0",
+        format="safetensors",
+        capabilities=["tool_use", "reasoning", "code"],
+        # Local build, on castor only: the 1Cat-vLLM fork with SM70/Volta kernels
+        # (mainline vLLM dropped Volta in 0.20) plus the multimodal gate removed.
+        # Its ENTRYPOINT is ["vllm"] with the binary at /opt/venv/bin/vllm, so
+        # _serve_argv_prefix emits "serve" and nothing else.
+        engine_image="onecat-vllm:1.5.0-mm",
+        # Volta has no fp8 path, and Qwen4Exp QSA wants a BF16 main KV cache, so
+        # state auto rather than inheriting the GB10 fp8 default.
+        kv_cache_dtype="auto",
+        max_model_len=262144,
+        trust_remote_code=True,
+        # 126 GB of weights over 128 GB of dedicated VRAM: every card sits at
+        # about 31.7 of 32 GB with this reservation, and lowering it does not
+        # leave room for the KV pool.
+        recommended_gmu=0.94,
+        extra_vllm_args=[
+            # A SOLO launch renders --tensor-parallel-size only from
+            # extra_vllm_args (nvidia.py::_build_solo_docker_cmd passes tp_size=1),
+            # so the four-card width has to be stated here or the engine tries to
+            # fit 126 GB on one card.
+            "--tensor-parallel-size", "4",
+            # Volta has no FlashAttention-2/3 and no FlashInfer: the fork ships a
+            # V100-specific backend and it has to be named, or the engine picks
+            # one that will not build on SM70.
+            "--attention-backend", "FLASH_ATTN_V100",
+            # 4 was measured as a wash against 1 on the raw lane and it keeps the
+            # node from serializing; anything higher has no KV pool to sit in.
+            "--max-num-seqs", "4",
+            "--reasoning-parser", "qwen3",
+            # Template emits <tool_call><function=..><parameter=..>, same as the
+            # GB10 Flash-Next, Ornith and Qwen3.8 27B entries, so qwen3_coder is
+            # the parser that parses.
+            "--tool-call-parser", "qwen3_coder",
+            "--enable-auto-tool-choice",
+            # The checkpoint's own 4-token MTP module. This is the one place the
+            # V100 recipe is RICHER than the GB10 one.
+            "--speculative-config",
+            '{"method":"qwen4_exp_mtp","num_speculative_tokens":4}',
+            # NOT carried over from the raw container this replaces:
+            # --allowed-origins ["*"], which only mattered while a browser talked
+            # to the engine port directly. Through AINode the browser talks to
+            # :3000 and cors_origins is the node's setting.
+        ],
+    ),
     # --- Fast single-node quantized chat models (AWQ-4bit, awq_marlin on GB10) ---
     # The everyday "always-on" tier: fit one node, serve at interactive speed, and
     # stack several per node. proven_tp=1 (no distribution). verified=True is set
