@@ -12,6 +12,108 @@ _Nothing yet._
 
 ---
 
+## [0.5.29] - 2026-09-19
+
+Wave 2 of the 19 September audit: a head keeps its multi-node model across a restart or says why, one command joins a node, metrics survive a restart and /metrics finally scrapes, a client endpoint that survives the master, TLS on a second port and per-client limits, and speech routed through the fleet.
+
+### Added
+- **A head writes down what it is serving, and says so when it cannot serve it.**
+  The distributed shape is persisted to `<AINODE_HOME>/distributed.json` on a
+  successful launch and removed on unload. On the next start, if the engine
+  container is gone, the shape is relaunched only when every peer answers the
+  same ssh probe the launch depends on; otherwise the record is marked degraded
+  with which peer answered what, and that shows up as a WARN in `ainode doctor`,
+  as `degraded_instances` in `/api/status`, and as a banner in the dashboard top
+  bar. One attempt per start, never a retry loop.
+- **A node joins a cluster with one command instead of a hand-edited `config.json`.** `ainode cluster token` on the master mints 32 random bytes, keeps only their SHA-256 hash in `<AINODE_HOME>/join-tokens.json` with a 30-minute expiry (`--ttl`) and a single use, and prints the `ainode join <master> <token>` line to paste. On the new node that command writes the master's `cluster_id`, the cluster's `cluster_secret`, the master's address, the discovery port and the member role, leaves every other key in the file exactly as it found it, and restarts the service or prints the command. `AINODE_JOIN="<host>[:<port>]:<token>"` does it as part of the install, and the dashboard does it from **Config, Cluster**. Joining a node used to mean typing `cluster_id`, `cluster_role` and `cluster_interface` into `config.json` on the new box, which is what joining pollux took, while "automatic clustering" was the headline claim ([#208](https://github.com/getainode/ainode/issues/208)).
+- **A fresh install generates a `cluster_secret`, so a new node is not running unauthenticated discovery by default** ([#169](https://github.com/getainode/ainode/issues/169)'s follow-up). Two nodes installed independently each generate their own and are invisible to each other, so joining is what copies one value onto the other, and `AINODE_CLUSTER_SECRET` pastes the master's value at install time for a node that will not join. The installer prints which it did and what the second node needs. Nothing already installed is touched: the value is written only when there is no `config.json` yet.
+- **`POST /api/cluster/join`, the fourth and last route that answers without an API key.** A node that has not joined cannot hold this cluster's key, so the join token is the credential instead: a wrong, an expired and a spent token all get one identical 403 (telling them apart would make the route an oracle for guessing), and the handler allows five attempts a minute per source address because there is no key in front of it. `POST /api/cluster/join-self` is the keyed twin the dashboard card calls, and it restarts nothing.
+- **A node now remembers what it measured.** Metrics are kept in a small SQLite file at `<AINODE_HOME>/metrics.db`, 48 hours of raw samples and 30 days of one-minute roll-ups, so a restart no longer resets the GPU series, the request counters and the latency percentiles to nothing. A figure the node could not measure is stored as null and read back as null, never as zero. Retention is configurable in a `metrics` block of `config.json` (`enabled`, `retention_hours`, `retention_days`, `interval_seconds`) and costs about 70 MB per node at steady state, measured. A read-only or full disk logs one warning and keeps serving.
+- **`GET /api/metrics/history` serves any series over any window.** Raw samples or one-minute roll-ups depending on how far back the window reaches, every series on the same evenly spaced grid, `null` in every slot nothing measured. `since` and `until` take a timestamp or a relative offset such as `-6h`. The existing `/api/metrics`, `/api/metrics/gpu` and `/api/metrics/requests` shapes are unchanged.
+- **The Prometheus endpoint can be scraped for the first time.** `GET /metrics` answered 500 on every request since 0.4, because the handler built a response with both a Content-Type header and aiohttp's `content_type` argument. Every series now also carries `node` and `node_id` labels, so a fleet scraped into one Prometheus is told apart by node name rather than by address, and there are new `ainode_model_loaded` and `ainode_metrics_retention_*` gauges. `docs/prometheus-scrape.yml` is a working scrape config.
+- **The dashboard's metrics buffer is seeded from disk at page load**, so a chart drawn over it opens on the node's real recent history instead of one point from the moment the page loaded.
+- **A client endpoint that survives the master.** `GET /api/cluster/endpoint` answers on every node with the fleet's addresses: this node, the elected master, and every online member with a URL a client can use. It needs no API key, like `/api/health`, because a client whose node has gone away has nothing else to ask and no key to ask with, and it carries nothing but names, addresses, ports, roles and versions. Clients no longer hold one address as a single point of failure for a cluster that does not have one.
+- **`/api/status` now carries `endpoint_hint`**, the same node list, so anything already polling status learns its fallbacks for free. `localhost` never appears in either payload: the local node reports the address the caller reached it on (when the `Host` header names one of its own), a peer the address its announcement arrived from, and a node with nothing routable reports an empty host and a null URL rather than an address that is wrong on every machine but its own.
+- **TLS on its own port, with HTTP left exactly where it was.** `ainode tls
+  enable` generates a self-signed certificate (hostname, LAN IP and tailnet IP as
+  SANs, 825 days, key mode 0600), installs a pair you already have, or runs
+  `tailscale cert` for a real Let's Encrypt certificate on the tailnet name, which
+  is what a Mac client with App Transport Security needs. The pair lives in
+  `~/.ainode/tls/` so the CLI and the containerised server see the same files, and
+  the node serves HTTPS on port 3443 (configurable) alongside the plain HTTP port
+  every client in a fleet already uses. `ainode tls status` and a `tls` block on
+  `/api/status` say what is served and when the certificate expires; `ainode
+  doctor` warns two weeks out and fails on an expired one.
+- **Per-client rate limits on the inference API.** A token bucket
+  (`requests_per_minute`, `burst`) and a concurrency cap (`max_inflight`) keyed by
+  API key id, or by address for an unkeyed caller, so one client can no longer
+  open two hundred concurrent completions and occupy every engine in the cluster.
+  Off by default, `/v1` only: health, the dashboard's own `/api` routes and static
+  files are never limited. A refusal is a 429 with `Retry-After` and a body naming
+  the limit, and a streaming answer holds its slot until the stream ends.
+- **Speech to text is a fleet feature: `POST /v1/audio/transcriptions` and
+  `/v1/audio/translations` now route across the cluster like a chat completion.**
+  They are multipart uploads rather than JSON, so the proxy reads the `model` form
+  field out of the body it buffered and forwards the identical bytes under the
+  caller's own boundary, with the same candidate ordering, failover, header and
+  query passthrough every other forwarded path gets. A body that names no model
+  gets a 400 naming the field instead of being sent to whichever model the node
+  happens to serve.
+- **`openai/whisper-large-v3-turbo` is in the curated catalog**, capability
+  `speech`, 1.6 GB of weights at 6 percent of a GB10 so it stacks beside a chat
+  model, with the launch recipe it needs (`--enforce-eager`, `kv-cache-dtype auto`)
+  and an engine image that carries vLLM's audio extras: no image on the fleet has
+  librosa or soundfile, and vLLM imports soundfile as soon as the model reports the
+  transcription task, so a Whisper serve on the stock image dies before it binds a
+  port.
+- **That engine image is published: `ghcr.io/getainode/ainode-whisper:0.17.0-t5`**,
+  built from `scripts/Dockerfile.whisper` by the new
+  `.github/workflows/publish-whisper-image.yml` on a `whisper-v*` tag or a manual
+  dispatch. Its tag is the base engine image's tag rather than an AINode version,
+  because the image tracks the engine it derives from and a release does not rebuild
+  it. A catalog entry pinning a hand-built tag would be a LAUNCH button that fails
+  on every node but the one that built it.
+
+### Fixed
+- **A restart on a distributed head no longer loses the multi-node model.** The
+  engine containers outlive the orchestrator, so a head came back with an empty
+  `InstanceManager` while its container kept serving: the node's own view of what
+  it ran was reconstructed from `config.json` by three separate fallbacks, an
+  UNLOAD naming the head's port matched nothing, and once the container did stop
+  the model was gone with nothing to bring it back. A node now adopts the engine
+  containers it is still running at startup, with the shape read from each
+  container's own argv, so `/api/status`, `/api/nodes`, `/v1/models` and the
+  cluster graphic describe a real instance from the first poll. A live stacked
+  container that no manifest entry knows about, which is what a crash between a
+  launch and the manifest write leaves behind, is adopted the same way and
+  written back into the manifest.
+- **A solo load can no longer replace a multi-node instance by accident.**
+  Re-loading a model already serving here across several nodes is refused with a
+  409 naming the width and the peers, instead of stopping the distributed engine
+  and bringing the model back on one node.
+- **The dashboard no longer claims there is no TLS.** Config > API access read out
+  a fixed sentence saying a key travels in plain text; it now reads the node's real
+  TLS state, including the certificate's kind and expiry, and says so plainly when
+  the browser has no key to read `/api/status` with.
+- **A launch refused over a missing engine image now says which image, and how to
+  get it.** The launch returned a bool, so the reason stayed in the node's log while
+  the API answered "Failed to launch engine": the one failure an operator can always
+  fix, reported as the one thing they cannot act on. Backends now carry
+  `launch_error`, `ensure_image` fills it with the image, what docker said, and the
+  fixes (pull the tag, build it from the Dockerfile this repo ships, or point the
+  instance at an image the node has), and both the solo and the distributed load
+  routes report it verbatim.
+- **A speech instance is its own kind across the interface.** It stays out of the
+  chat and bench pickers the way an embedding instance does, the capability probe
+  reports `speech` off the catalog instead of asking a chat question of an engine
+  with no chat path, and the model card, the capability badges, the endpoint list
+  and the Server view's copy-curl button all know what it serves.
+
+### Removed
+- **The browser onboarding wizard, which no deployed node could reach and which never joined anything.** `handle_index` redirected to `/onboarding` only while `config.onboarded` was false, and it never is: the installer writes `"onboarded": true` and every non-TTY start sets it before the server binds, so `/onboarding` answered a redirect to a page that redirected straight back. Its complete handler set a node name, a model and an email and touched no cluster key, downloaded nothing and launched nothing. The 19 KB template, the three `/api/onboarding/*` routes and the auth exemption they needed are gone; joining is `ainode join` and a card in **Config, Cluster**, and the terminal wizard on a TTY `ainode start` is unchanged ([#208](https://github.com/getainode/ainode/issues/208)).
+
+---
+
 ## [0.5.28] - 2026-09-19
 
 Wave 1 of the 19 September audit: telemetry that stops inventing numbers, signed discovery with versions on the wire and an update that verifies and prunes, training jobs that survive a restart, launch and unload buttons that do what they say, and docs that describe the system that ships.
