@@ -6,6 +6,7 @@
 #   curl -fsSL https://ainode.dev/install | bash -s -- --job master
 #   curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 #   AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
+#   AINODE_JOIN="10.0.0.1:3000:<token>" curl -fsSL https://ainode.dev/install | bash
 #
 # --job master  Head node: runs the inference engine, serves the web UI,
 #               manages the cluster. Set a model via the web UI after install.
@@ -16,6 +17,20 @@
 #               $AINODE_HOME and stop. Pulls nothing, starts nothing, needs no
 #               docker, no GPU and no sudo. Use it to see exactly what an
 #               install would write; the test suite runs the same path.
+#
+# AINODE_JOIN   "<master-host>[:<port>]:<token>", a join token minted on the
+#               master with `ainode cluster token`. Installs this node and then
+#               joins it: the cluster id, the cluster secret, the discovery port
+#               and the master address are written for you, so a new node needs
+#               no hand-edited config.json. Mutually exclusive with --job master.
+# AINODE_CLUSTER_SECRET
+#               The shared secret this cluster signs discovery with. Every node in
+#               one cluster must carry the SAME value. Left unset, a fresh install
+#               generates its own, which is right for the FIRST node and wrong for
+#               a second one installed independently: two nodes with different
+#               secrets are invisible to each other. So a second node either joins
+#               (AINODE_JOIN, which writes the master's value) or is installed with
+#               the master's value pasted here.
 
 set -euo pipefail
 
@@ -34,6 +49,10 @@ AINODE_IMAGE="${AINODE_IMAGE:-}"
 AINODE_NVIDIA_IMAGE="${AINODE_NVIDIA_IMAGE:-}"
 AINODE_HOME="${AINODE_HOME:-$HOME/.ainode}"
 AINODE_PEERS="${AINODE_PEERS:-}"           # comma-separated IPs
+# "<host>[:<port>]:<token>" -- join this node to a cluster after installing it.
+AINODE_JOIN="${AINODE_JOIN:-}"
+# The cluster's shared discovery secret, identical on every node (see the header).
+AINODE_CLUSTER_SECRET="${AINODE_CLUSTER_SECRET:-}"
 AINODE_SSH_USER="${AINODE_SSH_USER:-$USER}"
 AINODE_JOB="${AINODE_JOB:-solo}"          # solo | master | worker
 SETUP_SSH="false"
@@ -64,6 +83,12 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+if [ -n "$AINODE_JOIN" ] && [ "$AINODE_JOB" = "master" ]; then
+    echo "AINODE_JOIN joins an existing cluster; --job master heads its own." >&2
+    echo "Pick one." >&2
+    exit 2
+fi
 
 log() { printf "\033[1;32m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m!!\033[0m %s\n" "$*"; }
@@ -294,6 +319,30 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
     esac
 
     CLUSTER_IFACE="$(detect_cluster_interface)"
+
+    # A shared secret for this cluster, generated here so a fresh node HAS one
+    # rather than running unauthenticated discovery until somebody notices. It is
+    # only ever identical across a cluster by being handed over: `ainode cluster
+    # token` on this node prints the join command, and `ainode join` writes THIS
+    # value on the joining node. A node that is joining somebody else's cluster
+    # (AINODE_JOIN below) has its value overwritten by the join a moment later.
+    #
+    # Generated with openssl when it is there, /dev/urandom otherwise, because
+    # openssl is not on every minimal image.
+    if [ -n "$AINODE_CLUSTER_SECRET" ]; then
+        CLUSTER_SECRET="$AINODE_CLUSTER_SECRET"
+        log "Cluster secret: taken from AINODE_CLUSTER_SECRET"
+    elif command -v openssl >/dev/null 2>&1; then
+        CLUSTER_SECRET="$(openssl rand -hex 32)"
+    else
+        CLUSTER_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    if [ -z "$AINODE_CLUSTER_SECRET" ] && [ -z "$AINODE_JOIN" ]; then
+        log "Cluster secret: generated for this node"
+        log "  A SECOND node has to end up with this same value to see this one."
+        log "  Join it (ainode cluster token here, then the ainode join line there),"
+        log "  or install it with AINODE_CLUSTER_SECRET set to this node's value."
+    fi
     if [ -n "$CLUSTER_IFACE" ]; then
         log "Cluster interface: $CLUSTER_IFACE (auto-detected; edit cluster_interface in ~/.ainode/config.json to change)"
     else
@@ -333,6 +382,7 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
   "distributed_mode": "${DIST_MODE}",
   "peer_ips": [${PEER_IPS}],
   "cluster_id": "ainode-cluster",
+  "cluster_secret": "${CLUSTER_SECRET}",
   "cluster_interface": "${CLUSTER_IFACE}",
   "ssh_user": "${AINODE_SSH_USER}",
   "api_port": 8000,
@@ -776,11 +826,49 @@ WRAPPER
 
 $WRAPPER_SUDO chmod +x "$WRAPPER_PATH"
 
+# -- 6. Join an existing cluster --------------------------------------------
+# AINODE_JOIN is "<host>[:<port>]:<token>". The token is the last colon-separated
+# field, so a host with a port still parses: 10.0.0.1:3000:abc -> 10.0.0.1:3000
+# and abc. `ainode join` inside the container does the work (it writes the six
+# config keys and nothing else) and the restart below applies them; the wrapper
+# is already installed above, so this is the same command a user would type.
+#
+# Deliberately AFTER the service is up: the join is an HTTP call to the master
+# and a config write, and a node that fails to join is still a working node.
+if [ -n "$AINODE_JOIN" ]; then
+    JOIN_TOKEN="${AINODE_JOIN##*:}"
+    JOIN_HOST="${AINODE_JOIN%:*}"
+    if [ -z "$JOIN_TOKEN" ] || [ -z "$JOIN_HOST" ] || [ "$JOIN_HOST" = "$AINODE_JOIN" ]; then
+        warn "AINODE_JOIN must be \"<host>[:<port>]:<token>\"; got \"$AINODE_JOIN\""
+        warn "  Skipping the join. Mint a token on the master (ainode cluster token)"
+        warn "  and run: ainode join <host>:3000 <token>"
+    elif [ "$DRY_RUN" = "true" ]; then
+        log "Dry run: would join the cluster at $JOIN_HOST (token not used)"
+    else
+        log "Joining the cluster at $JOIN_HOST"
+        if "$WRAPPER_PATH" join "$JOIN_HOST" "$JOIN_TOKEN" --name "$(hostname)"; then
+            log "  Joined. Restarting to apply."
+            if [ "$USER_MODE" = "true" ]; then
+                systemctl --user restart ainode.service || \
+                    warn "  restart failed; run: systemctl --user restart ainode"
+            else
+                sudo systemctl restart ainode.service || \
+                    warn "  restart failed; run: sudo systemctl restart ainode"
+            fi
+        else
+            warn "  The join failed. This node is installed and running standalone."
+            warn "  Mint a fresh token on the master (ainode cluster token) and run:"
+            warn "    ainode join $JOIN_HOST <token>"
+        fi
+    fi
+fi
+
 # -- Banner -----------------------------------------------------------------
 if [ "$DRY_RUN" = "true" ]; then
     printf '\n'
     log "Dry run complete. Rendered under $AINODE_HOME:"
     log "  config.json      the node config an install would write"
+    log "                   (including a generated cluster_secret)"
     log "  ainode.service   the systemd unit (not installed)"
     log "  ainode-wrapper   the /usr/local/bin/ainode host wrapper"
     printf '\n'

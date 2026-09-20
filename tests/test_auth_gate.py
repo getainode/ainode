@@ -86,10 +86,14 @@ async def keyed(app):
 # =============================================================================
 
 # The only paths that answer without a key when auth is on, and why:
-#   /api/health       a liveness probe has no key
-#   /api/auth/status  so the dashboard can say a key is wanted, not render blank
-#   / /onboarding     the static shell, which is what asks for the key
-OPEN_WITH_AUTH_ON = {"/", "/onboarding", "/api/health", "/api/auth/status"}
+#   /api/health        a liveness probe has no key
+#   /api/auth/status   so the dashboard can say a key is wanted, not render blank
+#   /                  the static shell, which is what asks for the key
+#   /api/cluster/join  a node joining this cluster does not hold this cluster's
+#                      key yet, so a single-use expiring join token is the
+#                      credential and the handler rate limits per source IP
+#                      (api/cluster_join.py). Covered by tests/test_join_flow.py.
+OPEN_WITH_AUTH_ON = {"/", "/api/health", "/api/auth/status", "/api/cluster/join"}
 
 # Routes whose path carries a variable. Filled in with something harmless: the
 # request must be refused before the handler ever looks at it.
@@ -254,19 +258,6 @@ async def test_auth_status_reports_a_good_key_as_authenticated(keyed):
                             headers={"Authorization": f"Bearer {key}"})
     status = await resp.json()
     assert status["authenticated"] is True
-
-
-@pytest.mark.asyncio
-async def test_onboarding_is_open_only_before_onboarding(app, auth_home):
-    """POST /api/onboarding/complete is a mutating route once the node is set up."""
-    app["auth_config"].enable()
-    app["config"].onboarded = True
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.get("/api/onboarding/status")
-        assert resp.status == 401
-        app["config"].onboarded = False
-        resp = await client.get("/api/onboarding/status")
-        assert resp.status == 200
 
 
 # =============================================================================

@@ -1,17 +1,22 @@
 """API key authentication middleware for aiohttp.
 
 The rule, in one place: **when auth is enabled every path under ``/api`` and
-``/v1`` needs the key.** The exceptions are the three things a browser with no
-key must still be able to reach, or the dashboard cannot ask for one:
+``/v1`` needs the key.** The exceptions are the four things a caller with no key
+must still be able to reach:
 
-* the static shell (``/``, ``/onboarding``, ``/static/*``),
+* the static shell (``/``, ``/static/*``),
 * ``/api/health`` (liveness, for a probe that has no key),
 * ``/api/auth/status`` (so the UI can say "this node wants a key" instead of
-  rendering an empty page).
+  rendering an empty page),
+* ``POST /api/cluster/join`` (a node joining this cluster does not have this
+  cluster's key yet, so a single-use expiring join token is the credential
+  instead; see ``api/cluster_join.py`` for the rate limit that replaces the key).
 
-First-run onboarding is open only while the node is NOT yet onboarded:
-``POST /api/onboarding/complete`` writes the node's identity, so leaving it open
-on a configured node is a mutating route with no key on it (#168).
+The browser onboarding wizard used to be a fifth exemption, open while
+``config.onboarded`` was false. The wizard is gone (#208): it was unreachable on
+every deployed node, because the installer and every non-TTY start set
+``onboarded`` before the server came up, and it never joined a cluster even when
+reached.
 
 Every request is stamped with ``request["authenticated"]`` -- True only when a
 Bearer token matched a stored key hash. Handlers read it through
@@ -38,7 +43,7 @@ def _hash_key(key: str) -> str:
 
 AUTH_FILE = AINODE_HOME / "auth.json"
 
-SKIP_PATHS: set[str] = {"/", "/onboarding", "/api/health", "/api/auth/status"}
+SKIP_PATHS: set[str] = {"/", "/api/health", "/api/auth/status", "/api/cluster/join"}
 SKIP_PREFIXES: tuple[str, ...] = ("/static/",)
 
 #: ``request`` key carrying the outcome of token validation for this request.
@@ -156,21 +161,11 @@ def is_authenticated(request) -> bool:
     return bool(getter(AUTHENTICATED_KEY, False))
 
 
-def _onboarding_open(request: web.Request) -> bool:
-    """First-run routes answer without a key, but only before onboarding."""
-    if not request.path.startswith("/api/onboarding"):
-        return False
-    config = request.app.get("config")
-    return not bool(getattr(config, "onboarded", False))
-
-
 def _should_skip(request: web.Request) -> bool:
     path = request.path
     if path in SKIP_PATHS:
         return True
-    if path.startswith(SKIP_PREFIXES):
-        return True
-    return _onboarding_open(request)
+    return path.startswith(SKIP_PREFIXES)
 
 
 @web.middleware

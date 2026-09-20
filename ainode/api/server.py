@@ -19,9 +19,8 @@ from ainode.core.config import (
     NodeConfig,
 )
 from ainode.core.gpu import detect_gpu, detect_gpus, GPUInfo
-from ainode.web.serve import get_index_html, get_onboarding_html, get_static_path
+from ainode.web.serve import get_index_html, get_static_path
 from ainode.models.api_routes import register_model_routes
-from ainode.onboarding.api_routes import register_onboarding_routes
 from ainode.auth.middleware import (
     TRUST_REMOTE_CODE_RULE,
     AuthConfig,
@@ -67,6 +66,7 @@ from ainode.api.chat_routes import (
     record_vision_unsupported,
     register_chat_routes,
 )
+from ainode.api.cluster_join import register_cluster_join_routes
 from ainode.api.decide import handle_decide
 from ainode.bench.api_routes import register_bench_routes
 
@@ -177,7 +177,6 @@ def create_app(
     app.on_cleanup.append(_on_cleanup)
 
     app.router.add_get("/", handle_index)
-    app.router.add_get("/onboarding", handle_onboarding)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nodes", handle_nodes)
@@ -185,6 +184,10 @@ def create_app(
     app.router.add_get("/api/cluster/resources", handle_cluster_resources)
     app.router.add_post("/api/cluster/role", handle_cluster_set_role)
     app.router.add_post("/api/cluster/id", handle_cluster_set_id)
+    # Joining: POST /api/cluster/join (keyless, because a node that has not
+    # joined cannot hold this cluster's key, so the token is the credential)
+    # and POST /api/cluster/join-self (keyed, what the dashboard card calls).
+    register_cluster_join_routes(app)
     app.router.add_post("/api/cluster/load", handle_cluster_load)
     app.router.add_post("/api/cluster/unload", handle_cluster_unload)
     app.router.add_post("/api/cluster/update-all", handle_cluster_update_all)
@@ -242,8 +245,6 @@ def create_app(
     # downloads, Installed and Delete on the old path while launches used the new
     # one (#205).
     register_model_routes(app, models_dir=config.models_dir)
-
-    register_onboarding_routes(app)
 
     register_auth_routes(app)
 
@@ -894,19 +895,16 @@ async def cors_middleware(request: web.Request, handler):
     return resp
 
 async def handle_index(request: web.Request) -> web.Response:
-    """Serve the dashboard, or redirect to onboarding if not set up."""
-    config: NodeConfig = request.app["config"]
-    if not config.onboarded:
-        raise web.HTTPFound("/onboarding")
-    html = get_index_html()
-    return web.Response(text=html, content_type="text/html")
+    """Serve the dashboard.
 
-async def handle_onboarding(request: web.Request) -> web.Response:
-    """Serve the onboarding wizard. Redirect to dashboard if already onboarded."""
-    config: NodeConfig = request.app["config"]
-    if config.onboarded:
-        raise web.HTTPFound("/")
-    html = get_onboarding_html()
+    It used to redirect to /onboarding whenever ``config.onboarded`` was false,
+    which was never: the installer writes ``"onboarded": true`` and a non-TTY
+    start sets it before the server binds, so on every deployed node this branch
+    answered a redirect to a page that redirected straight back (#208). The
+    browser wizard it guarded is gone; joining a cluster is Config > Cluster or
+    ``ainode join``.
+    """
+    html = get_index_html()
     return web.Response(text=html, content_type="text/html")
 
 async def handle_health(_request: web.Request) -> web.Response:

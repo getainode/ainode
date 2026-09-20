@@ -162,9 +162,13 @@ current member list with per-node role, address, and last-seen.
    8.5 GB to download, about 22 GB on disk) so your first launch is not waiting on
    it. `AINODE_NVIDIA_IMAGE=skip` skips that.
 3. **Open the UI** at `http://<your-ip>:3000` and pick a model from the catalog.
-   Click a model card, then **Launch**, then chat. There is no onboarding wizard on
-   an installer install: the installer writes `onboarded: true` and leaves `model`
-   null, so the node comes up with nothing loaded and waits for you.
+   Click a model card, then **Launch**, then chat. There is no onboarding wizard:
+   the installer writes `onboarded: true` and leaves `model` null, so the node
+   comes up with nothing loaded and waits for you.
+4. **To add a node**, mint a token on this one with `ainode cluster token` and run
+   the `ainode join` line it prints on the new box. That writes the cluster id,
+   the shared secret and the master address for you, so joining is never a
+   hand-edited `config.json`.
 
 Upgrade is `ainode update`, which resolves and pulls the newest release and
 restarts the unit. Pass a version to pin one (`ainode update 0.5.24`). Run it as the
@@ -193,24 +197,32 @@ DGX Sparks. The browser path is the supported one:
 1. **Wire a clean high-speed link** between the two nodes (direct QSFP cable on its
    own `/24`, or a dedicated switch port). See
    [Networking requirements](#networking-requirements): this matters.
-2. **Install AINode on both.** The peer gets `--job worker`, which writes
-   `distributed_mode: "member"`:
-   ```bash
-   curl -fsSL https://ainode.dev/install | bash -s -- --job worker
-   ```
-   On the head, name the peers so the installer copies your SSH key to them:
+2. **Install the head first**, naming the peers so the installer copies your SSH
+   key to them:
    ```bash
    AINODE_PEERS="10.0.0.2" curl -fsSL https://ainode.dev/install | bash -s -- --job master
    ```
    `--job master` is not optional. Without it the peer list is used for
    `ssh-copy-id` and nothing else, and the node installs as solo.
-3. **Check passwordless SSH** from the head's install user to each peer. The head
+3. **Join the peer to it.** On the head, mint a token; on the peer, install and
+   join in one command:
+   ```bash
+   ainode cluster token                      # on the head, prints the line below
+   AINODE_JOIN="10.0.0.1:3000:<token>" curl -fsSL https://ainode.dev/install | bash
+   ```
+   That writes the head's `cluster_id`, its `cluster_secret`, the discovery port and
+   the master address on the peer, sets it to `distributed_mode: "member"`, and
+   touches no other key. Two nodes installed independently each generate their OWN
+   `cluster_secret` and are then invisible to each other, so either join, or install
+   the peer with `AINODE_CLUSTER_SECRET` set to the head's value. A peer installed
+   with `--job worker` and no join is a member of nothing.
+4. **Check passwordless SSH** from the head's install user to each peer. The head
    starts the peers' engine containers over SSH, so a password prompt is a failed
    launch.
-4. **Open the head UI.** You should see both nodes and the aggregated memory
+5. **Open the head UI.** You should see both nodes and the aggregated memory
    ("2 nodes · 244 GB · 2 GPUs"). Each node detects and announces its own GPU
    count, so a multi-GPU box contributes all of them to that total.
-5. **Launch it.** In the Launch Instance panel, pick the model, toggle on the nodes
+6. **Launch it.** In the Launch Instance panel, pick the model, toggle on the nodes
    to span, and launch. That posts one `POST /api/sharding/launch` with the node ids;
    the head is always the node you are on and the rest become peers, resolved to
    their fabric IPs. A peer with no known fabric IP is refused rather than launched
@@ -859,6 +871,11 @@ ainode stop                  # Stop AINode
 ainode status                # Show cluster status
 ainode models                # List available models
 ainode role master|worker|solo  # Set or show this node's cluster role
+ainode cluster token         # On the master: mint a single-use join token and print
+                             #   the `ainode join` line to run on the new node
+ainode cluster tokens        # List the join tokens that are still valid
+ainode join HOST[:PORT] TOKEN   # On the new node: join the cluster that token
+                             #   came from, then restart to apply
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
@@ -880,6 +897,18 @@ trap below. `--json` for machines, `--peer HOST` for the same report over SSH, a
 non-zero exit on any FAIL so it can gate a script, and `--fix` applies only the
 changes that cannot lose anything (create a directory, chmod the secrets store to
 0600, write the fleet discovery port) and then re-runs the checks.
+
+`ainode cluster token` and `ainode join` are the whole join. The token is 32 random
+bytes, stored on the master as a SHA-256 hash with an expiry (30 minutes, `--ttl`) and
+one use, and it is the joiner's only credential: `POST /api/cluster/join` is the one
+route that answers without an API key, because a node that has not joined cannot hold
+this cluster's key yet. A wrong, an expired and a spent token all get the same 403,
+and the handler allows five attempts a minute per source address. The joining side
+writes `cluster_id`, `cluster_secret`, `cluster_role`, `distributed_mode`,
+`master_address` and `discovery_port` into `config.json` and touches nothing else,
+refuses to join a master on a different AINode release unless you pass
+`--allow-version-mismatch`, and then restarts the service or prints the command.
+The browser can do the same thing from **Config, Cluster**.
 
 `ainode logs` resolves the log path from the backend and prints which file, and
 which backend, it is following: `nvidia-vllm.log` for a solo or stacked engine and
@@ -985,10 +1014,11 @@ network wants and it is what this fleet runs, so the dashboard says so in the he
 you assume a password exists. Turn it on in **Config, API access** (the browser that
 flips the switch stores the key it mints, so enabling auth cannot lock you out) or
 with `ainode auth enable`. With auth on, every path under `/api` and `/v1` wants the
-key, with three deliberate exceptions: `/api/health` because a probe has no key,
-`/api/auth/status` so the UI can say a key is wanted instead of rendering blank, and
-the static shell. `POST /api/onboarding/complete` is open only while the node is not
-yet onboarded.
+key, with four deliberate exceptions: `/api/health` because a probe has no key,
+`/api/auth/status` so the UI can say a key is wanted instead of rendering blank, the
+static shell, and `POST /api/cluster/join` because a node joining this cluster cannot
+hold this cluster's key yet. That last one takes a single-use expiring join token
+instead, and the handler rate limits it to five attempts a minute per source address.
 
 ### Pinning a request to one instance
 

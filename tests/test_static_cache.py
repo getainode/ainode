@@ -12,7 +12,7 @@ import pytest
 from aiohttp import web
 
 from ainode import __version__
-from ainode.web.serve import _stamp_static_urls, get_index_html, get_onboarding_html
+from ainode.web.serve import _stamp_static_urls, get_index_html
 
 
 def test_index_static_urls_carry_version():
@@ -20,12 +20,6 @@ def test_index_static_urls_carry_version():
     urls = re.findall(r"""/static/[^"')?#\s]+(?:\?[^"')\s]*)?""", html)
     assert urls, "index has no /static URLs?"
     for u in urls:
-        assert u.endswith(f"?v={__version__}"), u
-
-
-def test_onboarding_static_urls_carry_version():
-    html = get_onboarding_html()
-    for u in re.findall(r"""/static/[^"')?#\s]+(?:\?[^"')\s]*)?""", html):
         assert u.endswith(f"?v={__version__}"), u
 
 
