@@ -806,14 +806,22 @@ restart_service() {
 # binary and no path to the tailnet daemon, so this variable is the cheapest way
 # for the CLI in there to know which tailnet node it is running on.
 forward_to_container() {
+    # A TTY is allocated only when there is one to pass on. \`docker exec -t\` with
+    # a pipe or an \`ssh host ainode ...\` command line dies with "the input device
+    # is not a TTY" before the CLI in the container runs at all, so a hardcoded
+    # -it is what would stop
+    # \`echo pw | ainode auth user add x --password-stdin\` working and what
+    # \`ainode doctor --peer\` already has to route around (cli/doctor.py).
+    local exec_tty="-i"
+    if [ -t 0 ] && [ -t 1 ]; then exec_tty="-it"; fi
     if docker exec ainode true 2>/dev/null; then
-        exec docker exec -it -e AINODE_TAILNET_NAME -e AINODE_HOST_SERVICE_STATE ainode ainode "\$@"
+        exec docker exec \$exec_tty -e AINODE_TAILNET_NAME -e AINODE_HOST_SERVICE_STATE ainode ainode "\$@"
     fi
     # Same sudo trap as update: mount the .ainode the unit uses.
     local conf_home
     conf_home="\$(resolve_ainode_home || true)"
     [ -n "\$conf_home" ] || conf_home="\$HOME/.ainode"
-    exec docker run --rm -it \\
+    exec docker run --rm \$exec_tty \\
         --entrypoint ainode \\
         -e AINODE_TAILNET_NAME \\
         -e AINODE_HOST_SERVICE_STATE \\

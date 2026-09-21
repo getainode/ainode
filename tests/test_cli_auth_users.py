@@ -29,7 +29,11 @@ store here is :class:`StubStore` and the one guarded import the package makes
 from __future__ import annotations
 
 import io
+import os
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -714,3 +718,66 @@ def test_status_still_works_on_a_build_with_no_account_store(home, monkeypatch,
 
     assert code == 0, out
     assert "Auth:" in out and "Users:" not in out
+
+
+# =============================================================================
+# 8. The installer, and the wrapper the flag has to survive
+# =============================================================================
+
+INSTALL_SH = Path(__file__).resolve().parent.parent / "scripts" / "install.sh"
+
+
+def _render_install(tmp_path, env_extra=None):
+    """The real installer in --dry-run against a throwaway HOME.
+
+    The same helper ``tests/test_fresh_install.py`` and ``tests/test_fleet_auth.py``
+    use, kept here rather than imported so the three files cannot break each other.
+    """
+    home = tmp_path / "install-home"
+    ainode_home = home / ".ainode"
+    home.mkdir(parents=True, exist_ok=True)
+    sysfs = tmp_path / "sys-class-net"
+    sysfs.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.update(HOME=str(home), AINODE_HOME=str(ainode_home),
+               AINODE_IMAGE="ghcr.io/getainode/ainode:9.9.9",
+               SYS_CLASS_NET=str(sysfs))
+    for key in ("AINODE_PEERS", "HF_TOKEN", "AINODE_AUTH"):
+        env.pop(key, None)
+    env.update(env_extra or {})
+    proc = subprocess.run(["bash", str(INSTALL_SH), "--dry-run"],
+                          capture_output=True, text=True, timeout=180, env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return ainode_home, proc
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_a_protected_install_prints_the_two_lines_an_operator_needs(tmp_path):
+    _, proc = _render_install(tmp_path)
+
+    assert "ainode auth enable" in proc.stdout
+    assert "ainode auth user add <name> --admin" in proc.stdout
+    assert "--password-stdin" in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_an_open_install_says_nothing_about_a_login(tmp_path):
+    """With auth off the dashboard opens without one, so these lines would be
+    advice about a problem nobody has."""
+    _, proc = _render_install(tmp_path, env_extra={"AINODE_AUTH": "off"})
+
+    assert "auth user add" not in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_the_wrapper_asks_for_a_tty_only_when_it_has_one(tmp_path):
+    """``--password-stdin`` is the flag for a pipe, and a hardcoded ``docker exec
+    -it`` would kill the pipe before the CLI ran: docker answers "the input device
+    is not a TTY" and exits. Same failure ``ainode doctor --peer`` routes around."""
+    ainode_home, _ = _render_install(tmp_path)
+    wrapper = (ainode_home / "ainode-wrapper").read_text()
+
+    assert "docker exec -it" not in wrapper
+    assert '[ -t 0 ]' in wrapper
+    forward = wrapper[wrapper.index("forward_to_container()"):]
+    assert 'exec docker exec $exec_tty' in forward
