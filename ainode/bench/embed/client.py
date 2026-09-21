@@ -21,6 +21,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from ainode.bench import auth
+
 #: Seconds one request gets. A batch of 64 short texts on a busy node is the slow
 #: case here, and it is nothing like a generation, so this is not two minutes.
 DEFAULT_TIMEOUT = 60
@@ -82,7 +84,7 @@ def request_for(endpoint: str, model: str, texts: list,
     return Request(
         url=endpoint.rstrip("/") + "/embeddings",
         payload={"model": model, "input": list(texts)},
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=auth.bearer(api_key),
     )
 
 
@@ -150,7 +152,7 @@ class EmbedClient:
     """The one thing in this package that talks to a server."""
 
     def __init__(self, endpoint: str, model: str, api_key: str = DEFAULT_API_KEY,
-                 timeout: float = DEFAULT_TIMEOUT):
+                 timeout: float = DEFAULT_TIMEOUT, key_source: str = ""):
         if not endpoint:
             raise EmbedError("--endpoint is required: the OpenAI-compatible base "
                              "with its /v1, e.g. http://100.72.9.84:8001/v1")
@@ -160,6 +162,9 @@ class EmbedClient:
         self.model = model
         self.api_key = api_key or DEFAULT_API_KEY
         self.timeout = float(timeout)
+        #: Where the key came from (``--api-key``, ``$AINODE_API_KEY`` or the
+        #: default). The only half of it a run may print.
+        self.key_source = key_source or "the default"
         #: What the server called the model in its last answer. Recorded instead of
         #: the requested id, so a record names the thing that replied.
         self.reported_model = ""
@@ -168,9 +173,16 @@ class EmbedClient:
         return request_for(self.endpoint, self.model, texts, self.api_key)
 
     def embed(self, texts: list) -> Reply:
-        """One call, timed. A failure is a Reply with an ``error``, never a raise."""
+        """One call, timed. A failure is a Reply with an ``error``, never a raise.
+
+        The exception is a refusal: a 401 or a 429 raises
+        :class:`ainode.bench.auth.EndpointRefused` rather than becoming a row, because
+        every request in the run would carry the same error and the record would
+        report a p50, a throughput and a pair-ordering score over nothing.
+        """
         data, wall_s, error = post_json(self.request(texts), self.timeout)
         if error is not None:
+            auth.check_error(error)
             return Reply(wall_ms=round(wall_s * 1000, 2), error=error)
         reply = parse(data)
         reply.wall_ms = round(wall_s * 1000, 2)
@@ -189,8 +201,7 @@ class EmbedClient:
         """
         req = urllib.request.Request(
             self.endpoint + "/models",
-            headers={"Accept": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"})
+            headers={"Accept": "application/json", **auth.bearer(self.api_key)})
         started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:

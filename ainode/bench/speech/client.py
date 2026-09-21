@@ -30,6 +30,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from ainode.bench import auth
+
 #: Seconds one request gets. A five-second clip on a busy node is the slow case, and
 #: it is nothing like a generation, so this is not two minutes.
 DEFAULT_TIMEOUT = 120
@@ -133,7 +135,7 @@ def request_for(endpoint: str, model: str, path, audio: bytes,
         content_type=f"multipart/form-data; boundary={BOUNDARY}",
         fields=fields,
         filename=name,
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=auth.bearer(api_key),
     )
 
 
@@ -198,7 +200,7 @@ class SpeechClient:
 
     def __init__(self, endpoint: str, model: str, api_key: str = DEFAULT_API_KEY,
                  timeout: float = DEFAULT_TIMEOUT, language: str = "",
-                 translate: bool = False):
+                 translate: bool = False, key_source: str = ""):
         if not endpoint:
             raise SpeechError("--endpoint is required: the OpenAI-compatible base "
                               "with its /v1, e.g. http://100.122.26.9:3000/v1")
@@ -209,6 +211,9 @@ class SpeechClient:
         self.api_key = api_key or DEFAULT_API_KEY
         self.timeout = float(timeout)
         self.language = language or ""
+        #: Where the key came from (``--api-key``, ``$AINODE_API_KEY`` or the
+        #: default). The only half of it a run may print.
+        self.key_source = key_source or "the default"
         #: ``/v1/audio/translations`` instead of transcriptions. Whisper turbo is a
         #: transcription model and cannot translate, so this is for the ASR models
         #: that can; the record says which path was measured.
@@ -230,10 +235,18 @@ class SpeechClient:
             raise SpeechError(f"{clip['path']} could not be read: {exc}") from exc
 
     def transcribe(self, clip: dict, audio=None) -> Reply:
-        """One call, timed. A failure is a Reply with an ``error``, never a raise."""
+        """One call, timed. A failure is a Reply with an ``error``, never a raise.
+
+        The exception is a refusal: a 401 or a 429 raises
+        :class:`ainode.bench.auth.EndpointRefused` rather than becoming a row. A
+        refused clip is already counted out of every rate (it is a row with an error
+        and nulls), so ten of them would produce a record with no word error rate at
+        all and a reader would have to guess why.
+        """
         payload = audio if audio is not None else self.read_audio(clip)
         data, wall_s, error = post_multipart(self.request(clip, payload), self.timeout)
         if error is not None:
+            auth.check_error(error)
             return Reply(wall_ms=round(wall_s * 1000, 2), error=error)
         reply = parse(data)
         reply.wall_ms = round(wall_s * 1000, 2)
@@ -252,8 +265,7 @@ class SpeechClient:
         """
         req = urllib.request.Request(
             self.endpoint + "/models",
-            headers={"Accept": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"})
+            headers={"Accept": "application/json", **auth.bearer(self.api_key)})
         started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:

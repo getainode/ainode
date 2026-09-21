@@ -25,6 +25,7 @@ import json
 import pathlib
 import time
 
+from ainode.bench import auth
 from ainode.bench.agentic.probes import DEFAULT_NEEDLE, GROUPS, all_probes
 from ainode.bench.agentic.runner import (
     DEFAULT_API_KEY,
@@ -72,8 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "are sent, the way the throughput bench sends them)")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                    help=f"seconds per request (default {DEFAULT_TIMEOUT})")
-    p.add_argument("--api-key", default=DEFAULT_API_KEY,
-                   help=f"bearer token for the endpoint (default {DEFAULT_API_KEY})")
+    p.add_argument("--api-key", default="",
+                   help=f"bearer token for the endpoint (default ${auth.ENV_API_KEY}, "
+                        f"else the placeholder {DEFAULT_API_KEY} that an open node "
+                        f"accepts). Never printed and never written into a record")
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                    help=f"temperature for every probe except B2, which pins its own "
                         f"(default {DEFAULT_TEMPERATURE})")
@@ -147,10 +150,12 @@ def main(argv=None, out_dir=None) -> int:
     probes = all_probes(needle=needle, groups=groups)
     if not probes:
         p.error("that selection holds no probes")
+    args.api_key, key_source = auth.key_for(args.api_key, DEFAULT_API_KEY)
 
     print(f"\n  ainode-bench agentic  {args.model}")
     print(f"  label   : {args.label}")
     print(f"  endpoint: {args.endpoint}")
+    print(f"  key     : from {key_source} (never printed)")
     print(f"  probes  : {len(probes)} over groups {', '.join(groups)}"
           f"{' (quick)' if args.quick else ''}")
     print("  protocol: every verdict is mechanical; group C is executed and group G "
@@ -158,6 +163,10 @@ def main(argv=None, out_dir=None) -> int:
 
     if args.dry_run:
         return dry_run(probes, args, groups, needle)
+
+    refused = auth.preflight(args.endpoint, args.api_key)
+    if refused:
+        return auth.stop(refused)
 
     model_block, placement, warnings = describe(args)
     if args.ainode:
@@ -173,7 +182,12 @@ def main(argv=None, out_dir=None) -> int:
                         timeout=args.timeout, temperature=args.temperature,
                         think_kw=args.no_think_kw)
     started = time.time()
-    runs = run_probes(probes, client)
+    try:
+        runs = run_probes(probes, client)
+    except auth.EndpointRefused as exc:
+        # Mid-run, which the preflight cannot rule out: 25 probes refused the same
+        # way is one refusal, not a score of 0/25.
+        return auth.stop(str(exc))
     seconds = round(time.time() - started)
 
     block = build_agentic_block(runs, probes, args.endpoint, groups, needle,
@@ -218,10 +232,11 @@ def describe(args):
     from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
     base = args.ainode.rstrip("/")
-    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base,
-                                                                         args.model)
-    model_block, placement, _node_id, warnings = describe_via_http(base, base,
-                                                                  args.model)
+    key = getattr(args, "api_key", "") or ""
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(
+        base, args.model, api_key=key)
+    model_block, placement, _node_id, warnings = describe_via_http(
+        base, base, args.model, api_key=key)
     if node_name:
         # The fleet view names the node actually serving the model; the master's own
         # description would otherwise stamp the master as the placement.

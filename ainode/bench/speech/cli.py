@@ -24,6 +24,7 @@ import json
 import pathlib
 import time
 
+from ainode.bench import auth
 from ainode.bench.speech.clips import (
     CLIPS,
     ClipError,
@@ -85,8 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                    help=f"seconds per request (default {DEFAULT_TIMEOUT})")
     p.add_argument("--api-key", default="",
-                   help=f"bearer token for the endpoint (default {DEFAULT_API_KEY}). "
-                        "Never printed and never written into a record")
+                   help=f"bearer token for the endpoint (default ${auth.ENV_API_KEY}, "
+                        f"else the placeholder {DEFAULT_API_KEY} that an open node "
+                        "accepts). Never printed and never written into a record")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and one example request, write nothing")
     p.add_argument("--generate-clips", action="store_true",
@@ -112,13 +114,14 @@ def describe(args, client):
     from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
     base = args.ainode.rstrip("/")
-    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base,
-                                                                         client.model)
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(
+        base, client.model, api_key=client.api_key)
     # The resolved name is passed through so `stacked_with` names what shares the GPU
     # with THIS instance. A speech model is a stacked instance on a peer by design, so
     # a run driven at the master would otherwise record the master's own neighbours.
     model_block, placement, _node_id, warnings = describe_via_http(
-        base, base, client.model, serving_node_name=node_name)
+        base, base, client.model, serving_node_name=node_name,
+        api_key=client.api_key)
     if node_name:
         placement["node"] = node_name
         placement["port"] = engine_port
@@ -157,8 +160,7 @@ def dry_run(args, client, clips: list, out=say) -> int:
     out(f"\n  ainode-bench speech  {client.model}")
     out(f"  endpoint : {client.endpoint}")
     out(f"  path     : POST /v1/audio/{client.path_name}")
-    out(f"  key      : {'--api-key' if args.api_key else 'the default'} "
-        "(never printed)")
+    out(f"  key      : from {client.key_source} (never printed)")
     out(f"  clips    : {block['clips']} from {block['directory']} "
         f"({block['id']} v{block['version']}, {block['audio_seconds']}s of audio, "
         f"{block['reference_words']} reference words)")
@@ -208,34 +210,44 @@ def main(argv=None, out_dir=None) -> int:
         clips = load_clips(args.clips or None)
     except ClipError as exc:
         return p.error(str(exc))
+    key, key_source = auth.key_for(args.api_key, DEFAULT_API_KEY)
     try:
-        client = SpeechClient(args.endpoint, args.model,
-                              api_key=args.api_key or DEFAULT_API_KEY,
+        client = SpeechClient(args.endpoint, args.model, api_key=key,
                               timeout=args.timeout, language=args.language,
-                              translate=args.translate)
+                              translate=args.translate, key_source=key_source)
     except SpeechError as exc:
         return p.error(str(exc))
 
     if args.dry_run:
         return dry_run(args, client, clips)
 
+    refused = auth.preflight(client.endpoint, client.api_key)
+    if refused:
+        return auth.stop(refused, out=say)
+
     block = clips_block(clips)
     say(f"\n  ainode-bench speech  {client.model}")
     say(f"  label    : {args.label}")
     say(f"  endpoint : {client.endpoint}")
+    say(f"  key      : from {client.key_source} (never printed)")
     say(f"  clips    : {block['clips']} ({block['audio_seconds']}s of audio, "
         f"{len(block['voices'])} voices, {len(block['locales'])} locales)")
     say("  measures : word error rate against the text the clips were made from, "
         "latency per clip, and real-time factor")
 
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    floor_ms = run_transport_floor(client)
-    say("    warmup     one untimed request, transcript discarded")
-    warmup = run_warmup(client, clips[0])
-    say(f"    warmup     {warmup['clip']} {warmup['wall_ms']:.0f} ms"
-        + (f"  ERROR {warmup['error']}" if warmup.get("error") else ""))
-    started = time.time()
-    rows = run_clips(client, clips, progress=progress)
+    try:
+        floor_ms = run_transport_floor(client)
+        say("    warmup     one untimed request, transcript discarded")
+        warmup = run_warmup(client, clips[0])
+        say(f"    warmup     {warmup['clip']} {warmup['wall_ms']:.0f} ms"
+            + (f"  ERROR {warmup['error']}" if warmup.get("error") else ""))
+        started = time.time()
+        rows = run_clips(client, clips, progress=progress)
+    except auth.EndpointRefused as exc:
+        # Mid-run, which the preflight cannot rule out. Nothing is written: ten clips
+        # with an error each is a record with no rate in it and no reason given.
+        return auth.stop(str(exc), out=say)
     seconds = time.time() - started
 
     speech_block = build_speech_block(client, clips, rows, seconds, floor_ms=floor_ms,

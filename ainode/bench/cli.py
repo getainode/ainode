@@ -12,6 +12,7 @@ import pathlib
 import sys
 import time
 
+from ainode.bench import auth
 from ainode.bench.fleet import describe_via_http
 from ainode.bench.measure import (
     Cancelled,
@@ -71,6 +72,10 @@ def build_parser():
                    help="generation cap for single/prefill/concurrency")
     p.add_argument("--sustained-tokens", type=int, default=1500)
     p.add_argument("--reasoning-tokens", type=int, default=600)
+    p.add_argument("--api-key", default="",
+                   help="bearer token for a protected node, on every request this "
+                        f"run makes (default ${auth.ENV_API_KEY}). Never printed and "
+                        "never written into a record")
     p.add_argument("--show", help="pretty-print a saved result and exit")
     return p
 
@@ -122,16 +127,26 @@ def main(argv=None, out_dir=None):
     if bad:
         p.error(f"unknown section(s) {', '.join(bad)}; pick from {', '.join(SECTIONS)}")
 
+    key, key_source = auth.resolve_key(a.api_key)
     opts = BenchOptions(url=a.url, model=a.model, label=a.label, sections=want,
                         depths=int_list(a.depths), streams=int_list(a.streams),
                         no_think=a.no_think, max_tokens=a.max_tokens,
                         sustained_tokens=a.sustained_tokens,
-                        reasoning_tokens=a.reasoning_tokens)
+                        reasoning_tokens=a.reasoning_tokens, api_key=key)
 
-    mb, pl, node_id, warn = describe_via_http(a.ainode, a.url, a.model)
+    # Before the describe, so a protected node is named as one rather than reached
+    # through five degraded placement reads and a first request nobody expected to
+    # be refused.
+    refused = auth.preflight(a.url, key)
+    if refused:
+        return auth.stop(refused)
+
+    mb, pl, node_id, warn = describe_via_http(a.ainode, a.url, a.model, api_key=key)
     print(f"\n  ainode-bench  {opts.model}")
     print(f"  label   : {opts.label}")
     print(f"  endpoint: {opts.url}")
+    if key_source:
+        print(f"  key     : from {key_source} (never printed)")
     print(f"  node    : {pl.get('node', 'unknown')}  {pl.get('gpu', '')}  "
           f"tp={pl.get('tp', '?')}  ainode {pl.get('ainode', '?')}")
     print(f"  engine  : {pl.get('engine_image', 'unknown image')}  "
@@ -141,7 +156,7 @@ def main(argv=None, out_dir=None):
     for w in warn:
         print(f"  warn    : {w}")
 
-    tel = Telemetry(read=http_nodes_reader(a.ainode, node_id)).start()
+    tel = Telemetry(read=http_nodes_reader(a.ainode, node_id, api_key=key)).start()
     rep = ConsoleReporter()
     try:
         results, seconds, cpt = measure(opts, rep)
@@ -149,6 +164,12 @@ def main(argv=None, out_dir=None):
         tel.stop()
         print("\n  cancelled; nothing was written")
         return 130
+    except auth.EndpointRefused as exc:
+        # A refusal mid-run, which a preflight cannot rule out: the rate limiter can
+        # start refusing at the concurrency section. Nothing is written, because a
+        # record of the sections that ran before it would read as a complete run.
+        tel.stop()
+        return auth.stop(str(exc))
     tel.stop()
     telemetry = tel.result()
     if telemetry:

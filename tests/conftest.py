@@ -41,6 +41,20 @@ the Hub's file metadata before it lets a pull start, and remembers the answer
 under ``AINODE_HOME``. Both are the machine, so both are redirected: the lookup
 reports unknown (which lets the download through, exactly as before the check
 existed) and the cache lands in a tmpdir.
+
+``no_bench_api_key``: the bench CLI reads ``$AINODE_API_KEY`` when no ``--api-key``
+was passed (#245), and the operator running this suite usually has one exported for
+their own fleet. Without this, their key would decide what the harness dry-run
+prints and whether a key-source line says "the default", so the tests would pass or
+fail depending on whose shell they ran in. Tests that want the variable set do it
+themselves with ``monkeypatch.setenv``, which runs after this.
+
+``no_bench_preflight``: every bench section now opens with one GET of the endpoint's
+model list to find out whether the node will refuse the run (#245). The endpoints in
+these tests are real fleet addresses, so on a machine with the tailnet up that GET
+would leave the suite and its answer would decide the test. Stubbed to "not
+refused". The tests for the preflight call the real function with a faked
+``urlopen``, and the tests for a refusal set this seam to their own answer.
 """
 
 import shutil
@@ -132,6 +146,40 @@ def no_hub_size_lookup(monkeypatch, tmp_path_factory):
     home = tmp_path_factory.mktemp("ainode_fit_home")
     monkeypatch.setattr(fit, "fetch_repo_size", lambda *a, **k: fit.RepoSize())
     monkeypatch.setattr(fit, "size_cache_path", lambda: home / "repo-sizes.json")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_bench_api_key(monkeypatch):
+    """The bench never picks up the operator's own API key during the suite.
+
+    ``ainode/bench/auth.py`` falls back to ``$AINODE_API_KEY`` when no ``--api-key``
+    was given, so a developer with one exported would change what the CLI tests see:
+    a key source of ``$AINODE_API_KEY`` instead of "the default", and a masked
+    placeholder in the harness dry-run's env line. A test that wants the variable
+    sets it itself.
+    """
+    from ainode.bench.auth import ENV_API_KEY
+
+    monkeypatch.delenv(ENV_API_KEY, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_bench_preflight(monkeypatch):
+    """The bench's opening GET never leaves the suite.
+
+    Each section asks the endpoint for its model list before it measures anything, so
+    a refusing node is reported rather than scored (#245). The endpoints these tests
+    pass are real addresses on Jason's fleet, and a run of the suite with the tailnet
+    up would make that request for real and let the answer decide the test. Report
+    "not refused" instead. A test about a refusal sets this same seam to its own
+    answer, which wins because it patches later; the tests for the preflight itself
+    call the real function with a faked ``urlopen``.
+    """
+    from ainode.bench import auth
+
+    monkeypatch.setattr(auth, "preflight", lambda *a, **k: None)
     yield
 
 

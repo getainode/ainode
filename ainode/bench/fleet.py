@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ainode.auth.fleet import fleet_headers
+from ainode.bench import auth
 from ainode.bench.measure import CTL_TIMEOUT, get_json, node_sample
 from ainode.metrics.collector import optional_float
 
@@ -165,7 +166,7 @@ def _apply_live_config(pl: dict, cfg: dict) -> None:
 
 # ---------------------------------------------------------------- serving-node resolution (CLI)
 
-def resolve_serving_node(base_url: str, model: str):
+def resolve_serving_node(base_url: str, model: str, api_key: str = ""):
     """Which node serves ``model``, from the master's fleet view.
 
     Reads ``/api/server/status`` on the master to find the node that hosts the
@@ -175,11 +176,16 @@ def resolve_serving_node(base_url: str, model: str):
     through the master: a peer's own web port is only reachable over the
     cluster fabric, which the bench CLI usually is not on, so the record's
     placement is corrected by name rather than by re-addressing the request.
+
+    ``api_key`` is the node's API key (``--api-key`` or ``$AINODE_API_KEY``). Without
+    it every one of these reads answers 401 on a protected node, and the run recorded
+    a placement block with no node, no GPU and no flags in it.
     """
     base = base_url.rstrip("/")
-    ss = get_json(f"{base}/api/server/status")
+    ss = get_json(f"{base}/api/server/status", api_key=api_key)
     if ss.get("_error"):
-        return "", None, "", f"master /api/server/status unreadable: {ss['_error']}"
+        return "", None, "", ("master /api/server/status unreadable: "
+                              + auth.explain(ss["_error"]))
     node_name = ""
     engine_port = None
     for m in (ss.get("loaded_models") or []):
@@ -190,7 +196,7 @@ def resolve_serving_node(base_url: str, model: str):
     if not node_name:
         return "", None, "", ""
     gpu_name = ""
-    nodes = get_json(f"{base}/api/nodes")
+    nodes = get_json(f"{base}/api/nodes", api_key=api_key)
     if not nodes.get("_error"):
         for n in (nodes.get("nodes") if isinstance(nodes, dict) else nodes) or []:
             if n.get("node_name") == node_name:
@@ -201,7 +207,7 @@ def resolve_serving_node(base_url: str, model: str):
 
 # ---------------------------------------------------------------- HTTP describe (CLI)
 
-def describe_via_http(ainode, engine_url, model, serving_node_name=""):
+def describe_via_http(ainode, engine_url, model, serving_node_name="", api_key=""):
     """Build the model + placement blocks from what the fleet actually reports.
 
     The out-of-process path, used by ``scripts/ainode-bench.py``. Returns
@@ -216,6 +222,11 @@ def describe_via_http(ainode, engine_url, model, serving_node_name=""):
     silences the "does not report serving" warning in that case, because the caller
     is about to correct the placement and the warning would be describing a state it
     already handled.
+
+    ``api_key`` goes on every read below. A read the node refuses is a warning and
+    not a stopped run (``measure.get_json`` never raises), but the warning says what
+    is missing: ``auth.explain`` turns urllib's 401 into the sentence that names the
+    flag to pass.
     """
     warn = []
     mb = {"id": model}
@@ -223,21 +234,22 @@ def describe_via_http(ainode, engine_url, model, serving_node_name=""):
     node_id = None
 
     # --- engine itself: served context window (authoritative, it is serving)
-    ml = get_json(engine_url.rstrip("/") + "/v1/models", timeout=CTL_TIMEOUT)
+    ml = get_json(engine_url.rstrip("/") + "/v1/models", timeout=CTL_TIMEOUT,
+                  api_key=api_key)
     for entry in (ml.get("data") or []):
         if entry.get("id") == model and entry.get("max_model_len"):
             pl["max_model_len"] = entry["max_model_len"]
     if ml.get("_error"):
-        warn.append(f"engine /v1/models unreadable: {ml['_error']}")
+        warn.append(f"engine /v1/models unreadable: {auth.explain(ml['_error'])}")
 
     if not ainode:
         return mb, pl, node_id, warn
     base = ainode.rstrip("/")
 
     # --- the node we are hitting
-    st = get_json(f"{base}/api/status")
+    st = get_json(f"{base}/api/status", api_key=api_key)
     if st.get("_error"):
-        warn.append(f"/api/status unreadable: {st['_error']}")
+        warn.append(f"/api/status unreadable: {auth.explain(st['_error'])}")
     else:
         node_id = st.get("node_id")
         if st.get("node_name"):
@@ -254,7 +266,7 @@ def describe_via_http(ainode, engine_url, model, serving_node_name=""):
 
     # --- tensor parallelism and what else shares the node. "the node" is the one
     # SERVING the model when the caller resolved it, not the one being asked.
-    ss = get_json(f"{base}/api/server/status")
+    ss = get_json(f"{base}/api/server/status", api_key=api_key)
     stacked = []
     for m in (ss.get("loaded_models") or []):
         if m.get("id") == model:
@@ -274,12 +286,12 @@ def describe_via_http(ainode, engine_url, model, serving_node_name=""):
     # instance, but it is a shared mutable object that keeps the last load's
     # overrides, so it is only trustworthy when its own `model` is the model we
     # are benching. Otherwise fall back to the curated catalog recipe and say so.
-    cfg = get_json(f"{base}/api/config")
+    cfg = get_json(f"{base}/api/config", api_key=api_key)
     if not cfg.get("_error") and cfg.get("model") == model:
         _apply_live_config(pl, cfg)
 
     # --- model metadata from the catalog, matched on hf_repo or catalog id
-    cat = get_json(f"{base}/api/models", timeout=30)
+    cat = get_json(f"{base}/api/models", timeout=30, api_key=api_key)
     info = None
     for m in (cat.get("models") or []):
         if model in (m.get("hf_repo"), m.get("id")):

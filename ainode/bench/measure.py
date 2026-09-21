@@ -32,6 +32,9 @@ Honesty rules, all load-bearing, all inherited from the script:
     queueing, and the OpenAI-compatible API exposes no internal prefill timing.
   * Nothing is loaded, unloaded, restarted or deleted. Pure inference load
     against whatever is already serving.
+  * A request the node REFUSED is not a measurement. Both transports below hand a
+    401 or a 429 to ``ainode.bench.auth``, which raises out of the run rather than
+    letting the refusal land as a section of failures (see that module).
 """
 from __future__ import annotations
 
@@ -44,6 +47,8 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+
+from ainode.bench import auth
 
 SCHEMA = 1
 
@@ -87,6 +92,12 @@ class BenchOptions:
     max_tokens: int = 200
     sustained_tokens: int = 1500
     reasoning_tokens: int = 600
+    #: Bearer token for a protected node. Empty for the in-process runner, which
+    #: talks to an engine container that never sees AINode's middleware, and read
+    #: from ``--api-key`` or ``$AINODE_API_KEY`` by the CLI. Never printed and
+    #: never written into a record: ``build_record`` below names every setting it
+    #: emits, and this is not one of them.
+    api_key: str = ""
 
 
 # ---------------------------------------------------------------- reporting
@@ -129,18 +140,26 @@ class Cancelled(Exception):
 
 # ---------------------------------------------------------------- transport
 
-def get_json(url, timeout=CTL_TIMEOUT):
+def get_json(url, timeout=CTL_TIMEOUT, api_key=""):
     """GET JSON. Returns {"_error": ...} instead of raising: a missing control
-    endpoint must degrade a placement field, never kill a benchmark run."""
+    endpoint must degrade a placement field, never kill a benchmark run.
+
+    That is also why a 401 here does NOT raise the way one in ``stream_chat`` does:
+    a control-plane read the node refused costs the run a placement field, not a
+    measurement. The caller spells the refusal out with ``auth.explain`` so the
+    warning says which key is missing rather than quoting urllib.
+    """
     try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        req = urllib.request.Request(url, headers={"Accept": "application/json",
+                                                   **auth.bearer(api_key)})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
     except Exception as e:
         return {"_error": f"{type(e).__name__}: {str(e)[:140]}"}
 
 
-def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None):
+def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None,
+                api_key=""):
     """Stream one chat completion and time it.
 
     ``thinking`` None leaves the chat template's own default alone; True/False
@@ -149,6 +168,10 @@ def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None)
     an optional predicate checked while reading the stream, so a cancelled run
     stops inside a long generation rather than after it. Returns a dict with
     ok/error plus wall_s, ttft_s, decode_tok_s, gen_tokens, prompt_tokens.
+
+    The one exception to "never raises" is a refusal: a 401 or a 429 leaves as
+    :class:`ainode.bench.auth.EndpointRefused` rather than as an error dict, because
+    a refused request is not a slow one and a section full of them is not a result.
     """
     payload = {
         "model": model,
@@ -171,7 +194,7 @@ def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None)
     req = urllib.request.Request(
         url.rstrip("/") + "/v1/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **auth.bearer(api_key)},
     )
     t0 = time.monotonic()
     ttft = None
@@ -212,6 +235,8 @@ def stream_chat(url, model, prompt, max_tokens, thinking=None, should_stop=None)
                         ttft = time.monotonic() - t0
                     chunks += 1
     except Exception as e:
+        # A refusal raises out of the run; everything else is this request's row.
+        auth.check_exception(e)
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:140]}",
                 "wall_s": round(time.monotonic() - t0, 3)}
     wall = time.monotonic() - t0
@@ -236,7 +261,7 @@ def nonce():
     return f"[run {uuid.uuid4().hex}] "
 
 
-def calibrate_cpt(url, model):
+def calibrate_cpt(url, model, api_key=""):
     """Measure this model's chars-per-token instead of assuming ~4.
 
     One cheap probe (max_tokens=1; we only want the usage block). Only used to
@@ -245,7 +270,7 @@ def calibrate_cpt(url, model):
     truthfulness of the recorded depth.
     """
     probe = nonce() + FILLER * 40
-    r = stream_chat(url, model, probe, 1)
+    r = stream_chat(url, model, probe, 1, api_key=api_key)
     if r.get("ok") and r.get("prompt_tokens"):
         return len(probe) / r["prompt_tokens"]
     return 4.0
@@ -352,14 +377,14 @@ def node_sample(node: dict):
             "gpu_mem_total_gb": round(total, 1) if total else None}
 
 
-def http_nodes_reader(ainode: str, node_id: str):
+def http_nodes_reader(ainode: str, node_id: str, api_key: str = ""):
     """Telemetry reader for an out-of-process caller: GET <ainode>/api/nodes."""
     base = (ainode or "").rstrip("/")
     if not base or not node_id:
         return None
 
     def read():
-        d = get_json(f"{base}/api/nodes", timeout=8)
+        d = get_json(f"{base}/api/nodes", timeout=8, api_key=api_key)
         for n in (d.get("nodes") or []):
             if n.get("node_id") == node_id:
                 return node_sample(n)
@@ -382,7 +407,8 @@ def sec_single(a, cpt, rep):
     _check(rep)
     r = stream_chat(a.url, a.model, nonce() + SHORT_TASK, a.max_tokens,
                     thinking=False if a.no_think else None,
-                    should_stop=rep.cancelled)
+                    should_stop=rep.cancelled,
+                    api_key=a.api_key)
     if r.get("cancelled"):
         raise Cancelled()
     if not r.get("ok") or not r.get("decode_tok_s"):
@@ -410,7 +436,7 @@ def sec_prefill(a, cpt, rep):
         rep.step(i, len(a.depths), f"{d} prompt tokens")
         r = stream_chat(a.url, a.model, depth_prompt(d, cpt), a.max_tokens,
                         thinking=False if a.no_think else None,
-                        should_stop=rep.cancelled)
+                        should_stop=rep.cancelled, api_key=a.api_key)
         if r.get("cancelled"):
             raise Cancelled()
         if not r.get("ok"):
@@ -455,7 +481,8 @@ def sec_sustained(a, cpt, rep):
         "rates, and why throughput varies with content. Do not stop early.")
     r = stream_chat(a.url, a.model, prompt, a.sustained_tokens,
                     thinking=False if a.no_think else None,
-                    should_stop=rep.cancelled)
+                    should_stop=rep.cancelled,
+                    api_key=a.api_key)
     if r.get("cancelled"):
         raise Cancelled()
     if not r.get("ok") or not r.get("decode_tok_s"):
@@ -486,7 +513,8 @@ def sec_concurrency(a, cpt, rep):
             res = list(ex.map(
                 lambda p: stream_chat(a.url, a.model, p, a.max_tokens,
                                       thinking=False if a.no_think else None,
-                                      should_stop=rep.cancelled),
+                                      should_stop=rep.cancelled,
+                                      api_key=a.api_key),
                 prompts))
         wall = time.monotonic() - t0
         if any(r.get("cancelled") for r in res):
@@ -527,7 +555,8 @@ def sec_reasoning(a, cpt, rep):
         _check(rep)
         rep.step(i, 2, f"thinking {name}")
         r = stream_chat(a.url, a.model, nonce() + REASONING_Q, a.reasoning_tokens,
-                        thinking=flag, should_stop=rep.cancelled)
+                        thinking=flag, should_stop=rep.cancelled,
+                        api_key=a.api_key)
         if r.get("cancelled"):
             raise Cancelled()
         if not r.get("ok"):
@@ -577,19 +606,22 @@ def int_list(s):
 def measure(opts: BenchOptions, rep: Reporter, cpt=None):
     """Run the selected sections and return (results, seconds, cpt).
 
-    Blocking. Raises :class:`Cancelled` if the reporter reports a cancel. A
-    section that raises anything else is logged and skipped: one broken section
+    Blocking. Raises :class:`Cancelled` if the reporter reports a cancel, and
+    :class:`ainode.bench.auth.EndpointRefused` if the node refused a request (401 or
+    429): a refusal is not a section that measured badly, and swallowing one would
+    write a record claiming five sections ran against a node that answered nothing.
+    A section that raises anything else is logged and skipped: one broken section
     must not throw away the four that measured cleanly.
     """
     if cpt is None:
-        cpt = calibrate_cpt(opts.url, opts.model)
+        cpt = calibrate_cpt(opts.url, opts.model, api_key=opts.api_key)
     t_start = time.time()
     results = {}
     for name in opts.sections:
         key, fn = SECTIONS[name]
         try:
             val = fn(opts, cpt, rep)
-        except Cancelled:
+        except (Cancelled, auth.EndpointRefused):
             raise
         except Exception as e:
             rep.log(f"    section {name} raised {type(e).__name__}: {e}")

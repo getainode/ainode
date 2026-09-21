@@ -26,6 +26,7 @@ import json
 import pathlib
 import time
 
+from ainode.bench import auth
 from ainode.bench.decide.backends import (
     BACKENDS,
     DEFAULT_API_KEY,
@@ -97,10 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                    help=f"seconds per item (default {DEFAULT_TIMEOUT})")
     p.add_argument("--api-key", default="",
-                   help="bearer token: the endpoint's for ainode/chat (default "
-                        f"{DEFAULT_API_KEY}), TypeSafe's for jev (else "
-                        "$TYPESAFE_API_KEY, else ~/.jev_api_key). Never printed and "
-                        "never written into a record")
+                   help="bearer token: the endpoint's for ainode/chat (else "
+                        f"${auth.ENV_API_KEY}, else {DEFAULT_API_KEY}), TypeSafe's "
+                        "for jev (else $TYPESAFE_API_KEY, else ~/.jev_api_key). "
+                        "Never printed and never written into a record")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and one example request, write nothing")
     return p
@@ -142,10 +143,14 @@ def describe(args, backend):
     from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
     base = args.ainode.rstrip("/")
-    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base,
-                                                                         args.model)
-    model_block, placement, _node_id, warnings = describe_via_http(base, base,
-                                                                  args.model)
+    # The node's key, never the hosted backend's: a jev run returns above without
+    # touching a control plane of ours, so this can only be the one the local
+    # backends are using.
+    key = getattr(backend, "api_key", "") if backend.local else ""
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(
+        base, args.model, api_key=key)
+    model_block, placement, _node_id, warnings = describe_via_http(
+        base, base, args.model, api_key=key)
     if node_name:
         # The fleet view names the node actually serving the model; the master's own
         # description would otherwise stamp the master as the placement.
@@ -197,8 +202,7 @@ def dry_run(args, item_set, names, out=say) -> int:
             continue
         out(f"\n  backend : {backend.name}  model "
             f"{getattr(backend, 'model', '') or 'server default'}")
-        if backend.name == "jev":
-            out(f"  key     : from {backend.key_source} (never printed)")
+        out(f"  key     : from {backend.key_source} (never printed)")
         out(f"  cost    : ${backend.input_usd_per_mtok:g}/M input tokens, "
             f"${backend.output_usd_per_mtok:g}/M output")
         for item in example_items(item_set):
@@ -227,8 +231,13 @@ def run_backend(args, backend_name, item_set, names, out_dir, stamp, log=say):
                             api_key=args.api_key, timeout=args.timeout)
     log(f"\n  {backend.name}  {getattr(backend, 'model', '') or 'server default'}"
         f"  {backend.endpoint}")
-    if backend.name == "jev":
-        log(f"  key from {backend.key_source} (never printed)")
+    log(f"  key from {backend.key_source} (never printed)")
+    if backend.local:
+        # Before the items, so a protected node is reported as one rather than as 110
+        # items that all came back wrong.
+        refused = auth.preflight(args.endpoint, backend.api_key)
+        if refused:
+            raise auth.EndpointRefused(refused)
 
     total = len(item_set.items)
     started = time.time()
@@ -303,6 +312,11 @@ def main(argv=None, out_dir=None) -> int:
             titles.append(f"{backend_name} {block['model_reported'] or ''}".strip())
     except BackendError as exc:
         return p.error(str(exc))
+    except auth.EndpointRefused as exc:
+        # The node refused, before or during the items. Nothing is scored and no
+        # record is written: a partial set of rows would carry an accuracy and a
+        # calibration error computed over answers nobody gave.
+        return auth.stop(str(exc), out=say)
     if len(blocks) == 2:
         print_compare(blocks, titles, out=say)
     say("\n  render the README table with: python3 scripts/render-bench-table.py")
