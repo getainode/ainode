@@ -33,10 +33,15 @@ const AINode = {
     modelsSearch: '',
     modelsSort: 'recommended',
     configSection: 'credentials',
-    // /api/auth/status, polled on its own because it is the one API route that
-    // still answers when the key is missing (#167).
+    // /api/auth/status, polled on its own because it answers when the key is
+    // missing (#167). Who is signed in lives in AINodeAuth.me, from
+    // /api/auth/me: one home for the credential, same as the key (#261).
     authStatus: null,
     authBlocked: null,
+    // Config > Account and Config > Users, per render. null means "not read yet",
+    // so an empty list is never drawn as an answer nobody asked for.
+    authSessions: null,
+    authUsers: null,
     configData: {
       secrets: null,
       cluster: null,
@@ -64,8 +69,35 @@ const AINode = {
   // ========================================================================
 
   init() {
-    // First: a node that wants a key must be able to say so before any panel
-    // tries to render (#167).
+    var self = this;
+    // The front door comes before everything else (#261). /api/auth/me is open,
+    // so it answers on a node that wants a sign-in, and a release older than the
+    // route answers nothing at all: bootDecision reads that as "carry on as
+    // before, on the API key". Until it resolves, nothing is fetched and nothing
+    // is rendered, because a shell of panels that all 401 is the bug this fixes.
+    AINodeAuth.loadMe().then(function (me) {
+      var decision = AINodeAuth.bootDecision(me);
+      if (decision.show === 'signin') {
+        AINodeSignIn.show({
+          state: decision.state,
+          onSignedIn: function () { self.start(); },
+        });
+        return;
+      }
+      self.start();
+    });
+  },
+
+  /**
+   * The dashboard itself: bindings, polling, first render. Called once per page
+   * load, after the front door has let this browser through, and again when a
+   * person signs back in after a session ended mid-visit (which only restarts
+   * the clocks, because the listeners and the panels are still there).
+   */
+  start() {
+    if (this._started) { this.resume(); return; }
+    this._started = true;
+    // A node that wants a key must be able to say so before any panel renders.
     this.initAuth();
     this.loadChatSettings();
     this.loadConversations();
@@ -87,19 +119,44 @@ const AINode = {
     setTimeout(() => this.reconcileActiveDownloads(), 500);
   },
 
+  /** Back from the sign-in screen: restart the clocks, redraw what is on screen. */
+  resume() {
+    this.startPolling();
+    this.refreshAuthStatus();
+    this.renderUserChip();
+    if (this.state.currentView === 'config') this.renderConfigSection();
+  },
+
+  /** Every interval this page runs, stopped. The front door polls nothing. */
+  stopPolling() {
+    var self = this;
+    ['pollInterval', 'metricsInterval', 'loadTickInterval', 'versionInterval',
+     'authInterval'].forEach(function (key) {
+      if (self.state[key]) {
+        clearInterval(self.state[key]);
+        self.state[key] = null;
+      }
+    });
+    if (typeof this.stopServerLogPolling === 'function') this.stopServerLogPolling();
+  },
+
   // ========================================================================
   //  API KEY (see static/js/auth.js for the wrapper every fetch goes through)
   // ========================================================================
 
   initAuth() {
     var self = this;
-    // One handler for the whole UI: any 401, from any panel, opens the panel
-    // that fixes it instead of leaving an empty shell behind.
+    // One handler for the whole UI: any 401, from any panel, lands on the one
+    // screen that fixes it instead of leaving an empty shell behind.
     AINodeAuth.onUnauthorized(function (info) { self.onUnauthorized(info); });
     var chip = document.getElementById('api-access-chip');
     if (chip) chip.addEventListener('click', function () { self.openApiAccess(); });
+    var who = document.getElementById('user-chip-name');
+    if (who) who.addEventListener('click', function () { self.openConfigSection('account'); });
+    var out = document.getElementById('sign-out');
+    if (out) out.addEventListener('click', function () { self.signOut(); });
     this.refreshAuthStatus();
-    this.state.authInterval = setInterval(function () { self.refreshAuthStatus(); }, 15000);
+    this.renderUserChip();
   },
 
   initTopology() {
@@ -526,6 +583,9 @@ const AINode = {
     // Version check every 30 minutes
     this.checkVersion();
     this.state.versionInterval = setInterval(function () { self.checkVersion(); }, 30 * 60 * 1000);
+    // How this port is protected, on its own cadence: /api/auth/status answers
+    // when nothing else does (#167), and the chips read it.
+    this.state.authInterval = setInterval(function () { self.refreshAuthStatus(); }, 15000);
     // Initial fetch
     this.refresh();
   },
@@ -5825,6 +5885,8 @@ const AINode = {
   renderConfigSection() {
     switch (this.state.configSection) {
       case 'credentials': return this.renderConfigCredentials();
+      case 'account':     return this.renderConfigAccount();
+      case 'users':       return this.renderConfigUsers();
       case 'api':         return this.renderConfigApiAccess();
       case 'cluster':     return this.renderConfigCluster();
       case 'node':        return this.renderConfigNode();
@@ -6047,10 +6109,447 @@ const AINode = {
     });
   },
 
+  // ----- Account ------------------------------------------------------------
+  // Who you are on this node, your password, and the browsers signed in as you.
+  // Everything here is about a PERSON; keys for programs stay in API access.
+
+  /** A server timestamp as local text. Never invents one: absent reads absent. */
+  _authWhen(value) {
+    if (value === null || value === undefined || value === '') return 'unknown';
+    var when = null;
+    if (typeof value === 'number') {
+      // Seconds or milliseconds; a node writes seconds, so scale the small ones.
+      when = new Date(value < 1e12 ? value * 1000 : value);
+    } else {
+      when = new Date(String(value));
+    }
+    if (isNaN(when.getTime())) return String(value);
+    return when.toLocaleString();
+  },
+
+  /** A response body, or null when there is no JSON in it. */
+  async _authBody(resp) {
+    try { return await resp.json(); } catch (e) { return null; }
+  },
+
+  /** The server's own message for a refusal, or the fallback. */
+  _authMessage(body, fallback) {
+    if (body && body.error && body.error.message) return String(body.error.message);
+    if (body && body.message) return String(body.message);
+    return fallback;
+  },
+
+  async renderConfigAccount() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var self = this;
+    mount.innerHTML = '<div class="config-empty">Loading your account…</div>';
+    await AINodeAuth.loadMe();
+    this.renderUserChip();
+    var me = AINodeAuth.me || {};
+    var user = AINodeAuth.user();
+
+    var html = '';
+    html += '<h2 class="config-section-title">Account</h2>';
+    html += '<p class="config-section-desc">You sign in once and stay signed in until you sign out. A program is different: it sends an API key, and those live in API access.</p>';
+
+    if (!user) {
+      // No session: say which of the two reasons it is, and what to do next.
+      html += '<div class="config-card">';
+      html += '<h3 class="config-card-title">You are not signed in</h3>';
+      if (!AINodeAuth.me) {
+        html += '<p class="config-card-desc">This node is running a release without accounts, so there is nobody to sign in as. Update it to sign in with a name and password (the version is in Config &gt; About).</p>';
+      } else if (!me.auth_enabled) {
+        html += '<p class="config-card-desc">This node is open, so nobody signs in and there are no accounts. Turn sign-in on in API access, then create the first account on the node: <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code></p>';
+      } else if (AINodeAuth.hasKey()) {
+        html += '<p class="config-card-desc">This browser is driving the node with a stored API key, which belongs to a program rather than a person, so there is no account to show. Forget the key in API access and reload to sign in with a name and password.</p>';
+      } else {
+        html += '<p class="config-card-desc">Reload this page to sign in.</p>';
+      }
+      html += '<button class="config-btn secondary" id="account-open-api">Open API access</button>';
+      html += '</div>';
+      mount.innerHTML = html;
+      var open = document.getElementById('account-open-api');
+      if (open) open.addEventListener('click', function () { self.openApiAccess(); });
+      return;
+    }
+
+    // -- who you are ---------------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">You</h3>';
+    html += '<div class="auth-row">';
+    html += '  <div class="auth-row-main">';
+    html += '    <div class="auth-row-name">' + this.esc(user.name) + '';
+    html += '      <span class="auth-badge auth-badge-' + (user.role === 'admin' ? 'admin' : 'member') + '">' + this.esc(user.role || 'member') + '</span>';
+    html += '    </div>';
+    html += '    <div class="auth-row-meta">' + (user.role === 'admin'
+      ? 'An admin manages accounts and keys, and can turn sign-in on and off.'
+      : 'A member signs in and uses the dashboard. Account and key management need an admin.') + '</div>';
+    html += '  </div>';
+    html += '  <div class="auth-row-actions"><button class="config-btn secondary" id="account-signout">Sign out</button></div>';
+    html += '</div>';
+    html += '</div>';
+
+    // -- change password -----------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Change password</h3>';
+    html += '<p class="config-card-desc">Your current password proves it is you. The new one takes effect at once and your other sessions stay signed in.</p>';
+    html += '<form class="auth-form" id="account-password-form" autocomplete="off">';
+    html += '  <label class="form-label" for="account-pw-current">Current password</label>';
+    html += '  <input class="form-input" id="account-pw-current" type="password" autocomplete="current-password">';
+    html += '  <label class="form-label" for="account-pw-new">New password</label>';
+    html += '  <input class="form-input" id="account-pw-new" type="password" autocomplete="new-password">';
+    html += '  <label class="form-label" for="account-pw-confirm">New password again</label>';
+    html += '  <input class="form-input" id="account-pw-confirm" type="password" autocomplete="new-password">';
+    html += '  <button class="config-btn" type="submit" id="account-pw-save">Change password</button>';
+    html += '</form>';
+    html += '<div class="config-test-result" id="account-pw-result" style="display:none"></div>';
+    html += '</div>';
+
+    // -- your sessions -------------------------------------------------------
+    var currentId = (user.session && user.session.id) ? String(user.session.id) : '';
+    var resp = await AINodeAuth.fetch('/api/auth/sessions');
+    var body = await this._authBody(resp);
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Your sessions</h3>';
+    if (resp.status === 404) {
+      html += '<div class="config-empty">This node is running a release that does not list sessions. Update it to manage them here.</div>';
+    } else if (!resp.ok) {
+      html += '<div class="config-empty">' + this.esc(this._authMessage(body,
+        'This node did not list your sessions (HTTP ' + resp.status + ').')) + '</div>';
+    } else {
+      var sessions = Array.isArray(body) ? body : ((body && body.sessions) || []);
+      this.state.authSessions = sessions;
+      if (!sessions.length) {
+        html += '<div class="config-empty">No sessions listed.</div>';
+      } else {
+        html += '<p class="config-card-desc">One row per browser signed in as you. Revoke one and it signs out on its next request.</p>';
+        sessions.forEach(function (s) {
+          var mine = currentId && String(s.id) === currentId;
+          html += '<div class="auth-row">';
+          html += '  <div class="auth-row-main">';
+          html += '    <div class="auth-row-name">Session ' + self.esc(s.id);
+          if (mine) html += ' <span class="auth-badge auth-badge-current">this browser</span>';
+          html += '    </div>';
+          html += '    <div class="auth-row-meta">Signed in ' + self.esc(self._authWhen(s.created_at))
+                + ' · last seen ' + self.esc(self._authWhen(s.last_seen)) + '</div>';
+          html += '  </div>';
+          html += '  <div class="auth-row-actions"><button class="config-btn danger" data-revoke-session="'
+                + self.esc(s.id) + '"' + (mine ? ' data-session-current="1"' : '') + '>Revoke</button></div>';
+          html += '</div>';
+        });
+      }
+    }
+    html += '</div>';
+
+    // -- the pointer to keys -------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">API keys for your programs</h3>';
+    html += '<p class="config-card-desc">A script, the desktop app or another node sends <code>Authorization: Bearer &lt;key&gt;</code> instead of signing in. Create and revoke those in API access.</p>';
+    html += '<button class="config-btn secondary" id="account-open-api">Open API access</button>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    var signout = document.getElementById('account-signout');
+    if (signout) signout.addEventListener('click', function () { self.signOut(); });
+    var openApi = document.getElementById('account-open-api');
+    if (openApi) openApi.addEventListener('click', function () { self.openApiAccess(); });
+
+    var form = document.getElementById('account-password-form');
+    if (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        self.accountChangePassword();
+      });
+    }
+    mount.querySelectorAll('[data-revoke-session]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.accountRevokeSession(btn.dataset.revokeSession, btn.dataset.sessionCurrent === '1');
+      });
+    });
+  },
+
+  async accountChangePassword() {
+    var self = this;
+    var cur = document.getElementById('account-pw-current');
+    var next = document.getElementById('account-pw-new');
+    var again = document.getElementById('account-pw-confirm');
+    var result = document.getElementById('account-pw-result');
+    var show = function (ok, message) {
+      if (!result) { self.toast(message, ok ? 'success' : 'error'); return; }
+      result.style.display = '';
+      result.className = 'config-test-result ' + (ok ? 'ok' : 'err');
+      result.textContent = message;
+    };
+    var current = cur ? cur.value : '';
+    var wanted = next ? next.value : '';
+    var confirmed = again ? again.value : '';
+    if (!current || !wanted) { show(false, 'Fill in your current password and the new one.'); return; }
+    if (wanted !== confirmed) { show(false, 'The two new passwords are different. Type the new one again.'); return; }
+    var btn = document.getElementById('account-pw-save');
+    if (btn) { btn.disabled = true; btn.textContent = 'Changing...'; }
+    var resp = await AINodeAuth.fetch('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current: current, new: wanted }),
+    });
+    var body = await this._authBody(resp);
+    if (btn) { btn.disabled = false; btn.textContent = 'Change password'; }
+    if (!resp.ok) {
+      show(false, resp.status === 403
+        ? this._authMessage(body, 'That is not your current password.')
+        : this._authMessage(body, 'This node did not change your password (HTTP ' + resp.status + ').'));
+      return;
+    }
+    if (cur) cur.value = '';
+    if (next) next.value = '';
+    if (again) again.value = '';
+    show(true, 'Password changed. You stay signed in here.');
+  },
+
+  async accountRevokeSession(sessionId, isCurrent) {
+    if (!sessionId) return;
+    if (isCurrent && !confirm('Revoke this session?\n\nIt is the one this browser is using, so you will be signed out.')) return;
+    if (!isCurrent && !confirm('Revoke session ' + sessionId + '?\n\nThat browser signs out on its next request.')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/sessions/' + encodeURIComponent(sessionId), { method: 'DELETE' });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      this.toast(this._authMessage(body, 'Could not revoke session ' + sessionId + '.'), 'error');
+      return;
+    }
+    if (isCurrent) {
+      AINodeAuth.me = null;
+      this.renderUserChip();
+      this.requireSignIn('You signed this browser out.');
+      return;
+    }
+    this.toast('Session ' + sessionId + ' revoked.', 'success');
+    this.renderConfigAccount();
+  },
+
+  // ----- Users --------------------------------------------------------------
+  // Accounts on this node. Admin only: the server decides, and this panel
+  // renders the answer it gives rather than guessing from a role it read once.
+
+  async renderConfigUsers() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var self = this;
+    mount.innerHTML = '<div class="config-empty">Loading accounts…</div>';
+    var resp = await AINodeAuth.fetch('/api/auth/users');
+    var body = await this._authBody(resp);
+
+    var html = '';
+    html += '<h2 class="config-section-title">Users</h2>';
+    html += '<p class="config-section-desc">Accounts that can sign in to this node. An admin manages accounts, API keys and the sign-in switch; a member signs in and uses the dashboard. Passwords are stored hashed in <code>~/.ainode/auth.json</code> and can also be managed on the node with <code>ainode auth user</code>.</p>';
+
+    if (resp.status === 403) {
+      html += '<div class="config-card"><div class="config-empty">Only an admin can manage accounts on this node. Ask an admin to add or change one.</div></div>';
+      mount.innerHTML = html;
+      return;
+    }
+    if (resp.status === 404) {
+      html += '<div class="config-card"><div class="config-empty">This node is running a release without accounts. Update it to sign in with a name and password (the version is in Config &gt; About).</div></div>';
+      mount.innerHTML = html;
+      return;
+    }
+    if (!resp.ok) {
+      html += '<div class="config-card"><div class="config-empty">' + this.esc(this._authMessage(body,
+        'This node did not list accounts (HTTP ' + resp.status + ').')) + '</div></div>';
+      mount.innerHTML = html;
+      return;
+    }
+
+    var users = Array.isArray(body) ? body : ((body && body.users) || []);
+    this.state.authUsers = users;
+    var me = AINodeAuth.user();
+    var admins = users.filter(function (u) { return u.role === 'admin' && !u.disabled; }).length;
+
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Accounts</h3>';
+    if (!users.length) {
+      html += '<div class="config-empty">No accounts yet. Add one below, or run <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code> on the node.</div>';
+    } else {
+      users.forEach(function (u) {
+        var isMe = me && me.name === u.name;
+        html += '<div class="auth-row" data-user-row="' + self.esc(u.name) + '">';
+        html += '  <div class="auth-row-main">';
+        html += '    <div class="auth-row-name">' + self.esc(u.name);
+        html += '      <span class="auth-badge auth-badge-' + (u.role === 'admin' ? 'admin' : 'member') + '">' + self.esc(u.role || 'member') + '</span>';
+        if (u.disabled) html += ' <span class="auth-badge auth-badge-off">disabled</span>';
+        if (isMe) html += ' <span class="auth-badge auth-badge-current">you</span>';
+        html += '    </div>';
+        html += '    <div class="auth-row-meta">Added ' + self.esc(self._authWhen(u.created_at)) + '</div>';
+        html += '    <div class="auth-inline-form" id="user-pw-' + self.esc(u.name) + '" style="display:none">';
+        html += '      <input class="form-input" type="password" data-new-password="' + self.esc(u.name) + '" placeholder="New password for ' + self.esc(u.name) + '" autocomplete="new-password">';
+        html += '      <button class="config-btn" data-save-password="' + self.esc(u.name) + '">Set password</button>';
+        html += '    </div>';
+        html += '  </div>';
+        html += '  <div class="auth-row-actions">';
+        html += '    <button class="config-btn secondary" data-reset-password="' + self.esc(u.name) + '">Reset password</button>';
+        html += u.disabled
+          ? '    <button class="config-btn secondary" data-enable-user="' + self.esc(u.name) + '">Enable</button>'
+          : '    <button class="config-btn secondary" data-disable-user="' + self.esc(u.name) + '">Disable</button>';
+        html += '    <button class="config-btn danger" data-remove-user="' + self.esc(u.name) + '">Remove</button>';
+        html += '  </div>';
+        html += '</div>';
+      });
+      if (admins <= 1) {
+        html += '<p class="config-card-desc">This node has one admin. It will refuse to remove or disable the last one, so nobody can lock everybody out.</p>';
+      }
+    }
+    html += '</div>';
+
+    // -- add an account ------------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Add an account</h3>';
+    html += '<p class="config-card-desc">The person signs in with this name and password, and can change the password from their own Account page.</p>';
+    html += '<form class="auth-form auth-form-add" id="user-add-form" autocomplete="off">';
+    html += '  <input class="form-input" id="user-add-name" placeholder="Name" autocapitalize="none" spellcheck="false">';
+    html += '  <input class="form-input" id="user-add-password" type="password" placeholder="Password" autocomplete="new-password">';
+    html += '  <select class="form-select" id="user-add-role">';
+    html += '    <option value="member">member</option>';
+    html += '    <option value="admin">admin</option>';
+    html += '  </select>';
+    html += '  <button class="config-btn" type="submit" id="user-add-btn">+ Add</button>';
+    html += '</form>';
+    html += '<div class="config-test-result" id="user-add-result" style="display:none"></div>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    var form = document.getElementById('user-add-form');
+    if (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        self.usersAdd();
+      });
+    }
+    mount.querySelectorAll('[data-reset-password]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var row = document.getElementById('user-pw-' + btn.dataset.resetPassword);
+        if (!row) return;
+        var open = row.style.display !== 'none';
+        row.style.display = open ? 'none' : '';
+        if (!open) {
+          var input = row.querySelector('[data-new-password]');
+          if (input) input.focus();
+        }
+      });
+    });
+    mount.querySelectorAll('[data-save-password]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        // By element, not by a selector built from a name: a name is the user's
+        // text and has no business inside a CSS selector.
+        var name = btn.dataset.savePassword;
+        var row = document.getElementById('user-pw-' + name);
+        var input = row ? row.querySelector('[data-new-password]') : null;
+        self.usersSetPassword(name, input ? input.value : '');
+      });
+    });
+    mount.querySelectorAll('[data-disable-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.usersSetEnabled(btn.dataset.disableUser, false); });
+    });
+    mount.querySelectorAll('[data-enable-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.usersSetEnabled(btn.dataset.enableUser, true); });
+    });
+    mount.querySelectorAll('[data-remove-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.usersRemove(btn.dataset.removeUser); });
+    });
+  },
+
+  async usersAdd() {
+    var self = this;
+    var nameEl = document.getElementById('user-add-name');
+    var passEl = document.getElementById('user-add-password');
+    var roleEl = document.getElementById('user-add-role');
+    var result = document.getElementById('user-add-result');
+    var show = function (ok, message) {
+      if (!result) { self.toast(message, ok ? 'success' : 'error'); return; }
+      result.style.display = '';
+      result.className = 'config-test-result ' + (ok ? 'ok' : 'err');
+      result.textContent = message;
+    };
+    var name = (nameEl && nameEl.value || '').trim();
+    var password = passEl ? passEl.value : '';
+    var role = (roleEl && roleEl.value) || 'member';
+    if (!name || !password) { show(false, 'Enter a name and a password.'); return; }
+    var btn = document.getElementById('user-add-btn');
+    if (btn) btn.disabled = true;
+    var resp = await AINodeAuth.fetch('/api/auth/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, password: password, role: role }),
+    });
+    var body = await this._authBody(resp);
+    if (btn) btn.disabled = false;
+    if (!resp.ok) {
+      show(false, this._authMessage(body, 'Could not add ' + name + ' (HTTP ' + resp.status + ').'));
+      return;
+    }
+    this.toast('Added ' + name + ' as ' + role + '. Tell them to sign in and change the password.', 'success');
+    this.renderConfigUsers();
+  },
+
+  async usersSetPassword(name, password) {
+    if (!name) return;
+    if (!password) { this.toast('Type the new password first.', 'error'); return; }
+    var resp = await AINodeAuth.fetch('/api/auth/users/' + encodeURIComponent(name) + '/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: password }),
+    });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      this.toast(this._authMessage(body, 'Could not set a password for ' + name + '.'), 'error');
+      return;
+    }
+    this.toast('Password set for ' + name + '. Tell them what it is, and to change it.', 'success');
+    this.renderConfigUsers();
+  },
+
+  async usersSetEnabled(name, enabled) {
+    if (!name) return;
+    if (!enabled && !confirm('Disable ' + name + '?\n\nTheir sessions end and they cannot sign in until you enable them again.')) return;
+    var path = '/api/auth/users/' + encodeURIComponent(name) + (enabled ? '/enable' : '/disable');
+    var resp = await AINodeAuth.fetch(path, { method: 'POST' });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      this.toast(this._authMessage(body,
+        'Could not ' + (enabled ? 'enable ' : 'disable ') + name + '.'), 'error');
+      return;
+    }
+    this.toast(name + (enabled ? ' can sign in again.' : ' is disabled.'), 'success');
+    this.renderConfigUsers();
+  },
+
+  async usersRemove(name) {
+    if (!name) return;
+    if (!confirm('Remove ' + name + '?\n\nTheir sessions end at once. API keys are separate and are not touched.')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/users/' + encodeURIComponent(name), { method: 'DELETE' });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      // A 409 is the node refusing to remove its last admin. Show its own words.
+      this.toast(this._authMessage(body, 'Could not remove ' + name + '.'), 'error');
+      return;
+    }
+    this.toast(name + ' removed.', 'success');
+    var me = AINodeAuth.user();
+    if (me && me.name === name) {
+      AINodeAuth.me = null;
+      this.renderUserChip();
+      this.requireSignIn('You removed your own account.');
+      return;
+    }
+    this.renderConfigUsers();
+  },
+
   // ----- API access ---------------------------------------------------------
-  // The panel that makes auth usable: whether this port wants a key, the switch
-  // that turns it on, a key shown once, the keys that exist, and a box to paste
-  // one into on a fresh browser. A 401 anywhere in the UI lands here (#167).
+  // Keys for programs, and the switch that closes this port. People sign in at
+  // the front door (static/js/signin.js): the one hand-pasted key left here is
+  // for a browser driving a node it has no account on. A 401 with a stored key
+  // lands here (#167); a 401 with no credential lands on the front door (#261).
 
   async refreshAuthStatus() {
     // /api/auth/status answers with no key on purpose, so this stays truthful
@@ -6061,14 +6560,29 @@ const AINode = {
     return st;
   },
 
+  /**
+   * The chip, written from the user's side: who they are, or what this port is.
+   * The node's own wording for the port lives in apiStateText(), which is what
+   * the API access panel shows.
+   */
   authChipText() {
     var st = this.state.authStatus;
+    var user = AINodeAuth.user();
+    if (user) return 'Signed in as ' + user.name;
     if (!st) return 'API access';
-    if (st.enabled) {
-      return st.authenticated ? 'API key required, key set' : 'API key required, no key';
-    }
-    // Must read the same as /api/status's auth.label (api/server.py
-    // ::auth_status_fields) -- one fact, one wording.
+    if (!st.enabled) return 'Open, no key required';
+    return AINodeAuth.hasKey() ? 'Using an API key' : 'Sign-in required';
+  },
+
+  /**
+   * How this port is protected, in the node's words: it must read the same as
+   * /api/status's auth.label (api/server.py::auth_status_fields), because the
+   * installer summary and the API answer quote it too. One fact, one wording.
+   */
+  apiStateText() {
+    var st = this.state.authStatus;
+    if (!st) return 'API access';
+    if (st.enabled) return 'API key required';
     return st.key_count ? 'API open, key set but not required' : 'API open, no key set';
   },
 
@@ -6079,36 +6593,119 @@ const AINode = {
     var st = this.state.authStatus || {};
     label.textContent = this.authChipText();
     var state = 'open';
-    if (st.enabled) state = st.authenticated ? 'keyed' : 'locked';
+    if (st.enabled) state = (AINodeAuth.user() || AINodeAuth.hasKey()) ? 'keyed' : 'locked';
     chip.dataset.state = state;
     chip.title = st.enabled
-      ? 'This node requires an API key. Click to manage keys.'
-      : 'Anyone who can reach this port can load models and change config. Click to require a key.';
+      ? 'This node requires a sign-in, or an API key for a program. Click to manage keys.'
+      : 'Anyone who can reach this port can load models and change config. Click to require a sign-in.';
+    this.renderUserChip();
   },
 
-  openApiAccess() {
-    this.state.configSection = 'api';
+  /** The name in the header, and the way out. Hidden when nobody is signed in. */
+  renderUserChip() {
+    var wrap = document.getElementById('user-chip');
+    var name = document.getElementById('user-chip-name');
+    if (!wrap || !name) return;
+    var user = AINodeAuth.user();
+    if (!user) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+    name.textContent = user.name;
+    wrap.dataset.role = user.role || 'member';
+    name.title = 'Account: your name, password and sessions'
+      + (user.role ? ' (' + user.role + ')' : '');
+  },
+
+  /** Land on one Config section, sidebar in step with it. */
+  openConfigSection(section) {
+    this.state.configSection = section;
     if (this.state.currentView !== 'config') {
       this.navigate('config');
     }
     var nav = document.getElementById('config-nav');
     if (nav) {
       nav.querySelectorAll('.config-nav-item').forEach(function (b) {
-        b.classList.toggle('active', b.dataset.section === 'api');
+        b.classList.toggle('active', b.dataset.section === section);
       });
     }
     this.renderConfigSection();
   },
 
+  openApiAccess() {
+    this.openConfigSection('api');
+  },
+
+  /**
+   * Put the front door back up, with the reason on it. Stops every poll first:
+   * a page behind the sign-in screen must not be firing requests that 401.
+   */
+  async requireSignIn(reason) {
+    if (AINodeSignIn.isUp()) return;
+    this.stopPolling();
+    var self = this;
+    var me = await AINodeAuth.loadMe();
+    if (!AINodeAuth.needsSignIn(me)) {
+      // The credential is good after all (a node that is open, or a browser
+      // holding a key): carry on instead of demanding a password for nothing.
+      this.start();
+      return;
+    }
+    AINodeSignIn.show({
+      state: AINodeAuth.bootDecision(me).state,
+      reason: reason || '',
+      onSignedIn: function () { self.start(); },
+    });
+  },
+
   onUnauthorized(info) {
-    // A blank dashboard is the bug. Say what happened and open the one panel
-    // that fixes it.
+    // A blank dashboard is the bug, and there are two credentials to be refused
+    // on. A person whose session ended goes back to the front door with the
+    // reason on it; a browser sending a key this node rejects goes to the panel
+    // that holds the key box, because that is where a key is fixed. A release
+    // with no front door (/api/auth/me unanswered) keeps the old behaviour.
     this.state.authBlocked = info || { hadKey: AINodeAuth.hasKey() };
-    this.toast(info && info.hadKey
+    var hadKey = !!(info && info.hadKey);
+    if (!hadKey && AINodeAuth.me) {
+      this.requireSignIn(info && info.hadSession
+        ? 'This node ended your session. Sign in again.'
+        : 'This node requires a sign-in.');
+      return;
+    }
+    this.toast(hadKey
       ? 'This node rejected the stored API key. Paste a current one.'
       : 'This node requires an API key.', 'error');
     this.refreshAuthStatus();
     this.openApiAccess();
+  },
+
+  /**
+   * Sign out: end the session, then show the front door again. The stored API
+   * key is left alone on purpose. It belongs to a program, and Config > API
+   * access has the button that forgets it.
+   */
+  async signOut() {
+    await AINodeAuth.signOut();
+    this.state.authBlocked = null;
+    this.state.authSessions = null;
+    this.state.authUsers = null;
+    this.stopPolling();
+    var self = this;
+    var me = await AINodeAuth.loadMe();
+    this.renderUserChip();
+    if (!AINodeAuth.needsSignIn(me)) {
+      // A key in this browser still opens every route, so claiming to be signed
+      // out behind a sign-in screen would be a lie. Say what is still true.
+      this.start();
+      this.toast(AINodeAuth.hasKey()
+        ? 'Signed out. This browser still sends a stored API key, so the dashboard keeps working. Forget it in Config > API access.'
+        : 'Signed out. This node is open, so the dashboard keeps working.', 'info');
+      this.refreshAuthStatus();
+      return;
+    }
+    AINodeSignIn.show({
+      state: AINodeAuth.bootDecision(me).state,
+      reason: '',
+      onSignedIn: function () { self.start(); },
+    });
   },
 
   // The TLS sentence in the API access panel, from /api/status's tls block
@@ -6150,56 +6747,81 @@ const AINode = {
       keys = await this.fetchJSON('/api/auth/keys');
     }
     var stored = AINodeAuth.getKey();
+    var me = AINodeAuth.me || {};
+    var signedIn = AINodeAuth.user();
     var html = '';
     html += '<h2 class="config-section-title">API access</h2>';
     // The exempt set is auth/middleware.py::SKIP_PATHS plus SKIP_PREFIXES, spelled
     // out in full: this sentence listed three of the six, so an operator reading it
     // could not tell what an unauthenticated caller can still reach.
-    // tests/test_auth_usable.py checks every path in SKIP_PATHS appears here.
-    html += '<p class="config-section-desc">Who may call this node. AINode serves the dashboard, the OpenAI-compatible API and every management route on the same ports, so a key is the whole access control: with auth on, every <code>/api</code> and <code>/v1</code> route needs <code>Authorization: Bearer &lt;key&gt;</code>. What still answers without one: <code>/</code> and <code>/static/*</code> (the shell that asks for the key), <code>/api/health</code> (a liveness probe has none), <code>/api/auth/status</code> (so this page can say a key is wanted), <code>/api/cluster/endpoint</code> (names, addresses and ports, so a stranded client can find another node) and <code>/api/cluster/join</code> (a joining node holds a one-time token instead). Peers need no key of their own: a node-to-node call carries a key derived from <code>cluster_secret</code>.</p>';
+    // tests/test_fleet_auth.py checks every path in SKIP_PATHS appears here, and
+    // tests/test_auth_usable.py checks the two front-door paths by name.
+    html += '<p class="config-section-desc">Who may call this node. A person signs in on the dashboard and stays signed in; a program sends a key. AINode serves the dashboard, the OpenAI-compatible API and every management route on the same ports, so with sign-in on, every <code>/api</code> and <code>/v1</code> route needs either that session or <code>Authorization: Bearer &lt;key&gt;</code>. What still answers without either: <code>/</code> and <code>/static/*</code> (the shell that asks who you are), <code>/api/health</code> (a liveness probe has no credential), <code>/api/auth/status</code> (so this page can say a key is wanted), <code>/api/auth/me</code> and <code>/api/auth/login</code> (the sign-in screen itself), <code>/api/cluster/endpoint</code> (names, addresses and ports, so a stranded client can find another node) and <code>/api/cluster/join</code> (a joining node holds a one-time token instead). Peers need no key of their own: a node-to-node call carries a key derived from <code>cluster_secret</code>.</p>';
 
     if (this.state.authBlocked) {
       html += '<div class="config-card config-card-alert">';
       html += '<h3 class="config-card-title">This node refused the last request</h3>';
       html += '<p class="config-card-desc">' + (this.state.authBlocked.hadKey
         ? 'The key stored in this browser is not one of this node\'s keys. Paste a current one below, or create a new key from a session that is authenticated.'
-        : 'Auth is on and this browser has no key. Paste one below.') + '</p>';
+        : 'This node wants a sign-in or a key, and this browser sent neither. Reload to sign in, or paste a key below.') + '</p>';
       html += '</div>';
     }
 
     // -- state ---------------------------------------------------------------
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Status</h3>';
-    html += '<div class="api-access-state" data-state="' + (st.enabled ? (st.authenticated ? 'keyed' : 'locked') : 'open') + '">';
-    html += '<strong>' + this.esc(this.authChipText()) + '</strong>';
+    html += '<div class="api-access-state" data-state="' + (st.enabled ? ((st.authenticated || signedIn) ? 'keyed' : 'locked') : 'open') + '">';
+    html += '<strong>' + this.esc(this.apiStateText()) + '</strong>';
+    html += '<span class="api-access-who">' + this.esc(this.authChipText()) + '</span>';
     html += '</div>';
     if (!st.enabled) {
       html += '<p class="config-card-desc">Anyone who can reach this port can load and delete models, change config, start training and restart the cluster. That is fine on a private network and it is the default; turn it on before this node is reachable from anywhere else.</p>';
-      html += '<button class="config-btn" id="auth-enable">Require a key</button>';
+      html += '<p class="config-card-desc">Turning it on asks every browser for a name and password, and every program for a key. Create the first account on the node: <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code></p>';
+      html += '<button class="config-btn" id="auth-enable">Require a sign-in</button>';
     } else {
-      html += '<p class="config-card-desc">Keys are stored hashed in <code>~/.ainode/auth.json</code>. This browser keeps its key in <code>localStorage</code> under <code>' + this.esc(AINodeAuth.STORAGE_KEY) + '</code>, never in the page or a URL.</p>';
-      html += '<button class="config-btn secondary" id="auth-disable">Stop requiring a key</button>';
+      html += '<p class="config-card-desc">Passwords and keys are stored hashed in <code>~/.ainode/auth.json</code>. A signed-in person rides an HttpOnly <code>ainode_session</code> cookie, which never reaches the page; a browser using a key keeps it in <code>localStorage</code> under <code>' + this.esc(AINodeAuth.STORAGE_KEY) + '</code>, never in the page or a URL.</p>';
+      if (me.auth_enabled && me.has_users === false) {
+        html += '<p class="config-card-desc">No accounts exist yet, so nobody can sign in and every caller needs a key. Create the first account on the node: <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code></p>';
+      }
+      // The switch that opens the port is shown only to a caller this node has
+      // actually authenticated. An unauthenticated browser pressing it got a 401
+      // and a panel that looked broken (#262).
+      if (st.authenticated || signedIn) {
+        html += '<button class="config-btn secondary" id="auth-disable">Stop requiring a key</button>';
+      } else {
+        html += '<p class="config-card-desc">Sign in, or paste a key below, to turn this back off.</p>';
+      }
     }
     html += '</div>';
 
     // -- the key this browser sends -----------------------------------------
+    // Collapsed, and deliberately last in the reading order of this card: a
+    // person signs in at the front door and never types a key. This is for a
+    // browser driving a node it has no account on (a fleet node, a kiosk, the
+    // desktop app's embedded view), which is a real case and stays working.
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Key in this browser</h3>';
     html += '<p class="config-card-desc">' + (stored
-      ? 'Sending <code>' + this.esc(AINodeAuth.maskKey(stored)) + '</code> with every request.'
-      : 'No key stored. Paste one here to use this dashboard against a node that requires a key.') + '</p>';
-    html += '<div class="config-secret-input-row">';
-    html += '  <input type="password" class="form-input" id="auth-key-input" placeholder="Paste an API key" autocomplete="off">';
-    html += '  <button class="config-btn" id="auth-key-save">Save</button>';
-    if (stored) html += '  <button class="config-btn secondary" id="auth-key-clear">Forget</button>';
-    html += '</div>';
+      ? 'This browser is sending <code>' + this.esc(AINodeAuth.maskKey(stored)) + '</code> with every request.'
+      : 'Nothing stored, which is the normal case: you signed in instead.') + '</p>';
+    var openKeyBox = !!(stored || (this.state.authBlocked && this.state.authBlocked.hadKey)
+      || (st.enabled && !signedIn));
+    html += '<details class="config-details"' + (openKeyBox ? ' open' : '') + '>';
+    html += '  <summary>Use a key in this browser instead</summary>';
+    html += '  <p class="config-card-desc">For a browser with no account on this node. The key is sent as a Bearer token on every request from this browser, exactly as a program would.</p>';
+    html += '  <div class="config-secret-input-row">';
+    html += '    <input type="password" class="form-input" id="auth-key-input" placeholder="Paste an API key" autocomplete="off">';
+    html += '    <button class="config-btn" id="auth-key-save">Save</button>';
+    if (stored) html += '    <button class="config-btn secondary" id="auth-key-clear">Forget the stored key</button>';
+    html += '  </div>';
+    html += '</details>';
     html += '</div>';
 
     // -- keys on the node ----------------------------------------------------
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Keys on this node</h3>';
     if (keys === null) {
-      html += '<div class="config-empty">Paste a working key above to list and manage keys.</div>';
+      html += '<div class="config-empty">Sign in, or paste a working key above, to list and manage keys.</div>';
     } else {
       var rows = (keys.keys || []);
       if (!rows.length) {
@@ -6306,23 +6928,34 @@ const AINode = {
       this.toast('Could not enable auth.', 'error');
       return;
     }
-    if (data.api_key) {
-      // Store it straight away: the browser that flipped the switch must not
-      // lock itself out, which is exactly what used to happen.
+    // A signed-in person keeps their session across the switch, so a key does not
+    // need to be stored in their browser and quietly is not: the key this call
+    // minted is for their programs. A browser with no session is a different
+    // story, and storing it is what stops it locking itself out.
+    var keepsSession = !!AINodeAuth.user();
+    if (data.api_key && !keepsSession) {
       AINodeAuth.setKey(data.api_key);
       this.state.authBlocked = null;
-      this.toast('Auth on. This browser is using the new key.', 'success');
+      this.toast('Sign-in required from now on. This browser is using the new key.', 'success');
+    } else if (data.api_key) {
+      this.state.authBlocked = null;
+      this.toast('Sign-in required from now on. You stay signed in here.', 'success');
     } else {
-      this.toast(data.message || 'Auth on using the keys this node already has.', 'info');
+      this.toast(data.message || 'Sign-in required from now on, using the keys this node already has.', 'info');
     }
+    await AINodeAuth.loadMe();
     await this.refreshAuthStatus();
     await this.renderConfigApiAccess();
-    if (data.api_key) this._showNewKey(data.key_id, data.api_key, 'Saved in this browser already.');
+    if (data.api_key) {
+      this._showNewKey(data.key_id, data.api_key, keepsSession
+        ? 'This key is for your programs. You stay signed in here on your session.'
+        : 'Saved in this browser already.');
+    }
     this.refresh();
   },
 
   async authDisable() {
-    if (!confirm('Stop requiring an API key?\n\nEvery /api and /v1 route on this node answers anyone who can reach the port.')) return;
+    if (!confirm('Stop requiring a sign-in?\n\nEvery /api and /v1 route on this node answers anyone who can reach the port, with no name and no key.')) return;
     var resp = await AINodeAuth.fetch('/api/auth/disable', { method: 'POST' });
     if (!resp.ok) { this.toast('Could not disable auth.', 'error'); return; }
     this.state.authBlocked = null;

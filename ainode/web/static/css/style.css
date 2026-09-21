@@ -6520,3 +6520,326 @@ select {
 .metrics-store-warn {
   color: var(--amber);
 }
+
+/* ============================================================
+   THE FRONT DOOR (#261): the sign-in screen, the header's user chip,
+   and the account / user rows under Config.
+   ============================================================ */
+
+/* A full page, not a modal: while this is up the shell is display:none and
+   nothing else has been fetched. */
+.signin-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-primary);
+  background-image: radial-gradient(circle, #151515 1px, transparent 1px);
+  background-size: 20px 20px;
+  overflow-y: auto;
+}
+
+body.signin-mode { overflow: hidden; }
+
+.signin-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 28px 26px 20px;
+}
+
+.signin-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.signin-logo { width: 30px; height: 30px; }
+
+.signin-wordmark {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+}
+.signin-wordmark-ai { color: var(--nvidia-green); }
+.signin-wordmark-node { color: var(--text-primary); }
+
+.signin-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.signin-lead {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+}
+
+.signin-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.signin-input {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  margin-bottom: 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: var(--font-sans);
+}
+.signin-input:focus {
+  outline: none;
+  border-color: var(--nvidia-green);
+  box-shadow: 0 0 0 2px var(--nvidia-green-glow);
+}
+
+.signin-submit {
+  width: 100%;
+  background: var(--nvidia-green);
+  border: 1px solid var(--nvidia-green);
+  border-radius: var(--radius-sm);
+  color: #000;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 11px 14px;
+  margin-top: 4px;
+  cursor: pointer;
+}
+.signin-submit:hover:not(:disabled) { background: var(--nvidia-green-bright); }
+.signin-submit:disabled { opacity: 0.6; cursor: default; }
+
+/* The one line that says what went wrong, and what to do about it. */
+.signin-error {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  background: var(--red-glow);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.signin-command {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  padding: 11px 12px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+}
+.signin-command code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--nvidia-green);
+  white-space: nowrap;
+}
+
+.signin-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+.signin-note code { font-family: var(--font-mono); color: var(--text-primary); }
+
+.signin-programs {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.signin-footer {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+}
+
+/* -- the header chip: who is signed in, and the way out -------------------- */
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 3px 2px 2px;
+  white-space: nowrap;
+}
+
+.user-chip-name {
+  background: transparent;
+  border: none;
+  border-radius: 20px;
+  padding: 3px 9px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  max-width: 20ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.user-chip-name:hover { color: var(--nvidia-green); }
+.user-chip[data-role="admin"] .user-chip-name::after {
+  content: "admin";
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--nvidia-green);
+}
+
+.user-chip-signout {
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--border);
+  padding: 3px 9px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.user-chip-signout:hover { color: var(--red); }
+
+/* -- account and user rows ------------------------------------------------- */
+
+.auth-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+}
+.auth-row:last-child { border-bottom: none; }
+
+.auth-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.auth-row-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.auth-row-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.auth-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.auth-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border-hover);
+  color: var(--text-secondary);
+}
+.auth-badge-admin { border-color: var(--nvidia-green); color: var(--nvidia-green); }
+.auth-badge-member { border-color: var(--border-hover); color: var(--text-secondary); }
+.auth-badge-current { border-color: var(--cyan); color: var(--cyan); }
+.auth-badge-off { border-color: var(--amber); color: var(--amber); }
+
+.auth-form { display: block; margin-top: 4px; }
+.auth-form .form-input { margin-bottom: 12px; }
+
+.auth-form-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+}
+.auth-form-add .form-input { margin-bottom: 0; }
+
+.auth-inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+@media (max-width: 720px) {
+  .auth-form-add { grid-template-columns: minmax(0, 1fr); }
+  .auth-row { grid-template-columns: minmax(0, 1fr); }
+  .auth-row-actions { justify-content: flex-start; }
+}
+
+/* -- the collapsed "paste a key" block in API access ----------------------- */
+
+.config-details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.config-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  list-style: none;
+}
+.config-details > summary::-webkit-details-marker { display: none; }
+.config-details > summary::before {
+  content: "\25B8";
+  margin-right: 8px;
+  color: var(--text-muted);
+}
+.config-details[open] > summary::before { content: "\25BE"; }
+.config-details > summary:hover { color: var(--text-primary); }
+
+/* The person, under the port's own wording, in the API access Status card. */
+.api-access-who {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
