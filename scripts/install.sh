@@ -807,7 +807,7 @@ restart_service() {
 # for the CLI in there to know which tailnet node it is running on.
 forward_to_container() {
     if docker exec ainode true 2>/dev/null; then
-        exec docker exec -it -e AINODE_TAILNET_NAME ainode ainode "\$@"
+        exec docker exec -it -e AINODE_TAILNET_NAME -e AINODE_HOST_SERVICE_STATE ainode ainode "\$@"
     fi
     # Same sudo trap as update: mount the .ainode the unit uses.
     local conf_home
@@ -816,6 +816,7 @@ forward_to_container() {
     exec docker run --rm -it \\
         --entrypoint ainode \\
         -e AINODE_TAILNET_NAME \\
+        -e AINODE_HOST_SERVICE_STATE \\
         -v "\$conf_home":/root/.ainode \\
         "\$AINODE_IMAGE" "\$@"
 }
@@ -967,10 +968,16 @@ case "\${1:-}" in
         # Ask the node what it is running before claiming anything happened.
         STATUS_URL="http://127.0.0.1:\$(node_web_port "\$AINODE_HOME")/api/health"
         if [ -z "\$TARGET_VERSION" ]; then
-            echo "!! No version was resolved, so there is nothing to verify against."
-            echo "   /api/status reports: \$(api_version "\$STATUS_URL" || echo 'no answer')"
-            echo "   Images were left alone."
-            exit 0
+            # Non-zero on purpose: \$AINODE_IMAGE (a floating :latest) was pulled and
+            # the service restarted, but with no version resolved nothing can say
+            # whether the node came back on anything new. "exit 0" is what a roll
+            # script reads as "this node is updated", and this is not that.
+            echo "XX Could not resolve a version from ghcr.io, so nothing was verified." >&2
+            echo "   \$PULL_IMAGE was pulled and \$AINODE_SERVICE restarted." >&2
+            echo "   /api/status reports: \$(api_version "\$STATUS_URL" || echo 'no answer')" >&2
+            echo "   Images were left alone. Name the version to be sure:" >&2
+            echo "     ainode update <version>" >&2
+            exit 1
         fi
         echo "==> Waiting up to \${VERIFY_TIMEOUT}s for \$STATUS_URL to report \$TARGET_VERSION"
         RUNNING_VERSION="\$(wait_for_version "\$STATUS_URL" "\$TARGET_VERSION" "\$VERIFY_TIMEOUT")" || {
@@ -1017,6 +1024,9 @@ Host-side:
                           restart so the new one is served. Run daily by
                           ainode-tls-renew.timer. 'ainode tls --help' for the rest.
   --version               print the wrapper's pinned image tag
+  doctor [args...]        the container's own report, plus the host unit state
+                          handed in so the systemd check is real and not a WARN
+                          about there being no systemd in a container
 
 Container-side (forwarded via docker exec):
   status, models, config, logs, service, auth, ...
@@ -1175,6 +1185,22 @@ HELP
         fi
 
         export AINODE_TAILNET_NAME="\$(tailnet_name)"
+        forward_to_container "\$@"
+        ;;
+    doctor)
+        # The doctor runs in the container like everything else, but three of its
+        # checks are about the HOST: the systemd unit, the docker daemon and which
+        # image the container runs. It cannot see the unit from in there, which is
+        # why every containerized node carried a permanent WARN nobody in there
+        # could clear (#225). So read the unit state here and hand it in through
+        # the environment, the way \`tls\` hands the tailnet name in.
+        AINODE_HOST_SERVICE_STATE="\$(systemctl is-active "\$AINODE_SERVICE" 2>/dev/null || true)"
+        HOST_STATE="\$AINODE_HOST_SERVICE_STATE"
+        if [ -z "\$HOST_STATE" ] || [ "\$HOST_STATE" = "inactive" ]; then
+            USER_STATE="\$(systemctl --user is-active "\$AINODE_SERVICE" 2>/dev/null || true)"
+            [ -n "\$USER_STATE" ] && AINODE_HOST_SERVICE_STATE="\$USER_STATE"
+        fi
+        export AINODE_HOST_SERVICE_STATE
         forward_to_container "\$@"
         ;;
     *)

@@ -17,7 +17,12 @@ Shape, so this stays testable and stays honest:
 * Everything that touches the world goes through a module-level seam
   (:func:`run_command`, :func:`disk_usage`, :func:`tcp_listening`,
   :func:`udp_listeners`, :func:`http_json`, :func:`latest_image_tag`,
-  :func:`probe_gpus`). Tests monkeypatch the seam, not the check.
+  :func:`probe_gpus`, :func:`running_in_container`, :func:`host_service_state`).
+  Tests monkeypatch the seam, not the check.
+* A check that needs something only the HOST can see says so as an INFO naming
+  the host command, rather than a WARN. The documented deployment runs this
+  inside the container, so a WARN about the absence of systemd in there was a
+  permanent yellow line on every node in the fleet (#225).
 * WARN means "this will bite you"; FAIL means "this node cannot do its job
   right now". Only a FAIL makes the command exit non-zero, because a fleet
   where every WARN is fatal is a fleet where nobody runs the doctor. INFO is a
@@ -39,6 +44,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,6 +208,49 @@ def latest_image_tag() -> Optional[str]:
         return None
 
 
+def running_in_container(env: Optional[dict] = None,
+                         cgroup_path: str = "/proc/1/cgroup",
+                         dockerenv: str = "/.dockerenv") -> bool:
+    """Is this doctor running inside the AINode container?
+
+    The normal deployment: the installer's host wrapper runs every command as
+    ``docker exec ainode ainode ...``, so this is the usual answer and not an
+    exotic case. Three ways to tell, cheapest first: the env var the image sets,
+    the marker file docker writes, and pid 1's cgroup naming a container
+    runtime. A host that answers none of them is a host.
+
+    Every check that needs something only the host can see reads this, because a
+    WARN nobody standing in the container can clear is a WARN that teaches
+    operators to ignore WARNs (#225).
+    """
+    env = os.environ if env is None else env
+    if str(env.get("AINODE_IN_CONTAINER", "")).strip() == "1":
+        return True
+    try:
+        if Path(dockerenv).exists():
+            return True
+    except OSError:
+        pass
+    try:
+        text = Path(cgroup_path).read_text()
+    except OSError:
+        return False
+    return any(marker in text for marker in
+               ("docker", "containerd", "kubepods", "libpod", "lxc"))
+
+
+def host_service_state(env: Optional[dict] = None) -> str:
+    """The unit state the HOST wrapper handed in, or "".
+
+    ``scripts/install.sh`` renders an ``ainode`` wrapper that runs the CLI inside
+    the container. Its ``doctor`` case asks systemd on the host first and passes
+    the answer in through this variable, so the containerized doctor reports the
+    real unit rather than a permanent "cannot see systemd from here" (#225).
+    """
+    env = os.environ if env is None else env
+    return str(env.get("AINODE_HOST_SERVICE_STATE", "") or "").strip()
+
+
 def probe_gpus() -> list[dict]:
     """Every NVIDIA GPU this host enumerates, as plain dicts.
 
@@ -210,6 +259,11 @@ def probe_gpus() -> list[dict]:
     inferred the way detect_gpu infers it, from NVML refusing to report memory
     on GB10, and the figures then come from host RAM because that is what
     unified memory is.
+
+    ``persistence_mode`` is True, False, or None where NVML will not say (it is
+    not supported on a unified-memory part). It is here because a node with it
+    off pays a full GPU init on every NVML open, which is how castor's whole API
+    came to hang on the driver (#238).
     """
     try:
         import warnings
@@ -245,12 +299,18 @@ def probe_gpus() -> list[dict]:
                     free_mb = int(vm.available) // (1024 * 1024)
                 except Exception:
                     pass
+            persistence: Optional[bool] = None
+            try:
+                persistence = bool(int(pynvml.nvmlDeviceGetPersistenceMode(handle)))
+            except Exception:
+                persistence = None
             found.append({
                 "index": index,
                 "name": str(name),
                 "memory_total_mb": total_mb,
                 "memory_free_mb": free_mb,
                 "unified_memory": unified,
+                "persistence_mode": persistence,
             })
     except Exception:
         pass
@@ -389,7 +449,8 @@ def check_config_file(config_path, error: Optional[str]) -> list[Check]:
 
 
 def check_engine_backend(config: NodeConfig, config_path,
-                         docker_ok: bool, image_present: Optional[bool]) -> list[Check]:
+                         docker_ok: bool, image_present: Optional[bool],
+                         in_container: Optional[bool] = None) -> list[Check]:
     """Is ``engine_backend`` a backend whose binary or image is actually here?
 
     This is the 0.5.26 install bug as a check: a node on the ``eugr`` backend
@@ -401,12 +462,20 @@ def check_engine_backend(config: NodeConfig, config_path,
     engine_image = _engine_image_for(config)
     data = {"engine_backend": backend, "engine_image": engine_image}
 
+    if in_container is None:
+        in_container = running_in_container()
+
     if backend == "nvidia":
         if not docker_ok:
-            return [Check("config.engine_backend", WARN,
+            # Unknown, and inside the container unknowable: there is no docker
+            # here to ask. Not a WARN in that case, for the same reason the
+            # systemd check is not (#225).
+            return [Check("config.engine_backend", INFO if in_container else WARN,
                           f"nvidia backend wants image {engine_image}; docker is not "
                           f"answering here, so whether it is pulled is unknown",
-                          fix="fix docker first (see the docker.daemon check)",
+                          fix=("run `docker image inspect " + engine_image +
+                               "` on the host" if in_container
+                               else "fix docker first (see the docker.daemon check)"),
                           data=data)]
         if image_present:
             return [Check("config.engine_backend", OK,
@@ -524,14 +593,34 @@ def check_model(config: NodeConfig) -> list[Check]:
                   data=dict(data, path=None))]
 
 
-def check_docker(engine_image: str = "") -> list[Check]:
+def check_docker(engine_image: str = "",
+                 in_container: Optional[bool] = None) -> list[Check]:
     """Is the docker daemon reachable, and is the engine image here?
 
     Returns the daemon check first; the engine-image answer rides in its
     ``data`` so :func:`check_engine_backend` does not shell out a second time.
+
+    Inside the AINode container the answer is about the socket this container
+    was given, not about the host's docker: the unit mounts
+    ``/var/run/docker.sock`` so the node can launch engine containers, and where
+    that mount is missing this doctor cannot tell a broken host daemon from a
+    container that was never handed one. That case is an INFO naming the command
+    to run on the host and the mount to look for (#225), rather than a FAIL
+    about a daemon it cannot see or a WARN nobody in here can clear.
     """
+    if in_container is None:
+        in_container = running_in_container()
     code, out = run_command(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=15)
     first = (out.splitlines() or [""])[0][:200]
+    if code != 0 and in_container:
+        return [Check("docker.daemon", INFO,
+                      "docker does not answer inside this container, so neither the "
+                      "host's daemon nor this node's engine launches can be judged "
+                      f"from here: {first}",
+                      fix="run `docker info` on the host; if that is healthy, the "
+                          "container is missing -v /var/run/docker.sock:/var/run/docker.sock",
+                      data={"reachable": False, "image_present": None,
+                            "in_container": True, "error": first})]
     if code == 127:
         return [Check("docker.daemon", FAIL, "no docker CLI on PATH",
                       fix="install docker; AINode runs both itself and the engine as containers",
@@ -566,6 +655,56 @@ def check_gpus(gpus: Optional[list[dict]] = None) -> list[Check]:
     return [Check("gpu.devices", OK,
                   f"{len(gpus)} GPU: " + ", ".join(parts),
                   data={"count": len(gpus), "gpus": gpus})]
+
+
+def check_persistence_mode(gpus: Optional[list[dict]] = None) -> list[Check]:
+    """Is persistence mode on, on a node with discrete GPUs?
+
+    With it off, the driver tears a GPU's context down as soon as the last
+    process closes the device, and the next process to open it pays a full
+    initialisation. Nothing notices while an engine is loaded, because the engine
+    holds the devices open. It bites in the gap: on castor (Dell C4130, 4 x V100)
+    between one engine stopping and the next starting, every NVML metrics sample
+    paid about 22 ms per device of GPU init, and while the driver was inside that
+    ioctl every route on the node's API timed out, ``/api/health`` included
+    (#238). The product no longer puts that read on the event loop, and the node
+    setting is still worth fixing: one command, and it survives nothing but a
+    reboot, which is why the fix names the persistenced unit too.
+
+    A unified-memory part (GB10) does not pay this and NVML does not report the
+    setting there, so those nodes are an INFO line and never a WARN.
+    """
+    gpus = probe_gpus() if gpus is None else gpus
+    if not gpus:
+        return [Check("gpu.persistence", INFO,
+                      "no NVIDIA device to ask about persistence mode",
+                      data={"discrete": 0, "disabled": [], "unknown": []})]
+    discrete = [g for g in gpus if not g.get("unified_memory")]
+    if not discrete:
+        return [Check("gpu.persistence", INFO,
+                      "unified memory, where persistence mode does not apply",
+                      data={"discrete": 0, "disabled": [], "unknown": []})]
+    disabled = [int(g.get("index", -1)) for g in discrete
+                if g.get("persistence_mode") is False]
+    unknown = [int(g.get("index", -1)) for g in discrete
+               if g.get("persistence_mode") is None]
+    data = {"discrete": len(discrete), "disabled": disabled, "unknown": unknown}
+    if disabled:
+        return [Check("gpu.persistence", WARN,
+                      f"persistence mode is off on {len(disabled)} of {len(discrete)} "
+                      f"discrete GPU(s) (device {', '.join(str(i) for i in disabled)}), "
+                      f"so every process that opens one pays a full GPU init",
+                      fix="sudo nvidia-smi -pm 1 (add nvidia-persistenced to boot to "
+                          "keep it across a reboot)",
+                      data=data)]
+    if len(unknown) == len(discrete):
+        return [Check("gpu.persistence", INFO,
+                      "the driver would not say whether persistence mode is on",
+                      fix="nvidia-smi -q | grep -i persistence",
+                      data=data)]
+    return [Check("gpu.persistence", OK,
+                  f"persistence mode on for {len(discrete) - len(unknown)} of "
+                  f"{len(discrete)} discrete GPU(s)", data=data)]
 
 
 def check_disk(home, models_dir) -> list[Check]:
@@ -611,8 +750,18 @@ def check_disk(home, models_dir) -> list[Check]:
     return checks
 
 
-def check_image_pin(home, running_version: str = "", docker_ok: bool = True) -> list[Check]:
-    """What the unit will start, what is running, and what has been published."""
+def check_image_pin(home, running_version: str = "", docker_ok: bool = True,
+                    in_container: Optional[bool] = None) -> list[Check]:
+    """What the unit will start, what is running, and what has been published.
+
+    ``image.env`` is readable from inside the container (AINODE_HOME is the bind
+    mount), but WHICH image is running is a question for docker. With no docker
+    to ask from in here, that half is an INFO naming the host command instead of
+    a WARN claiming no container named ainode is running while one plainly is
+    (#225).
+    """
+    if in_container is None:
+        in_container = running_in_container()
     pinned = read_image_env(home)
     running_image = None
     container_state = None
@@ -628,7 +777,14 @@ def check_image_pin(home, running_version: str = "", docker_ok: bool = True) -> 
     data = {"pinned": pinned, "running_image": running_image,
             "container_state": container_state}
     checks: list[Check] = []
-    if pinned is None:
+    if in_container and not docker_ok:
+        checks.append(Check("image.pin", INFO,
+                            f"image.env pins {pinned or 'nothing'}; which image this "
+                            f"container runs cannot be read without a docker to ask",
+                            fix="run `docker ps --filter name=ainode --format "
+                                "'{{.Image}}'` on the host",
+                            data=dict(data, in_container=True)))
+    elif pinned is None:
         checks.append(Check("image.pin", WARN,
                             f"no image.env under {home}, so the unit starts whatever tag "
                             f"was baked into it at install time",
@@ -669,15 +825,26 @@ def check_image_pin(home, running_version: str = "", docker_ok: bool = True) -> 
     return checks
 
 
-def check_service(in_container: Optional[bool] = None) -> list[Check]:
+def check_service(in_container: Optional[bool] = None,
+                  host_state: Optional[str] = None) -> list[Check]:
     """Is the systemd unit installed and running?
 
-    From inside the AINode container there is no systemd at all, and saying
-    "not installed" there would be a lie: that answer is a WARN naming the
-    reason instead.
+    From inside the AINode container there is no systemd at all. That used to be
+    a WARN, which meant every containerized node in the fleet (all of them, that
+    being the documented deployment) carried a permanent WARN about something
+    nobody standing there could fix (#225). Two honest answers instead:
+
+    * The host wrapper ran the doctor and passed the unit state in
+      (``AINODE_HOST_SERVICE_STATE``): report the real state, and say where it
+      came from.
+    * Nobody passed anything in: an INFO line naming the command to run on the
+      host. INFO stays out of the exit code and out of ``--fix``'s "left for a
+      human" list, because there is nothing here to act on.
     """
     if in_container is None:
-        in_container = os.environ.get("AINODE_IN_CONTAINER") == "1"
+        in_container = running_in_container()
+    if host_state is None:
+        host_state = host_service_state()
     try:
         from ainode.service.systemd import SERVICE_NAME, SYSTEM_UNIT_DIR, USER_UNIT_DIR
 
@@ -688,10 +855,27 @@ def check_service(in_container: Optional[bool] = None) -> list[Check]:
     present = [p for p in unit_paths if _exists(p)]
 
     if in_container:
-        return [Check("service.unit", WARN,
+        data = {"in_container": True, "state": host_state or None,
+                "state_source": "host wrapper" if host_state else None}
+        if host_state == "active":
+            return [Check("service.unit", OK,
+                          f"{SERVICE_NAME} active on the host (state from the host wrapper)",
+                          data=data)]
+        if host_state in ("activating", "reloading", "deactivating"):
+            return [Check("service.unit", INFO,
+                          f"{SERVICE_NAME} is {host_state} on the host, so it is mid "
+                          f"restart (state from the host wrapper)",
+                          data=data)]
+        if host_state:
+            return [Check("service.unit", WARN,
+                          f"{SERVICE_NAME} is {host_state} on the host while this "
+                          f"container is running, so a reboot will not bring the node back",
+                          fix=f"sudo systemctl enable --now {SERVICE_NAME} on the host",
+                          data=data)]
+        return [Check("service.unit", INFO,
                       "running inside the AINode container, where there is no systemd to ask",
                       fix=f"run `systemctl status {SERVICE_NAME}` on the host",
-                      data={"in_container": True})]
+                      data=data)]
 
     code, out = run_command(["systemctl", "is-active", SERVICE_NAME], timeout=15)
     state = (out.splitlines() or [""])[0].strip() or "unknown"
@@ -1217,19 +1401,27 @@ def run_checks(home=None, config_path=None) -> list[Check]:
     checks += check_sudo_trap()
     checks += check_config_file(config_path, error)
 
+    # Asked once and passed down: several checks need something only the host can
+    # see, and they must all agree about where they are running (#225).
+    # ``check_docker`` asks for itself, so that call stays exactly as it was.
+    inside = running_in_container()
+
     docker_checks = check_docker(_engine_image_for(config))
     docker_ok = bool(docker_checks[0].data.get("reachable"))
     image_present = docker_checks[0].data.get("image_present")
 
-    checks += check_engine_backend(config, config_path, docker_ok, image_present)
+    checks += check_engine_backend(config, config_path, docker_ok, image_present,
+                                   in_container=inside)
     checks += check_gpu_memory_utilization(config)
     checks += check_discovery_port(config)
     checks += check_model(config)
     checks += docker_checks
-    checks += check_gpus()
+    gpus = probe_gpus()
+    checks += check_gpus(gpus)
+    checks += check_persistence_mode(gpus)
     checks += check_disk(home, getattr(config, "models_dir", "") or (home / "models"))
-    checks += check_image_pin(home, __version__, docker_ok)
-    checks += check_service()
+    checks += check_image_pin(home, __version__, docker_ok, in_container=inside)
+    checks += check_service(in_container=inside)
     checks += check_ports(config)
 
     peer_checks = check_peers(config)
@@ -1445,6 +1637,15 @@ def cmd_doctor(args) -> None:
     wants_fix = bool(getattr(args, "fix", False))
 
     if peer:
+        if wants_fix:
+            # It used to accept the pair and silently drop the --fix: the report
+            # came back from the peer and nothing was ever applied anywhere. A
+            # fix belongs to the node whose files it writes, so say so and stop
+            # rather than half doing it.
+            print(f"--fix is not applied over --peer. Run it on {peer}:\n"
+                  f"  ssh {peer} docker exec ainode ainode doctor --fix",
+                  file=sys.stderr)
+            raise SystemExit(2)
         checks, payload = peer_checks(peer)
         if as_json:
             print(json.dumps(payload or report_payload(checks), indent=2))

@@ -240,7 +240,8 @@ def _fake_replay(monkeypatch, entries, *, primary_binds=True, launch_ok=None):
         manager.by[model] = _Inst(model)
         return {"ok": True, "model": model, "api_port": 8000 + len(manager.by)}
 
-    async def _ensure(app, port, relaunch, label, timeout=300.0, backend=None):
+    async def _ensure(app, port, relaunch, label, timeout=300.0, backend=None,
+                      loading=1):
         events.append(("bind", label))
         # Every launch in the serialized run happens with the slot held.
         assert api_routes.launch_owner() == "startup replay"

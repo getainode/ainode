@@ -420,9 +420,14 @@ def test_no_unit_at_all_warns(monkeypatch):
 
 
 def test_inside_the_container_the_service_answer_says_it_cannot_tell():
-    check = _one(doc.check_service(in_container=True))
-    assert check.status == WARN
-    assert check.data == {"in_container": True}
+    """INFO, not WARN: the documented deployment runs the CLI inside the
+    container, so a WARN here was a permanent yellow line on every node in the
+    fleet about something nobody standing in there could fix (#225). The wired
+    behaviour, including the state the host wrapper passes in, is
+    tests/test_doctor_container.py."""
+    check = _one(doc.check_service(in_container=True, host_state=""))
+    assert check.status == doc.INFO
+    assert check.data == {"in_container": True, "state": None, "state_source": None}
 
 
 def test_no_systemctl_warns_rather_than_guessing(monkeypatch):

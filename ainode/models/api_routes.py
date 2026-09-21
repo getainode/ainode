@@ -24,9 +24,81 @@ from ainode.engine.reconcile import (
     adopted_boot_primary,
     replay_distributed_if_needed,
 )
+from ainode.models import fit as model_fit
 from ainode.models.registry import ModelManager
 
 logger = logging.getLogger(__name__)
+
+
+# -- Disk fit: refuse a download that cannot land ------------------------------
+# A pull with nowhere to go does not fail as a disk error; it dies part way and
+# the engine waiting for those weights looks like an engine that crashed (#184
+# point 4). The size, the free space and the decision live in
+# ``ainode/models/fit.py``; this is the HTTP shape of the refusal.
+#
+# 507 Insufficient Storage, because that is what happened and no other code in
+# this file means it: 400 would say the caller asked wrongly, and 409 is the
+# launch-slot refusal the dashboard already reads as "another load is running".
+FIT_REFUSED_STATUS = 507
+
+
+def _wants_force(body: dict) -> bool:
+    """Did the caller say "download it anyway"? Both spellings accepted."""
+    for key in ("force", "force_download"):
+        value = (body or {}).get(key)
+        if isinstance(value, bool) and value:
+            return True
+        if isinstance(value, str) and value.strip().lower() in ("1", "true", "yes"):
+            return True
+    return False
+
+
+def _model_on_disk(request: web.Request, model: str) -> bool:
+    """Are ``model``'s weights already under this node's models directory?
+
+    One home for the layout list is ``registry.find_model_dir``; this only asks
+    it, and answers False on any failure so the fit check runs rather than being
+    skipped by an unreadable directory.
+    """
+    manager = request.app.get("model_manager")
+    if manager is None:
+        return False
+    try:
+        from ainode.models.registry import find_model_dir
+
+        return find_model_dir(Path(manager.models_dir), model) is not None
+    except Exception:
+        return False
+
+
+async def _refuse_if_it_will_not_fit(request: web.Request, hf_repo: str, *,
+                                     force: bool = False,
+                                     catalog_size_gb=None,
+                                     learn: bool = True):
+    """None when the transfer may proceed; a 507 response when it may not.
+
+    ``learn`` is False on the launch path: a launch must not wait on an HTTP
+    round trip to the Hub before it starts, so it decides from what this node
+    already knows (a remembered size, the catalog entry). A size nobody can
+    learn is unknown, and unknown always proceeds -- the check refuses on
+    evidence, never on the absence of it.
+    """
+    manager: Optional[ModelManager] = request.app.get("model_manager")
+    if manager is None:
+        return None
+    loop = asyncio.get_event_loop()
+    verdict = await loop.run_in_executor(
+        None,
+        lambda: model_fit.check_fit(hf_repo, manager.models_dir,
+                                    catalog_size_gb=catalog_size_gb, learn=learn))
+    if verdict.fits is False:
+        if force:
+            logger.warning("forced past the fit check: %s", verdict.message())
+            return None
+        logger.warning("refused for disk: %s", verdict.message())
+        return web.json_response(model_fit.refusal_payload(verdict),
+                                 status=FIT_REFUSED_STATUS)
+    return None
 
 # Serialize model downloads so two concurrent fat pulls can't gang up on the
 # uplink. Concurrency is AINODE_MAX_CONCURRENT_DOWNLOADS (default 1). Lazily
@@ -562,6 +634,26 @@ def catalog_recipe(model: str) -> dict:
     return {}
 
 
+def catalog_size_gb(model: str):
+    """The curated catalog's own size for ``model`` (id or hf_repo), or None.
+
+    Read from the in-process CURATED_CLUSTER_MODELS dict and nothing else: the
+    launch path calls this and must not reach the network or refresh a catalog
+    cache to answer a disk question. None for anything not curated, which the
+    fit check reports as an unknown size rather than as zero.
+    """
+    from ainode.models.registry import CURATED_CLUSTER_MODELS
+
+    m = (model or "").strip()
+    if not m:
+        return None
+    for info in CURATED_CLUSTER_MODELS.values():
+        if m in (info.id, info.hf_repo):
+            size = getattr(info, "size_gb", 0) or 0
+            return float(size) if size > 0 else None
+    return None
+
+
 # Recipe keys that are per-instance launch config (everything except the gmu,
 # which travels on its own because both load paths clamp it differently).
 RECIPE_CONFIG_KEYS = ("engine_image", "extra_vllm_args", "extra_env",
@@ -917,6 +1009,40 @@ _GPU_RELEASE_SECONDS = 30.0
 _DEFAULT_BIND_LOG_SILENCE_SECONDS = 300.0
 _DEFAULT_BIND_CEILING_SECONDS = 3600.0
 
+# How many of the engine's own log lines are copied into the ainode log when it
+# fails to bind. The container is about to be removed by the relaunch (a launch
+# stop/rm's a leftover by name), and with it the only record of WHY it died: the
+# 0.5.28 replay on Spark-4 said "never bound on :8001 after 79s (container
+# exited)" and nothing anywhere said what the engine had printed (#235). Forty
+# lines is a vLLM traceback plus the CUDA error above it.
+REPLAY_LOG_TAIL_LINES = 40
+
+# Each engine loading at the same time as this one buys the bind wait this much
+# more of its base window, capped at BIND_WINDOW_MAX_SCALE. Concurrent loads on
+# one node share its bandwidth, its CPU and its GPU, so a window sized for a
+# single load is a kill switch when three are coming up: the same start that
+# binds first time on a quiet node exits under memory pressure while the primary
+# profiles (#235).
+BIND_WINDOW_PER_EXTRA_INSTANCE = 0.5
+BIND_WINDOW_MAX_SCALE = 3.0
+
+
+def bind_window_scale(loading) -> float:
+    """Multiplier for a bind window when ``loading`` engines are coming up.
+
+    A pure function of the count: 1 engine is 1.0 (nothing changes for the
+    single-load case), and every extra one adds
+    ``BIND_WINDOW_PER_EXTRA_INSTANCE`` up to ``BIND_WINDOW_MAX_SCALE``. Anything
+    unusable (None, 0, a negative, a string) reads as one engine.
+    """
+    try:
+        count = int(loading)
+    except (TypeError, ValueError):
+        count = 1
+    count = max(1, count)
+    return min(BIND_WINDOW_MAX_SCALE,
+               1.0 + (count - 1) * BIND_WINDOW_PER_EXTRA_INSTANCE)
+
 
 async def _port_serving(port: int) -> bool:
     """One probe of http://localhost:<port>/v1/models, True on HTTP 200."""
@@ -1039,12 +1165,16 @@ def _engine_launch_mark(backend):
     return ts
 
 
-def _bind_limits(app):
+def _bind_limits(app, loading=1):
     """(silence seconds, ceiling seconds) from NodeConfig, with fallbacks.
 
     The first is how long BOTH liveness signals (engine activity, log) may be
     quiet before the wait calls the start dead -- not the log alone (#112),
     which is why the default came back down from 900 s to 300 s.
+
+    ``loading`` is how many engines are coming up on this node at once, and it
+    stretches both numbers by :func:`bind_window_scale`. One engine leaves the
+    configured values exactly as they are.
     """
     config = app.get("config") if hasattr(app, "get") else None
 
@@ -1055,11 +1185,51 @@ def _bind_limits(app):
             return fallback
         return v if v > 0 else fallback
 
-    return (_num("engine_bind_log_silence_seconds", _DEFAULT_BIND_LOG_SILENCE_SECONDS),
-            _num("engine_bind_ceiling_seconds", _DEFAULT_BIND_CEILING_SECONDS))
+    scale = bind_window_scale(loading)
+    return (_num("engine_bind_log_silence_seconds",
+                 _DEFAULT_BIND_LOG_SILENCE_SECONDS) * scale,
+            _num("engine_bind_ceiling_seconds", _DEFAULT_BIND_CEILING_SECONDS) * scale)
 
 
-async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
+async def _engine_log_tail(backend, lines: int = REPLAY_LOG_TAIL_LINES) -> str:
+    """The engine's last ``lines`` log lines, or "" when it cannot say.
+
+    A module-level seam over ``EngineBackend.log_tail`` so the replay can copy a
+    dying engine's own words into the ainode log, and so a test can hand back
+    canned output. Runs in the executor: the implementation shells out to
+    ``docker logs`` and the caller is on the event loop during startup.
+    """
+    probe = getattr(backend, "log_tail", None)
+    if not callable(probe):
+        return ""
+
+    def _ask() -> str:
+        try:
+            return str(probe(lines) or "")
+        except Exception:
+            return ""
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ask)
+
+
+async def _log_failed_engine_output(backend, label: str, reason: str) -> None:
+    """Copy a failed engine's last output into the ainode log, before it is gone.
+
+    The relaunch removes the container by name before starting a fresh one, and
+    engines run without ``--rm`` precisely so a corpse survives to be read. This
+    is the read: without it the only record of a replay that died during a
+    concurrent load was the bind wait's one-line verdict (#235).
+    """
+    tail = await _engine_log_tail(backend)
+    if not tail:
+        return
+    logger.warning("%s last %d log line(s) before the container is removed (%s):\n%s",
+                   label, REPLAY_LOG_TAIL_LINES, reason, tail)
+
+
+async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0,
+                         loading: int = 1):
     """Wait for ``port`` to serve. Returns (bound, reason, seconds_waited).
 
     Time-to-bind is not ours to predict. On vllm/vllm-openai:v0.27.1 a GB10 node
@@ -1091,23 +1261,32 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0):
     life read as "after 0s" (#96). The silence budget and the ceiling still measure
     the wait: they bound how long boot is held open, not the engine's life.
 
+    ``loading`` is how many engines this node is bringing up at once; it stretches
+    the silence budget, the ceiling and the fixed window through
+    :func:`bind_window_scale`, because concurrent loads share one node's
+    bandwidth and memory and a window sized for one of them kills the rest
+    (#235).
+
     Every verdict this returns, bound or not, is appended to the node's
     launch-time ledger, the only place a load time is written down where the
     interface can read it back afterwards (see ``record_launch_time``).
     """
-    bound, reason, alive = await _bind_wait(app, port, backend, timeout)
+    bound, reason, alive = await _bind_wait(app, port, backend, timeout,
+                                            loading=loading)
     await record_launch_time(app, port, backend, seconds=alive,
                              outcome="ready" if bound else "failed",
                              reason="" if bound else reason)
     return bound, reason, alive
 
 
-async def _bind_wait(app, port: int, backend, timeout: float = 300.0):
+async def _bind_wait(app, port: int, backend, timeout: float = 300.0,
+                     loading: int = 1):
     """The wait itself. The contract, the signals and the verdicts are documented
     on ``_wait_for_bind``, which is the entry point every caller uses and which
     records the verdict in the ledger."""
     launched = _engine_launch_mark(backend)
     began = time.monotonic()
+    timeout = float(timeout) * bind_window_scale(loading)
 
     def _alive() -> float:
         """Seconds the container has been up, or the wait's own age as a fallback."""
@@ -1125,7 +1304,7 @@ async def _bind_wait(app, port: int, backend, timeout: float = 300.0):
         ok = await _wait_port_ready(port, timeout=timeout)
         return ok, ("bound" if ok else f"fixed {timeout:.0f}s window expired"), _alive()
 
-    silence, ceiling = _bind_limits(app)
+    silence, ceiling = _bind_limits(app, loading)
     mark = _engine_log_mark(backend)
     progress_at = began
     while True:
@@ -1154,7 +1333,7 @@ async def _bind_wait(app, port: int, backend, timeout: float = 300.0):
 
 
 async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float = 300.0,
-                          backend=None) -> bool:
+                          backend=None, loading: int = 1) -> bool:
     """Wait for an engine to bind, and if it died on the way up, relaunch ONCE.
 
     An engine can pass the launch check (its container reached Running) and then
@@ -1172,14 +1351,23 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     ``backend`` is the engine handle whose liveness the wait watches (see
     ``_wait_for_bind``). Without it the wait is the old fixed ``timeout``, which
     relaunches a slow start that was never in trouble.
+
+    ``loading`` is how many engines are coming up at once, and stretches the
+    wait's windows accordingly (#235).
+
+    Before the relaunch, the failed engine's own last lines are copied into the
+    ainode log: the relaunch removes that container, and it was the only thing
+    that knew why it died.
     """
-    bound, reason, alive = await _wait_for_bind(app, port, backend, timeout)
+    bound, reason, alive = await _wait_for_bind(app, port, backend, timeout,
+                                                loading=loading)
     if bound:
         logger.info("%s bound on :%s after %.0fs", label, port, alive)
         return True
     # The seconds are the container's life, not this wait's: see _wait_for_bind.
     logger.warning("%s never bound on :%s after %.0fs (%s); relaunching once",
                    label, port, alive, reason)
+    await _log_failed_engine_output(backend, label, reason)
     # Give the GPU time to finish releasing before asking for it again.
     await asyncio.sleep(_GPU_RELEASE_SECONDS)
     loop = asyncio.get_event_loop()
@@ -1191,10 +1379,15 @@ async def _ensure_serving(app, port: int, relaunch, label: str, timeout: float =
     if not ok:
         logger.error("%s relaunch failed to start", label)
         return False
-    served, reason, alive = await _wait_for_bind(app, port, backend, timeout)
+    served, reason, alive = await _wait_for_bind(app, port, backend, timeout,
+                                                loading=loading)
     logger.info("%s relaunch %s after %.0fs%s", label,
                 "is serving" if served else "still not serving", alive,
                 "" if served else f" ({reason})")
+    if not served:
+        # The second corpse is read too: nothing else will remove it, so a human
+        # can still docker logs it, but the reason belongs where the verdict is.
+        await _log_failed_engine_output(backend, f"{label} relaunch", reason)
     return served
 
 
@@ -1567,30 +1760,79 @@ async def replay_instances_on_startup(app) -> None:
         logger.exception("distributed replay failed")
 
 
-async def _replay_serialized(app, config, entries) -> None:
-    """Boot primary, then one stacked instance at a time. Slot already held."""
+#: The window for a primary this process has no engine handle for. It was a flat
+#: 300 s, and on a node whose primary takes twelve minutes to bind that expired
+#: while the primary was still profiling, which let the stacked replay launch into
+#: the middle of its memory reservation (#235). Scaled by how many engines are
+#: loading, like every other bind window here.
+_PRIMARY_PORT_WAIT_SECONDS = 300.0
+
+
+async def _await_primary_bind(app, config, loading: int = 1) -> bool:
+    """Wait for the boot primary to SERVE. The gate the stacked replay waits on.
+
+    Binding is the only signal that the primary has finished reserving memory and
+    sizing its KV cache: vLLM profiles against what is free at that moment, so an
+    engine that starts while the primary is still in loading_weights or profiling
+    is the one that dies (#235, and #96 before it). "Started" is not that signal,
+    and neither is a clock that ran out.
+
+    Returns True when the port serves. With the engine's handle the wait watches
+    the engine and retries it once; without one it is a fixed window, scaled by
+    how many engines are coming up, and only when a primary is expected at all.
+    """
+    boot_engine = app.get("engine")
+    port = int(getattr(config, "api_port", 8000) or 8000)
+    model = getattr(config, "model", None)
+
     # An ADOPTED primary is already serving, so there is nothing to wait for and
     # nothing to relaunch (#240). It must also not go through the bind wait: that
     # wait reports the CONTAINER's life, so an engine adopted after fourteen hours
     # up would be written into the launch-time ledger as a fourteen-hour load and
     # every "how long does this model take here" answer would read it.
     adopted_primary = adopted_boot_primary()
-    boot_engine = app.get("engine")
-    if adopted_primary is not None and await _port_serving(config.api_port):
+    if adopted_primary is not None and await _port_serving(port):
         logger.info("boot primary %s is already serving on :%s, adopted from the "
                     "container that outlived the restart (up %s)",
-                    adopted_primary.get("model") or config.model, config.api_port,
+                    adopted_primary.get("model") or model, port,
                     adopted_primary.get("uptime") or "unknown")
-    # Wait for the boot primary to actually serve before stacking on top of it.
-    # Retry once if it died on the way up — otherwise the node comes back with
-    # its main model silently missing.
-    elif boot_engine is not None and getattr(config, "model", None):
+        return True
+    # Otherwise wait for it to serve, retrying it once if it died on the way up:
+    # a node that comes back with its main model silently missing is the #96 shape.
+    if boot_engine is not None and model:
         # Pass the engine handle so the wait tracks ITS liveness (container up,
         # log advancing) instead of a fixed window a slow bind would blow past.
-        await _ensure_serving(app, config.api_port, boot_engine.start,
-                              f"boot primary {config.model}", backend=boot_engine)
-    else:
-        await _wait_port_ready(config.api_port, timeout=300)
+        return await _ensure_serving(app, port, boot_engine.start,
+                                     f"boot primary {model}", backend=boot_engine,
+                                     loading=loading)
+    window = _PRIMARY_PORT_WAIT_SECONDS * (bind_window_scale(loading) if model else 1.0)
+    if await _wait_port_ready(port, timeout=window):
+        return True
+    logger.warning("nothing serves on :%s after %.0fs and this process holds no "
+                   "engine handle for it", port, window)
+    return False
+
+
+async def _replay_serialized(app, config, entries) -> None:
+    """Boot primary, then one stacked instance at a time. Slot already held.
+
+    The stacked instances wait for the primary's BIND, not for its start: see
+    ``_await_primary_bind``. A primary that never binds does not cancel the
+    replay, because a node has to come back serving whatever it can, but it is
+    logged as what it is, so a stacked engine that then dies of memory pressure
+    has the reason written down above it.
+    """
+    # How many engines this node is bringing up at once. Every bind window below
+    # is scaled by it: concurrent loads share one node's bandwidth, CPU and
+    # memory, and a window sized for a single load kills the rest (#235).
+    loading = len(entries) + (1 if getattr(config, "model", None) else 0)
+
+    primary_ready = await _await_primary_bind(app, config, loading)
+    if not primary_ready and entries:
+        logger.warning("the primary is not serving, so the %d stacked instance(s) "
+                       "in the manifest are replayed without it: an engine that "
+                       "profiles next to a primary still reserving memory is the "
+                       "one that dies", len(entries))
 
     manager = app.get("instances")
     have = {i.record.model for i in manager.instances()} if manager is not None else set()
@@ -1618,7 +1860,8 @@ async def _replay_serialized(app, config, entries) -> None:
                                   bool(append_solo_instance(app, mm, g, overrides=ov,
                                                             persist=False).get("ok"))))
                 await _ensure_serving(app, res["api_port"], relaunch, f"replay {m}",
-                                      backend=inst.backend if inst is not None else None)
+                                      backend=inst.backend if inst is not None else None,
+                                      loading=loading)
             else:
                 # One model failing is not the next model's problem: say why and
                 # carry on down the manifest.
@@ -1697,6 +1940,19 @@ async def handle_model_load(request: web.Request) -> web.Response:
             overrides[key] = recipe[key]
     if gmu is None and "gpu_memory_utilization" in recipe:
         gmu = recipe["gpu_memory_utilization"]
+
+    # A launch whose weights are not on disk downloads them itself, inside the
+    # engine container, so it pays the same disk question a download does and
+    # fails the same way when the filesystem runs out: an engine that died
+    # (#184 point 4). No Hub call on this path (learn=False) -- a launch must not
+    # wait on huggingface.co -- so the size comes from what this node already
+    # knows, and an unknown size launches exactly as it did before.
+    if not _model_on_disk(request, model):
+        refusal = await _refuse_if_it_will_not_fit(
+            request, model, force=_wants_force(body), learn=False,
+            catalog_size_gb=catalog_size_gb(model))
+        if refusal is not None:
+            return refusal
 
     # Decide: single-node or distributed?
     sharding_config = None
@@ -2031,11 +2287,25 @@ async def handle_download_model(request: web.Request) -> web.Response:
     model_id = request.match_info["model_id"]
     manager: ModelManager = request.app["model_manager"]
 
-    if manager.get_model_info(model_id) is None:
+    entry = manager.get_model_info(model_id)
+    if entry is None:
         return web.json_response(
             {"error": f"Model '{model_id}' not found in catalog"},
             status=404,
         )
+
+    # Does it fit? The catalog entry's own size is the fallback if the Hub will
+    # not answer; a repo whose size nobody knows is downloaded as before.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    refusal = await _refuse_if_it_will_not_fit(
+        request, entry.get("hf_repo") or model_id,
+        force=_wants_force(body if isinstance(body, dict) else {}),
+        catalog_size_gb=entry.get("size_gb"))
+    if refusal is not None:
+        return refusal
 
     job_id = str(uuid.uuid4())
     jobs: dict = request.app["download_jobs"]
@@ -2063,6 +2333,14 @@ async def handle_download_repo(request: web.Request) -> web.Response:
     hf_repo = hf_repo.strip()
     if not hf_repo or "/" not in hf_repo:
         return web.json_response({"error": "hf_repo required (e.g. meta-llama/Llama-3.2-3B-Instruct)"}, status=400)
+
+    # An arbitrary repo is the case the fit check exists for: nothing in the
+    # catalog bounds its size, and a 400 GB pull onto a node with 70 GB free is
+    # a wasted hour that ends in a partial blob cache.
+    refusal = await _refuse_if_it_will_not_fit(request, hf_repo,
+                                              force=_wants_force(body))
+    if refusal is not None:
+        return refusal
 
     manager: ModelManager = request.app["model_manager"]
     job_id = str(uuid.uuid4())
@@ -2223,6 +2501,12 @@ async def _run_download_repo(manager: "ModelManager", hf_repo: str, job_id: str,
 
     # Fetch total size in background (don't block start)
     total_bytes = await loop.run_in_executor(None, _get_repo_total_bytes, hf_repo)
+    if total_bytes > 0:
+        # Remember it: the next fit check on this repo, including the one a
+        # launch makes without touching the Hub, then has a real number.
+        model_fit.remember_repo_size(
+            hf_repo, model_fit.RepoSize(total_bytes=int(total_bytes),
+                                        source="hub_files"))
     jobs[job_id]["total_bytes"] = total_bytes
     jobs[job_id]["downloaded_bytes"] = 0
     jobs[job_id]["target_dir"] = str(target)

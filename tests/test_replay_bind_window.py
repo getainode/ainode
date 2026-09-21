@@ -342,7 +342,8 @@ async def test_e_replay_still_loads_one_model_at_a_time_in_manifest_order(monkey
         manager.by[model] = _Inst(model)
         return {"ok": True, "model": model, "api_port": 8000 + len(events)}
 
-    async def _fake_ensure(app, port, relaunch, label, timeout=300.0, backend=None):
+    async def _fake_ensure(app, port, relaunch, label, timeout=300.0, backend=None,
+                           loading=1):
         events.append(("bind", label, getattr(backend, "model", None)))
         return True
 
@@ -380,7 +381,8 @@ async def test_the_boot_primary_wait_watches_the_boot_engine(monkeypatch):
     has to get the boot engine's handle too."""
     seen = {}
 
-    async def _fake_ensure(app, port, relaunch, label, timeout=300.0, backend=None):
+    async def _fake_ensure(app, port, relaunch, label, timeout=300.0, backend=None,
+                           loading=1):
         seen["label"] = label
         seen["backend"] = backend
         return True

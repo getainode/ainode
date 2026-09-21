@@ -681,7 +681,8 @@ def test_the_replay_still_waits_on_a_primary_this_boot_launched(monkeypatch):
 
     waited: list = []
 
-    async def _ensure(app_, port, relaunch, label, timeout=300.0, backend=None):
+    async def _ensure(app_, port, relaunch, label, timeout=300.0, backend=None,
+                      loading=1):
         waited.append((port, label))
         return True
 
