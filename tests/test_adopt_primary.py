@@ -758,6 +758,10 @@ def test_a_running_engine_is_left_alone_on_shutdown(monkeypatch):
     _fake_docker(monkeypatch, {PRIMARY: _inspect(POLLUX_ARGV)})
     config = _config()
     engine = _FakeBackend(config)
+    follower = SimpleNamespace(terminated=0, poll=lambda: None)
+    follower.terminate = lambda: setattr(follower, "terminated",
+                                         follower.terminated + 1)
+    engine.process = follower
 
     line = rec.keep_engines_on_shutdown(engine, config)
 
@@ -765,6 +769,9 @@ def test_a_running_engine_is_left_alone_on_shutdown(monkeypatch):
     assert line == (f"engine left serving {MODEL} on :8000 (container {PRIMARY}); "
                     f"the next start adopts it. To free the GPU: "
                     f"docker rm -f {PRIMARY}")
+    # The `docker logs -f` follower is not the engine, and an orphaned one goes on
+    # writing into the log after this process is gone.
+    assert follower.terminated == 1
 
 
 def test_an_engine_whose_container_is_gone_is_still_stopped(monkeypatch):

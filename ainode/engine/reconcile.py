@@ -719,6 +719,11 @@ def adopt_boot_engines(config) -> dict:
     if primary is not None:
         decision["primary"] = primary
     decision["stacked"] = _consider_stacked(config, decision["lines"])
+    for line in decision["lines"]:
+        # Logged as well as returned: the console is what an operator actually
+        # reads on a service start (nothing configures logging in-process), and
+        # the log line is for a node whose output is collected.
+        logger.info("%s", line)
     _BOOT_DECISION.clear()
     _BOOT_DECISION.update(decision)
     return decision
@@ -877,6 +882,15 @@ def keep_engines_on_shutdown(engine, config) -> str:
         except Exception:
             logger.exception("stopping the engine on shutdown failed")
         return ""
+    # The backend's own subprocess is the ``docker logs -f`` follower, not the
+    # engine, so it is closed either way: leaving it behind orphans a docker
+    # client that goes on writing into the engine log after this process is gone.
+    proc = getattr(engine, "process", None)
+    if proc is not None and getattr(proc, "poll", lambda: 0)() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            logger.debug("could not close the engine log follower")
     model = shape.get("model") or (getattr(config, "model", "") or "")
     port = _as_int(shape.get("api_port"), 0) or _as_int(getattr(config, "api_port", 0), 0)
     line = (f"engine left serving {model} on :{port} (container {name}); the next "
