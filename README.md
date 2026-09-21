@@ -368,10 +368,10 @@ to match. A resume never writes into the run it resumed.
 | Browser-based fine-tuning (LoRA / QLoRA / Full, single node) | ✅ |
 | Training artifact retrieval + download via API | ✅ |
 | LoRA adapter merge into base model | ✅ |
-| Checkpoint resume (own output dir; source run mounted read-only) | ✅ v0.5.27 |
-| Training jobs survive a restart (`status.json` per job, registry rebuilt from disk) | ✅ v0.5.27 |
-| Training image published to GHCR (`ainode-train:<version>`), with a named preflight | ✅ v0.5.27 |
-| Chat / ShareGPT / AutoData `conversations` datasets train (model's own chat template) | ✅ v0.5.27 |
+| Checkpoint resume (own output dir; source run mounted read-only at `/src`) | ✅ v0.5.28 |
+| Training jobs survive a restart (`status.json` per job, registry rebuilt from disk) | ✅ v0.5.28 |
+| Training image published to GHCR (`ainode-train:<version>`), with a named preflight | ✅ v0.5.28 |
+| Chat / ShareGPT / AutoData `conversations` datasets train (model's own chat template) | ✅ v0.5.28 |
 | Evaluation loop (configurable train/eval split) | ✅ |
 | W&B logging integration | ✅ |
 | Custom training template persistence | ✅ |
@@ -399,6 +399,26 @@ to match. A resume never writes into the run it resumed.
 | Cancellable, commit-pinned, parallel model downloads | ✅ v0.5.2 |
 | Delete a downloaded model from disk (`delete-repo`, frees GB) | ✅ |
 | AutoData: Δ-filtered synthetic-data generation (v2.2 val-set lift objective) | ✅ v0.5.0 |
+| `ainode doctor`: two dozen node checks with a one-line fix each, `--json`, `--peer`, `--fix` | ✅ v0.5.27 |
+| API key auth the dashboard can use (one wrapper, key stored by the browser that enables it) | ✅ v0.5.27 |
+| `trust_remote_code` needs a presented API key, or a catalog recipe that declares it | ✅ v0.5.27 |
+| Disk free / total for the AINode home and the models dir, with a warning state under 15% | ✅ v0.5.27 |
+| `/v1/responses`, `/tokenize`, `/detokenize`, `/v1/rerank`, `/v1/score` through the fleet endpoint | ✅ v0.5.27 |
+| Pin a forwarded request to one instance (`X-AINode-Node` / `X-AINode-Port`), `X-AINode-Served-By` on the answer | ✅ v0.5.28 |
+| HMAC-signed UDP discovery keyed by `cluster_secret`, rotatable without a restart | ✅ v0.5.28 |
+| `ainode_version` on the wire, with a split-fleet banner and `cluster_split` on `/api/version/check` | ✅ v0.5.28 |
+| `ainode update` verifies the node came back on the new version, and exits non-zero when it did not | ✅ v0.5.28 |
+| `ainode prune-images` and an automatic post-update prune, keeping N rollback generations | ✅ v0.5.28 |
+| A multi-GPU node counts as all of its GPUs (`gpu_count` on the announcement) | ✅ v0.5.28 |
+| One-command cluster joining (`ainode cluster token`, `ainode join`, `AINODE_JOIN`) | ✅ v0.5.29 |
+| A fresh install generates a `cluster_secret`, so discovery is not unauthenticated by default | ✅ v0.5.29 |
+| `GET /api/cluster/endpoint` and `endpoint_hint`: the fleet's addresses, keyless, so a client survives the master | ✅ v0.5.29 |
+| A distributed head adopts its running engine at startup, or records the shape as degraded and says which peer | ✅ v0.5.29 |
+| Metrics kept on the node: 48 h raw, 30 d of one-minute roll-ups, `GET /api/metrics/history` | ✅ v0.5.29 |
+| `GET /metrics` actually scrapes (500 since 0.4), with `node` / `node_id` labels and a committed scrape config | ✅ v0.5.29 |
+| TLS on its own port (`ainode tls enable`, 3443), self-signed or `tailscale cert`, HTTP untouched | ✅ v0.5.29 |
+| Per-client rate and concurrency limits on `/v1` (`rate_limit` block, 429 naming the limit) | ✅ v0.5.29 |
+| Speech to text through the fleet endpoint (`/v1/audio/transcriptions`, `/v1/audio/translations`) | ✅ v0.5.29 |
 
 ---
 
@@ -862,8 +882,8 @@ where load time hurts, add an rsync-to-local staging step.
 The installer puts a thin `ainode` wrapper at `/usr/local/bin/ainode`.
 Host-side commands (`update`) run directly, and everything else is forwarded
 into the running container with `docker exec`. Day to day you never need to type
-`docker` yourself, though a job container for training or quantization has to be
-built by hand once (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
+`docker` yourself: the training and quantize image is published too, so a fresh
+node pulls it (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
 
 ```bash
 ainode update [version]      # pull, pin, restart, verify the node came back on it,
@@ -881,30 +901,44 @@ ainode join HOST[:PORT] TOKEN   # On the new node: join the cluster that token
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
-ainode auth enable|disable|status|new-key   # API key auth
-ainode doctor                # 21 checks over config, docker, GPUs, disk, ports, peers
+ainode auth enable|disable|status|new-key   # API key auth. The server reads
+                             #   auth.json once at startup, so a CLI change needs a
+                             #   service restart; the dashboard panel takes effect now
+ainode tls enable            # Serve HTTPS on its own port (3443), HTTP untouched.
+                             #   --cert/--key installs a pair you have, --tailscale
+                             #   gets a real Let's Encrypt cert, --port moves it
+ainode tls status            # TLS state, certificate kind and expiry
+ainode tls disable           # Stop serving HTTPS; the pair is kept
+ainode doctor                # Two dozen checks over config, docker, GPUs, disk,
+                             #   the image pin, the unit, ports, peers, TLS and more
 ainode prune-images          # Reclaim older AINode images (what update does for you)
 ainode logs -f               # Tail the engine log the configured backend writes
 ```
 
 `ainode doctor` is where to start on a node that is behaving oddly. One line per
-check with OK, WARN or FAIL and a one-line fix: the engine backend against what is
-actually on the node, `gpu_memory_utilization` against the stacked-load guard, the
+check with OK, WARN, FAIL or INFO and a one-line fix: the engine backend against what
+is actually on the node, `gpu_memory_utilization` against the stacked-load guard, the
 discovery port and `cluster_id` against what the installer writes, docker and the
 engine image, GPUs and whether the memory is unified, free space on the AINode home
 and the models dir, the pin in `image.env` against the running container and the
-newest published tag, the unit, ports 3000 / 8000 / 5679, peers and whether the fleet
-agrees on a release, the fabric interface, the secrets store's mode, and the sudo
-trap below. `--json` for machines, `--peer HOST` for the same report over SSH, a
-non-zero exit on any FAIL so it can gate a script, and `--fix` applies only the
-changes that cannot lose anything (create a directory, chmod the secrets store to
-0600, write the fleet discovery port) and then re-runs the checks.
+newest published tag, the unit, the web / engine / discovery ports, peers and whether
+the fleet agrees on a release, the fabric interface, the recorded distributed shape
+and whether it went degraded, the secrets store's mode, the TLS certificate and its
+expiry, the per-client limits, whether a Hugging Face token exists anywhere, and the
+sudo trap below. Two dozen checks on a solo node, a couple more once it can see a
+peer. `--json` for machines (statuses lowercase there), `--peer HOST` for the same
+report over SSH, a non-zero exit on any FAIL so it can gate a script (a WARN and an
+INFO never fail the run), and `--fix` applies only the changes that cannot lose
+anything (create a directory, chmod the secrets store to 0600, write the fleet
+discovery port) and then re-runs the checks so the report describes the node as it is
+now.
 
 `ainode cluster token` and `ainode join` are the whole join. The token is 32 random
 bytes, stored on the master as a SHA-256 hash with an expiry (30 minutes, `--ttl`) and
-one use, and it is the joiner's only credential: `POST /api/cluster/join` is the one
-route that answers without an API key, because a node that has not joined cannot hold
-this cluster's key yet. A wrong, an expired and a spent token all get the same 403,
+one use, and it is the joiner's only credential: `POST /api/cluster/join` answers
+without an API key, because a node that has not joined cannot hold this cluster's key
+yet. It is one of five keyless paths, with `/api/health`, `/api/auth/status`,
+`/api/cluster/endpoint` and the static shell. A wrong, an expired and a spent token all get the same 403,
 and the handler allows five attempts a minute per source address. The joining side
 writes `cluster_id`, `cluster_secret`, `cluster_role`, `distributed_mode`,
 `master_address` and `discovery_port` into `config.json` and touches nothing else,
@@ -1186,7 +1220,7 @@ scrape_configs:
 |---|---|---|
 | Monthly cost | $100 to $10,000+ | $0 (you own the hardware) |
 | Data privacy | Your data on their servers | Your data stays local |
-| Rate limits | Yes | None |
+| Rate limits | Theirs, on you | None by default, and yours to set per client |
 | Network hop | Out to a provider and back | Your own LAN |
 | Fine-tuning | Limited, expensive | LoRA, QLoRA and full, single node, free |
 | Internet required | Yes | Only to pull images and weights |
