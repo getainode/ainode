@@ -1339,12 +1339,24 @@ async def handle_status(request: web.Request) -> web.Response:
         logger.exception("could not read the distributed record")
         degraded = []
 
+    # Was the engine on this node's own port ADOPTED from a container that
+    # outlived the orchestrator, rather than launched by this process (#240)? The
+    # instance record is the one place that knows, and a reader of this endpoint
+    # otherwise cannot tell a restart that kept its engine from one that reloaded
+    # it in the seconds before the load phase would have said so.
+    engine_adopted = False
+    _manager = request.app.get("instances")
+    if _manager is not None:
+        _own = _manager.by_port(getattr(config, "api_port", 0) or 0)
+        engine_adopted = bool(_own is not None and getattr(_own.record, "adopted", False))
+
     return web.json_response({
         "node_id": config.node_id,
         "node_name": config.node_name,
         "model": config.model,
         "gpu": gpu_info,
         "engine_ready": engine_ready,
+        "engine_adopted": engine_adopted,
         # Coarse engine load phase for the UI launching card (3c), derived from
         # the live /v1/models probe above rather than the engine's own latch:
         # see engine_load_phase.
@@ -1596,7 +1608,13 @@ async def handle_nodes(request: web.Request) -> web.Response:
                      # Real launch width (#92): a distributed instance spans
                      # several nodes and must not read as single-GPU here. An
                      # older peer sends no field, which reads as 1.
-                     "tensor_parallel_size": instance_parallel(inst)}
+                     "tensor_parallel_size": instance_parallel(inst),
+                     # Reconstructed from a container that was already running
+                     # rather than launched by the process reporting it (#179,
+                     # #240). It rides on the announcement already; this
+                     # projection was dropping it, so no view could tell an
+                     # engine that survived a restart from one this boot loaded.
+                     "adopted": bool(inst.get("adopted"))}
                     for inst in (getattr(n, "instances", []) or [])
                     if isinstance(inst, dict) and inst.get("model")
                 ],

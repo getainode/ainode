@@ -583,9 +583,36 @@ def test_the_app_seeds_the_primary_record_as_adopted(monkeypatch, tmp_path):
     assert record.adopted is True
     assert record.status == "serving"
     assert record.model == MODEL
-    # And it travels: the announcement carries the flag to every node view.
+    # And it travels: the announcement carries the flag to every node view
+    # (the /api/nodes projection of it is pinned in tests/test_api.py).
     wire = server.announced_instances(config, [record], "solo", True)
     assert wire[0]["adopted"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_status_says_the_engine_was_adopted(monkeypatch, tmp_path):
+    """One boolean on the endpoint every operator and dashboard already polls."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from ainode.api import server
+
+    _fake_docker(monkeypatch, {PRIMARY: _inspect(POLLUX_ARGV)})
+    config = _config(models_dir=str(tmp_path / "models"),
+                     datasets_dir=str(tmp_path / "datasets"),
+                     training_dir=str(tmp_path / "runs"), cluster_enabled=False)
+    rec.adopt_boot_engines(config)
+    config._skip_replay = True
+    app = server.create_app(config=config, engine=_FakeBackend(config))
+
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        payload = await (await client.get("/api/status")).json()
+    finally:
+        await client.close()
+
+    assert payload["engine_adopted"] is True
+    assert payload["model"] == MODEL
 
 
 def test_the_app_seeds_a_launched_primary_as_starting(monkeypatch, tmp_path):

@@ -401,6 +401,36 @@ async def test_nodes_include_stacked_instances(client, app):
     assert any(i["model"] == "stacked-model" and i["api_port"] == 8001 for i in n2["instances"])
 
 
+@pytest.mark.asyncio
+async def test_nodes_say_which_instances_were_adopted(client, app):
+    """``adopted`` survives the row projection (#240).
+
+    It rides on the announcement (``InstanceRecord.adopted``) and this route used
+    to drop every key it does not name, so no view could tell an engine that
+    survived a restart from one this boot loaded.
+    """
+    from ainode.discovery.broadcast import NodeStatus
+    from ainode.discovery.cluster import ClusterNode
+
+    cluster = app["cluster_state"]
+    cluster.add_node(ClusterNode(
+        node_id="n3", node_name="N3", gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model="kept-model", status=NodeStatus.ONLINE,
+        api_port=8000, web_port=8080, last_seen=0.0,
+        instances=[
+            {"model": "kept-model", "api_port": 8000, "status": "serving",
+             "adopted": True},
+            {"model": "fresh-model", "api_port": 8001, "status": "serving"},
+        ],
+    ))
+    resp = await client.get("/api/nodes")
+    data = await resp.json()
+    n3 = next(n for n in data["nodes"] if n["node_id"] == "n3")
+    by_model = {i["model"]: i for i in n3["instances"]}
+    assert by_model["kept-model"]["adopted"] is True
+    assert by_model["fresh-model"]["adopted"] is False
+
+
 # --- request body ceiling -------------------------------------------------
 # aiohttp defaults client_max_size to 1 MB. That silently caps long-context
 # models: a 262k-context model can only be fed ~190k tokens of prompt through
