@@ -12,6 +12,207 @@ _Nothing yet._
 
 ---
 
+## [0.5.30] - 2026-09-19
+
+AINode grows up: a fresh install is protected by default and a fleet can run with auth on everywhere, a tailnet certificate is one command with renewal, a restart or an update keeps the engines that are serving, Whisper runs on the fleet with a speech bench behind its verified flag, the dashboard draws the metrics it keeps, a download is refused when it will not fit, the doctor stops warning about what it cannot see, and Castor's Flash-Next lane is a catalog entry.
+
+### Added
+- **Qwen3.8-Flash-Next NVFP4 runs on four Tesla V100s through the launch path.**
+  A new curated entry, `qwen3.8-flash-next-nvfp4-v100`, carries the TP=4 Volta
+  recipe that castor had been running as a hand-rolled container: the SM70
+  attention backend, a BF16 KV cache, 262144 context, the qwen3 reasoning and
+  qwen3_coder tool parsers, and the checkpoint's own 4-token MTP module, on the
+  local 1Cat-vLLM build that is the only engine able to run Qwen4Exp on Volta.
+  Verified on castor 2026-09-20: ready in 855 s, 49.6 tok/s single-stream,
+  65.3 sustained, 104.2 across 16 streams, and 20/22 on the quick agentic rubric.
+- **A catalog id beats an hf repo when two entries share a checkpoint.**
+  `catalog_recipe` resolves ids in their own pass, so a hardware-specific lane
+  can be loaded by name without depending on which entry the catalog reaches
+  first. A bare repo id keeps answering exactly as it did.
+- **A bench record states the width of a single-node tensor-parallel launch.**
+  A solo instance record counts nodes, so a launch across four cards in one box
+  recorded `tp: 1` beside its own `--tensor-parallel-size 4`. The width is read
+  back from the launch flags now, and only ever upward, so an unstated width
+  still records as 1 rather than a guess.
+- **A speech section for the bench: `scripts/ainode-bench.py speech` measures word error
+  rate, latency per clip and real-time factor against audio the repo ships.** Ten clips
+  in six voices across six English locales are committed under `bench/speech/clips/`,
+  because a word error rate is only comparable over the same bytes, and the reference is
+  the exact text they were made from rather than anything transcribed by hand. Two rates
+  are reported, one folding number words to digits and one orthographic, so a transcript
+  that heard every word and wrote "nine" for "9" is not scored wrong for its spelling and
+  a reader can still see how much of the error was spelling. The one warm-up request is
+  recorded rather than hidden: on `--enforce-eager` the first transcription after a
+  launch compiles the kernels and took 89 seconds against 0.7 for every one after it.
+- **`openai/whisper-large-v3-turbo` is verified, with a record behind it.** It serves on
+  a GB10 stacked at 6 percent beside a 30B MoE chat model and an embedder, ready in 110
+  seconds, at 2.3 percent word error rate with 8 of 10 clips word for word, 739 ms median
+  per clip through the fleet endpoint and a real-time factor of 0.18, so it transcribes
+  about five times faster than the audio plays. The entry names its bench record and
+  carries the launch time as `typical_ready_minutes`.
+- **A cluster can run with auth on.** Every node-to-node request AINode makes now
+  presents a fleet key derived from the cluster's shared secret,
+  `HMAC-SHA256(cluster_secret, "ainode-fleet-key-v1")`, and the middleware accepts it
+  as the caller id `fleet`. Every node holding the secret computes the same key, so
+  `ainode join` is all a new node needs; rotation follows the secret with no restart;
+  and nothing is written to disk for it. The load and unload fan-outs, `update-all`,
+  the model card's read of a peer's config, the bench's node reads and the doctor's
+  peer probes all carry it. Engine ports do not, because a vLLM container never sees
+  AINode's auth.
+- **`ainode auth key create --name <client>`, `ainode auth key list`, and `ainode
+  auth key revoke <id>`.** A key is minted for one client with a name on it, shown
+  once, and `list` says which client holds which key and when it was created.
+- **Two doctor checks.** `auth.state` fails a node that has auth on and peers but no
+  `cluster_secret` (its own cluster cannot call it), warns when auth is off on a node
+  bound to something other than loopback, and is OK otherwise. `cluster.secret` warns
+  when there is no secret at all, because discovery is then unauthenticated and no
+  peer can authenticate either.
+- **`/api/health` reports the running version.** It is the one route that answers
+  without a key, which is what `ainode update` needs to verify a release on a node
+  that requires one.
+- **The dashboard draws the metrics a node has been keeping.** A new Metrics view charts GPU memory against the node's total, GPU utilization, temperature, request rate with errors, the latency percentiles and process uptime, over 1 h, 6 h, 24 h or 7 d of the node's own retained history. Hand drawn on canvas with no library, and theme-aware through the existing design tokens. A gap in the data is a gap in the line, a counter's rate across a restart is absent rather than negative, and a series the node cannot measure is said in words: on a DGX Spark the driver exposes no GPU utilization counter, so that panel says so instead of drawing a flat zero that would read as an idle GPU.
+- **Any node's charts, from any node.** `GET /api/metrics/history?node=<id or name>` fetches that node's own history and passes it through, so the dashboard can show a peer's measurements without a head inventing them. A node that cannot be reached is an error naming it rather than an empty chart.
+- **The Prometheus latency summary tells the truth about an idle node.** `ainode_request_latency_milliseconds` is absent until a request has actually been timed, where it used to publish three zeros that read as instant answers, and it no longer carries a `_sum` that was always 0 and made every average read as zero latency. `ainode_gpu_available` now answers 1 on a healthy node as its help text always promised, and `ainode_model_loaded` carries a `tp` label so a multi-node instance is not indistinguishable from a solo one.
+- **`ainode tls enable --tailscale` works, and it runs on the host.** The
+  installer's wrapper resolves this node's MagicDNS name, runs `tailscale cert`
+  into `<AINODE_HOME>/tls/<name>.crt` and `.key` (plain first, then `sudo -n`, so
+  `tailscale set --operator=$USER` is honoured), and hands off to the container,
+  which adopts the pair and writes the `tls` block. The CLI is inside a container
+  with no tailscale binary and no daemon socket, so this was the one shape that
+  could not work before.
+- **The certificate renews itself.** `ainode-tls-renew.timer`, rendered by the
+  installer for every node whatever its TLS state, runs daily, asks the node for
+  the decision, and inside the last 14 days re-runs `tailscale cert` and restarts
+  so the new pair is served. It renews into the files the config points at,
+  restarts only when the expiry actually moved, and refuses to replace a
+  self-signed pair or a certificate issued outside the tailnet.
+  `AINODE_TLS_RENEW_RESTART=0` leaves the restart to a human.
+- **`ainode tls renew [--check]`**, the decision half: `key=value` lines and exit
+  10 for "nothing to do", which is what lets a daily timer stay silent for 75
+  days.
+- **A download that cannot fit is refused before it starts.** AINode learns a
+  checkpoint's size from the Hugging Face API (cached under `AINODE_HOME`) and
+  compares it with free space on the models directory: a pull with nowhere to go
+  is a 507 naming what is needed, what is free and which path was measured,
+  instead of a transfer that dies part way and leaves a partial blob cache behind.
+  `{"force": true}` downloads it anyway, a size nobody can learn is reported as
+  unknown and downloads as before, and the model card shows the size with whether
+  it fits on that node.
+- **`ainode doctor` warns when persistence mode is off on a node with discrete
+  GPUs.** With it off, every process that opens a GPU pays a full initialisation,
+  which is how a node with no engine loaded can stop answering its own API. One
+  command fixes it, and the check names it.
+
+### Changed
+- **The README describes the product that ships.** The CLI reference gained `doctor`, `update` (verify and prune), `prune-images`, `auth`, `tls`, `cluster token` and `join`; the feature rows for fine-tuning, TLS, rate limiting, the failover endpoint and speech match 0.5.27 to 0.5.29; four training rows that were dated 0.5.27 now say 0.5.28, where they shipped.
+- **A speech run driven at a master now records the right node's neighbours.**
+  `describe_via_http` keyed a record's `stacked_with` on the node it was asking rather
+  than the node serving the model, so a run pointed at the master named the master's own
+  stack for an instance on a peer. It takes the resolved serving node now, which is the
+  normal shape for a speech or embedding instance: those stack on a peer by design.
+- **`bench/README.md` lists every bench again.** It said four and had never been updated
+  for the embedding section; it says six and describes both the embedding and the speech
+  ones, with the command to run each.
+- **A fresh install requires an API key.** The installer mints one, stores its
+  SHA-256 in `~/.ainode/auth.json`, prints it once in a box at the end, and the
+  summary line reads "API protected, one key". `AINODE_AUTH=off` keeps the previous
+  open node and prints what that choice means. An install over an existing
+  `config.json` changes neither the auth state nor the keys, so no update turns auth
+  on under a running fleet.
+- **An `ainode auth` change takes effect immediately.** The server re-reads
+  `auth.json` when it changes instead of holding what it read at startup, so
+  `enable`, `disable`, `key create` and `key revoke` no longer need a service
+  restart, and each command says so.
+- **`auth.json` and `config.json` are written 0600** and atomically, and an existing
+  wider file is tightened on load. `config.json` carries `cluster_secret` and may
+  carry `hf_token`.
+- **The API access panel, the README and the join route's docstring state the real
+  set of keyless paths** (`/`, `/static/*`, `/api/health`, `/api/auth/status`,
+  `/api/cluster/endpoint`, `POST /api/cluster/join`), each with its reason. They
+  named three of the six.
+- **A graceful shutdown leaves a still-serving engine container running.** Stopping
+  it was what left the next boot with nothing to adopt, and every STACKED engine
+  already outlived the orchestrator, so the primary and the head now behave the same
+  way. A container that is not running is still stopped through the backend (which
+  reaps a corpse and a head's peer containers), the `docker logs -f` follower is
+  always closed, and the line on the way out names `docker rm -f <container>` for
+  freeing the GPU. `touch ~/.ainode/.start-clean` still starts a node idle: it adopts
+  nothing by design. The FIRST restart after this release still reloads on every
+  node, because the process being stopped predates the fix.
+- **A node advertises the scheme it really serves.** `url` on every
+  `/api/cluster/endpoint` row, in `endpoint_hint` and in the `self` and `master`
+  blocks is `https://host:<tls port>` when that node opens a TLS listener, with
+  `tls` and `tls_port` beside it. `port` stays the HTTP port in every row, always:
+  the peer proxy and every older client build `http://host:port` from it. Peers
+  keep talking HTTP on the LAN, and only a node's own rows can claim TLS.
+- **`ainode doctor`'s TLS check names this node.** With TLS off it prints the
+  node's MagicDNS name and `ainode tls enable --tailscale (a real certificate for
+  <name>)`; inside the renewal window on a tailnet certificate it points at
+  `ainode tls renew` and says the timer already runs it. The name is found from
+  the wrapper's environment variable, `tailscale status`, or a reverse MagicDNS
+  lookup of this node's own tailnet address, bounded at two seconds.
+
+### Fixed
+- **`hf_token` no longer leaves the node in `GET /api/config`.** Only
+  `cluster_secret` was scrubbed, so a Hugging Face credential that can write to the
+  operator's own repositories came back in clear to any caller, and on an open node
+  to anyone who could reach the port. `ainode config` masks it as "set (hidden)".
+- **`ainode update` no longer reports a failed update on a protected node.** The host
+  wrapper verified the running release on `/api/status`, which needs the key, so
+  every update would have pulled, pinned, restarted and then exited non-zero saying
+  it had not applied. It reads `/api/health`.
+- **`POST /api/cluster/update-all` no longer crashes on a peer that announced no
+  source address.** It read `n.host`, which `ClusterNode` does not have, so one such
+  peer took the whole handler down with an `AttributeError` instead of updating the
+  fleet. It uses the one derivation of a peer's reachable address.
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+- **A restart no longer reloads a model the node is already serving.** Engine
+  containers outlive the orchestrator, but `ainode start` freed every one of them
+  before the boot engine relaunched `config.model`, and the orchestrator stopped its
+  own engine on the way out, so a `systemctl restart ainode` (and therefore every
+  `ainode update`) cost a full model load: 420 s on pollux, 834 s on castor, measured.
+  A boot now inspects the container a launch would have created BEFORE it sweeps
+  anything, and keeps it when it is running, matches the configured recipe (model,
+  port, engine image, TP width, executor) and is answering (`/health` plus
+  `/v1/models` naming that model). A kept engine is skipped by the sweep, not
+  relaunched, and recorded in the `InstanceManager` with `adopted: true` and
+  `serving`; anything that fails one of those checks reloads exactly as before, with
+  one line saying which. Same treatment for a distributed head and for every stacked
+  instance the manifest names. Measured on pollux: a restart that cost 420 s now has
+  the model answering through the master in 1 s, on the same engine container, with
+  nothing reloaded and no phantom row in the launch-time ledger.
+- **Every view that lists instances now says which ones were adopted.**
+  `/api/nodes` projects each announced instance down to the keys it names and was
+  dropping the flag, so nothing could tell an engine that survived a restart from one
+  the reporting process launched; `/api/status` gained `engine_adopted` for the node's
+  own port.
+- **`ainode doctor` inside the container no longer carries a WARN nobody can
+  clear.** The systemd, docker and image checks are about the host, and the
+  documented deployment runs the CLI in a container: they print INFO naming the
+  host command now, and the host wrapper hands the real unit state in so the
+  service line is a real answer.
+- **A slow GPU driver can no longer make a node look dead.** NVML is sampled on a
+  worker thread with a timeout and the last good sample is served while a read is
+  slow, so no request waits on the driver. A stale sample is never recorded in the
+  retained metrics history.
+- **A replayed engine that dies on the way up says why.** Its last 40 log lines go
+  into the AINode log before its container is removed, stacked instances wait for
+  the primary to finish binding rather than for a fixed window, and the bind window
+  grows with the number of engines coming up at once.
+- **`ainode doctor --fix --peer HOST` no longer ignores `--fix` silently.** It
+  refuses the combination and names the command to run on that node.
+- **`ainode update` exits non-zero when it cannot resolve a version to verify
+  against.** It pulled a floating tag, restarted and returned success without ever
+  confirming what came back.
+- **`ainode prune-images` reclaims the Docker Hub mirror tag that nodes actually
+  carry.** The repository list had the mirror name misspelled, so those tags held
+  the bytes of images the prune reported as removed.
+
+### Removed
+- **The unused metrics ring buffer in the dashboard.** It was seeded from the same history route the charts now read, and nothing ever drew it; keeping a 20 minute buffer beside a 48 hour store would be two sources for one line.
+
+---
+
 ## [0.5.29] - 2026-09-19
 
 Wave 2 of the 19 September audit: a head keeps its multi-node model across a restart or says why, one command joins a node, metrics survive a restart and /metrics finally scrapes, a client endpoint that survives the master, TLS on a second port and per-client limits, and speech routed through the fleet.
