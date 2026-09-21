@@ -51,9 +51,11 @@ def build_parser():
                "a coding agent to passing tests instead of its throughput, "
                "`ainode-bench agentic --help` scores it on the agentic capability "
                "rubric, `ainode-bench decide --help` measures how well a backend "
-               "makes typed decisions (accuracy, calibration, latency, cost), and "
+               "makes typed decisions (accuracy, calibration, latency, cost), "
                "`ainode-bench embed --help` measures an embedding model (dimensions, "
-               "latency, throughput by batch size, pair ordering)")
+               "latency, throughput by batch size, pair ordering), and "
+               "`ainode-bench speech --help` measures a speech-to-text model (word "
+               "error rate against known text, latency per clip, real-time factor)")
     p.add_argument("--url", help="engine or AINode proxy base, e.g. http://host:8000")
     p.add_argument("--model", help="model id exactly as served")
     p.add_argument("--ainode", default="", help="AINode web base, e.g. http://host:3000 "
@@ -74,13 +76,15 @@ def build_parser():
 
 
 def main(argv=None, out_dir=None):
-    # Four subcommands, dispatched before argparse sees them, so every existing flag
+    # Five subcommands, dispatched before argparse sees them, so every existing flag
     # keeps working exactly as documented. `harness` measures a different thing
     # (a model driving a coding agent to passing tests), `agentic` a third one
     # (the capability rubric), `decide` a fourth (typed decisions: accuracy,
-    # calibration, latency, cost) and `embed` a fifth (an embedding model:
-    # dimensions, latency, throughput by batch size, pair ordering); each has its own
-    # parser under its own package. Everything else is the throughput bench.
+    # calibration, latency, cost), `embed` a fifth (an embedding model:
+    # dimensions, latency, throughput by batch size, pair ordering) and `speech` a
+    # sixth (a transcription model: word error rate against known text, latency per
+    # clip, real-time factor); each has its own parser under its own package.
+    # Everything else is the throughput bench.
     words = list(sys.argv[1:]) if argv is None else list(argv)
     if words and words[0] == "harness":
         from ainode.bench.harness.cli import main as harness_main
@@ -98,6 +102,10 @@ def main(argv=None, out_dir=None):
         from ainode.bench.embed.cli import main as embed_main
 
         return embed_main(words[1:], out_dir=out_dir)
+    if words and words[0] == "speech":
+        from ainode.bench.speech.cli import main as speech_main
+
+        return speech_main(words[1:], out_dir=out_dir)
 
     p = build_parser()
     a = p.parse_args(argv)

@@ -3,7 +3,7 @@
 What an AINode-served model actually does on the hardware in front of us, as
 opposed to what a model card says.
 
-Four benches live here, and they answer different questions:
+Six benches live here, and they answer different questions:
 
 - **Throughput** (this file): TTFT, decode rate, prefill scaling, concurrency,
   reasoning tax. How fast the model generates.
@@ -33,11 +33,26 @@ Four benches live here, and they answer different questions:
   chat fallback, and TypeSafe AI's hosted Jev for comparison. Run it with
   `python3 scripts/ainode-bench.py decide --backend chat --endpoint
   http://<node>:3000/v1 --ainode http://<node>:3000 --model <id> --label <label>`.
+- **Embedding** (`ainode/bench/embed/`): vector width, single-request p50 and p95,
+  texts and tokens per second at batches of 1, 16 and 64, and a six-pair ordering
+  check on whether the vectors separate meaning at all. What a retrieval pipeline
+  gets from a model that writes no tokens. Run it with
+  `python3 scripts/ainode-bench.py embed --endpoint http://<node>:3000/v1
+  --ainode http://<node>:3000 --model <id> --label <label>`.
+- **Speech** (`ainode/bench/speech/`): word error rate against the exact text ten
+  committed clips were made from, reported both with number words folded to digits
+  and orthographically, plus latency per clip and the real-time factor. Whether a
+  transcription model can hear. The clips are `bench/speech/clips/`, six voices
+  across six English locales; `--generate-clips` rebuilds them on a Mac and is a
+  maintenance step, not part of a run. Run it with
+  `python3 scripts/ainode-bench.py speech --endpoint http://<node>:3000/v1
+  --ainode http://<node>:3000 --model <id> --label <label>`.
 
-All four write one schema-1 JSON into `bench/results/`. A harness record carries
-a `harness` block, an agentic record an `agentic` block and a decision record a
-`decide` block instead of `results`, and all three are skipped by the README's tok/s
-table in favour of their own.
+All six write one schema-1 JSON into `bench/results/`. A harness record carries
+a `harness` block, an agentic record an `agentic` block, a decision record a
+`decide` block, an embedding record an `embed` block and a speech record a `speech`
+block instead of `results`, and all five are skipped by the README's tok/s table in
+favour of their own.
 
 The rest of this file is the throughput bench. Two ways to run it, one measurement:
 

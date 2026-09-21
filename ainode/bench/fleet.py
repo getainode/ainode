@@ -200,11 +200,21 @@ def resolve_serving_node(base_url: str, model: str):
 
 # ---------------------------------------------------------------- HTTP describe (CLI)
 
-def describe_via_http(ainode, engine_url, model):
+def describe_via_http(ainode, engine_url, model, serving_node_name=""):
     """Build the model + placement blocks from what the fleet actually reports.
 
     The out-of-process path, used by ``scripts/ainode-bench.py``. Returns
     (model_block, placement, node_id, warnings).
+
+    ``serving_node_name`` is for a run pointed at a MASTER that does not itself serve
+    the model, which is the normal shape for a stacked instance on a peer: the caller
+    has already asked ``resolve_serving_node`` which node hosts it, so
+    ``stacked_with`` is keyed on that node rather than on the node this function is
+    talking to. Without it the record named the master's own neighbours as the
+    measured instance's, which is a placement claim about the wrong machine. It also
+    silences the "does not report serving" warning in that case, because the caller
+    is about to correct the placement and the warning would be describing a state it
+    already handled.
     """
     warn = []
     mb = {"id": model}
@@ -236,11 +246,13 @@ def describe_via_http(ainode, engine_url, model):
         if st.get("version"):
             pl["ainode"] = st["version"]
         serves = [st.get("model")] + list(st.get("models_loaded") or [])
-        if model not in serves:
+        elsewhere = bool(serving_node_name) and serving_node_name != st.get("node_name")
+        if model not in serves and not elsewhere:
             warn.append(f"{pl.get('node', 'this AINode')} does not report serving {model}; "
                         "placement and telemetry may describe the wrong node")
 
-    # --- tensor parallelism and what else shares the node
+    # --- tensor parallelism and what else shares the node. "the node" is the one
+    # SERVING the model when the caller resolved it, not the one being asked.
     ss = get_json(f"{base}/api/server/status")
     stacked = []
     for m in (ss.get("loaded_models") or []):
@@ -248,6 +260,9 @@ def describe_via_http(ainode, engine_url, model):
             if m.get("parallel"):
                 pl["tp"] = m["parallel"]
                 pl["gpus"] = m["parallel"]
+        elif serving_node_name:
+            if m.get("node_hostname") == serving_node_name:
+                stacked.append(m["id"])
         elif node_id and m.get("node_id") == node_id:
             stacked.append(m["id"])
     pl["stacked_with"] = stacked
