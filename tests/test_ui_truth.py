@@ -303,7 +303,7 @@ class _FanoutSession:
     def __init__(self):
         self.posts: list = []
 
-    def post(self, url, json=None, timeout=None):
+    def post(self, url, json=None, timeout=None, headers=None):
         self.posts.append((url, json))
 
         class _R:
@@ -377,7 +377,7 @@ def test_the_ui_unload_route_carries_the_node_and_port_to_that_node(monkeypatch)
             return False
 
     class _Sess:
-        def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None, headers=None):
             posted["url"] = url
             posted["json"] = json
             return _Up2()

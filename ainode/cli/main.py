@@ -518,10 +518,12 @@ def cmd_config(args):
     table.add_column("Value")
 
     for key, value in data.items():
-        # The cluster secret is what a joined node signs discovery with. It is
-        # scrubbed from GET /api/config for the same reason it is masked here:
-        # `ainode config` output gets pasted into issues and chat.
-        if key == "cluster_secret":
+        # The cluster secret is what a joined node signs discovery with, and the
+        # HF token can write to the operator's own repositories. Both are scrubbed
+        # from GET /api/config (api/server.py::SCRUBBED_CONFIG_KEYS) for the same
+        # reason they are masked here: `ainode config` output gets pasted into
+        # issues and chat.
+        if key in ("cluster_secret", "hf_token"):
             display = "[dim]set (hidden)[/dim]" if value else "[dim]not set[/dim]"
         else:
             display = str(value) if value is not None else "[dim]not set[/dim]"
@@ -741,6 +743,104 @@ def cmd_service(args):
         console.print("  Usage: ainode service {install|uninstall|status|logs}")
 
 
+#: Printed after every change to auth.json, because the change is live: the
+#: server stats the file per request (auth/middleware.py::reload_if_changed), so
+#: an `ainode auth ...` on a running node takes effect on the next request rather
+#: than at the next restart. It used to take effect at the next restart and say
+#: nothing, so `ainode auth enable` looked like it had done nothing.
+AUTH_LIVE_NOTE = ("  In effect now: the running node re-reads auth.json, "
+                  "no restart needed.")
+
+
+def _print_new_key(entry: dict) -> None:
+    """The one place a plaintext key is printed, and what to do with it.
+
+    It exists only in this output: the store keeps a SHA-256, so a key that is
+    not copied now is gone and the fix is another key, never a lookup.
+    """
+    console.print(f"  API key: {entry['key']}")
+    console.print(f"  Key ID:  {entry['id']}")
+    if entry.get("name"):
+        console.print(f"  Name:    {entry['name']}")
+    console.print()
+    console.print("  Shown once, stored hashed. Copy it now.")
+    console.print("  Use: Authorization: Bearer <key>")
+    console.print("  Dashboard: paste the key under Config > API access.")
+
+
+def cmd_auth_key(args):
+    """``ainode auth key {create|list|revoke}``: the operator's key handling.
+
+    Separate from ``auth enable`` / ``disable`` on purpose: whether this node
+    requires a key and which clients hold one are two different decisions, and the
+    second one is the one an operator returns to (a laptop replaced, an
+    integration retired). The fleet key is not in here and never will be: peers
+    authenticate with a key derived from ``cluster_secret``
+    (``ainode/auth/fleet.py``), so there is nothing to mint, list or revoke for
+    them, and revoking the fleet means changing that secret.
+    """
+    from ainode.auth.middleware import AuthConfig
+
+    action = getattr(args, "key_action", None)
+    auth_cfg = AuthConfig.load()
+
+    if action == "create":
+        entry = auth_cfg.generate_key(getattr(args, "name", "") or "")
+        console.print("  [green]New API key created.[/green]")
+        _print_new_key(entry)
+        if not auth_cfg.enabled:
+            console.print()
+            console.print("  [yellow]This node does not require a key yet[/yellow], so "
+                          "the key works but nothing is refused without it.")
+            console.print("  Require one: ainode auth enable")
+        console.print(AUTH_LIVE_NOTE)
+        console.print("  Made in Texas")
+
+    elif action == "list":
+        keys = auth_cfg.key_ids()
+        state = "[green]required[/green]" if auth_cfg.enabled else "[dim]not required[/dim]"
+        console.print(f"  API key: {state}")
+        if not keys:
+            console.print("  No keys on this node. Create one: "
+                          "ainode auth key create --name <client>")
+            console.print("  Made in Texas")
+            return
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("ID")
+        table.add_column("Name")
+        table.add_column("Created")
+        for key in keys:
+            table.add_row(key["id"], key["name"] or "[dim](unnamed)[/dim]",
+                          key["created_at"] or "[dim]unknown[/dim]")
+        console.print(table)
+        console.print()
+        console.print("  Keys are stored hashed and cannot be shown again.")
+        console.print("  Revoke one: ainode auth key revoke <id>")
+        console.print("  Made in Texas")
+
+    elif action == "revoke":
+        key_id = getattr(args, "key_id", "") or ""
+        # Named by id, never by name: two clients may share a name, and a revoke
+        # that guessed which one to remove is a revoke nobody can trust.
+        if auth_cfg.revoke_key(key_id):
+            console.print(f"  [green]Revoked key {key_id}.[/green]")
+            console.print(f"  Keys left: {len(auth_cfg.api_keys)}")
+            if auth_cfg.enabled and not auth_cfg.api_keys:
+                console.print("  [yellow]That was the last key, and this node still "
+                              "requires one.[/yellow] Nothing can call it until you "
+                              "run: ainode auth key create --name <client>")
+        else:
+            console.print(f"  [yellow]No key with id '{key_id}' on this node.[/yellow]")
+            console.print("  List them: ainode auth key list")
+            console.print("  Made in Texas")
+            return
+        console.print(AUTH_LIVE_NOTE)
+        console.print("  Made in Texas")
+
+    else:
+        console.print("  Usage: ainode auth key {create [--name NAME]|list|revoke <id>}")
+
+
 def cmd_auth(args):
     """Manage API key authentication."""
     from ainode.auth.middleware import AuthConfig
@@ -748,25 +848,35 @@ def cmd_auth(args):
     action = getattr(args, "auth_action", None)
     auth_cfg = AuthConfig.load()
 
+    if action == "key":
+        return cmd_auth_key(args)
+
     if action == "enable":
-        entry = auth_cfg.enable()
+        entry = auth_cfg.enable(getattr(args, "name", "") or "first key")
         console.print("  [green]Auth enabled.[/green]")
         if entry["key"]:
-            console.print(f"  API key: {entry['key']}")
-            console.print(f"  Key ID:  {entry['id']}")
+            _print_new_key({**entry,
+                            "name": getattr(args, "name", "") or "first key"})
         else:
             # Keys are stored hashed, so an existing one cannot be printed again.
             console.print(f"  Using the {len(auth_cfg.api_keys)} key(s) this node "
                           "already has (stored hashed, so not shown again).")
-            console.print("  Lost it? ainode auth new-key")
+            console.print("  Lost it? ainode auth key create --name <client>")
+            console.print()
+            console.print("  Use: Authorization: Bearer <key>")
+            console.print("  Dashboard: paste the key under Config > API access.")
         console.print()
-        console.print("  Use: Authorization: Bearer <key>")
-        console.print("  Dashboard: paste the key under Config > API access.")
+        console.print("  Peers need no key of their own: a node-to-node call "
+                      "authenticates with the key derived from cluster_secret.")
+        console.print(AUTH_LIVE_NOTE)
         console.print("  Made in Texas")
 
     elif action == "disable":
         auth_cfg.disable()
         console.print("  [yellow]Auth disabled.[/yellow] All requests allowed.")
+        console.print("  The keys are still on the node; nothing is refused "
+                      "without one.")
+        console.print(AUTH_LIVE_NOTE)
         console.print("  Made in Texas")
 
     elif action == "status":
@@ -776,17 +886,32 @@ def cmd_auth(args):
         if not auth_cfg.enabled:
             console.print("  API open, no key set" if not auth_cfg.api_keys
                           else "  API open, key set but not required")
+        # Whether this node can still talk to its own cluster with auth on. The
+        # doctor says the same thing as a FAIL (cli/doctor.py::check_auth); this
+        # is the version an operator sees while turning auth on.
+        config = NodeConfig.load()
+        if auth_cfg.enabled and not (config.cluster_secret or "").strip():
+            console.print("  [yellow]No cluster_secret on this node[/yellow]: if it has "
+                          "peers, their node-to-node calls answer 401.")
+            console.print("  Fix: ainode join <master> <token>, or set the cluster's "
+                          "shared cluster_secret in config.json")
+        elif auth_cfg.enabled:
+            console.print("  Peers authenticate with the key derived from cluster_secret")
         console.print("  Made in Texas")
 
     elif action == "new-key":
-        entry = auth_cfg.generate_key()
+        # Kept working, and pointed at its replacement: `auth key create` is the
+        # same act with a name on it.
+        entry = auth_cfg.generate_key(getattr(args, "name", "") or "")
         console.print("  [green]New API key generated.[/green]")
-        console.print(f"  API key: {entry['key']}")
-        console.print(f"  Key ID:  {entry['id']}")
+        _print_new_key(entry)
+        console.print("  (ainode auth key create --name <client> names it.)")
+        console.print(AUTH_LIVE_NOTE)
         console.print("  Made in Texas")
 
     else:
-        console.print("  Usage: ainode auth {enable|disable|status|new-key}")
+        console.print("  Usage: ainode auth {enable|disable|status|key|new-key}")
+        console.print("         ainode auth key {create [--name NAME]|list|revoke <id>}")
 
 
 def cmd_prune_images(args):
@@ -1363,10 +1488,27 @@ def main():
     # auth
     auth_parser = subparsers.add_parser("auth", help="Manage API key authentication")
     auth_sub = auth_parser.add_subparsers(dest="auth_action")
-    auth_sub.add_parser("enable", help="Enable API key auth")
-    auth_sub.add_parser("disable", help="Disable API key auth")
+    auth_enable = auth_sub.add_parser("enable", help="Require an API key on /api and /v1")
+    auth_enable.add_argument(
+        "--name", default="",
+        help="Name the key this mints, if there is no key yet (default: first key)")
+    auth_sub.add_parser("disable", help="Stop requiring an API key")
     auth_sub.add_parser("status", help="Show auth status")
-    auth_sub.add_parser("new-key", help="Generate a new API key")
+    auth_new_key = auth_sub.add_parser(
+        "new-key", help="Generate a new API key (same as: auth key create)")
+    auth_new_key.add_argument("--name", default="", help="Which client this key is for")
+    # `auth key ...` is the operator's key handling: create one per client, see
+    # which clients hold one, take one away.
+    auth_key = auth_sub.add_parser("key", help="Create, list and revoke API keys")
+    auth_key_sub = auth_key.add_subparsers(dest="key_action")
+    auth_key_create = auth_key_sub.add_parser(
+        "create", help="Mint a key and print it once")
+    auth_key_create.add_argument(
+        "--name", default="",
+        help="Which client this key is for (shown by: ainode auth key list)")
+    auth_key_sub.add_parser("list", help="The keys on this node, by id and name")
+    auth_key_revoke = auth_key_sub.add_parser("revoke", help="Revoke a key by id")
+    auth_key_revoke.add_argument("key_id", help="The key id from: ainode auth key list")
     auth_parser.set_defaults(func=cmd_auth)
 
     # prune-images: reclaim the images an update replaced (#184)

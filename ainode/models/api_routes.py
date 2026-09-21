@@ -16,6 +16,7 @@ from typing import Optional
 
 from aiohttp import web
 
+from ainode.auth.fleet import fleet_headers
 from ainode.auth.middleware import TRUST_REMOTE_CODE_RULE, is_authenticated
 from ainode.core.gpu import detect_gpu
 from ainode.engine.reconcile import (
@@ -1934,6 +1935,7 @@ async def handle_model_unload(request: web.Request) -> web.Response:
             url = f"http://{host}:{node.web_port}/api/models/unload?fanout=0"
             try:
                 async with session.post(url, json={"model": model},
+                                        headers=fleet_headers(request.app),
                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
                     peers_reached += 1
                     jr = await r.json()

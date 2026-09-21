@@ -73,7 +73,11 @@ async def handle_auth_disable(request: web.Request) -> web.Response:
 
 
 async def handle_list_keys(request: web.Request) -> web.Response:
-    """GET /api/auth/keys -- the key ids, so the UI can revoke one by name."""
+    """GET /api/auth/keys -- id, name and age per key, so the UI can revoke one.
+
+    Never a hash and never a plaintext: a key is shown once, at mint time, and
+    after that the only operations are "list" and "revoke".
+    """
     auth_cfg: AuthConfig = request.app["auth_config"]
     return web.json_response({
         "enabled": auth_cfg.enabled,
@@ -83,12 +87,26 @@ async def handle_list_keys(request: web.Request) -> web.Response:
 
 
 async def handle_create_key(request: web.Request) -> web.Response:
-    """POST /api/auth/keys -- generate a new API key."""
+    """POST /api/auth/keys -- generate a new API key.
+
+    An optional ``name`` in the body says which client the key is for, so
+    ``GET /api/auth/keys`` and ``ainode auth key list`` can name it later. A
+    request with no body is the old shape and still mints an unnamed key.
+    """
     auth_cfg: AuthConfig = request.app["auth_config"]
-    entry = auth_cfg.generate_key()
+    name = ""
+    try:
+        if request.can_read_body:
+            body = await request.json()
+            if isinstance(body, dict):
+                name = str(body.get("name") or "")
+    except Exception:
+        name = ""
+    entry = auth_cfg.generate_key(name)
     return web.json_response({
         "api_key": entry["key"],
         "key_id": entry["id"],
+        "name": entry["name"],
         "key_count": len(auth_cfg.api_keys),
     })
 

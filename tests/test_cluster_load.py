@@ -75,9 +75,10 @@ def test_cluster_load_remote_forwards_over_fabric(monkeypatch):
             return False
 
     class _Sess:
-        def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None, headers=None):
             posted["url"] = url
             posted["json"] = json
+            posted["headers"] = headers
             return _Up()
 
     app = _app("spark1", [_node("spark1", "10.100.0.11"), _node("spark3", "10.100.0.15")])
@@ -108,8 +109,9 @@ def test_cluster_unload_remote_targets_unload_path(monkeypatch):
             return False
 
     class _Sess:
-        def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None, headers=None):
             posted["url"] = url
+            posted["headers"] = headers
             return _Up()
 
     app = _app("spark1", [_node("spark1", "10.100.0.11"), _node("spark3", "10.100.0.15")])

@@ -36,10 +36,19 @@ async def client(app):
 
 @pytest.mark.asyncio
 async def test_health(client):
+    """Liveness, plus the release that is alive.
+
+    The version is on this route because it is the one route that answers with no
+    API key, and the host wrapper's `ainode update` reads it to verify that an
+    update applied (scripts/install.sh). Reading /api/status there 401'd on any
+    node that requires a key.
+    """
+    from ainode import __version__
+
     resp = await client.get("/api/health")
     assert resp.status == 200
     data = await resp.json()
-    assert data == {"status": "ok"}
+    assert data == {"status": "ok", "version": __version__}
 
 
 # ---- /api/status -----------------------------------------------------------

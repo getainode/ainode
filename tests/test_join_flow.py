@@ -974,9 +974,18 @@ class TestDocs:
         assert "invisible to each other" in text
 
     def test_the_readme_lists_the_join_route_among_the_keyless_ones(self):
+        """Every keyless path, not a count of them.
+
+        The count was the drifting half: the sentence said "four deliberate
+        exceptions" while the middleware had five, and auth on by default made
+        that paragraph the first thing a new operator reads.
+        """
+        from ainode.auth.middleware import SKIP_PATHS
+
         text = (REPO_ROOT / "README.md").read_text()
-        assert "four deliberate exceptions" in text
         assert "POST /api/cluster/join" in text
+        for path in SKIP_PATHS - {"/", "/api/cluster/join"}:
+            assert f"`{path}`" in text, f"{path} is keyless and not in the README"
 
 
 class TestJoinCard:

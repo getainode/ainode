@@ -23,6 +23,7 @@ from ainode.core.config import (
 from ainode.core.gpu import detect_gpu, detect_gpus, GPUInfo
 from ainode.web.serve import get_index_html, get_static_path
 from ainode.models.api_routes import register_model_routes
+from ainode.auth.fleet import fleet_headers
 from ainode.auth.middleware import (
     TRUST_REMOTE_CODE_RULE,
     AuthConfig,
@@ -1004,8 +1005,19 @@ async def handle_index(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 async def handle_health(_request: web.Request) -> web.Response:
-    """Simple liveness probe."""
-    return web.json_response({"status": "ok"})
+    """Simple liveness probe, and the release that is alive.
+
+    The version is here because this is the one route that answers with no key
+    (``auth/middleware.py::SKIP_PATHS``), and the host wrapper's ``ainode update``
+    has to read the running version to verify that an update applied. It used to
+    read ``/api/status``, which needs the key: on a node that requires one, every
+    update would have pulled, pinned, restarted, failed to read a version and
+    then exited non-zero saying the update did not apply. A release number on a
+    liveness probe is also what every other consumer of this route expects, and
+    the same value already travels unauthenticated on the discovery wire and on
+    ``/api/cluster/endpoint``.
+    """
+    return web.json_response({"status": "ok", "version": __version__})
 
 # -- Live load progress: how far into a launch this node is right now ---------
 #
@@ -1648,8 +1660,13 @@ async def _cluster_dispatch(request: web.Request, path: str):
     url = f"http://{host}:{node.web_port}{path}"
     session: aiohttp.ClientSession = request.app["client_session"]
     fwd = {k: v for k, v in body.items() if k != "node_id"}
+    # The fleet key, never the operator's own: keys are per node, so the one this
+    # caller presented means nothing on the peer. What both nodes share is the
+    # cluster secret (auth/fleet.py).
+    headers = fleet_headers(request.app)
     try:
-        async with session.post(url, json=fwd, timeout=aiohttp.ClientTimeout(total=60)) as up:
+        async with session.post(url, json=fwd, headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=60)) as up:
             data = await up.read()
             # web.Response rejects a content_type carrying a charset; the node's
             # json_response sends "application/json; charset=utf-8" — strip it.
@@ -2277,7 +2294,13 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
     all_nodes = [{"node_id": config.node_id, "node_name": config.node_id, "host": "localhost", "port": config.web_port or 3000, "is_self": True}]
     for n in nodes:
         if n.node_id != config.node_id:
-            peer_ip = getattr(n, "peer_ip", None) or n.host
+            # _node_host, which is the ONE derivation of a peer's reachable
+            # address (server_routes.peer_host: the announcement's source
+            # address, then the fabric IP, then its name). It used to read
+            # `n.host`, which ClusterNode does not have, so a peer that
+            # announced no source address took the whole update-all handler
+            # down with an AttributeError instead of updating the fleet.
+            peer_ip = _node_host(n, config.node_id)
             port = getattr(n, "web_port", 3000) or 3000
             all_nodes.append({
                 "node_id": n.node_id,
@@ -2405,7 +2428,9 @@ async def handle_cluster_update_all(request: web.Request) -> web.Response:
             # Each worker runs the same AINode container with /api/engine/update.
             url = f"http://{node['host']}:{node['port']}/api/engine/update"
             try:
-                async with session.post(url, json={"version": target}, timeout=aiohttp.ClientTimeout(total=700)) as resp:
+                async with session.post(url, json={"version": target},
+                                        headers=fleet_headers(request.app),
+                                        timeout=aiohttp.ClientTimeout(total=700)) as resp:
                     data = await resp.json()
                     if resp.status < 300:
                         _mark(state, "done",
@@ -2592,11 +2617,21 @@ PATCHABLE_CONFIG_FIELDS = {
 }
 
 
+#: Config keys that carry a credential and are therefore never in a response.
+#: ``cluster_secret`` signs discovery and derives the fleet key; ``hf_token`` is a
+#: Hugging Face credential that can write to the operator's own repositories. Both
+#: were in the dataclass, and only the first was scrubbed, so `GET /api/config`
+#: handed the token to any caller (and, with auth off, to anyone who could reach
+#: the port). Presence is answerable without the value: `ainode config` prints
+#: "set (hidden)" and `ainode doctor` reports which sources have one.
+SCRUBBED_CONFIG_KEYS = ("cluster_secret", "hf_token")
+
+
 def _safe_config_dict(config: NodeConfig) -> dict:
     """Return a safely serializable view of the config (no secrets)."""
     data = asdict(config)
-    # Scrub anything that might carry a credential.
-    data.pop("cluster_secret", None)
+    for key in SCRUBBED_CONFIG_KEYS:
+        data.pop(key, None)
     return data
 
 

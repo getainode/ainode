@@ -935,16 +935,19 @@ ainode join HOST[:PORT] TOKEN   # On the new node: join the cluster that token
 ainode service install       # Install the systemd unit
 ainode service status        # Show systemd state + recent journal
 ainode config                # Show current configuration
-ainode auth enable|disable|status|new-key   # API key auth. The server reads
-                             #   auth.json once at startup, so a CLI change needs a
-                             #   service restart; the dashboard panel takes effect now
+ainode auth enable|disable|status   # Require an API key on /api and /v1, or stop
+                             #   requiring one. Live on the running node: the server
+                             #   re-reads auth.json when it changes, no restart
+ainode auth key create --name <client>   # Mint a key for one client, printed once
+ainode auth key list         # Which clients hold a key, by id and name
+ainode auth key revoke ID    # Take one away, live
 ainode tls enable            # Serve HTTPS on its own port (3443), HTTP untouched.
                              #   --cert/--key installs a pair you have, --tailscale
                              #   gets a real Let's Encrypt cert, --port moves it
 ainode tls status            # TLS state, certificate kind and expiry
 ainode tls disable           # Stop serving HTTPS; the pair is kept
 ainode doctor                # Two dozen checks over config, docker, GPUs, disk,
-                             #   the image pin, the unit, ports, peers, TLS and more
+                             #   the image pin, the unit, ports, peers, auth, TLS
 ainode prune-images          # Reclaim older AINode images (what update does for you)
 ainode logs -f               # Tail the engine log the configured backend writes
 ```
@@ -1082,17 +1085,38 @@ model with no routing and no failover, it is closed until a model is loaded, and
 It is useful for looking straight at an engine and for nothing else. A stacked model
 gets 8001, 8002 and so on the same way.
 
-**Neither port asks for a credential until you turn one on.** That is what a private
-network wants and it is what this fleet runs, so the dashboard says so in the header
-("API open, no key set") and the installer prints the same words rather than letting
-you assume a password exists. Turn it on in **Config, API access** (the browser that
-flips the switch stores the key it mints, so enabling auth cannot lock you out) or
-with `ainode auth enable`. With auth on, every path under `/api` and `/v1` wants the
-key, with four deliberate exceptions: `/api/health` because a probe has no key,
-`/api/auth/status` so the UI can say a key is wanted instead of rendering blank, the
-static shell, and `POST /api/cluster/join` because a node joining this cluster cannot
-hold this cluster's key yet. That last one takes a single-use expiring join token
-instead, and the handler rate limits it to five attempts a minute per source address.
+**A fresh install requires an API key.** The installer mints one, stores its
+SHA-256 in `~/.ainode/auth.json` and prints the key once in a box at the end of the
+install; the dashboard asks for it the first time you open the node and remembers it
+after that. Everything on both ports is behind it, because AINode serves the
+dashboard, the OpenAI-compatible API and every management route (load a model, unload
+one, change the config) on the same ports, so the key is the whole access control.
+Install with `AINODE_AUTH=off` for the old behaviour on a LAN you trust, and the
+installer prints what that choice means. An update never changes the auth state or
+the keys of a node that is already installed: `ainode auth enable` and
+`ainode auth disable` are how that changes, and both take effect on the running node
+with no restart.
+
+With auth on, every path under `/api` and `/v1` wants the key, with these deliberate
+exceptions: the static shell (`/` and `/static/*`), because it is what asks for the
+key; `/api/health`, because a liveness probe has none, which is also why `ainode
+update` verifies a release there; `/api/auth/status`, so the UI can say a key is
+wanted instead of rendering blank; `/api/cluster/endpoint`, which carries names,
+addresses and ports so a client stranded by its own node can find another; and `POST
+/api/cluster/join`, because a node joining this cluster cannot hold this cluster's key
+yet. That last one takes a single-use expiring join token instead, and the handler
+rate limits it to five attempts a minute per source address.
+
+**A cluster needs no second credential.** Every node-to-node call AINode makes (the
+load and unload fan-outs, the cluster update, the model card's read of a peer's
+config, the bench's read of a node) presents a key derived from the cluster's shared
+`cluster_secret`: `HMAC-SHA256(cluster_secret, "ainode-fleet-key-v1")`, so every node
+holding the secret computes the same key, a node joined with `ainode join` is
+authenticated to its peers the moment it has the secret, and rotating the secret
+rotates the fleet's access with no restart. Nothing is stored for it. A node with auth
+on, peers, and NO `cluster_secret` cannot talk to its own cluster, which is why
+`ainode doctor` fails that combination and names the fix. Keys are per node: the key
+your dashboard holds is not a key another node accepts.
 
 ### Pinning a request to one instance
 

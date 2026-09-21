@@ -2,6 +2,7 @@
 
 import os
 import json
+import stat
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional
@@ -302,16 +303,50 @@ class NodeConfig:
     metrics: Dict[str, object] = field(default_factory=dict)
 
     def save(self):
+        """Write config.json 0600, through a temp file in the same directory.
+
+        0600 because this file carries ``cluster_secret`` (the discovery signing
+        key, and the key every node-to-node call derives from) and may carry
+        ``hf_token``; it was written under the default umask, which is 0644 for
+        the root the container runs as. Atomic because several readers stat and
+        parse it live: ``ClusterSecret`` per discovery datagram and the auth
+        middleware per request, and a half-written document would blank the
+        cluster's key for as long as the write took.
+        """
         AINODE_HOME.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2))
+        tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(asdict(self), indent=2))
+        os.chmod(tmp, 0o600)
+        tmp.replace(CONFIG_FILE)
 
     @classmethod
     def load(cls) -> "NodeConfig":
         """Load config from disk, or return defaults."""
         if CONFIG_FILE.exists():
             data = json.loads(CONFIG_FILE.read_text())
+            tighten_config_mode()
             return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         return cls()
+
+
+def tighten_config_mode() -> bool:
+    """chmod config.json to 0600 when it is wider. True when it changed.
+
+    Called once per load, for the nodes installed before :meth:`NodeConfig.save`
+    started writing it that way: the file names this cluster's shared secret, and
+    on a multi-user host every account could read it.
+    """
+    try:
+        mode = stat.S_IMODE(os.stat(CONFIG_FILE).st_mode)
+    except OSError:
+        return False
+    if not mode & 0o077:
+        return False
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        return False
+    return True
 
 
 def ensure_dirs():
