@@ -12,6 +12,7 @@ import aiohttp
 from aiohttp import web
 
 from ainode.api.server_routes import peer_host
+from ainode.auth.fleet import fleet_headers
 from ainode.metrics import prometheus
 from ainode.metrics.collector import MetricsCollector
 from ainode.metrics.store import MAX_HISTORY_POINTS, MetricsStore
@@ -255,22 +256,6 @@ def _peer_query(request: web.Request) -> str:
     return urlencode(pairs)
 
 
-def _peer_auth_headers(request: web.Request) -> dict[str, str]:
-    """What to send a peer so a key-protected node answers.
-
-    The caller's own ``Authorization`` header, forwarded, which is what
-    ``proxy_to_vllm`` already does for every inference path and what makes a
-    fleet sharing one key work today.
-
-    TODO(auth): when the peer-call helper being added for cluster auth lands,
-    call it here instead. A fleet whose nodes hold DIFFERENT keys needs this
-    node's own credential for the peer rather than the browser's, and that
-    decision belongs in one place for every peer call, not in this file.
-    """
-    token = request.headers.get("Authorization", "")
-    return {"Authorization": token} if token else {}
-
-
 async def _peer_history(request: web.Request, target: str) -> web.Response:
     """GET one peer's ``/api/metrics/history`` and pass it through."""
     node = _find_peer(request.app, target)
@@ -303,10 +288,16 @@ async def _peer_history(request: web.Request, target: str) -> web.Response:
 
     query = _peer_query(request)
     url = f"http://{host}:{port}/api/metrics/history" + (f"?{query}" if query else "")
+    # The fleet key, not the browser's. A peer accepts the key derived from the
+    # shared cluster_secret whatever its own operator key is (auth/fleet.py), so
+    # this works on a fleet with auth on everywhere, which forwarding whatever the
+    # dashboard happened to send would not. Same helper as every other
+    # node-to-node call, which is what makes "does this request carry the fleet
+    # key" answerable by reading one name.
     try:
         async with session.get(
             url,
-            headers=_peer_auth_headers(request),
+            headers=fleet_headers(request.app),
             timeout=aiohttp.ClientTimeout(total=PEER_HISTORY_TIMEOUT),
         ) as resp:
             body = await resp.json(content_type=None)

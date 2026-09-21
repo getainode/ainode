@@ -40,6 +40,7 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from ainode.auth.fleet import fleet_key_headers
 from ainode.discovery.broadcast import NodeStatus
 from ainode.discovery.cluster import ClusterNode, ClusterState
 from ainode.metrics.api_routes import register_metrics_routes
@@ -501,10 +502,10 @@ def store(tmp_path):
     s.close()
 
 
-def _app(store, session=None, cluster=None):
+def _app(store, session=None, cluster=None, cluster_secret=""):
     app = web.Application()
     app["config"] = SimpleNamespace(node_id="spark1", node_name="Spark-1-DGX",
-                                    web_port=3000)
+                                    web_port=3000, cluster_secret=cluster_secret)
     if cluster is not None:
         app["cluster_state"] = cluster
     app["client_session"] = session
@@ -548,12 +549,13 @@ class TestHistoryPerNode:
             "node": {"node_id": "spark3", "node_name": "Spark-3-DGX", "local": True},
         }
         session = FakeSession({PEER_URL: (200, peer_payload)})
-        app = _app(store, session=session, cluster=_cluster([_peer()]))
+        app = _app(store, session=session, cluster=_cluster([_peer()]),
+                   cluster_secret="s3cret")
         async with TestClient(TestServer(app)) as client:
             resp = await client.get(
                 "/api/metrics/history?node=spark3&series=gpu.temperature_c"
                 "&since=-1h&step=15s&resolution=raw",
-                headers={"Authorization": "Bearer deadbeef"},
+                headers={"Authorization": "Bearer the-operators-own-key"},
             )
             body = await resp.json()
         assert resp.status == 200
@@ -569,8 +571,13 @@ class TestHistoryPerNode:
         assert "series=gpu.temperature_c" in call["url"]
         assert "since=-1h" in call["url"] and "step=15s" in call["url"]
         assert "node=" not in call["url"]
-        # A key-protected peer needs the credential the caller presented.
-        assert call["headers"]["Authorization"] == "Bearer deadbeef"
+        # The FLEET key, not the browser's. A peer accepts the key derived from
+        # the shared cluster_secret whatever its own operator key is (#244), so
+        # this works on a fleet with auth on everywhere; forwarding whatever the
+        # dashboard happened to send would only work where every node holds the
+        # same operator key.
+        assert call["headers"] == fleet_key_headers("s3cret")
+        assert call["headers"]["Authorization"] != "Bearer the-operators-own-key"
 
     async def test_a_peer_is_asked_on_its_own_web_port(self, store):
         session = FakeSession({"http://10.100.0.15:3111/api/metrics/history":
@@ -582,7 +589,8 @@ class TestHistoryPerNode:
         assert resp.status == 200
         assert ":3111/" in session.calls[0]["url"]
 
-    async def test_an_unkeyed_caller_sends_no_empty_header(self, store):
+    async def test_a_node_with_no_cluster_secret_sends_no_empty_header(self, store):
+        """A fleet that never had a secret makes the request it always made."""
         session = FakeSession({PEER_URL: (200, {"series": {}, "points": 0})})
         app = _app(store, session=session, cluster=_cluster([_peer()]))
         async with TestClient(TestServer(app)) as client:
