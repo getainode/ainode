@@ -28,6 +28,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from ainode.bench import auth
 from ainode.bench.agentic.probes import (
     DEFAULT_NEEDLE,
     GROUPS,
@@ -141,9 +142,7 @@ class ChatClient:
         payload = {"model": self.model, "messages": messages,
                    "temperature": self.temperature}
         payload.update(kw)
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers = {"Content-Type": "application/json", **auth.bearer(self.api_key)}
         req = urllib.request.Request(self.url, data=json.dumps(payload).encode(),
                                     headers=headers)
         self.requests += 1
@@ -157,6 +156,10 @@ class ChatClient:
                 body = exc.read().decode("utf-8", "ignore")[:ERROR_CHARS]
             except Exception:
                 pass
+            # A 401 or a 429 refused the run, so it leaves as an exception rather
+            # than as a failed probe: 25 probes failing identically is not a rubric
+            # score, it is one refusal counted 25 times.
+            auth.refuse(exc.code, body)
             return Reply(wall_s=time.monotonic() - start, status=exc.code,
                          error=f"HTTP {exc.code}: {body.strip()}")
         except Exception as exc:
@@ -222,6 +225,8 @@ def run_probes(probes, client, log=say) -> list:
     for probe in probes:
         try:
             result = probe.run(client)
+        except auth.EndpointRefused:                 # the node refused: not a score
+            raise
         except Exception as exc:                     # a broken check is one failure
             result = ProbeResult(False, f"probe raised {type(exc).__name__}: "
                                         f"{str(exc)[:200]}")

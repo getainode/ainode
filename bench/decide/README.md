@@ -72,10 +72,13 @@ Flags:
   quietly measuring nothing.
 - `--concurrency 8` - items in flight at once.
 - `--timeout 120` - seconds per item.
-- `--api-key` - bearer token. The endpoint's for `ainode`/`chat` (default `ainode`),
-  TypeSafe's for `jev`, which otherwise reads `$TYPESAFE_API_KEY` and then
-  `~/.jev_api_key`. **The key is never printed, never written into a record and never
-  put in a note**; a run reports only which of the three places it came from.
+- `--api-key` - bearer token. The endpoint's for `ainode`/`chat`, which otherwise
+  reads `$AINODE_API_KEY` and then falls back to the placeholder `ainode`; TypeSafe's
+  for `jev`, which otherwise reads `$TYPESAFE_API_KEY` and then `~/.jev_api_key`. The
+  two orders are separate on purpose: a fleet key must never be posted to
+  `api.typesafe.ai`, or theirs to a node of ours. **The key is never printed, never
+  written into a record and never put in a note**; a run reports only which place it
+  came from.
 
 ## The item sets
 
@@ -183,7 +186,12 @@ The same ones the rest of `bench/` runs under, plus three of its own.
   record keeps both the request (`settings.sets`) and what ran (`decide.sets`).
 - **The API key never leaves the process.** Not in the console, not in the record, not
   in a note, not in a dry run. A run reports the source (`--api-key`,
-  `$TYPESAFE_API_KEY`, `~/.jev_api_key`) and nothing else.
+  `$AINODE_API_KEY`, `$TYPESAFE_API_KEY`, `~/.jev_api_key`) and nothing else.
+- **A refused run is not a set of wrong answers.** A 401 from one of our own nodes
+  says "this node wants an API key" and stops before the first item; a 429 names the
+  limit that refused it and stops the same way. Neither is scored, because an
+  accuracy and a calibration error computed over answers nobody gave are worse than
+  no record.
 - **Cost is a posted rate over reported tokens, or zero.** Never an estimate.
 
 ## Adding items

@@ -23,6 +23,7 @@ import json
 import pathlib
 import time
 
+from ainode.bench import auth
 from ainode.bench.embed.client import (
     DEFAULT_API_KEY,
     DEFAULT_TIMEOUT,
@@ -79,8 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                    help=f"seconds per request (default {DEFAULT_TIMEOUT})")
     p.add_argument("--api-key", default="",
-                   help=f"bearer token for the endpoint (default {DEFAULT_API_KEY}). "
-                        "Never printed and never written into a record")
+                   help=f"bearer token for the endpoint (default ${auth.ENV_API_KEY}, "
+                        f"else the placeholder {DEFAULT_API_KEY} that an open node "
+                        "accepts). Never printed and never written into a record")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and one example request, write nothing")
     return p
@@ -105,10 +107,10 @@ def describe(args, client):
     from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
     base = args.ainode.rstrip("/")
-    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base,
-                                                                         client.model)
-    model_block, placement, _node_id, warnings = describe_via_http(base, base,
-                                                                  client.model)
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(
+        base, client.model, api_key=client.api_key)
+    model_block, placement, _node_id, warnings = describe_via_http(
+        base, base, client.model, api_key=client.api_key)
     if node_name:
         placement["node"] = node_name
         placement["port"] = engine_port
@@ -142,8 +144,7 @@ def record_path(out_dir, stamp: str, model_id: str, label: str) -> pathlib.Path:
 def dry_run(args, client, batches: list, out=say) -> int:
     out(f"\n  ainode-bench embed  {client.model}")
     out(f"  endpoint : {client.endpoint}")
-    out(f"  key      : {'--api-key' if args.api_key else 'the default'} "
-        "(never printed)")
+    out(f"  key      : from {client.key_source} (never printed)")
     out(f"  latency  : {len(LATENCY_TEXTS)} single-text requests")
     for batch in batches:
         requests = max(1, (args.texts_per_batch + batch - 1) // batch)
@@ -180,28 +181,38 @@ def main(argv=None, out_dir=None) -> int:
     if not batches or any(b < 1 for b in batches):
         p.error("--batches must be positive integers, e.g. 1,16,64")
 
+    key, key_source = auth.key_for(args.api_key, DEFAULT_API_KEY)
     try:
-        client = EmbedClient(args.endpoint, args.model,
-                             api_key=args.api_key or DEFAULT_API_KEY,
-                             timeout=args.timeout)
+        client = EmbedClient(args.endpoint, args.model, api_key=key,
+                             timeout=args.timeout, key_source=key_source)
     except EmbedError as exc:
         return p.error(str(exc))
 
     if args.dry_run:
         return dry_run(args, client, batches)
 
+    refused = auth.preflight(client.endpoint, client.api_key)
+    if refused:
+        return auth.stop(refused, out=say)
+
     say(f"\n  ainode-bench embed  {client.model}")
     say(f"  label    : {args.label}")
     say(f"  endpoint : {client.endpoint}")
+    say(f"  key      : from {client.key_source} (never printed)")
     say("  measures : dimensions, single-request p50/p95, texts and tokens per "
         "second by batch size, and 6 pairs checked for related above unrelated")
 
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     started = time.time()
-    latency, dimensions, latency_errors = run_latency(client, progress=progress)
-    throughput, throughput_errors = run_throughput(
-        client, sizes=batches, per_size=args.texts_per_batch, progress=progress)
-    quality, quality_errors = run_quality(client)
+    try:
+        latency, dimensions, latency_errors = run_latency(client, progress=progress)
+        throughput, throughput_errors = run_throughput(
+            client, sizes=batches, per_size=args.texts_per_batch, progress=progress)
+        quality, quality_errors = run_quality(client)
+    except auth.EndpointRefused as exc:
+        # Mid-run, which the preflight cannot rule out: the limiter can start
+        # refusing at the batch-of-64 sweep. Nothing is written.
+        return auth.stop(str(exc), out=say)
     seconds = time.time() - started
 
     errors = list(latency_errors) + list(throughput_errors) + list(quality_errors)

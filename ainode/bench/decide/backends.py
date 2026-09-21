@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from ainode.bench import auth
 from ainode.bench.decide.items import CHOICE, FALSE, NOUL, TRUE, Item
 
 #: Seconds one request gets. A decision is a short generation; a local model on a
@@ -213,6 +214,10 @@ class Backend:
     endpoint = ""
     input_usd_per_mtok = 0.0
     output_usd_per_mtok = 0.0
+    #: True for a backend that talks to one of OUR nodes, so a 401 or a 429 from it
+    #: is AINode's auth or AINode's rate limiter and stops the run. False for the
+    #: hosted one, whose refusals are somebody else's and belong in their own row.
+    local = True
 
     def __init__(self, timeout: float = DEFAULT_TIMEOUT):
         self.timeout = timeout
@@ -230,12 +235,21 @@ class Backend:
         raise NotImplementedError
 
     def decide(self, item: Item) -> Decision:
-        """One item, end to end. A failure is a Decision with ``error`` set."""
+        """One item, end to end. A failure is a Decision with ``error`` set.
+
+        The exception is a refusal from one of OUR nodes: a 401 or a 429 means no
+        item was answered, so it raises rather than becoming 110 wrong answers with
+        a Brier score computed over them. The hosted backend is left alone
+        (``local = False``): a 401 from TypeSafe is about the TypeSafe key, and the
+        AINode sentence would send the operator after the wrong credential.
+        """
         request = self.request(item)
         self.requests += 1
         data, wall, error = post_json(request, self.timeout)
         wall_ms = round(wall * 1000)
         if error:
+            if self.local:
+                auth.check_error(error)
             return Decision(wall_ms=wall_ms, error=error)
         try:
             decision = self.parse(item, data)
@@ -272,13 +286,16 @@ class DecideBackend(Backend):
     name = "ainode"
 
     def __init__(self, endpoint: str, model: str = "", api_key: str = DEFAULT_API_KEY,
-                 timeout: float = DEFAULT_TIMEOUT):
+                 timeout: float = DEFAULT_TIMEOUT, key_source: str = ""):
         super().__init__(timeout=timeout)
         if not endpoint:
             raise BackendError("the ainode backend needs --endpoint")
         self.endpoint = decide_url(endpoint)
         self.model = model
         self.api_key = api_key
+        #: Where the key came from, for the one line a run prints about it. Never
+        #: the key itself, the rule the hosted backend already holds.
+        self.key_source = key_source
 
     def question(self, item: Item) -> dict:
         if item.kind == CHOICE:
@@ -291,9 +308,7 @@ class DecideBackend(Backend):
                    "questions": {QUESTION_KEY: self.question(item)}}
         if self.model:
             payload["model"] = self.model
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers = auth.bearer(self.api_key)
         return Request(self.endpoint, payload, headers)
 
     def parse(self, item: Item, data: dict) -> Decision:
@@ -331,7 +346,8 @@ class ChatBackend(Backend):
     TOP_LOGPROBS = 20
 
     def __init__(self, endpoint: str, model: str, api_key: str = DEFAULT_API_KEY,
-                 timeout: float = DEFAULT_TIMEOUT, think_off: bool = True):
+                 timeout: float = DEFAULT_TIMEOUT, think_off: bool = True,
+                 key_source: str = ""):
         super().__init__(timeout=timeout)
         if not endpoint:
             raise BackendError("the chat backend needs --endpoint")
@@ -341,6 +357,8 @@ class ChatBackend(Backend):
         self.model = model
         self.api_key = api_key
         self.think_off = think_off
+        #: Where the key came from, for the one line a run prints about it.
+        self.key_source = key_source
 
     def letters(self, item: Item) -> list:
         options = item.options
@@ -371,9 +389,7 @@ class ChatBackend(Backend):
             # latency on a question whose answer is one letter.
             payload["chat_template_kwargs"] = {"enable_thinking": False,
                                                "thinking": False}
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers = auth.bearer(self.api_key)
         return Request(self.endpoint, payload, headers)
 
     def parse(self, item: Item, data: dict) -> Decision:
@@ -417,6 +433,8 @@ class JevBackend(Backend):
     name = "jev"
     input_usd_per_mtok = JEV_INPUT_USD_PER_MTOK
     output_usd_per_mtok = JEV_OUTPUT_USD_PER_MTOK
+    #: Not one of our nodes, so its 401s and 429s are TypeSafe's to explain.
+    local = False
 
     def __init__(self, api_key: str, model: str = JEV_MODEL, url: str = JEV_URL,
                  timeout: float = DEFAULT_TIMEOUT, key_source: str = ""):
@@ -440,8 +458,7 @@ class JevBackend(Backend):
     def request(self, item: Item) -> Request:
         payload = {"state": item.state, "model": self.model,
                    "questions": {QUESTION_KEY: self.question(item)}}
-        return Request(self.endpoint, payload,
-                       {"Authorization": f"Bearer {self.api_key}"})
+        return Request(self.endpoint, payload, auth.bearer(self.api_key))
 
     def parse(self, item: Item, data: dict) -> Decision:
         answer_block = (data.get("answers") or {})[QUESTION_KEY]
@@ -536,6 +553,18 @@ def jev_api_key(explicit: str = ""):
     return "", ""
 
 
+def node_api_key(explicit: str = ""):
+    """``(key, source)`` for the two backends that talk to one of our own nodes.
+
+    ``--api-key``, then ``$AINODE_API_KEY``, then the placeholder an open node
+    accepts. Deliberately NOT the same function as :func:`jev_api_key`: the hosted
+    backend's credential is TypeSafe's, and feeding this node's key to
+    ``api.typesafe.ai`` (or theirs to a node of ours) would hand a credential to the
+    wrong party.
+    """
+    return auth.key_for(explicit, DEFAULT_API_KEY)
+
+
 def build_backend(name: str, endpoint: str = "", model: str = "",
                   api_key: str = "", timeout: float = DEFAULT_TIMEOUT):
     """The named backend, or ``BackendError`` saying what it still needs."""
@@ -543,12 +572,13 @@ def build_backend(name: str, endpoint: str = "", model: str = "",
         key, source = jev_api_key(api_key)
         return JevBackend(key, model=model or JEV_MODEL, timeout=timeout,
                           key_source=source)
+    key, source = node_api_key(api_key)
     if name == "ainode":
-        return DecideBackend(endpoint, model=model,
-                             api_key=api_key or DEFAULT_API_KEY, timeout=timeout)
+        return DecideBackend(endpoint, model=model, api_key=key, timeout=timeout,
+                             key_source=source)
     if name == "chat":
-        return ChatBackend(endpoint, model, api_key=api_key or DEFAULT_API_KEY,
-                           timeout=timeout)
+        return ChatBackend(endpoint, model, api_key=key, timeout=timeout,
+                           key_source=source)
     raise BackendError(f"unknown backend {name!r}; pick from {', '.join(BACKENDS)}")
 
 
@@ -558,4 +588,5 @@ __all__ = ["BACKENDS", "DEFAULT_API_KEY", "DEFAULT_TIMEOUT", "ERROR_CHARS",
            "BackendError", "ChatBackend", "DecideBackend", "Decision", "JevBackend",
            "Request", "boolean_distribution", "build_backend", "chat_url",
            "coerce_boolean", "decide_url", "jev_api_key", "letter_probabilities",
-           "missing_key_message", "normalize", "post_json", "rubric_lines"]
+           "missing_key_message", "node_api_key", "normalize", "post_json",
+           "rubric_lines"]

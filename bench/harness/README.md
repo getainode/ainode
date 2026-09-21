@@ -85,6 +85,18 @@ Useful flags:
   default (see the `claude` section). Recorded in the run's `settings` and on the
   claude block's `options`, and ignored by every other harness.
 - `--no-metrics` - skip the `/api/metrics` token window.
+- `--api-key` - bearer token for a protected node. Defaults to `$AINODE_API_KEY`, then
+  to the placeholder `ainode` that an open node accepts. It goes two places: into the
+  variable or config field each harness's own provider entry names (see the per
+  harness sections below), and onto the bench's own placement and token-counter reads.
+  Never printed and never written into a record, and the dry run's `env` line masks
+  anything key-shaped that is not the placeholder.
+
+A node that wants a key and did not get one **stops the run before the first task**.
+That matters more here than anywhere else: the requests are made by an agent CLI in a
+subprocess, so a 401 would arrive as ten tasks whose hidden tests never passed, which
+reads as a score. A 429 from the rate limiter stops it the same way and names the
+limit.
 
 It is inference only. It never loads, unloads, restarts or deletes anything, so it
 is safe to point at a node somebody else is using; it will add real load, and ten

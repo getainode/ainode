@@ -109,11 +109,26 @@ Useful flags:
 - `--max-tokens` / `--sustained-tokens` / `--reasoning-tokens` - generation
   budgets. Lower them for a slow model; a dense 405B at ~1 tok/s will sit on the
   default 1500-token sustained run for 25 minutes.
+- `--api-key` - bearer token for a protected node, on every request the run makes:
+  the chat completions it times, the placement reads and the telemetry poll.
+  Defaults to `$AINODE_API_KEY`. Never printed and never written into a record; a run
+  reports only where it came from. Every section takes this flag and reads the same
+  variable, so an operator exports it once and then runs whichever section they came
+  for.
 - `--show bench/results/<file>.json` - pretty-print a saved run.
 
 The script is **inference only**. It never loads, unloads, restarts or deletes
 anything, so it is safe to point at a node someone else is using. It will add
 load, so do not run the wide sweeps against a node serving live traffic.
+
+**A node that refuses the run is not a result.** Since a fresh install requires a
+key, every section opens with one GET of the endpoint's model list: a 401 prints
+"this node wants an API key (pass --api-key or set AINODE_API_KEY)" and stops before
+anything is measured, and a 429 names the limit that refused it and stops the same
+way. Neither is ever recorded as a model that could not answer. A refusal that only
+appears mid-run (a rotated key, a limiter that trips at the concurrency sweep) stops
+the run there and writes no file, for the same reason: a record of the sections that
+happened to finish first reads as a complete measurement.
 
 ## What each section measures
 

@@ -53,7 +53,11 @@ Useful flags:
   probe. Both `enable_thinking` and `thinking` always go out together (Qwen-family
   templates read the first, DeepSeek V4 reads the second), and `NAME` adds a third.
 - `--timeout 900` - seconds per request. The 100k needle prefill is the slow one.
-- `--api-key ainode` - bearer token for the endpoint.
+- `--api-key` - bearer token for the endpoint. Defaults to `$AINODE_API_KEY`, then to
+  the placeholder `ainode` that an open node accepts. Never printed and never written
+  into a record: a run reports only which of the three it came from. A node that wants
+  a key and did not get one stops the run before any probe is scored, rather than
+  failing all 25 the same way.
 
 ## The probes
 

@@ -398,11 +398,14 @@ def _token_delta(before, after):
     return out or None
 
 
-def http_metrics_reader(ainode: str):
+def http_metrics_reader(ainode: str, api_key: str = ""):
     """A reader for ``<ainode>/api/metrics``. Returns None when not configured.
 
     Uses the throughput bench's own tolerant GET: a control endpoint that is not
-    there degrades one optional field, it never fails a run.
+    there degrades one optional field, it never fails a run. ``api_key`` is the
+    node's, because ``/api/metrics`` is behind the key like everything else under
+    ``/api``, and without it the token window was silently absent from every record
+    written against a protected node.
     """
     if not ainode:
         return None
@@ -411,7 +414,7 @@ def http_metrics_reader(ainode: str):
     base = ainode.rstrip("/")
 
     def read():
-        data = get_json(f"{base}/api/metrics")
+        data = get_json(f"{base}/api/metrics", api_key=api_key)
         return None if "_error" in data else data
 
     return read

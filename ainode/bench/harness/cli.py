@@ -22,6 +22,7 @@ import pathlib
 import shlex
 import time
 
+from ainode.bench import auth
 from ainode.bench.harness import adapters as adapters_mod
 from ainode.bench.harness import runner as runner_mod
 from ainode.bench.harness.adapters import (
@@ -73,9 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
                                                   "repo's bench/harness/tasks)")
     p.add_argument("--work-dir", default="", help="where working copies go "
                                                  "(default a fresh temp dir)")
-    p.add_argument("--api-key", default=DEFAULT_API_KEY,
-                   help="placeholder key for harnesses that insist on one "
-                        f"(default {DEFAULT_API_KEY})")
+    p.add_argument("--api-key", default="",
+                   help="bearer token for a protected node. It goes to the harness "
+                        "through the variable or config field its own provider "
+                        "entry names, and on the bench's own placement reads "
+                        f"(default ${auth.ENV_API_KEY}, else the placeholder "
+                        f"{DEFAULT_API_KEY} that an open node accepts). Never "
+                        "printed and never written into a record")
     p.add_argument("--context-window", type=int, default=DEFAULT_CONTEXT_WINDOW,
                    help="context window declared to harnesses that need a catalog "
                         f"entry (default {DEFAULT_CONTEXT_WINDOW})")
@@ -126,17 +131,19 @@ def _preview(arg: str) -> str:
 SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
-def _mask(env: dict, api_key: str) -> dict:
-    """Print the overlay, except a credential we did not put there ourselves.
+def _mask(env: dict, placeholder: str = DEFAULT_API_KEY) -> dict:
+    """Print the overlay, except a credential.
 
     Paths are the useful half of this line, so they print. A key-shaped variable
-    prints only when it holds our placeholder: the adapters fill in a real key's
-    variable only if it was already set in the environment, and that value is
-    somebody's actual credential.
+    prints only when it holds our own PLACEHOLDER, which is a constant and not the
+    run's key: the adapters fill in a real key's variable only if it was already set
+    in the environment, and that value is somebody's actual credential. It used to
+    compare against ``--api-key``, which was safe only while that flag could not
+    carry a real key; since #245 it can, so a dry run would have printed it.
     """
     def show(name, value):
         keyish = any(word in name.upper() for word in SECRET_WORDS)
-        return value if (value == api_key or not keyish) else "***"
+        return value if (value == placeholder or not keyish) else "***"
 
     return {k: show(k, v) for k, v in sorted(env.items())}
 
@@ -163,7 +170,7 @@ def dry_run(tasks, adapters, args, out=print) -> int:
             out(f"    hidden   : {', '.join(task.test_names())} (after the harness exits)")
             out(f"    command  : {shlex.join(_preview(a) for a in info['command'])}")
             if info["env"]:
-                out(f"    env      : {_mask(info['env'], args.api_key)}")
+                out(f"    env      : {_mask(info['env'])}")
             if info["git_init"]:
                 out(f"    git init : {workdir}")
             for cfg in info["config"]:
@@ -180,6 +187,10 @@ def dry_run(tasks, adapters, args, out=print) -> int:
 def main(argv=None, out_dir=None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
+    # Resolved onto the namespace, because the key has to reach three places that
+    # already read it from there: the harness request the adapters build their
+    # provider config from, the bench's own placement reads, and the token window.
+    args.api_key, key_source = auth.key_for(args.api_key, DEFAULT_API_KEY)
     if not args.dry_run and not getattr(args, "list_harnesses", False):
         reason = preflight_test_interpreter()
         if reason:
@@ -221,6 +232,7 @@ def main(argv=None, out_dir=None) -> int:
     print(f"\n  ainode-bench harness  {args.model}")
     print(f"  label   : {args.label}")
     print(f"  endpoint: {args.endpoint}")
+    print(f"  key     : from {key_source} (never printed)")
     print(f"  harness : {', '.join(names)}")
     print(f"  tasks   : {len(tasks)} of {meta.get('count')} "
           f"({meta.get('id')}): {', '.join(t.slug for t in tasks)}")
@@ -238,11 +250,20 @@ def main(argv=None, out_dir=None) -> int:
         p.error(f"not on PATH: {', '.join(missing)}. Install them or drop them from "
                 "--harness; run with --dry-run to see what would have been called")
 
+    # This section's only protection against a refusing node: the measured requests
+    # are made by an agent CLI in a subprocess, so a 401 would reach this process as
+    # ten tasks whose hidden tests never passed, which is a score and not an error.
+    refused = auth.preflight(args.endpoint, args.api_key)
+    if refused:
+        return auth.stop(refused)
+
     base = ainode_base(args.endpoint, args.ainode)
     from ainode.bench.fleet import describe_via_http, resolve_serving_node
 
-    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(base, args.model)
-    model_block, placement, _node_id, warnings = describe_via_http(base, base, args.model)
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(
+        base, args.model, api_key=args.api_key)
+    model_block, placement, _node_id, warnings = describe_via_http(
+        base, base, args.model, api_key=args.api_key)
     if node_name:
         # The fleet view names the serving node; the master's own description
         # would otherwise stamp the master as the placement.
@@ -259,7 +280,7 @@ def main(argv=None, out_dir=None) -> int:
     for warning in warnings:
         print(f"  warn    : {warning}")
 
-    reader = None if args.no_metrics else http_metrics_reader(base)
+    reader = None if args.no_metrics else http_metrics_reader(base, args.api_key)
     started = time.time()
     results = run_suite(tasks, adapters, args.endpoint, args.model,
                         root=pathlib.Path(args.work_dir) if args.work_dir else None,
