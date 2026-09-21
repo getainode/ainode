@@ -1,9 +1,16 @@
 """Shared pytest fixtures.
 
-Five are global, all there to keep the suite from reading or touching the machine
-it runs on: netdev isolation, the metrics-store redirect, the boot-reconcile
-guard and the Hub size lookup (per test), and the
+Six are global, all there to keep the suite from reading or touching the machine
+it runs on: netdev isolation, the metrics-store redirect, the users-store
+redirect, the boot-reconcile guard and the Hub size lookup (per test), and the
 engine-container guard (per session, at the bottom of this file).
+
+``isolate_users_store``: ``create_app`` loads the login accounts
+(``ainode/auth/accounts.py``) the way it loads ``auth.json``, so without this
+every test that starts an application would read, and any test that created an
+account would WRITE, the developer's own ``~/.ainode/users.json``. Point the
+module constant at a temporary file per test. A test that wants a specific path
+passes one to ``UsersStore``, which this does not touch.
 
 ``isolate_netdev``: ``ainode.cluster.netdev`` reads the
 real host (``ip -o -4 addr show``, ``/sys/class/net``) and caches the answer
@@ -80,6 +87,20 @@ def isolate_metrics_store(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(
         metrics_store, "default_store_path", lambda: home / "metrics.db"
     )
+    yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_users_store(monkeypatch, tmp_path):
+    """Keep the login accounts out of the operator's real AINODE_HOME.
+
+    ``UsersStore`` resolves ``accounts.USERS_FILE`` at call time rather than in
+    ``__init__`` precisely so this one patch reaches a store that already exists,
+    the same way the ``auth_home`` fixtures redirect ``AUTH_FILE``.
+    """
+    from ainode.auth import accounts
+
+    monkeypatch.setattr(accounts, "USERS_FILE", tmp_path / "users.json")
     yield
 
 

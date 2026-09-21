@@ -30,7 +30,9 @@ from ainode.auth.middleware import (
     auth_middleware,
     is_authenticated,
 )
+from ainode.auth.accounts import UsersStore
 from ainode.auth.api_routes import register_auth_routes
+from ainode.auth.session_routes import register_session_routes
 from ainode.ratelimit.middleware import (
     RateLimitConfig,
     RateLimiter,
@@ -125,6 +127,11 @@ def create_app(
         config = NodeConfig()
 
     auth_config = AuthConfig.load()
+    # The accounts beside the keys (#261). Built here so the middleware, the
+    # login routes and the CLI all read one store, and loaded the same way
+    # auth.json is: a malformed file raises at boot rather than letting the node
+    # come up with no accounts and an operator who thinks there are some.
+    users_store = UsersStore.load()
 
     # Order matters. The rate limiter is LAST, so it runs innermost: by then the
     # auth middleware has stamped the API key id, which is what the limiter keys
@@ -150,6 +157,7 @@ def create_app(
 
     app["config"] = config
     app["auth_config"] = auth_config
+    app["users_store"] = users_store
     # Per-client limits on /v1. Off unless config.json says otherwise, so a node
     # that never heard of the block behaves exactly as it did before.
     app["rate_limiter"] = RateLimiter(config=RateLimitConfig.from_config(config))
@@ -294,6 +302,9 @@ def create_app(
     register_model_routes(app, models_dir=config.models_dir)
 
     register_auth_routes(app)
+    # The login half of auth, beside the key half: one door for people, one for
+    # machines (ainode/auth/session_routes.py).
+    register_session_routes(app)
 
     # --- Metrics routes ------------------------------------------------------
     register_metrics_routes(app, collector)
