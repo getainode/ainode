@@ -5,9 +5,6 @@ const AINode = {
     status: null,
     nodes: [],
     metrics: null,
-    // Ring buffer of recent metrics points, seeded from /api/metrics/history at
-    // page load and appended to by each poll. See seedMetricsHistory.
-    metricsHistory: null,
     messages: [],
     conversations: [],
     currentConversation: null,
@@ -467,6 +464,14 @@ const AINode = {
         // results table current.
         if (window.AINodeBench) window.AINodeBench.render(this);
         break;
+      case 'metrics':
+        // Same deal for the Metrics view (metrics.js): it owns its charts, its
+        // range picker and its own refetch cadence, and reads the poll tick only
+        // to keep the node picker current. A 7 day chart has nothing to gain from
+        // a request every five seconds, so it throttles itself rather than being
+        // driven from here.
+        if (window.AINodeMetrics) window.AINodeMetrics.render(this);
+        break;
       case 'config':
         this.renderConfig();
         break;
@@ -511,11 +516,10 @@ const AINode = {
     }
     // Status + nodes every 5s
     this.state.pollInterval = setInterval(function () { self.refresh(); }, 5000);
-    // Metrics every 3s
+    // Metrics every 3s. One reader: the GPU block, which the topology graphic
+    // draws as the local node's ring. The request block and the history live in
+    // the Metrics view now, which reads /api/metrics/history itself (metrics.js).
     this.state.metricsInterval = setInterval(function () { self.pollMetrics(); }, 3000);
-    // Seed the metrics ring buffer from disk once, before the polls start
-    // appending to it, so a chart opens on the node's real recent history.
-    this.seedMetricsHistory();
     // Live load progress every 1s, locally: no request, just the clock moving on
     // the last payload. Every poll reconciles it with the server.
     this.state.loadTickInterval = setInterval(function () { self.tickLoadProgress(); }, 1000);
@@ -738,90 +742,19 @@ const AINode = {
     topBar.appendChild(banner);
   },
 
+  // One snapshot, one reader: the topology graphic's local node ring
+  // (renderDashboard). The request block rides along in the same response and is
+  // NOT read here. The Metrics view draws requests, latency and tokens from
+  // /api/metrics/history, which is the copy that survives a restart (#234).
+  //
+  // The 400 point ring buffer that used to be appended here has gone with it. It
+  // was seeded from that same history route and nothing ever drew it (#210), and
+  // a buffer plus a store is two sources for one line: the range picker asks for
+  // windows a 20 minute buffer cannot answer, and the store already holds 48
+  // hours of raw samples and 30 days of roll-ups.
   async pollMetrics() {
     var data = await this.fetchJSON('/api/metrics');
     if (data) this.state.metrics = data;
-    this.pushMetricsPoint(data);
-  },
-
-  // ========================================================================
-  //  METRICS HISTORY (ring buffer, seeded from disk)
-  // ========================================================================
-
-  // Series the buffer keeps. Named exactly as /api/metrics/history names them.
-  METRICS_SERIES: [
-    'gpu.utilization_percent',
-    'gpu.memory_used_mb',
-    'gpu.temperature_c',
-    'requests.tokens_per_second',
-  ],
-
-  // How many points the buffer holds: 3 second polls over about 20 minutes.
-  METRICS_BUFFER_POINTS: 400,
-
-  // Fill the ring buffer from what the node kept on disk, so a chart opens with
-  // the last 20 minutes on it instead of one point from the moment the page
-  // loaded. Everything the node measured used to live in the server's memory,
-  // and a restart or a browser refresh put the chart back to empty.
-  //
-  // A null value is kept as null, never dropped and never zeroed: a gap in the
-  // series is a minute nobody measured, and a chart that joins across it or
-  // draws it at the axis is telling the reader the GPU was idle.
-  async seedMetricsHistory() {
-    var buffer = { points: [], seeded: false, series: this.METRICS_SERIES };
-    this.state.metricsHistory = buffer;
-    var qs = 'series=' + encodeURIComponent(this.METRICS_SERIES.join(','))
-      + '&since=-20m&step=3s';
-    var data = await this.fetchJSON('/api/metrics/history?' + qs);
-    buffer.store = (data && data.store) || null;
-    if (!data || !data.series) { buffer.seeded = true; return buffer; }
-    var names = this.METRICS_SERIES;
-    // Timestamps in milliseconds, like Date.now(), because that is what the live
-    // points below carry and one buffer cannot hold two units.
-    var grid = data.series[names[0]] || [];
-    var seeded = [];
-    for (var i = 0; i < grid.length; i++) {
-      var point = { ts: grid[i].ts * 1000, values: {} };
-      for (var s = 0; s < names.length; s++) {
-        var slot = (data.series[names[s]] || [])[i];
-        point.values[names[s]] = slot && slot.value !== undefined ? slot.value : null;
-      }
-      seeded.push(point);
-    }
-    // In front of whatever the poll appended while this request was in flight:
-    // the fetch is not awaited by the caller, so a 3 second tick can land first,
-    // and a live point sitting before the history would put the buffer out of
-    // order for anything that reads it as a series.
-    buffer.points = seeded.concat(buffer.points);
-    if (buffer.points.length > this.METRICS_BUFFER_POINTS) {
-      buffer.points = buffer.points.slice(-this.METRICS_BUFFER_POINTS);
-    }
-    buffer.seeded = true;
-    return buffer;
-  },
-
-  // Append one live poll to the buffer. A poll that failed appends a null point
-  // rather than nothing, so a gap in the chart is the gap that happened.
-  pushMetricsPoint(data) {
-    var buffer = this.state.metricsHistory;
-    if (!buffer) return;
-    var gpu = (data && data.gpu) || {};
-    var req = (data && data.requests) || {};
-    var pick = function (value) {
-      return (value === undefined || value === null) ? null : value;
-    };
-    buffer.points.push({
-      ts: Date.now(),
-      values: {
-        'gpu.utilization_percent': pick(gpu.utilization_percent),
-        'gpu.memory_used_mb': pick(gpu.memory_used_mb),
-        'gpu.temperature_c': pick(gpu.temperature_c),
-        'requests.tokens_per_second': pick(req.tokens_per_second),
-      },
-    });
-    if (buffer.points.length > this.METRICS_BUFFER_POINTS) {
-      buffer.points = buffer.points.slice(-this.METRICS_BUFFER_POINTS);
-    }
   },
 
   // ========================================================================

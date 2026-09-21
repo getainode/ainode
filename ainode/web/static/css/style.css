@@ -6292,3 +6292,223 @@ select {
   word-break: break-all;
   user-select: all;
 }
+
+/* ============================================================
+   METRICS VIEW: charts of this node's retained history
+   ============================================================
+   Drawn by static/js/metrics.js on canvases. The colours of the LINES are not
+   here: metrics.js reads the tokens at the top of this file through
+   getComputedStyle, so a change to --nvidia-green moves the charts with
+   everything else instead of leaving them on a stale copy. What is here is the
+   frame around them. */
+#view-metrics {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+#metrics-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+#view-metrics .view-header h2 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+#view-metrics .view-header p {
+  margin-top: 4px;
+  max-width: 76ch;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.metrics-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.metrics-ranges,
+.metrics-nodes {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.metrics-nodes-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.metrics-range-pill,
+.metrics-node-pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  letter-spacing: 0.3px;
+  cursor: pointer;
+}
+
+.metrics-range-pill:hover,
+.metrics-node-pill:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.metrics-range-pill.active,
+.metrics-node-pill.active {
+  background: var(--nvidia-green-dim);
+  border-color: var(--nvidia-green);
+  color: #000;
+}
+
+/* What the node actually served: raw samples or roll-ups, at which step. A
+   picker that asks for one thing and a store that answers another is exactly the
+   kind of quiet mismatch this line exists to show. */
+.metrics-toolbar-status {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 14px;
+}
+
+.metrics-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px 10px;
+  min-width: 0;
+}
+
+.metrics-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.metrics-panel-titles {
+  min-width: 0;
+}
+
+.metrics-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 0;
+}
+
+.metrics-panel-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.metrics-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.metrics-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.metrics-legend-item i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.metrics-legend-item b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* n/a, not 0: a series the node never measured is dimmed and says n/a, and its
+   canvas stays empty. Drawing it at the axis would report an idle GPU. */
+.metrics-legend-item.absent,
+.metrics-legend-item.absent b {
+  color: var(--text-muted);
+}
+
+.metrics-canvas-wrap {
+  position: relative;
+  height: 170px;
+}
+
+.metrics-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.metrics-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.metrics-panel-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  max-width: 70ch;
+}
+
+.metrics-store {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.metrics-store code {
+  color: var(--text-secondary);
+}
+
+.metrics-store-warn {
+  color: var(--amber);
+}

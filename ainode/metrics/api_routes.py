@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any, Optional
+from urllib.parse import urlencode
 
+import aiohttp
 from aiohttp import web
 
+from ainode.api.server_routes import peer_host
 from ainode.metrics import prometheus
 from ainode.metrics.collector import MetricsCollector
 from ainode.metrics.store import MAX_HISTORY_POINTS, MetricsStore
+
+logger = logging.getLogger(__name__)
+
+#: How long a peer has to answer for its own history. A dashboard drawing six
+#: panels waits on this, and a node that has gone is better reported as absent
+#: than waited on: the panel says which node did not answer.
+PEER_HISTORY_TIMEOUT = 6.0
 
 #: Suffixes accepted on a duration or a relative instant in the query string.
 _UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
@@ -86,11 +97,20 @@ async def handle_metrics_history(request: web.Request) -> web.Response:
         ``raw`` or ``1m``, to override the automatic choice. The automatic choice
         is the roll-up table whenever the window reaches back past the raw
         retention or the step is a minute or more.
+    ``node``
+        A node id or node name. Absent, or this node's own, answers from this
+        node's store. Any other name is fetched FROM THAT NODE and passed
+        through, so the fleet's charts are each node's own measurements rather
+        than anything a head inferred about it (see ``_peer_history``).
 
     Every series comes back as the same evenly spaced grid, ``value: null`` in
     any slot where nothing was measured. Null is never filled in: a gap is a gap,
     whether the sampler was down or the driver would not answer.
     """
+    target = (request.query.get("node") or "").strip()
+    if target and not _is_local_node(request.app, target):
+        return await _peer_history(request, target)
+
     store: Optional[MetricsStore] = request.app.get("metrics_store")
     if store is None:
         # Retention off, or the store could not be opened at boot. Answer the
@@ -100,6 +120,7 @@ async def handle_metrics_history(request: web.Request) -> web.Response:
             "store": {"enabled": False, "available": False, "degraded": False},
             "series": {},
             "points": 0,
+            "node": local_node_block(request.app),
         })
 
     try:
@@ -138,6 +159,7 @@ async def handle_metrics_history(request: web.Request) -> web.Response:
         "samples": stats["samples"],
         "downsampled": stats["downsampled"],
     }
+    payload["node"] = local_node_block(request.app)
     return web.json_response(payload)
 
 
@@ -166,6 +188,158 @@ async def handle_prometheus(request: web.Request) -> web.Response:
         body=rendered.encode("utf-8"),
         headers={"Content-Type": prometheus.content_type()},
     )
+
+
+# ---------------------------------------------------------------------------
+# One node's history, from any node in the cluster
+# ---------------------------------------------------------------------------
+#
+# The dashboard draws the same six panels for any node of the fleet, and the
+# figures behind them are the ones THAT node measured and wrote to its own store.
+# So ``?node=<id>`` is a pass-through, not an aggregation: this node fetches the
+# peer's own ``/api/metrics/history`` with the same window and hands the answer
+# back with a ``node`` block saying whose it is. Nothing is merged, averaged or
+# filled in on the way through, because a head has no measurements of a peer's
+# GPU and an interpolated grid would read as one.
+#
+# A peer that does not answer is an error naming the node, never an empty grid:
+# empty would draw as a node that measured nothing, which is a different fact
+# from a node that could not be reached.
+
+
+def local_node_block(app: web.Application) -> dict[str, Any]:
+    """Whose measurements these are, on every history response."""
+    config = app.get("config")
+    return {
+        "node_id": str(getattr(config, "node_id", "") or ""),
+        "node_name": str(getattr(config, "node_name", "") or ""),
+        "local": True,
+    }
+
+
+def _is_local_node(app: web.Application, target: str) -> bool:
+    """True when ``target`` names the node serving this request."""
+    config = app.get("config")
+    wanted = target.strip().lower()
+    for value in (getattr(config, "node_id", ""), getattr(config, "node_name", "")):
+        if value and str(value).strip().lower() == wanted:
+            return True
+    return False
+
+
+def _find_peer(app: web.Application, target: str):
+    """The ClusterNode named by id or name, or None. Offline nodes included.
+
+    Offline on purpose: a node that stopped announcing five minutes ago still has
+    a store full of the hours before that, and "that node is not answering" is a
+    better answer for the panel than "no such node".
+    """
+    cluster = app.get("cluster_state")
+    if cluster is None:
+        return None
+    wanted = target.strip().lower()
+    try:
+        nodes = cluster.get_nodes(include_offline=True)
+    except Exception:
+        return None
+    for node in nodes or []:
+        for value in (getattr(node, "node_id", ""), getattr(node, "node_name", "")):
+            if value and str(value).strip().lower() == wanted:
+                return node
+    return None
+
+
+def _peer_query(request: web.Request) -> str:
+    """This request's query string with ``node`` removed, repeats preserved."""
+    pairs = [(key, value) for key, value in request.query.items() if key != "node"]
+    return urlencode(pairs)
+
+
+def _peer_auth_headers(request: web.Request) -> dict[str, str]:
+    """What to send a peer so a key-protected node answers.
+
+    The caller's own ``Authorization`` header, forwarded, which is what
+    ``proxy_to_vllm`` already does for every inference path and what makes a
+    fleet sharing one key work today.
+
+    TODO(auth): when the peer-call helper being added for cluster auth lands,
+    call it here instead. A fleet whose nodes hold DIFFERENT keys needs this
+    node's own credential for the peer rather than the browser's, and that
+    decision belongs in one place for every peer call, not in this file.
+    """
+    token = request.headers.get("Authorization", "")
+    return {"Authorization": token} if token else {}
+
+
+async def _peer_history(request: web.Request, target: str) -> web.Response:
+    """GET one peer's ``/api/metrics/history`` and pass it through."""
+    node = _find_peer(request.app, target)
+    if node is None:
+        return web.json_response(
+            {
+                "error": f"no node named {target!r} in this cluster",
+                "node": {"node_id": target, "node_name": target, "local": False},
+                "series": {},
+                "points": 0,
+            },
+            status=404,
+        )
+
+    node_block = {
+        "node_id": str(getattr(node, "node_id", "") or ""),
+        "node_name": str(getattr(node, "node_name", "") or ""),
+        "local": False,
+    }
+    host = peer_host(node)
+    port = int(getattr(node, "web_port", 3000) or 3000)
+    session: Optional[aiohttp.ClientSession] = request.app.get("client_session")
+    if not host or session is None:
+        reason = ("this node has no usable address for that node"
+                  if not host else "this node has no HTTP session to ask with")
+        return web.json_response(
+            {"error": reason, "node": node_block, "series": {}, "points": 0},
+            status=502,
+        )
+
+    query = _peer_query(request)
+    url = f"http://{host}:{port}/api/metrics/history" + (f"?{query}" if query else "")
+    try:
+        async with session.get(
+            url,
+            headers=_peer_auth_headers(request),
+            timeout=aiohttp.ClientTimeout(total=PEER_HISTORY_TIMEOUT),
+        ) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status != 200 or not isinstance(body, dict):
+                message = ""
+                if isinstance(body, dict):
+                    message = str(body.get("error") or "")
+                return web.json_response(
+                    {
+                        "error": message or f"{node_block['node_name'] or target} answered {resp.status}",
+                        "node": node_block,
+                        "series": {},
+                        "points": 0,
+                    },
+                    status=502 if resp.status != 404 else 404,
+                )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logger.debug("peer history from %s failed: %s", url, exc)
+        return web.json_response(
+            {
+                "error": f"{node_block['node_name'] or target} did not answer for its history",
+                "node": node_block,
+                "series": {},
+                "points": 0,
+            },
+            status=502,
+        )
+
+    # The peer's own answer, with the name of whose it is. Its ``node`` block (it
+    # sends one saying "local") is replaced: local is true of the peer and false
+    # of the reader, and the reader is who this is for.
+    body["node"] = node_block
+    return web.json_response(body)
 
 
 # ---------------------------------------------------------------------------

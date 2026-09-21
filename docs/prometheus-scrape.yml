@@ -19,13 +19,20 @@
 #   ainode_tokens_generated_total                counter
 #   ainode_tokens_per_second                     gauge, mean over process life
 #   ainode_requests_by_model_total{model}        counter
-#   ainode_request_latency_milliseconds{quantile}  summary, p50 p95 p99
+#   ainode_request_latency_milliseconds{quantile}  summary, p50 p95 p99,
+#                                                ABSENT until a request is timed.
+#                                                No _sum: the collector keeps no
+#                                                running total, and a sum of 0
+#                                                averages to zero latency.
+#   ainode_request_latency_milliseconds_count    counter, the timed request count
 #   ainode_gpu_utilization_percent               gauge, ABSENT on unified memory
 #   ainode_gpu_memory_used_bytes                 gauge, ABSENT when nothing measured it
 #   ainode_gpu_memory_total_bytes                gauge
 #   ainode_gpu_temperature_celsius               gauge
-#   ainode_gpu_available                         gauge, 0 when NVML would not answer
-#   ainode_model_loaded{model,status,port}       gauge, 1 per engine on this node
+#   ainode_gpu_available                         gauge, 1 when NVML answers, 0 when not
+#   ainode_model_loaded{model,status,port,tp}    gauge, 1 per engine on this node.
+#                                                tp is the tensor parallel width,
+#                                                absent when the record has none.
 #   ainode_metrics_retention_enabled             gauge
 #   ainode_metrics_retention_degraded            gauge, 1 after a store write failed
 #   ainode_metrics_retention_db_bytes            gauge
@@ -39,6 +46,12 @@
 # on a DGX Spark (GB10) the driver exposes no GPU utilisation counter and NVML
 # reports no per-device memory usage, so ainode_gpu_utilization_percent is simply
 # not there. A 0 would draw as an idle GPU on a node that is serving.
+#
+# The same rule covers latency: a node that has timed no request publishes no
+# latency summary at all, rather than three percentiles reading 0, which would
+# make it the fastest node in the fleet. ainode_gpu_available is the one series
+# that answers in both directions, because whether NVML replies is a yes or no
+# question and not a measurement.
 #
 # Two consequences for anything built on this:
 #
@@ -74,12 +87,14 @@ scrape_configs:
     #   credentials_file: /etc/prometheus/ainode.key
 
     static_configs:
-      # One target per node, on its web port. Replace with your own addresses.
+      # One target per node, on its web port. Replace these with your own
+      # addresses: a node is reachable at whatever address its own network gives
+      # it, and the node / node_id labels below are what identify it afterwards.
       - targets:
-          - 100.122.26.9:3000    # Spark-1
-          - 100.85.4.222:3000    # Spark-2
-          - 100.80.240.119:3000  # Spark-3
-          - 100.71.16.165:3000   # Spark-4
+          - node-1.example:3000
+          - node-2.example:3000
+          - node-3.example:3000
+          - node-4.example:3000
 
     relabel_configs:
       # Keep the address as a separate label, so `instance` can be overwritten
@@ -89,8 +104,8 @@ scrape_configs:
 
     metric_relabel_configs:
       # Make `instance` the node's own name where the node states one. A fleet
-      # dashboard then reads Spark-3 rather than 100.80.240.119:3000, and a node
-      # that changes address keeps its identity in every existing panel.
+      # dashboard then reads the node's name rather than its address, and a node
+      # that moves keeps its identity in every existing panel.
       - source_labels: [node]
         regex: (.+)
         target_label: instance

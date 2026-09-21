@@ -95,28 +95,60 @@ def render(
             ))
         lines.append("")
 
-    # Latency summary (p50 / p95 / p99 are pre-computed by the collector)
+    # Latency summary (p50 / p95 / p99 are pre-computed by the collector).
+    #
+    # ABSENT until a request has been timed. The collector answers 0 for all
+    # three percentiles on a node that has served nothing, because that is the
+    # shape /api/metrics has always had, and exported that read as "every request
+    # answers instantly": the one reading nobody can tell from a very fast node.
+    # The store already refuses to persist those zeros (store.series_from_snapshot
+    # stores None until `total` moves), and the exposition agrees with it: no
+    # HELP, no TYPE, no samples, so a dashboard shows no data and an alert can
+    # say absent() instead of == 0.
+    #
+    # There is no _sum. The collector keeps a window of latencies for the
+    # percentiles and no running total, so the only sum available was a literal 0,
+    # which makes avg = sum/count read as zero latency on every node in the
+    # fleet. A summary without a sum is a summary a scraper cannot average; a
+    # summary with a fake one is a wrong answer, and tracking a real one means
+    # adding a field to a snapshot shape that is pinned by test and read by the
+    # discovery broadcast. _count is real (it is the request counter) and stays.
     latency = requests.get("latency_ms", {}) or {}
-    lines += [
-        "# HELP ainode_request_latency_milliseconds Request latency percentiles (milliseconds).",
-        "# TYPE ainode_request_latency_milliseconds summary",
-    ]
-    for pct_key, quantile in (("p50", "0.5"), ("p95", "0.95"), ("p99", "0.99")):
-        value = float(latency.get(pct_key, 0.0) or 0.0)
-        lines.append(_fmt(
-            "ainode_request_latency_milliseconds", value,
-            {**base, "quantile": quantile},
-        ))
-    # Also emit count + sum so Prometheus recording rules can compute
-    # additional aggregates (avg = sum/count) if a scraper wants them.
-    lines.append(_fmt("ainode_request_latency_milliseconds_count", total, base))
-    # exact sum not tracked
-    lines.append(_fmt("ainode_request_latency_milliseconds_sum", 0, base))
-    lines.append("")
+    if total > 0:
+        lines += [
+            "# HELP ainode_request_latency_milliseconds Request latency percentiles "
+            "(milliseconds). Absent until a request has been timed.",
+            "# TYPE ainode_request_latency_milliseconds summary",
+        ]
+        for pct_key, quantile in (("p50", "0.5"), ("p95", "0.95"), ("p99", "0.99")):
+            value = optional_float(latency.get(pct_key))
+            if value is None:
+                continue
+            lines.append(_fmt(
+                "ainode_request_latency_milliseconds", float(value),
+                {**base, "quantile": quantile},
+            ))
+        lines.append(_fmt("ainode_request_latency_milliseconds_count", total, base))
+        lines.append("")
 
     # -- GPU -----------------------------------------------------------------
+    #
+    # ainode_gpu_available is emitted in BOTH directions. It only ever carried the
+    # 0, so the healthy case published no series at all and a dashboard could not
+    # tell a working node from one that has never been scraped, although the HELP
+    # text promised "1=yes, 0=no". The individual readings stay absent-when-
+    # unreadable (a GB10 exposes no utilisation counter, so that series is simply
+    # not here); this one is a yes/no about NVML itself and has an answer either
+    # way.
     gpu = snapshot.get("gpu", {}) or {}
-    if isinstance(gpu, dict) and "error" not in gpu:
+    gpu_ok = isinstance(gpu, dict) and "error" not in gpu
+    lines += [
+        "# HELP ainode_gpu_available Whether the GPU is queryable via pynvml (1=yes, 0=no).",
+        "# TYPE ainode_gpu_available gauge",
+        _fmt("ainode_gpu_available", 1 if gpu_ok else 0, base),
+        "",
+    ]
+    if gpu_ok:
         util = gpu.get("utilization_percent")
         used = gpu.get("memory_used_mb")
         total_mem = gpu.get("memory_total_mb")
@@ -150,15 +182,6 @@ def render(
                 _fmt("ainode_gpu_temperature_celsius", float(temp), base),
                 "",
             ]
-    else:
-        # Surface the pynvml error as a gauge=0 stat so Grafana panels don't
-        # silently show "No data" when the GPU is unreachable.
-        lines += [
-            "# HELP ainode_gpu_available Whether the GPU is queryable via pynvml (1=yes, 0=no).",
-            "# TYPE ainode_gpu_available gauge",
-            _fmt("ainode_gpu_available", 0, base),
-            "",
-        ]
 
     lines += _model_lines(models, base)
     lines += _retention_lines(store, base)
@@ -215,6 +238,14 @@ def _model_lines(
         port = optional_float(entry.get("port"))
         if port is not None:
             extra["port"] = str(int(port))
+        # How wide the instance is. It was collected and then dropped, so a
+        # four node TP=4 instance and a solo TP=1 one produced identical series
+        # and a fleet dashboard could not tell them apart. Absent, not 1, when
+        # the record does not say: a default would claim solo of a shape nobody
+        # reported.
+        tp = optional_float(entry.get("tensor_parallel_size"))
+        if tp is not None:
+            extra["tp"] = str(int(tp))
         lines.append(_fmt("ainode_model_loaded", 1, extra))
     lines.append("")
     return lines
