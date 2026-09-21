@@ -377,6 +377,106 @@ def tailscale_dns_name(runner: Optional[CommandRunner] = None) -> Optional[str]:
     return name or None
 
 
+#: The tailnet's address range (100.64.0.0/10, RFC 6598 carrier-grade NAT), and
+#: the suffix every MagicDNS name ends in. Together they are how this node finds
+#: its own tailnet name with no tailscale binary in reach.
+TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+TAILNET_SUFFIX = ".ts.net"
+
+#: Environment variable the installer's host wrapper sets when it forwards a
+#: command into the container, so the containerised CLI can name the tailnet node
+#: without a daemon socket or a DNS lookup.
+TAILNET_NAME_ENV = "AINODE_TAILNET_NAME"
+
+#: Seconds to wait on `tailscale status --json`. Well under `run_command`'s own
+#: 30, because a wedged tailscaled must not hold up `ainode doctor`: not knowing
+#: the name costs one sentence in a message, and 30 seconds of silence costs the
+#: operator their trust in the command.
+TAILNET_PROBE_TIMEOUT = 5.0
+
+#: Seconds to wait on the reverse lookup. ``socket.gethostbyaddr`` takes no
+#: timeout and ignores ``setdefaulttimeout``, so the only way to bound it is to
+#: run it somewhere this function can walk away from.
+TAILNET_LOOKUP_TIMEOUT = 2.0
+
+
+def _reverse_lookup(addr: str, timeout: float = TAILNET_LOOKUP_TIMEOUT) -> str:
+    """The PTR name for *addr*, or "", giving up after *timeout* seconds.
+
+    In a daemon thread because ``gethostbyaddr`` cannot be interrupted: on a host
+    whose resolver is unhappy it blocks for as long as the resolver wants, and
+    this runs on ``ainode doctor``, which an operator is watching. The thread is
+    abandoned rather than joined on timeout, and dies with the process.
+    """
+    import threading
+
+    answer: list = []
+
+    def work() -> None:
+        try:
+            answer.append(socket.gethostbyaddr(addr)[0])
+        except (OSError, IndexError):
+            pass
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    return (answer[0] if answer else "").strip().rstrip(".")
+
+
+def tailnet_dns_name(runner: Optional[CommandRunner] = None,
+                     environ: Optional[dict] = None,
+                     allow_lookup: bool = True) -> Optional[str]:
+    """This node's MagicDNS name, found by whichever of three routes works.
+
+    In order, because each one answers where the previous cannot:
+
+    1. ``$AINODE_TAILNET_NAME``. The host wrapper resolves the name on the host,
+       where tailscale lives, and passes it in. Free and exact.
+    2. ``tailscale status --json``. The answer on a host, or in a source install
+       outside the container. There is no binary inside the image.
+    3. A reverse lookup of this host's tailnet address. The container runs with
+       ``--network=host``, so it shares the host's resolver, which on a tailnet
+       node is MagicDNS: ``100.80.240.119`` comes back
+       ``spark-3-dgx.tailed10d2.ts.net``. Only 100.64.0.0/10 addresses are asked
+       about and only a ``.ts.net`` answer is accepted, so nothing else on the
+       box can be mistaken for a tailnet name.
+
+    **Never call this on a request path**, and pass ``allow_lookup=False``
+    anywhere a stall would be worse than a missing name. Route 3 is a synchronous
+    name lookup that can stall for seconds on a host whose resolver is unhappy;
+    the doctor turns it off for that reason and gets the name from route 1
+    instead, since the wrapper always sets the variable. ``/api/status`` must
+    keep using the cached address derivation in ``api/server_routes.py``, which
+    does no name resolution at all.
+    """
+    env = os.environ if environ is None else environ
+    from_env = (env.get(TAILNET_NAME_ENV) or "").strip().rstrip(".")
+    if from_env:
+        return from_env
+
+    if tailscale_binary() or runner is not None:
+        probe = runner if runner is not None else (
+            lambda argv: run_command(argv, timeout=TAILNET_PROBE_TIMEOUT))
+        name = tailscale_dns_name(probe)
+        if name:
+            return name
+
+    if not allow_lookup:
+        return None
+
+    for addr in host_ip_addresses(runner):
+        try:
+            if ipaddress.IPv4Address(addr) not in TAILNET_NETWORK:
+                continue
+        except ValueError:  # pragma: no cover - host_ip_addresses already filtered
+            continue
+        resolved = _reverse_lookup(addr)
+        if resolved.lower().endswith(TAILNET_SUFFIX):
+            return resolved
+    return None
+
+
 def tailscale_cert(name: str, cert_path, key_path,
                    runner: Optional[CommandRunner] = None) -> dict:
     """Run ``tailscale cert`` for ``name``, writing straight into the TLS dir.
@@ -597,3 +697,66 @@ def ensure_pair(home=None) -> tuple[Path, Path]:
 
     ensure_tls_dir(home)
     return cert_paths(home)
+
+
+#: ``{(cert, key): ((cert stamp, key stamp), bool)}``, so the SSL context is
+#: built once per version of the pair rather than once per caller.
+_LOADABLE_CACHE: dict[tuple[str, str], tuple[tuple, bool]] = {}
+
+
+def pair_loadable(cert_file, key_file) -> bool:
+    """True when this cert and key can actually open a TLS listener.
+
+    The same question ``api/server.py::listener_plan`` asks at boot, answered
+    against the files as they are now, and cached on their identity (path, mtime,
+    size) because an ``SSLContext`` per call would put a key parse on whatever
+    route asked.
+    """
+    cert_path, key_path = Path(cert_file), Path(key_file)
+    key = (str(cert_path), str(key_path))
+    stamp = (_cache_stamp(cert_path), _cache_stamp(key_path))
+    if None in stamp:
+        return False
+    cached = _LOADABLE_CACHE.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    try:
+        ssl_context(cert_path, key_path)
+        answer = True
+    except (ssl.SSLError, OSError, ValueError):
+        answer = False
+    _LOADABLE_CACHE[key] = (stamp, answer)
+    return answer
+
+
+def serves_https(config) -> tuple[bool, int]:
+    """``(does this node serve HTTPS, on which port)``.
+
+    Every condition ``listener_plan`` applies, in the same order, so a node's
+    advertised address and the socket it actually opened cannot disagree: the
+    block is enabled, the port is not the HTTP port, both halves of the pair are
+    on disk, and the pair loads.
+
+    Evaluated against the files as they are NOW rather than against what the boot
+    decided, which is the one place this can drift: replacing a certificate
+    without restarting leaves the listener on the old pair. That is exactly the
+    case every ``ainode tls`` path already ends by telling the operator to
+    restart, and the alternative (a boot-time flag) would report a certificate
+    that has since been deleted as still serving.
+
+    When the answer is no, the port returned is the HTTP port, so a caller can
+    build one URL without asking twice.
+    """
+    from ainode.tls.config import load_tls_config
+
+    web_port = int(getattr(config, "web_port", 3000) or 3000)
+    tls = load_tls_config(config)
+    if not tls.enabled:
+        return False, web_port
+    if int(tls.port) == web_port:
+        return False, web_port
+    if not tls.files_present():
+        return False, web_port
+    if not pair_loadable(tls.cert_file, tls.key_file):
+        return False, web_port
+    return True, int(tls.port)

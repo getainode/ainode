@@ -1249,23 +1249,39 @@ def _restart_after_join() -> None:
     console.print("  Restart AINode on the HOST to apply:")
     console.print("    [bold]sudo systemctl restart ainode[/bold]")
 
-#: What to run on the HOST when `--tailscale` is asked for inside the container.
+#: What to run on the HOST when `--tailscale` is asked for inside the container
+#: and the pair is not there yet.
+#:
 #: The image ships no tailscale binary and the daemon socket is not mounted, so
-#: the operator runs the two commands themselves; the paths line up because
-#: $AINODE_HOME in the container IS the host's ~/.ainode bind mount.
+#: the cert step happens on the host. The installer's host wrapper does exactly
+#: that and then calls back in here, so an operator who typed `ainode tls enable
+#: --tailscale` on the host never sees this message; it is for a node whose
+#: wrapper predates that (or someone running the command inside the container by
+#: hand), and the manual commands it prints are the same two the wrapper runs.
 TAILSCALE_ON_THE_HOST = """\
   This is the AINode container, which has no tailscale binary and no access to
-  the tailnet daemon. Run these two on the HOST instead:
+  the tailnet daemon, and no tailnet pair is on disk yet.
 
-    sudo tailscale cert --cert-file {host_cert} --key-file {host_key} <your-node>.<tailnet>.ts.net
+  Run it on the HOST, where the wrapper does the cert step for you:
+
+    ainode tls enable --tailscale
+
+  If this node's wrapper is older than that, the two commands it would run are:
+
+    sudo tailscale cert --cert-file {host_cert} --key-file {host_key} {name}
     sudo chmod 600 {host_key}
 
   ({host_dir} is the same directory as {cert_dir} in here, so the
-  server will read what tailscale writes.) Then, back in the container:
+  server reads what tailscale writes.) Then, back in the container:
 
-    ainode tls enable --cert {cert} --key {key}
+    ainode tls enable --tailscale
 
   `tailscale status --json` on the host names the node: look for Self.DNSName."""
+
+#: The one-line fix when `tailscale cert` is refused because the tailnet has no
+#: HTTPS support turned on. Printed by the CLI and by the wrapper, same words.
+TAILNET_HTTPS_FIX = ("HTTPS must be enabled for the tailnet: Tailscale admin "
+                     "console > DNS > HTTPS Certificates > Enable.")
 
 
 def cmd_tls(args):
@@ -1277,13 +1293,15 @@ def cmd_tls(args):
         generate_self_signed,
         install_pair,
         load_tls_config,
+        renewal_decision,
         save_tls_config,
+        tailnet_dns_name,
+        tailnet_pair_paths,
         tailscale_cert,
-        tailscale_dns_name,
         tls_dir,
     )
     from ainode.tls.certs import tailscale_binary
-    from ainode.tls.config import DEFAULT_TLS_PORT, ensure_tls_dir
+    from ainode.tls.config import DEFAULT_TLS_PORT, ensure_tls_dir, harden_key
 
     action = getattr(args, "tls_action", None)
     config = NodeConfig.load()
@@ -1305,33 +1323,53 @@ def cmd_tls(args):
         default_cert, default_key = cert_paths()
 
         if getattr(args, "tailscale", False):
-            if not tailscale_binary():
-                # AINODE_HOST_HOME is set by the systemd unit the installer
-                # renders, so the message can name the path as the OPERATOR sees
-                # it rather than the container's /root/.ainode.
-                host_tls = os.path.join(
-                    os.environ.get("AINODE_HOST_HOME") or str(AINODE_HOME), "tls")
-                console.print("  [yellow]No tailscale binary here.[/yellow]")
-                console.print(TAILSCALE_ON_THE_HOST.format(
-                    host_cert=os.path.join(host_tls, "cert.pem"),
-                    host_key=os.path.join(host_tls, "key.pem"),
-                    host_dir=host_tls, cert_dir=tls_dir(),
-                    cert=default_cert, key=default_key))
-                sys.exit(1)
-            name = tailscale_dns_name()
-            if not name:
-                console.print("  [red]Could not read this node's MagicDNS name[/red] "
-                              "from `tailscale status --json`. Is tailscaled up?")
-                sys.exit(1)
-            try:
-                tailscale_cert(name, default_cert, default_key)
-            except RuntimeError as exc:
-                console.print(f"  [red]{exc}[/red]")
-                console.print("  HTTPS must be enabled for the tailnet "
-                              "(Tailscale admin console > DNS > HTTPS Certificates).")
-                sys.exit(1)
-            console.print(f"  [green]Installed a Let's Encrypt certificate for "
-                          f"{name}.[/green]")
+            # The name first, because both branches below need it and it is the
+            # one thing findable from either side of the container boundary.
+            name = tailnet_dns_name()
+            if tailscale_binary():
+                # A host, or a source install outside the container: do the cert
+                # step right here.
+                if not name:
+                    console.print("  [red]Could not read this node's MagicDNS "
+                                  "name[/red] from `tailscale status --json`. "
+                                  "Is tailscaled up?")
+                    sys.exit(1)
+                default_cert, default_key = tailnet_pair_paths(name)
+                try:
+                    tailscale_cert(name, default_cert, default_key)
+                except RuntimeError as exc:
+                    console.print(f"  [red]{exc}[/red]")
+                    console.print(f"  {TAILNET_HTTPS_FIX}")
+                    sys.exit(1)
+                console.print(f"  [green]Installed a Let's Encrypt certificate for "
+                              f"{name}.[/green]")
+            else:
+                # The container. The installer's host wrapper runs the cert step
+                # on the host and then calls this, so the pair is already in the
+                # bind mount under the name it was issued for: adopt it rather
+                # than fail on a binary that is never going to be in this image.
+                pair = tailnet_pair_paths(name) if name else None
+                if pair and pair[0].is_file() and pair[1].is_file():
+                    default_cert, default_key = pair
+                    harden_key(default_key)
+                    console.print(f"  [green]Adopting the tailnet certificate for "
+                                  f"{name}.[/green]")
+                    console.print("  Obtained on the host by `tailscale cert`; this "
+                                  "directory is the bind mount both sides share.")
+                else:
+                    # AINODE_HOST_HOME is set by the systemd unit the installer
+                    # renders, so the message can name the path as the OPERATOR
+                    # sees it rather than the container's /root/.ainode.
+                    host_tls = os.path.join(
+                        os.environ.get("AINODE_HOST_HOME") or str(AINODE_HOME), "tls")
+                    shown = name or "<your-node>.<tailnet>.ts.net"
+                    console.print("  [yellow]No tailscale binary here, and no "
+                                  "tailnet pair on disk.[/yellow]")
+                    console.print(TAILSCALE_ON_THE_HOST.format(
+                        host_cert=os.path.join(host_tls, f"{shown}.crt"),
+                        host_key=os.path.join(host_tls, f"{shown}.key"),
+                        host_dir=host_tls, cert_dir=tls_dir(), name=shown))
+                    sys.exit(1)
         elif cert_arg:
             try:
                 installed_cert, installed_key = install_pair(cert_arg, key_arg)
@@ -1378,6 +1416,44 @@ def cmd_tls(args):
         console.print("  Restart the node to close the port.")
         console.print("  Made in Texas")
 
+    elif action == "renew":
+        # The DECISION lives in ainode.tls.renew and the ACTING lives on the
+        # host: tailscale is not in this image, and the new pair is only served
+        # after a restart, which is a host operation too. `--check` is the
+        # machine-readable half the installer's renewal timer reads through the
+        # wrapper; without it this prints the same answer for a human.
+        info = certificate_info(tls.cert_file) if tls.cert_file else {}
+        decision = renewal_decision(tls, info, tailnet_name=tailnet_dns_name())
+        if getattr(args, "check", False):
+            for line in decision.as_lines():
+                console.print(line, highlight=False, markup=False, soft_wrap=True)
+            # Basenames, not paths: the renewal writes into the files the CONFIG
+            # points at (which may be cert.pem from an earlier manual run, not
+            # <name>.crt), and the host has to name them under ITS own
+            # <AINODE_HOME>/tls rather than the container's.
+            console.print(f"cert_name={os.path.basename(tls.cert_file or '')}",
+                          highlight=False, markup=False, soft_wrap=True)
+            console.print(f"key_name={os.path.basename(tls.key_file or '')}",
+                          highlight=False, markup=False, soft_wrap=True)
+            # 0 means "renew now", 10 means "decided, nothing to do": a timer can
+            # act on the code alone and stay quiet the other 75 days.
+            sys.exit(0 if decision.renew else 10)
+        if decision.renew:
+            console.print("  [yellow]This certificate is due for renewal.[/yellow]")
+        else:
+            console.print("  [green]No renewal needed.[/green]")
+        console.print(f"  {decision.reason}")
+        if decision.days_left is not None:
+            console.print(f"  Days left: {decision.days_left}")
+        console.print()
+        console.print("  Renewal runs on the HOST: `tailscale cert` needs the "
+                      "tailnet daemon, which this container has no path to, and "
+                      "the new pair is only served after a restart.")
+        console.print("    [bold]ainode tls renew[/bold]   (on the host)")
+        console.print("  The installer's ainode-tls-renew.timer already runs that "
+                      "daily, so an unattended node renews itself.")
+        console.print("  Made in Texas")
+
     elif action == "status":
         state = "[green]enabled[/green]" if tls.enabled else "[dim]disabled[/dim]"
         console.print(f"  TLS:  {state}")
@@ -1398,12 +1474,19 @@ def cmd_tls(args):
                 if info.get("sans"):
                     console.print(f"        names: {', '.join(info['sans'])}")
         if not tls.enabled:
-            console.print("  Enable it: ainode tls enable")
+            name = tailnet_dns_name()
+            if name:
+                console.print(f"  Tailnet name: {name}")
+                console.print("  Enable it: [bold]ainode tls enable --tailscale[/bold] "
+                              "(a real certificate for that name)")
+            else:
+                console.print("  Enable it: ainode tls enable")
         console.print("  Made in Texas")
 
     else:
-        console.print("  Usage: ainode tls {enable|disable|status}")
+        console.print("  Usage: ainode tls {enable|disable|status|renew}")
         console.print("  enable [--cert PATH --key PATH] [--tailscale] [--port N]")
+        console.print("  renew [--check]")
 
 
 def main():
@@ -1590,6 +1673,12 @@ def main():
                             help="TLS port (default 3443; must not be the HTTP port)")
     tls_sub.add_parser("disable", help="Stop serving HTTPS (the pair is kept)")
     tls_sub.add_parser("status", help="Show TLS state, certificate and expiry")
+    tls_renew = tls_sub.add_parser(
+        "renew", help="Whether the tailnet certificate is due for replacement")
+    tls_renew.add_argument(
+        "--check", action="store_true",
+        help="Print the decision as key=value lines and exit 0 when a renewal is "
+             "due, 10 when it is not (what the host's renewal timer reads)")
     tls_parser.set_defaults(func=cmd_tls)
 
     # doctor: node health report. Exits non-zero on any FAIL so it can gate a

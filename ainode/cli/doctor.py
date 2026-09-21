@@ -1082,18 +1082,37 @@ def check_tls(config: NodeConfig) -> list[Check]:
     or a tailnet, and it is what the whole fleet runs. An expired certificate IS a
     FAIL, because the node is refusing connections on a port it advertises.
     """
+    from ainode.tls.certs import tailnet_dns_name
+
     tls = load_tls_config(config)
     web_port = int(getattr(config, "web_port", 3000) or 3000)
+    # Free and exact when the host wrapper passed the name in; otherwise a reverse
+    # MagicDNS lookup of this node's own tailnet address, which is what answers
+    # inside the container (--network=host shares the host's resolver, and there
+    # is no tailscale binary in the image). Bounded at two seconds, because the
+    # doctor is a command somebody is watching.
+    tailnet = tailnet_dns_name() or ""
     data = {"enabled": bool(tls.enabled), "port": int(tls.port),
-            "cert_file": tls.cert_file, "http_port": web_port}
+            "cert_file": tls.cert_file, "http_port": web_port,
+            "tailnet_name": tailnet}
 
     if not tls.enabled:
-        return [Check("tls.enabled", WARN,
-                      f"no TLS: the dashboard, the API and any key travel in clear "
-                      f"text on {web_port}",
-                      fix="ainode tls enable (self-signed), or ainode tls enable "
-                          "--tailscale for a real certificate",
-                      data=data)]
+        # Name the command for THIS node rather than the shape of a command. An
+        # operator reading "--tailscale for a real certificate" still has to go
+        # and find out what their MagicDNS name is; with the name in the line,
+        # the fix is a copy and a paste.
+        if tailnet:
+            fix = (f"ainode tls enable --tailscale (a real certificate for "
+                   f"{tailnet}), or ainode tls enable for a self-signed one")
+            detail = (f"no TLS: the dashboard, the API and any key travel in clear "
+                      f"text on {web_port}, and this node is {tailnet} on the "
+                      f"tailnet")
+        else:
+            fix = ("ainode tls enable (self-signed), or ainode tls enable "
+                   "--tailscale for a real certificate")
+            detail = (f"no TLS: the dashboard, the API and any key travel in clear "
+                      f"text on {web_port}")
+        return [Check("tls.enabled", WARN, detail, fix=fix, data=data)]
     if not tls.cert_file or not tls.key_file:
         return [Check("tls.enabled", FAIL,
                       "TLS is enabled with no certificate configured, so the port "
@@ -1124,10 +1143,16 @@ def check_tls(config: NodeConfig) -> list[Check]:
                           "--tailscale, then restart",
                       data=data)]
     if days is not None and days <= TLS_EXPIRY_WARN_DAYS:
+        # Inside the window the host's ainode-tls-renew.timer acts on, so say so:
+        # on a tailnet certificate this warning is informational and the timer
+        # has it, and on anything else it is the operator's move.
+        fix = ("ainode tls enable to replace it, then restart the node")
+        if not info.get("self_signed") and tailnet:
+            fix = (f"ainode tls renew on the host replaces it for {tailnet} (the "
+                   f"installer's ainode-tls-renew.timer runs that daily)")
         return [Check("tls.enabled", WARN,
                       f"the {kind} certificate on {tls.port} expires in {days} days",
-                      fix="ainode tls enable to replace it, then restart the node",
-                      data=data)]
+                      fix=fix, data=data)]
     return [Check("tls.enabled", OK,
                   f"HTTPS on {tls.port}, {kind}, {days} days left "
                   f"(HTTP still on {web_port})",
