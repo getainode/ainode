@@ -164,12 +164,22 @@ def create_app(
             and (getattr(config, "distributed_mode", "solo") or "solo") == "solo":
         from ainode.discovery.instance import InstanceRecord
         from ainode.engine.instance_manager import InstanceManager
+        from ainode.engine.reconcile import adopted_boot_primary
         _seed = InstanceManager(base_port=config.api_port)
+        # An ADOPTED primary is already serving and was not launched by this
+        # process (#240), and both halves of that are the record's to state: the
+        # status is not "starting" (the engine is up, and a status that says
+        # otherwise makes the dashboard draw a loading card for a model answering
+        # requests) and ``adopted`` is how every reader tells a reconstructed
+        # instance from one this process launched.
+        _adopted = adopted_boot_primary()
         _seed.add(InstanceRecord(
             instance_id=f"{config.node_id or 'head'}:{config.model}",
             model=config.model, head_node_id=config.node_id or "head",
-            peer_ips=[], api_port=config.api_port, tensor_parallel_size=1,
-            status="starting"), engine)
+            peer_ips=[], api_port=config.api_port,
+            tensor_parallel_size=(_adopted or {}).get("tensor_parallel_size") or 1,
+            status=("serving" if _adopted else "starting"),
+            adopted=bool(_adopted)), engine)
         app["instances"] = _seed
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
@@ -1329,12 +1339,24 @@ async def handle_status(request: web.Request) -> web.Response:
         logger.exception("could not read the distributed record")
         degraded = []
 
+    # Was the engine on this node's own port ADOPTED from a container that
+    # outlived the orchestrator, rather than launched by this process (#240)? The
+    # instance record is the one place that knows, and a reader of this endpoint
+    # otherwise cannot tell a restart that kept its engine from one that reloaded
+    # it in the seconds before the load phase would have said so.
+    engine_adopted = False
+    _manager = request.app.get("instances")
+    if _manager is not None:
+        _own = _manager.by_port(getattr(config, "api_port", 0) or 0)
+        engine_adopted = bool(_own is not None and getattr(_own.record, "adopted", False))
+
     return web.json_response({
         "node_id": config.node_id,
         "node_name": config.node_name,
         "model": config.model,
         "gpu": gpu_info,
         "engine_ready": engine_ready,
+        "engine_adopted": engine_adopted,
         # Coarse engine load phase for the UI launching card (3c), derived from
         # the live /v1/models probe above rather than the engine's own latch:
         # see engine_load_phase.
@@ -1586,7 +1608,13 @@ async def handle_nodes(request: web.Request) -> web.Response:
                      # Real launch width (#92): a distributed instance spans
                      # several nodes and must not read as single-GPU here. An
                      # older peer sends no field, which reads as 1.
-                     "tensor_parallel_size": instance_parallel(inst)}
+                     "tensor_parallel_size": instance_parallel(inst),
+                     # Reconstructed from a container that was already running
+                     # rather than launched by the process reporting it (#179,
+                     # #240). It rides on the announcement already; this
+                     # projection was dropping it, so no view could tell an
+                     # engine that survived a restart from one this boot loaded.
+                     "adopted": bool(inst.get("adopted"))}
                     for inst in (getattr(n, "instances", []) or [])
                     if isinstance(inst, dict) and inst.get("model")
                 ],

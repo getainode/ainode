@@ -82,6 +82,13 @@ def no_boot_reconcile(monkeypatch):
     Patched where the replay reads them, on ``models.api_routes``, so a direct
     call to ``ainode.engine.reconcile.adopt_running_engines`` (what the tests for
     this behaviour make) still runs the real thing.
+
+    The reconciler's two DOCKER seams are stubbed for the same reason, but on
+    ``reconcile`` itself: since #240 the boot adoption decision runs in
+    ``cmd_start`` before the sweep, so any test that drives the CLI start path
+    would otherwise ask the real docker on the machine running the suite what it
+    is serving. A test that exercises adoption fakes those seams itself and its
+    own patch wins.
     """
     from ainode.engine import reconcile
     from ainode.models import api_routes
@@ -95,6 +102,8 @@ def no_boot_reconcile(monkeypatch):
     monkeypatch.setattr(api_routes, "adopt_running_engines", _no_adopt)
     monkeypatch.setattr(api_routes, "replay_distributed_if_needed",
                         _no_distributed_replay)
+    monkeypatch.setattr(reconcile, "inspect_container", lambda name: None)
+    monkeypatch.setattr(reconcile, "list_engine_containers", lambda: [])
     reconcile.reset_state_for_tests()
     yield
     reconcile.reset_state_for_tests()
