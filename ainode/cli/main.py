@@ -1399,6 +1399,9 @@ def cmd_auth(args):
         state = "[green]enabled[/green]" if auth_cfg.enabled else "[dim]disabled[/dim]"
         console.print(f"  Auth: {state}")
         console.print(f"  Keys: {len(auth_cfg.api_keys)}")
+        if not auth_cfg.enabled:
+            console.print("  API open, no key set" if not auth_cfg.api_keys
+                          else "  API open, key set but not required")
         # The accounts half of the same question. Auth on with no admin account is
         # a dashboard only a key can open, which is what ainode doctor FAILs on, so
         # the number belongs beside the key count rather than behind another
@@ -1420,9 +1423,6 @@ def cmd_auth(args):
                 console.print("  [yellow]No admin account[/yellow]: nobody can manage "
                               "users from the dashboard.")
                 console.print("  Fix: ainode auth user add <name> --admin")
-        if not auth_cfg.enabled:
-            console.print("  API open, no key set" if not auth_cfg.api_keys
-                          else "  API open, key set but not required")
         # Whether this node can still talk to its own cluster with auth on. The
         # doctor says the same thing as a FAIL (cli/doctor.py::check_auth); this
         # is the version an operator sees while turning auth on.
