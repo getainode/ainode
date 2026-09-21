@@ -587,16 +587,37 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "startup before it binds a port. The image below is the stock GB10 "
             "build plus those two libraries, published by CI from "
             "scripts/Dockerfile.whisper, so a node pulls it the way it pulls any "
-            "other engine image."
+            "other engine image. Measured on Spark-4 (ASUS GX10) 2026-09-21, "
+            "stacked at 0.06 beside Nemotron 3.5 Lightning at 0.62 and the "
+            "embedder at 0.06: ready in 110 s, then 2.3 percent word error rate "
+            "over 10 clips in 6 voices and 6 English locales, 8 of the 10 "
+            "transcribed word for word, 739 ms median per clip through the fleet "
+            "endpoint and a real-time factor of 0.18, so it transcribes about five "
+            "times faster than the audio plays. The bench record is "
+            "bench/results/20260921-012724-whisper-large-v3-turbo-spark-4-stacked-"
+            "beside-nemotron-at-0_62-via-the-fleet-endpoint-speech.json. One thing "
+            "the record shows that a card will not: on --enforce-eager the FIRST "
+            "transcription after a launch compiles the kernels and took 89 s, "
+            "against 0.7 s for every one after it, so warm the engine before "
+            "pointing a user at it."
         ),
         quantization=None, min_memory_gb=4, family="whisper", params_b=0.81,
         arch="dense",
-        # Not verified, and deliberately not dressed up as it: the engine has not
-        # served on this hardware yet. Both nodes with room to stack were full
-        # when it was tried (2026-09-19: CUDA out of memory at context creation on
-        # a node with 3 GB free), and a True flip needs a bench record to name,
-        # which needs a speech section in the bench. Both are follow-ups.
-        proven_tp=1, verified=False, recommended=True, curated=True,
+        # Verified on the second attempt, and what changed was room rather than the
+        # recipe: the first try (2026-09-19) died with CUDA out of memory at context
+        # creation on a node holding 0.70 plus 0.06 with about 3 GB of MemFree, which
+        # is the host number that matters on a unified-memory part rather than the
+        # 0.76 the admission guard saw. Dropping Nemotron to 0.62 freed 8.4 GiB and
+        # the same load came up untouched.
+        proven_tp=1, verified=True, recommended=True, curated=True,
+        verified_on="2026-09-21",
+        verified_record=(
+            "20260921-012724-whisper-large-v3-turbo-spark-4-stacked-beside-"
+            "nemotron-at-0_62-via-the-fleet-endpoint-speech.json"
+        ),
+        # Stacked on Spark-4 beside Nemotron and the embedder, timed 2026-09-21:
+        # 110.2 s from the load call to the engine answering /v1/models.
+        typical_ready_minutes=2.0,
         # 448 is Whisper's decoder window, which is what the engine reports as
         # max_model_len. The 30-second audio chunk is an encoder property and is
         # not a context length.

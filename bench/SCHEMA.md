@@ -429,3 +429,147 @@ Rules specific to this block, all load-bearing:
   they are counted out of every percentile and rate in the block and named in the notes,
   because "the server refused" and "the vectors were bad" are different findings.
 - No API key is ever in the record. Not in `settings`, not in `protocol`, not in a note.
+
+## The `speech` block
+
+A speech-bench run (`scripts/ainode-bench.py speech`) writes the same record with a
+top-level `speech` block and **no `results` block**, for the reason the four above have
+none: the model it measured takes audio in and is scored against words nobody typed at
+it, so a tok/s figure would be meaningless even as a zero.
+`scripts/render-bench-table.py` keeps a record shaped like that out of the README's
+throughput table and gives it a row in the "Speech runs" table instead.
+
+The `endpoint` is part of the measurement and not a footnote. The same instance
+measured straight at its engine port and through an AINode node's `:3000/v1` are two
+different numbers, because the second one includes the fleet routing hop, which for
+this path also includes reading the model id out of a multipart body and forwarding the
+bytes unchanged.
+
+```json
+{
+  "schema": 1, "stamp": "20260921-013000",
+  "label": "Spark-4 stacked beside Nemotron, via the fleet endpoint",
+  "model": { "id": "openai/whisper-large-v3-turbo", "name": "Whisper Large v3 Turbo",
+             "params_b": 0.81, "arch": "dense", "vision": false },
+  "placement": { "node": "Spark-4-GX10", "gpu": "NVIDIA GB10", "gpus": 1, "tp": 1,
+                 "port": 8002, "engine": "vllm", "ainode": "0.5.29",
+                 "stacked_with": ["nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"] },
+  "settings": {
+    "endpoint": "http://100.122.26.9:3000/v1",
+    "model_requested": "openai/whisper-large-v3-turbo",
+    "path": "POST /v1/audio/transcriptions",
+    "clips": "say-10", "clips_version": 1,
+    "clips_directory": "bench/speech/clips", "clip_count": 10,
+    "audio_seconds": 42.348, "language": "", "timeout_s": 120
+  },
+  "speech": {
+    "endpoint": "http://100.122.26.9:3000/v1",
+    "path": "POST /v1/audio/transcriptions",
+    "model_reported": null,
+    "warmup": { "clip": "clip-01", "wall_ms": 1404.58, "error": null,
+                "note": "one untimed request, its transcript discarded: ..." },
+    "clips": { "id": "say-10", "version": 1, "clips": 10,
+               "voices": ["Daniel", "Karen", "Moira", "Rishi", "Samantha", "Tessa"],
+               "locales": ["en_AU", "en_GB", "en_IE", "en_IN", "en_US", "en_ZA"],
+               "reference_words": 129, "audio_seconds": 43.567,
+               "sample_rates": [16000], "directory": "bench/speech/clips",
+               "source": "ainode/bench/speech/clips.py" },
+    "normalizer": { "id": "case-punct-numbers-1", "version": 1,
+                    "folds": ["case", "unicode NFKC", "punctuation", "whitespace",
+                              "ordinal suffixes", "number words to digits"],
+                    "orthographic_folds": ["case", "unicode NFKC", "punctuation",
+                                           "whitespace"],
+                    "source": "ainode/bench/speech/metrics.py" },
+    "protocol": { "path": "POST /v1/audio/transcriptions", "endpoint": "...",
+                  "model_requested": "...",
+                  "content_type": "multipart/form-data; boundary=...",
+                  "response_format": "json",
+                  "language": "not sent, so the engine detects it",
+                  "timeout_s": 120, "body": "the model id and response_format ..." },
+    "accuracy": { "clips": 10, "scored": 10, "reference_words": 129, "edits": 3,
+                  "substitutions": 2, "deletions": 0, "insertions": 1,
+                  "wer": 0.023256, "wer_orthographic": 0.045757,
+                  "wer_per_clip_mean": 0.022424, "wer_max": 0.133333,
+                  "clips_exact": 8 },
+    "latency": { "n": 10, "answered": 10, "errors": 0,
+                 "p50_ms": 739.33, "p95_ms": 961.2, "min_ms": 663.27,
+                 "max_ms": 965.73, "mean_ms": 790.52, "transport_floor_ms": 28.78 },
+    "rtf": { "scored": 10, "audio_seconds": 43.567, "wall_seconds": 7.905,
+             "pooled": 0.1815, "p50": 0.1827, "min": 0.1265, "max": 0.2616 },
+    "rows": [
+      { "id": "clip-01", "voice": "Samantha", "locale": "en_US",
+        "audio_seconds": 3.583, "reference": "The train from Austin ...",
+        "transcript": "The train from Austin ...", "wall_ms": 655.1, "error": null,
+        "reference_words": 12, "hypothesis_words": 12, "substitutions": 0,
+        "deletions": 0, "insertions": 0, "edits": 0,
+        "wer": 0.0, "wer_orthographic": 0.0, "rtf": 0.1829 }
+    ],
+    "errors": [], "seconds": 8.1
+  },
+  "notes": ["..."],
+  "source": "scripts/ainode-bench.py speech"
+}
+```
+
+Rules specific to this block, all load-bearing:
+
+- **The reference is the text the clip was made from, fixed before the run.** It is the
+  string handed to macOS `say` in `ainode/bench/speech/clips.py`, so it is exactly what
+  was spoken, and nothing adjusts it after a transcript is seen. A reference edited to
+  match what a model said would make the error rate a statement about the editor.
+- **The audio is committed, not synthesised per run** (`bench/speech/clips/`, 1.3 MB for
+  the ten). A word error rate is only comparable over the same bytes, so `clips.id` plus
+  `clips.version` say which set produced these numbers and `CLIPS_VERSION` is bumped on
+  any edit to a text, a voice or a file. `--generate-clips` rebuilds the set on a Mac and
+  is a maintenance step, never part of a run.
+- **`wer` is pooled over words, not averaged over clips.** Total edits over total
+  reference words, which is the standard definition and the honest one: a mean of
+  per-clip rates weights a four-word clip like a twenty-word one. The per-clip mean is
+  carried beside it as `wer_per_clip_mean` for readers who want it, and `wer_max` is the
+  worst single clip.
+- **Two rates are reported and neither replaces the other.** `wer` uses the full
+  normaliser (case, punctuation, whitespace, ordinal suffixes, number words folded to
+  digits), because a transcript that heard every word and wrote "9" where the reference
+  says "nine" is not a hearing error. `wer_orthographic` folds case, punctuation and
+  whitespace only. The gap between them is how much of the error was spelling rather
+  than hearing. `normalizer.id` and `normalizer.version` are in the record because the
+  rate depends on them: a number taken under a different normaliser is a different
+  number under the same name.
+- **Nothing is normalised away that changes a word.** No stopword list, no stemming, no
+  synonym map, and no per-clip exception.
+- `substitutions`, `deletions` and `insertions` are kept apart because they are
+  different findings: a model that drops the end of every clip and one that
+  hallucinates a trailing sentence both score badly, and only the breakdown tells them
+  apart. `edits` is their sum and the numerator of `wer`.
+- **A clip that failed is one row with an `error` and nulls for every number**, counted
+  out of every rate, percentile and factor, and named in the notes. It is never folded
+  in as a 100 percent error rate: a transport failure inside a figure a reader takes as
+  the model's is the one mistake this section can make. `accuracy.clips` counts the
+  clips sent and `accuracy.scored` the ones that came back.
+- **`latency` is one upload per request, sent one at a time**, so the percentiles
+  describe a request that had the engine to itself rather than a queue this bench
+  created. Percentiles are interpolated, not nearest-rank, the same choice the embedding
+  block documents.
+- **`warmup` is the one untimed request that came first, recorded rather than hidden.**
+  A vLLM speech engine on `--enforce-eager` compiles its kernels on the FIRST real
+  transcription: 89 seconds measured on a GB10 against 0.7 for every one after it.
+  Leaving that inside the timed set would put a one-time compile in a p50 and in a
+  real-time factor a reader takes as steady state; dropping it silently would hide a
+  cost a user meets once per launch. So it is sent, its transcript discarded, and its
+  wall time written here. A `warmup` carrying an `error` means the first timed clip may
+  still hold that compile, and the notes say so.
+- **`latency` and `rtf` are end to end from wherever the bench ran, and
+  `transport_floor_ms` says how much of that was the wire.** The floor is the median of
+  five `GET /v1/models` calls over the same link, a request that transcribes nothing. It
+  is a measurement, not a correction: nothing is subtracted anywhere in the record.
+- `rtf.pooled` is total wall over total audio, which is what a batch of clips costs;
+  `p50` and `max` are the per-clip spread, which is what one caller waits. Below 1 means
+  the engine transcribes faster than the clip plays. `audio_seconds` comes off each
+  WAV's own header (frames over frame rate), never from a duration somebody typed.
+- `rows` is in manifest order, one per clip, and carries both the reference and the
+  transcript verbatim, because the transcript is the evidence behind the rate and a
+  reader has to be able to see what differed.
+- `path` says which of the two audio paths was measured. Whisper turbo is a
+  transcription model and cannot translate, so a `translations` run belongs to an ASR
+  model that can, and the two are never compared.
+- No API key is ever in the record. Not in `settings`, not in `protocol`, not in a note.
