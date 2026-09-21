@@ -399,7 +399,7 @@ to match. A resume never writes into the run it resumed.
 | Cancellable, commit-pinned, parallel model downloads | ✅ v0.5.2 |
 | Delete a downloaded model from disk (`delete-repo`, frees GB) | ✅ |
 | AutoData: Δ-filtered synthetic-data generation (v2.2 val-set lift objective) | ✅ v0.5.0 |
-| `ainode doctor`: two dozen node checks with a one-line fix each, `--json`, `--peer`, `--fix` | ✅ v0.5.27 |
+| `ainode doctor`: node checks with a one-line fix each, `--json`, `--peer`, `--fix` | ✅ v0.5.27 |
 | API key auth the dashboard can use (one wrapper, key stored by the browser that enables it) | ✅ v0.5.27 |
 | `trust_remote_code` needs a presented API key, or a catalog recipe that declares it | ✅ v0.5.27 |
 | Disk free / total for the AINode home and the models dir, with a warning state under 15% | ✅ v0.5.27 |
@@ -419,6 +419,17 @@ to match. A resume never writes into the run it resumed.
 | TLS on its own port (`ainode tls enable`, 3443), self-signed or `tailscale cert`, HTTP untouched | ✅ v0.5.29 |
 | Per-client rate and concurrency limits on `/v1` (`rate_limit` block, 429 naming the limit) | ✅ v0.5.29 |
 | Speech to text through the fleet endpoint (`/v1/audio/transcriptions`, `/v1/audio/translations`) | ✅ v0.5.29 |
+| A fresh install mints an API key and requires it (`AINODE_AUTH=off` opts out), and an install over an existing config changes neither | ✅ v0.5.30 |
+| A fleet runs with auth on: every node-to-node call presents `HMAC-SHA256(cluster_secret, "ainode-fleet-key-v1")`, accepted as the caller `fleet` | ✅ v0.5.30 |
+| `ainode auth key create --name`/`list`/`revoke`, and an `auth.json` change is live on the running node with no restart | ✅ v0.5.30 |
+| `hf_token` scrubbed from `GET /api/config`, `auth.json` and `config.json` written 0600 | ✅ v0.5.30 |
+| `ainode tls enable --tailscale` gets a real certificate for this node's MagicDNS name, and `ainode-tls-renew.timer` renews it inside 14 days | ✅ v0.5.30 |
+| `/api/cluster/endpoint` and `endpoint_hint` carry `tls`, `tls_port` and an https `url` when a node serves it | ✅ v0.5.30 |
+| A restart or an update adopts every engine still serving (primary, head, stacked) instead of reloading it, with `engine_adopted` on `/api/status` | ✅ v0.5.30 |
+| A download that will not fit is a 507 naming what is needed, what is free and which path was measured | ✅ v0.5.30 |
+| A Metrics view charting six panels over 1 h to 7 d, and `GET /api/metrics/history?node=` for any node through the fleet | ✅ v0.5.30 |
+| `openai/whisper-large-v3-turbo` verified with a speech bench record (word error rate, latency, real-time factor) | ✅ v0.5.30 |
+| `qwen3.8-flash-next-nvfp4-v100`: Qwen3.8-Flash-Next at TP=4 across four Tesla V100s through the catalog | ✅ v0.5.30 |
 
 ---
 
@@ -914,10 +925,12 @@ where load time hurts, add an rsync-to-local staging step.
 ## CLI reference
 
 The installer puts a thin `ainode` wrapper at `/usr/local/bin/ainode`.
-Host-side commands (`update`) run directly, and everything else is forwarded
-into the running container with `docker exec`. Day to day you never need to type
-`docker` yourself: the training and quantize image is published too, so a fresh
-node pulls it (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
+Host-side commands (`update`, `tls enable --tailscale`, `tls renew`, and the host's
+unit state for `doctor`) run directly, and everything else is forwarded into the
+running container with `docker exec`. The two `tls` shapes are host work because
+`tailscale` is on the host and not in the image. Day to day you never need to type
+`docker` yourself: the training and quantize image is published too, so a fresh node
+pulls it once (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
 
 ```bash
 ainode update [version]      # pull, pin, restart, verify the node came back on it,
@@ -949,11 +962,16 @@ ainode auth key list         # Which clients hold a key, by id and name
 ainode auth key revoke ID    # Take one away, live
 ainode tls enable            # Serve HTTPS on its own port (3443), HTTP untouched.
                              #   --cert/--key installs a pair you have, --tailscale
-                             #   gets a real Let's Encrypt cert, --port moves it
+                             #   gets a real Let's Encrypt cert for this node's
+                             #   MagicDNS name, --port moves it
+ainode tls renew [--check]   # Replace a tailnet certificate inside its last 14 days
+                             #   and restart so it is served. ainode-tls-renew.timer
+                             #   runs it daily. --check prints the decision as
+                             #   key=value and exits 10 for "nothing to do"
 ainode tls status            # TLS state, certificate kind and expiry
 ainode tls disable           # Stop serving HTTPS; the pair is kept
-ainode doctor                # Two dozen checks over config, docker, GPUs, disk,
-                             #   the image pin, the unit, ports, peers, auth, TLS
+ainode doctor                # Checks over config, docker, GPUs, disk, the image pin,
+                             #   the unit, ports, peers, auth, TLS
 ainode prune-images          # Reclaim older AINode images (what update does for you)
 ainode logs -f               # Tail the engine log the configured backend writes
 ```
@@ -969,8 +987,9 @@ newest published tag, the unit, the web / engine / discovery ports, peers and wh
 the fleet agrees on a release, the fabric interface, the recorded distributed shape
 and whether it went degraded, the secrets store's mode, the TLS certificate and its
 expiry, the per-client limits, whether a Hugging Face token exists anywhere, and the
-sudo trap below. Two dozen checks on a solo node, a couple more once it can see a
-peer. `--json` for machines (statuses lowercase there), `--peer HOST` for the same
+sudo trap below. A few more checks run once the node can see a peer, and the summary
+line counts whatever this run produced rather than a number written down anywhere.
+`--json` for machines (statuses lowercase there), `--peer HOST` for the same
 report over SSH, a non-zero exit on any FAIL so it can gate a script (a WARN and an
 INFO never fail the run), and `--fix` applies only the changes that cannot lose
 anything (create a directory, chmod the secrets store to 0600, write the fleet
