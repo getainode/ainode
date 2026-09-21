@@ -9,8 +9,9 @@ whole path to having one. What is pinned here:
    operator discovers instead of a test.
 2. **Both ways of supplying a password.** Interactive is two ``getpass`` prompts
    that have to agree; ``--password-stdin`` is the answer for anything with no
-   terminal, which includes ``ssh host ainode ...`` and every script, because the
-   installer's host wrapper runs ``docker exec -it`` and getpass needs a TTY.
+   terminal, which includes ``ssh host ainode ...`` and every script, because
+   getpass needs a TTY. The installer's host wrapper had to stop hardcoding
+   ``docker exec -it`` for that flag to work at all, which is pinned at the bottom.
 3. **A short password is refused** before anything is written.
 4. **The last admin cannot be removed or disabled.** With auth on and no admin, the
    dashboard can only be opened by pasting an API key, which is the state
@@ -223,8 +224,8 @@ def test_the_usage_line_names_the_new_commands(home, store, no_peer_calls):
 
 
 def test_password_stdin_is_documented_in_the_help(capsys):
-    """The host wrapper runs `docker exec -it`, so the prompt needs a terminal and
-    the flag is the documented way to work without one."""
+    """getpass needs a terminal, and the flag is the documented way to work without
+    one, so the help text has to say so where an operator will read it."""
     with patch.object(sys, "argv", ["ainode", "auth", "user", "add", "--help"]):
         with pytest.raises(SystemExit):
             cli.main()

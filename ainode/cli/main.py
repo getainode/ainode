@@ -945,10 +945,11 @@ def _save_store(store) -> None:
 def _read_new_password(args, label: str = "Password") -> str:
     """The new password: one read of stdin, or two prompts that must agree.
 
-    ``--password-stdin`` exists because ``getpass`` needs a TTY and the installer's
-    host wrapper runs ``docker exec -it``: interactive from a terminal, but not
-    from a script, a unit file or ``ssh host ainode ...``. Only the newline the
-    shell added is stripped, so a password may contain spaces.
+    ``--password-stdin`` exists because ``getpass`` needs a TTY, and a script, a
+    unit file or ``ssh host ainode ...`` has none. The installer's host wrapper
+    forwards a piped command without ``docker exec -t`` for the same reason, so
+    the pipe survives the container boundary. Only the newline the shell added is
+    stripped, so a password may contain spaces.
     """
     from ainode.auth.replication import min_password_length
 
@@ -2139,8 +2140,9 @@ def main():
     # `auth user ...` is the DASHBOARD login (#261): a name and a password, which
     # is a different credential from an API key and managed on the cluster's
     # master. --password-stdin is the answer for anything with no terminal: getpass
-    # needs a TTY and the installer's wrapper runs `docker exec -it`, so the prompt
-    # works from a shell and not from a script, a unit or `ssh host ainode ...`.
+    # needs a TTY, so the prompt works from a shell and not from a script, a unit
+    # or `ssh host ainode ...`. The installer's wrapper allocates a TTY only when
+    # it has one, so a piped password reaches the container.
     auth_user = auth_sub.add_parser(
         "user", help="Dashboard accounts: add, list, remove, change a password")
     auth_user_sub = auth_user.add_subparsers(dest="user_action")
