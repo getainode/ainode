@@ -874,6 +874,483 @@ def cmd_auth_key(args):
         console.print("  Usage: ainode auth key {create [--name NAME]|list|revoke <id>}")
 
 
+# =============================================================================
+#  Dashboard accounts: `ainode auth user ...` and `ainode auth session ...`
+# =============================================================================
+#
+# The dashboard login (#261) is a second credential on the node: a named account
+# with a password, in `<AINODE_HOME>/users.json`. These commands are how an
+# operator creates the first one, because there is no sign-up page and there must
+# not be: a route that mints the first admin over HTTP is a route anybody on the
+# LAN can call before the operator does.
+#
+# The store is written HERE, on the box, and the running server picks the file up
+# through `reload_if_changed` exactly as `ainode auth enable` is live. On the
+# cluster's MASTER the change is then pushed to every peer
+# (ainode/auth/replication.py); on a worker it is written and the operator is told
+# it will be overwritten, because the master is the authority for accounts.
+#
+# Sessions are per node and are never replicated, so `ainode auth session ...`
+# answers about this node only. That is the honest shape: a session is one
+# browser's cookie against one node, and copying them would hand every node in the
+# fleet a credential it never issued.
+
+#: Same promise AUTH_LIVE_NOTE makes about auth.json, for the account store.
+USERS_LIVE_NOTE = ("  In effect now: the running node re-reads users.json, "
+                   "no restart needed.")
+
+#: Printed on a node that is not the account authority, once, and then the change
+#: is made anyway: refusing would leave an operator who typed the command on the
+#: wrong box with no accounts and no explanation.
+NOT_THE_MASTER_NOTE = (
+    "  [yellow]Accounts are managed on the master[/yellow], and this node will be "
+    "overwritten by the next sync from it. Run the same command there to keep it.")
+
+
+def _users_store():
+    """The account store on this node, or None with a printed reason.
+
+    One guarded import for the whole CLI (``auth/replication.py::open_store``), so
+    a release without the account store says so instead of raising an ImportError
+    at the operator.
+    """
+    from ainode.auth.replication import open_store
+
+    store = open_store()
+    if store is None:
+        console.print("  [yellow]This build has no account store[/yellow], so there "
+                      "are no dashboard logins to manage on it.")
+        console.print("  API keys still work: ainode auth key create --name <client>")
+    return store
+
+
+def _save_store(store) -> None:
+    """Persist the store, if persisting is a separate step on it.
+
+    The store's mutators are modelled on ``AuthConfig``'s, which save themselves,
+    so this is normally a second write of identical bytes (temp-then-replace, so
+    it costs nothing and cannot half-apply). It is here because the alternative
+    failure is an account an operator was told about that is not on disk.
+    """
+    save = getattr(store, "save", None)
+    if not callable(save):
+        return
+    try:
+        save()
+    except Exception as exc:  # pragma: no cover - a store that cannot write
+        console.print(f"  [red]Could not write the account store: {exc}[/red]")
+        raise SystemExit(1)
+
+
+def _read_new_password(args, label: str = "Password") -> str:
+    """The new password: one read of stdin, or two prompts that must agree.
+
+    ``--password-stdin`` exists because ``getpass`` needs a TTY and the installer's
+    host wrapper runs ``docker exec -it``: interactive from a terminal, but not
+    from a script, a unit file or ``ssh host ainode ...``. Only the newline the
+    shell added is stripped, so a password may contain spaces.
+    """
+    from ainode.auth.replication import min_password_length
+
+    minimum = min_password_length()
+    if getattr(args, "password_stdin", False):
+        password = sys.stdin.read().rstrip("\r\n")
+    else:
+        import getpass
+
+        try:
+            password = getpass.getpass(f"  {label}: ")
+            again = getpass.getpass("  Again: ")
+        except (EOFError, OSError):
+            console.print("  [red]No terminal to ask for a password on.[/red]")
+            console.print("  Pipe it instead: echo 'the password' | ainode auth user "
+                          "add <name> --password-stdin")
+            raise SystemExit(2)
+        if password != again:
+            console.print("  [red]The two passwords do not match.[/red] "
+                          "Nothing was changed.")
+            raise SystemExit(2)
+    if len(password) < minimum:
+        console.print(f"  [red]That password is too short.[/red] It needs at least "
+                      f"{minimum} characters.")
+        raise SystemExit(2)
+    return password
+
+
+def _account_rows(store) -> list:
+    """``list_users()`` as a list of dicts, whatever it hands back."""
+    try:
+        rows = store.list_users()
+    except Exception as exc:
+        console.print(f"  [red]Could not read the accounts: {exc}[/red]")
+        raise SystemExit(1)
+    out = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            out.append(row)
+        else:  # a store that lists names only
+            out.append({"name": str(row)})
+    return out
+
+
+def _find_account(rows: list, name: str):
+    for row in rows:
+        if str(row.get("name") or "") == name:
+            return row
+    return None
+
+
+def _account_enabled(row: dict) -> bool:
+    """Is this account allowed to sign in? Both spellings are read."""
+    if row.get("disabled") is True:
+        return False
+    return row.get("enabled") is not False
+
+
+def _admin_count(store, rows: list) -> int:
+    try:
+        return int(store.admin_count())
+    except Exception:
+        return sum(1 for row in rows if str(row.get("role") or "") == "admin")
+
+
+def _refuse_if_last_admin(store, rows: list, name: str, action: str) -> None:
+    """Refuse an action that would leave the dashboard with no admin.
+
+    With auth on and no admin account, the dashboard can only be opened with an
+    API key, which is the state ``ainode doctor``'s Login check FAILs on. Refusing
+    here is cheaper than explaining it there.
+    """
+    row = _find_account(rows, name)
+    if row is None or str(row.get("role") or "") != "admin":
+        return
+    if _admin_count(store, rows) > 1:
+        return
+    console.print(f"  [red]{name} is the only admin account[/red], so it cannot be "
+                  f"{action}.")
+    console.print("  Add another admin first: ainode auth user add <name> --admin")
+    raise SystemExit(2)
+
+
+def _set_account_enabled(store, name: str, enabled: bool) -> bool:
+    """Disable or enable one account, however this store spells it.
+
+    The account contract names the two ROUTES (``/disable`` and ``/enable``) and
+    leaves the store's own method name open, so the three spellings a store of
+    this shape would use are tried in order. Raises ``NotImplementedError`` when
+    it has none: the CLI says so and points at the route, rather than inventing a
+    field name inside somebody else's file.
+    """
+    setter = getattr(store, "set_enabled", None)
+    if callable(setter):
+        return setter(name, enabled) is not False
+    setter = getattr(store, "set_disabled", None)
+    if callable(setter):
+        return setter(name, not enabled) is not False
+    setter = getattr(store, "enable_user" if enabled else "disable_user", None)
+    if callable(setter):
+        return setter(name) is not False
+    raise NotImplementedError("this account store cannot disable an account")
+
+
+def _session_rows(store, name: str) -> list:
+    """``sessions_for(name)`` as a list of dicts, whatever it hands back."""
+    try:
+        rows = store.sessions_for(name)
+    except Exception as exc:
+        console.print(f"  [yellow]Could not read {name}'s sessions: {exc}[/yellow]")
+        return []
+    out = []
+    for row in rows or []:
+        out.append(dict(row) if isinstance(row, dict) else {"id": str(row)})
+    return out
+
+
+def _account_counts(store) -> dict:
+    """Users, admins and sessions on this node, for ``ainode auth status``."""
+    rows = _account_rows(store)
+    sessions = 0
+    for row in rows:
+        sessions += len(_session_rows(store, str(row.get("name") or "")))
+    return {"users": len(rows), "admins": _admin_count(store, rows),
+            "sessions": sessions}
+
+
+def _replicate_after_change(config, store) -> None:
+    """Push a just-written account change to the peers, or say why it was not.
+
+    Three answers, and each of them is a line an operator needs: a solo node has
+    nobody to tell, a worker has just written a change the master will overwrite,
+    and a master pushes now instead of leaving the peers to catch up on the
+    server's own 60 second retry.
+    """
+    from ainode.auth.replication import (
+        cluster_info,
+        local_role,
+        replicate_from_cli,
+    )
+
+    info = cluster_info(config)
+    role = local_role(config, info=info)
+    if role == "solo":
+        return
+    if role == "worker":
+        console.print(NOT_THE_MASTER_NOTE)
+        return
+
+    try:
+        users = store.export_users()
+    except Exception as exc:
+        console.print(f"  [yellow]Could not read the accounts to replicate: {exc}"
+                      f"[/yellow]")
+        return
+    result = replicate_from_cli(config, users, info=info)
+    pushed, failed = result.get("pushed") or [], result.get("failed") or []
+    if result.get("reason"):
+        console.print(f"  [yellow]Not replicated: {result['reason']}[/yellow]")
+        return
+    if pushed:
+        console.print(f"  Replicated to {len(pushed)} peer(s): {', '.join(pushed)}")
+    for label, detail in failed:
+        console.print(f"  [yellow]{label} did not take the update ({detail})[/yellow]; "
+                      "this node retries it every 60s while it is behind.")
+    if not pushed and not failed:
+        console.print("  No peers to replicate to yet.")
+
+
+def cmd_auth_user(args):
+    """``ainode auth user {add|list|remove|passwd|disable|enable}``."""
+    action = getattr(args, "user_action", None)
+    if action is None:
+        console.print("  Usage: ainode auth user {add <name> [--admin] "
+                      "[--password-stdin]|list|remove <name>|passwd <name>|"
+                      "disable <name>|enable <name>}")
+        return
+
+    store = _users_store()
+    if store is None:
+        raise SystemExit(2)
+    config = NodeConfig.load()
+    # Account names are lowercase by contract ([a-z0-9._-]), so what an operator
+    # typed with a capital is folded rather than refused. The name is echoed back
+    # in every line below, so the fold is visible.
+    name = str(getattr(args, "name", "") or "").strip().lower()
+
+    if action == "list":
+        rows = _account_rows(store)
+        if not rows:
+            console.print("  No dashboard accounts on this node.")
+            console.print("  Add the first one: ainode auth user add <name> --admin")
+            console.print("  Made in Texas")
+            return
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("Name")
+        table.add_column("Role")
+        table.add_column("State")
+        table.add_column("Sessions")
+        for row in sorted(rows, key=lambda r: str(r.get("name") or "")):
+            account = str(row.get("name") or "")
+            table.add_row(
+                account,
+                str(row.get("role") or "member"),
+                "enabled" if _account_enabled(row) else "[yellow]disabled[/yellow]",
+                str(len(_session_rows(store, account))),
+            )
+        console.print(table)
+        console.print()
+        console.print(f"  {_admin_count(store, rows)} admin(s) of {len(rows)} "
+                      "account(s). Sessions are per node and are not replicated.")
+        console.print("  Made in Texas")
+        return
+
+    if not name:
+        console.print(f"  [red]Which account?[/red] ainode auth user {action} <name>")
+        raise SystemExit(2)
+
+    if action == "add":
+        role = "admin" if getattr(args, "admin", False) else "member"
+        password = _read_new_password(args)
+        try:
+            store.add_user(name, password, role)
+        except ValueError as exc:
+            console.print(f"  [red]{exc}[/red]")
+            raise SystemExit(2)
+        except Exception as exc:
+            console.print(f"  [red]Could not add {name}: {exc}[/red]")
+            raise SystemExit(1)
+        _save_store(store)
+        console.print(f"  [green]Account {name} added[/green] as {role}.")
+        console.print("  Sign in at the dashboard with that name and password.")
+        console.print(USERS_LIVE_NOTE)
+        _replicate_after_change(config, store)
+        console.print("  Made in Texas")
+        return
+
+    rows = _account_rows(store)
+    if _find_account(rows, name) is None:
+        console.print(f"  [yellow]No account named '{name}' on this node.[/yellow]")
+        console.print("  List them: ainode auth user list")
+        raise SystemExit(2)
+
+    if action == "remove":
+        _refuse_if_last_admin(store, rows, name, "removed")
+        try:
+            removed = store.remove_user(name)
+        except Exception as exc:
+            console.print(f"  [red]Could not remove {name}: {exc}[/red]")
+            raise SystemExit(1)
+        if removed is False:
+            console.print(f"  [yellow]No account named '{name}' on this node.[/yellow]")
+            raise SystemExit(2)
+        _save_store(store)
+        console.print(f"  [green]Account {name} removed.[/green] Its sessions on this "
+                      "node are gone with it.")
+        console.print(USERS_LIVE_NOTE)
+        _replicate_after_change(config, store)
+        console.print("  Made in Texas")
+        return
+
+    if action == "passwd":
+        password = _read_new_password(args, label=f"New password for {name}")
+        try:
+            store.set_password(name, password)
+        except ValueError as exc:
+            console.print(f"  [red]{exc}[/red]")
+            raise SystemExit(2)
+        except Exception as exc:
+            console.print(f"  [red]Could not set {name}'s password: {exc}[/red]")
+            raise SystemExit(1)
+        _save_store(store)
+        console.print(f"  [green]Password changed for {name}.[/green]")
+        console.print("  Existing sessions are untouched: sign them out with "
+                      f"ainode auth session clear --user {name}")
+        console.print(USERS_LIVE_NOTE)
+        _replicate_after_change(config, store)
+        console.print("  Made in Texas")
+        return
+
+    if action in ("disable", "enable"):
+        enabled = action == "enable"
+        if not enabled:
+            _refuse_if_last_admin(store, rows, name, "disabled")
+        try:
+            _set_account_enabled(store, name, enabled)
+        except NotImplementedError:
+            console.print("  [yellow]This account store has no disable of its own."
+                          "[/yellow] Use the API route instead, on this node's own "
+                          "port, with an operator key:")
+            console.print(f"    POST /api/auth/users/{name}/{action}")
+            raise SystemExit(2)
+        except Exception as exc:
+            console.print(f"  [red]Could not {action} {name}: {exc}[/red]")
+            raise SystemExit(1)
+        _save_store(store)
+        if enabled:
+            console.print(f"  [green]Account {name} enabled.[/green]")
+        else:
+            console.print(f"  [yellow]Account {name} disabled.[/yellow] It cannot "
+                          "sign in, and its sessions are no longer accepted.")
+        console.print(USERS_LIVE_NOTE)
+        _replicate_after_change(config, store)
+        console.print("  Made in Texas")
+        return
+
+    console.print(f"  [red]Unknown account command '{action}'.[/red]")
+    raise SystemExit(2)
+
+
+def cmd_auth_session(args):
+    """``ainode auth session {list|revoke|clear}``: this node's sign-ins.
+
+    Per node on purpose (see the block comment above): a session is one browser's
+    cookie against one node, so there is nothing here to fan out and nothing to
+    replicate.
+    """
+    action = getattr(args, "session_action", None)
+    if action is None:
+        console.print("  Usage: ainode auth session {list [--user NAME]|"
+                      "revoke <id>|clear [--user NAME]}")
+        return
+
+    store = _users_store()
+    if store is None:
+        raise SystemExit(2)
+    only = str(getattr(args, "user", "") or "").strip().lower()
+    rows = _account_rows(store)
+    if only and _find_account(rows, only) is None:
+        console.print(f"  [yellow]No account named '{only}' on this node.[/yellow]")
+        raise SystemExit(2)
+    names = [only] if only else [str(r.get("name") or "") for r in rows]
+
+    if action == "list":
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("Session")
+        table.add_column("User")
+        table.add_column("Created")
+        table.add_column("Last seen")
+        total = 0
+        for account in sorted(names):
+            for session in _session_rows(store, account):
+                total += 1
+                table.add_row(
+                    str(session.get("id") or ""),
+                    account,
+                    str(session.get("created_at") or "[dim]unknown[/dim]"),
+                    str(session.get("last_seen")
+                        or session.get("last_used") or "[dim]unknown[/dim]"),
+                )
+        if not total:
+            console.print("  No sessions on this node"
+                          + (f" for {only}." if only else "."))
+            console.print("  Made in Texas")
+            return
+        console.print(table)
+        console.print()
+        console.print(f"  {total} session(s) on this node. Sessions are per node: "
+                      "signing out here does not sign out anywhere else.")
+        console.print("  Made in Texas")
+        return
+
+    if action == "revoke":
+        session_id = str(getattr(args, "session_id", "") or "").strip()
+        if not session_id:
+            console.print("  [red]Which session?[/red] ainode auth session revoke <id>")
+            raise SystemExit(2)
+        try:
+            gone = store.revoke_session(session_id)
+        except Exception as exc:
+            console.print(f"  [red]Could not revoke that session: {exc}[/red]")
+            raise SystemExit(1)
+        if gone is False:
+            console.print(f"  [yellow]No session '{session_id}' on this node."
+                          "[/yellow] List them: ainode auth session list")
+            raise SystemExit(2)
+        console.print(f"  [green]Session {session_id} revoked.[/green]")
+        console.print("  Made in Texas")
+        return
+
+    if action == "clear":
+        revoked = 0
+        for account in names:
+            for session in _session_rows(store, account):
+                session_id = str(session.get("id") or "")
+                if not session_id:
+                    continue
+                try:
+                    if store.revoke_session(session_id, user=account) is not False:
+                        revoked += 1
+                except Exception as exc:
+                    console.print(f"  [yellow]{account}: {exc}[/yellow]")
+        who = f"{only}" if only else "everybody"
+        console.print(f"  [green]Signed out {who}[/green]: {revoked} session(s) "
+                      "revoked on this node.")
+        console.print("  Made in Texas")
+        return
+
+    console.print(f"  [red]Unknown session command '{action}'.[/red]")
+    raise SystemExit(2)
+
+
 def cmd_auth(args):
     """Manage API key authentication."""
     from ainode.auth.middleware import AuthConfig
@@ -883,6 +1360,12 @@ def cmd_auth(args):
 
     if action == "key":
         return cmd_auth_key(args)
+
+    if action == "user":
+        return cmd_auth_user(args)
+
+    if action == "session":
+        return cmd_auth_session(args)
 
     if action == "enable":
         entry = auth_cfg.enable(getattr(args, "name", "") or "first key")
@@ -916,6 +1399,27 @@ def cmd_auth(args):
         state = "[green]enabled[/green]" if auth_cfg.enabled else "[dim]disabled[/dim]"
         console.print(f"  Auth: {state}")
         console.print(f"  Keys: {len(auth_cfg.api_keys)}")
+        # The accounts half of the same question. Auth on with no admin account is
+        # a dashboard only a key can open, which is what ainode doctor FAILs on, so
+        # the number belongs beside the key count rather than behind another
+        # command.
+        from ainode.auth.replication import open_store
+
+        store = open_store()
+        if store is not None:
+            counts = _account_counts(store)
+            console.print(f"  Users: {counts['users']} "
+                          f"({counts['admins']} admin)")
+            console.print(f"  Sessions: {counts['sessions']} (this node only, never "
+                          "replicated)")
+            if auth_cfg.enabled and not counts["users"]:
+                console.print("  [yellow]No dashboard account[/yellow], so the UI can "
+                              "only be opened with an API key.")
+                console.print("  Fix: ainode auth user add <name> --admin")
+            elif auth_cfg.enabled and not counts["admins"]:
+                console.print("  [yellow]No admin account[/yellow]: nobody can manage "
+                              "users from the dashboard.")
+                console.print("  Fix: ainode auth user add <name> --admin")
         if not auth_cfg.enabled:
             console.print("  API open, no key set" if not auth_cfg.api_keys
                           else "  API open, key set but not required")
@@ -943,8 +1447,14 @@ def cmd_auth(args):
         console.print("  Made in Texas")
 
     else:
-        console.print("  Usage: ainode auth {enable|disable|status|key|new-key}")
+        console.print("  Usage: ainode auth {enable|disable|status|key|user|session"
+                      "|new-key}")
         console.print("         ainode auth key {create [--name NAME]|list|revoke <id>}")
+        console.print("         ainode auth user {add <name> [--admin] "
+                      "[--password-stdin]|list|remove <name>|passwd <name>|"
+                      "disable <name>|enable <name>}")
+        console.print("         ainode auth session {list [--user NAME]|revoke <id>|"
+                      "clear [--user NAME]}")
 
 
 def cmd_prune_images(args):
@@ -1625,6 +2135,61 @@ def main():
     auth_key_sub.add_parser("list", help="The keys on this node, by id and name")
     auth_key_revoke = auth_key_sub.add_parser("revoke", help="Revoke a key by id")
     auth_key_revoke.add_argument("key_id", help="The key id from: ainode auth key list")
+
+    # `auth user ...` is the DASHBOARD login (#261): a name and a password, which
+    # is a different credential from an API key and managed on the cluster's
+    # master. --password-stdin is the answer for anything with no terminal: getpass
+    # needs a TTY and the installer's wrapper runs `docker exec -it`, so the prompt
+    # works from a shell and not from a script, a unit or `ssh host ainode ...`.
+    auth_user = auth_sub.add_parser(
+        "user", help="Dashboard accounts: add, list, remove, change a password")
+    auth_user_sub = auth_user.add_subparsers(dest="user_action")
+    auth_user_add = auth_user_sub.add_parser(
+        "add", help="Create a dashboard account (prompts for the password twice)")
+    auth_user_add.add_argument("name", help="Account name (a-z, 0-9, dot, dash, "
+                                           "underscore)")
+    auth_user_add.add_argument(
+        "--admin", action="store_true",
+        help="Make it an admin: it may manage users and sessions")
+    auth_user_add.add_argument(
+        "--password-stdin", action="store_true", dest="password_stdin",
+        help="Read the password from stdin instead of prompting. Use this with no "
+             "TTY: echo 'the password' | ainode auth user add jason --admin "
+             "--password-stdin")
+    auth_user_sub.add_parser("list", help="The accounts on this node and their roles")
+    auth_user_remove = auth_user_sub.add_parser(
+        "remove", help="Delete an account (refused for the last admin)")
+    auth_user_remove.add_argument("name", help="The account to delete")
+    auth_user_passwd = auth_user_sub.add_parser(
+        "passwd", help="Change an account's password")
+    auth_user_passwd.add_argument("name", help="The account to change")
+    auth_user_passwd.add_argument(
+        "--password-stdin", action="store_true", dest="password_stdin",
+        help="Read the new password from stdin instead of prompting (no TTY needed)")
+    auth_user_disable = auth_user_sub.add_parser(
+        "disable", help="Stop an account signing in, keeping it (refused for the "
+                        "last admin)")
+    auth_user_disable.add_argument("name", help="The account to disable")
+    auth_user_enable = auth_user_sub.add_parser(
+        "enable", help="Let an account sign in again")
+    auth_user_enable.add_argument("name", help="The account to enable")
+
+    # `auth session ...` is this node's sign-ins. Never a fan-out: a session is one
+    # browser's cookie against one node, so there is nothing to replicate.
+    auth_session = auth_sub.add_parser(
+        "session", help="Sign-ins on THIS node: list, revoke one, sign everybody out")
+    auth_session_sub = auth_session.add_subparsers(dest="session_action")
+    auth_session_list = auth_session_sub.add_parser(
+        "list", help="The sessions on this node")
+    auth_session_list.add_argument("--user", default="", help="Only this account's")
+    auth_session_revoke = auth_session_sub.add_parser(
+        "revoke", help="Revoke one session by id")
+    auth_session_revoke.add_argument(
+        "session_id", help="The session id from: ainode auth session list")
+    auth_session_clear = auth_session_sub.add_parser(
+        "clear", help="Sign everybody out of this node")
+    auth_session_clear.add_argument(
+        "--user", default="", help="Sign out only this account")
     auth_parser.set_defaults(func=cmd_auth)
 
     # prune-images: reclaim the images an update replaced (#184)

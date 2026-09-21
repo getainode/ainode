@@ -635,6 +635,23 @@ async def _on_startup(app: web.Application) -> None:
                 )
             )
 
+    # Dashboard accounts come from the MASTER, and this is the only thing that
+    # moves them (ainode/auth/replication.py): the master pushes every change to
+    # its peers, a worker pulls at startup and every five minutes, and sessions
+    # are never replicated because a session is one browser's credential against
+    # one node. Started here, after the cluster secret and the HTTP session exist,
+    # because both are what it authenticates and talks with. A node with no
+    # cluster_secret gets no loop and says so once: it could not authenticate to a
+    # peer anyway, and pretending otherwise would fill the log with 401s.
+    try:
+        from ainode.auth.replication import start_replication
+
+        replicator = start_replication(app)
+        if replicator is not None:
+            await replicator.start()
+    except Exception:
+        logger.exception("could not start account replication")
+
 
 def _start_metrics_retention(app: web.Application, config: NodeConfig) -> None:
     """Open ``<AINODE_HOME>/metrics.db`` and start the sampler, if enabled.
@@ -882,6 +899,15 @@ async def _on_cleanup(app: web.Application) -> None:
             await sync_task
         except asyncio.CancelledError:
             pass
+
+    # Stop the account replication loop. Nothing it does is a write this node
+    # needs to finish, so a cancel is the whole teardown.
+    try:
+        from ainode.auth.replication import stop_replication
+
+        await stop_replication(app)
+    except Exception:  # pragma: no cover - teardown must not raise
+        logger.exception("could not stop account replication")
 
     # Stop Ray autostart task
     ray_task = app.get("_ray_autostart_task")

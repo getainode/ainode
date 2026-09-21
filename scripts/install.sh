@@ -1346,6 +1346,19 @@ else
     ACCESS_LINE="API open, no key set. Require one in Config > API access."
 fi
 
+# The two commands a human needs to be able to open the dashboard with a name and
+# a password instead of pasting an API key (#261). Printed only when this node
+# requires a credential, because with auth off the dashboard opens without a login
+# and these lines would be advice about a problem nobody has. There is no route
+# that mints the first admin: the first account is made on the box, by the operator.
+print_login_lines() {
+    [ -n "$INSTALL_API_KEY" ] || auth_enabled_on_disk || return 0
+    printf '    Login:   ainode auth enable\n'
+    printf '             ainode auth user add <name> --admin\n'
+    printf '             [the account is how a human signs in instead of pasting\n'
+    printf '              the key; --password-stdin where there is no terminal]\n'
+}
+
 # -- Banner -----------------------------------------------------------------
 if [ "$DRY_RUN" = "true" ]; then
     printf '\n'
@@ -1361,6 +1374,7 @@ if [ "$DRY_RUN" = "true" ]; then
     log "                   the daily tailnet certificate renewal (not installed)"
     log "  Access:          $ACCESS_LINE"
     print_api_key_box
+    print_login_lines
     printf '\n'
     exit 0
 fi
@@ -1377,6 +1391,7 @@ printf '    Status:  ainode status\n'
 printf '    Logs:    ainode logs -f\n'
 printf '    Update:  ainode update\n'
 print_api_key_box
+print_login_lines
 printf '\n'
 printf '    Made in Texas\n'
 printf '\n'
