@@ -1060,6 +1060,31 @@ const AINode = {
     return prog;
   },
 
+  // Will this checkpoint fit on THIS node, and say so on the card (#184 point 4).
+  // The size is the catalog entry's (or the on-disk figure once it is here) and
+  // the free space is /api/status's disk block for the models directory, which is
+  // the filesystem a download actually lands on.
+  //
+  // Unknown stays unknown in both directions: a 0 size is "nobody told us", not
+  // "fits in nothing", and a null free_gb is a path the node could not stat, not
+  // an empty disk. The server refuses a download that cannot land; this is the
+  // line that lets somebody see it coming.
+  modelFitNote(m) {
+    var size = (m && (m.local_size_gb || m.size_gb)) || 0;
+    var disk = (this.state.status && this.state.status.disk) || null;
+    var models = disk && disk.models;
+    var free = (models && typeof models.free_gb === 'number') ? models.free_gb : null;
+    if (!size) return { text: 'size unknown', cls: '' };
+    var sizeStr = '~' + Math.round(size) + ' GB';
+    if (free === null) return { text: sizeStr + ', free space unknown', cls: '' };
+    var freeStr = Math.round(free) + ' GB free';
+    if (m && (m.downloaded || m.local_size_gb)) {
+      return { text: sizeStr + ' on disk, ' + freeStr, cls: '' };
+    }
+    if (size <= free) return { text: sizeStr + ' to fetch, ' + freeStr, cls: '' };
+    return { text: sizeStr + ' to fetch, only ' + freeStr, cls: 'md-fit-no' };
+  },
+
   // Live progress for one model id or repo. Not loading anywhere: a non-loading
   // answer, which every caller renders as nothing.
   modelLoadProgress(model, nowMs) {
@@ -3537,8 +3562,12 @@ const AINode = {
     var paramsStr = m.params_b ? m.params_b + 'B' : (m.params || '—');
     var ctxStr = m.context_length ? self.formatNumber(m.context_length) + ' tokens' : '—';
 
+    var fit = this.modelFitNote(m);
     var metaRow =
       '<div class="md-meta-row">' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Disk</span>' +
+          '<span class="md-meta-value ' + fit.cls + '">' + self.esc(fit.text) +
+          '</span></div>' +
         '<div class="md-meta-pair"><span class="md-meta-label">Params</span><span class="md-meta-value">' + self.esc(paramsStr) + '</span></div>' +
         '<div class="md-meta-pair"><span class="md-meta-label">Arch</span><span class="md-meta-value">' + self.esc(arch) + '</span></div>' +
         '<div class="md-meta-pair"><span class="md-meta-label">Format</span><span class="md-meta-value md-format">' + self.esc(fmt) + '</span></div>' +

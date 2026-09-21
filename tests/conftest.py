@@ -1,8 +1,8 @@
 """Shared pytest fixtures.
 
-Four are global, all there to keep the suite from reading or touching the machine
-it runs on: netdev isolation, the metrics-store redirect and the boot-reconcile
-guard (per test), and the
+Five are global, all there to keep the suite from reading or touching the machine
+it runs on: netdev isolation, the metrics-store redirect, the boot-reconcile
+guard and the Hub size lookup (per test), and the
 engine-container guard (per session, at the bottom of this file).
 
 ``isolate_netdev``: ``ainode.cluster.netdev`` reads the
@@ -35,6 +35,12 @@ could try to relaunch its shape, and a test that patches ``subprocess.run`` and
 asserts it was not called races it (observed as a flaky
 ``tests/test_api.py::test_engine_update_unresolvable_version``). The tests that
 exercise reconciliation call it directly, which these no-ops do not affect.
+
+``no_hub_size_lookup``: the download fit check learns a checkpoint's size from
+the Hub's file metadata before it lets a pull start, and remembers the answer
+under ``AINODE_HOME``. Both are the machine, so both are redirected: the lookup
+reports unknown (which lets the download through, exactly as before the check
+existed) and the cache lands in a tmpdir.
 """
 
 import shutil
@@ -107,6 +113,26 @@ def no_boot_reconcile(monkeypatch):
     reconcile.reset_state_for_tests()
     yield
     reconcile.reset_state_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def no_hub_size_lookup(monkeypatch, tmp_path_factory):
+    """The fit check never asks huggingface.co, and never writes the real cache.
+
+    ``ainode/models/fit.py`` learns a checkpoint's size from the Hub before a
+    download starts (#184 point 4), so without this every test that posts to a
+    download route would make a real HTTP call from the suite, and remembering
+    the answer would write into the developer's own ``~/.ainode``. Report unknown
+    instead, which is the "nobody could say" branch and the one that lets a
+    download through unchanged. The tests for the check hand ``check_fit`` its own
+    sizes, or patch this seam with a fake of their own.
+    """
+    from ainode.models import fit
+
+    home = tmp_path_factory.mktemp("ainode_fit_home")
+    monkeypatch.setattr(fit, "fetch_repo_size", lambda *a, **k: fit.RepoSize())
+    monkeypatch.setattr(fit, "size_cache_path", lambda: home / "repo-sizes.json")
+    yield
 
 
 def _engine_containers():

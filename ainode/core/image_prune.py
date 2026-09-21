@@ -1,8 +1,8 @@
 """Which AINode images an update may delete, and what deleting them frees.
 
 ``ainode update`` pulled a new image on every release and removed nothing, so a
-node accumulated one 1.5 GB orchestrator image per release under each of the
-three names the image is mirrored as. Spark-1 reached 180 images, 226 GB
+node accumulated one 1.5 GB orchestrator image per release under every name the
+image wears on that host. Spark-1 reached 180 images, 226 GB
 reclaimable, on a filesystem at 82 percent (#184). Nothing in the product
 reported it and nothing reclaimed it.
 
@@ -23,8 +23,8 @@ daemon anywhere near it:
   <older>`` then has something to roll back TO, which is what makes that
   command's promise true.
 * Anything else is removed BY TAG, never by image id: the same image is tagged
-  under three repositories, and ``docker rmi <id>`` would take all three at once,
-  including a tag this node is running on.
+  under several repositories, and ``docker rmi <id>`` would take every one of
+  them at once, including a tag this node is running on.
 * Nothing is decided at all when the pinned release is not in the listing. That
   means the pull did not land, or the wrong listing was handed in, and pruning
   against an unknown baseline is how a node loses the image it is running.
@@ -43,13 +43,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
-# The repositories one AINode release is published or tagged under. Everything
-# else on the host is left alone.
+# The repositories one AINode release is published or tagged under on a HOST.
+# Everything else is left alone. Publishing goes to GHCR and nowhere else; the
+# other two are names the same image wears locally on nodes that have been
+# running since the 0.4 era, and both have to be here or those tags hold every
+# byte of an image the GHCR line thinks it removed (#184: Spark-1 carried every
+# release under all three).
+#
+# ``argentaios/ainode`` is the Docker Hub repository that actually exists (stale
+# at 0.4.7, no CI step pushes to it) and is the spelling the README, CLAUDE.md
+# and scripts/uninstall.sh use. ``argentos/ainode`` is the misspelling the old
+# mirror step tagged locally, which is why it is in the evidence on Spark-1 and
+# is nowhere on Docker Hub.
 AINODE_IMAGE_REPOS = (
     "ghcr.io/getainode/ainode",
+    "argentaios/ainode",
     "argentos/ainode",
     "ainode",
 )
+
+#: The Docker Hub repository name every document uses. Pinned by a test so the
+#: prune list and the prose cannot drift apart again.
+DOCKER_HUB_REPO = "argentaios/ainode"
 
 # The listing this module parses. Tab separated because a tag cannot contain a
 # tab and a repository cannot either, while both can contain everything else.
@@ -208,8 +223,8 @@ def plan_prune(rows: Sequence[ImageRow], current: str, keep: int = 1) -> PrunePl
                    if r.tag == current_tag and r.image_id}
 
     # Generations are counted in RELEASES across all of AINode's repositories,
-    # not per repository. The same release is tagged under each of them and the
-    # three tags share one image, so keeping the mirror's copy of a release keeps
+    # not per repository. The same release is tagged under each of them and those
+    # tags share one image, so keeping the mirror's copy of a release keeps
     # the whole image alive: counting per repository would remove
     # ghcr.io/...:0.5.24 while argentos/ainode:0.5.24 held every byte of it, and
     # free nothing at all. A kept generation is kept under all its names, and a

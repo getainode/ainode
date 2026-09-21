@@ -6,6 +6,20 @@ from collections import defaultdict, deque
 from typing import Any, Optional
 
 
+#: How long a caller may wait for a fresh NVML read before it is handed the last
+#: good sample instead. On a node with persistence mode off, one sample reopens
+#: every device and pays a full GPU init each time (about 22 ms a device on
+#: castor's four V100s, and unbounded while the driver is busy releasing a GPU an
+#: engine just let go of). The read itself happens on a worker thread; this is
+#: only how long the caller waits for it (#238).
+NVML_SAMPLE_TIMEOUT_SECONDS = 1.0
+
+#: A completed sample younger than this is served as it is, with no read at all.
+#: Just under the dashboard's poll, so a browser open on the page does not queue
+#: a driver read per widget.
+NVML_SAMPLE_MAX_AGE_SECONDS = 2.0
+
+
 def optional_float(value: Any) -> Optional[float]:
     """``float(value)``, or None for anything that is not a number.
 
@@ -61,6 +75,18 @@ class MetricsCollector:
         # retention landed: a restart reset all of it and nothing kept a copy.
         self._store_sampler: Any = None
 
+        # The GPU sample, and the one read that may be in flight for it. NVML is
+        # read on a worker thread and never on the caller's own: every route on
+        # castor's API, /api/health included, hung on this while the driver was
+        # inside nvidia_unlocked_ioctl with no process holding the GPUs (#238).
+        # A caller waits NVML_SAMPLE_TIMEOUT_SECONDS at most and is then handed
+        # the last completed sample, marked as the age it is.
+        self._gpu_lock = threading.Lock()
+        self._gpu_sample: Optional[dict[str, Any]] = None
+        self._gpu_sampled_at: Optional[float] = None
+        self._gpu_reading: Optional[threading.Event] = None
+        self._gpu_reads: int = 0
+
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
@@ -85,11 +111,18 @@ class MetricsCollector:
     # Snapshots
     # ------------------------------------------------------------------
 
-    def get_snapshot(self) -> dict[str, Any]:
-        """Return a full metrics snapshot (requests, latency, GPU, uptime)."""
+    def get_snapshot(self, gpu_timeout: Optional[float] = None) -> dict[str, Any]:
+        """Return a full metrics snapshot (requests, latency, GPU, uptime).
+
+        ``gpu_timeout`` is how long this snapshot waits for an NVML read before
+        it is handed the last completed sample (see :meth:`get_gpu_metrics`). A
+        caller on the event loop leaves it alone; the retention sampler passes
+        its own, larger one, because it has a thread of its own and a stale
+        sample in the stored series would be the previous tick carried forward.
+        """
         with self._lock:
             request_stats = self._request_stats_locked()
-        gpu = self.get_gpu_metrics()
+        gpu = self.get_gpu_metrics(timeout=gpu_timeout)
         return {
             "uptime_seconds": round(time.time() - self._start_time, 1),
             "requests": request_stats,
@@ -133,11 +166,21 @@ class MetricsCollector:
 
         self.detach_store()
         sampler = MetricsSampler(
-            store, self.get_snapshot, interval_seconds=interval_seconds
+            store, self.snapshot_for_retention, interval_seconds=interval_seconds
         )
         self._store_sampler = sampler
         sampler.start()
         return sampler
+
+    #: The retention sampler's own GPU wait. It runs on its own thread with
+    #: nothing waiting on it, so it waits for a real read instead of accepting the
+    #: last good sample: an unmeasured tick belongs in the store as a NULL row and
+    #: never as the previous tick carried forward.
+    RETENTION_GPU_TIMEOUT_SECONDS = 30.0
+
+    def snapshot_for_retention(self) -> dict[str, Any]:
+        """The snapshot the on-disk sampler stores. See the constant above."""
+        return self.get_snapshot(gpu_timeout=self.RETENTION_GPU_TIMEOUT_SECONDS)
 
     def detach_store(self) -> None:
         """Stop the retention sampler, if one is running. Safe to call twice."""
@@ -171,8 +214,97 @@ class MetricsCollector:
         except (TypeError, ValueError):
             return None
 
-    def get_gpu_metrics(self) -> dict[str, Any]:
+    # ------------------------------------------------------------------
+    # GPU sampling: off the caller's thread, always
+    # ------------------------------------------------------------------
+
+    def get_gpu_metrics(self, timeout: Optional[float] = None) -> dict[str, Any]:
+        """The node's GPU figures, without ever blocking the caller on the driver.
+
+        A fresh enough sample is returned as it is. Otherwise a read is started
+        on a worker thread (one at a time, however many callers ask) and the
+        caller waits ``timeout`` seconds for it. A read that has not finished by
+        then hands back the last completed sample with ``stale: true`` and the
+        age it actually has, or, when this process has never got one, a
+        ``pending`` error saying the driver has not answered yet.
+
+        Why: this is called from aiohttp handlers on the event loop (``/api/metrics``,
+        ``/api/nodes``, ``/api/status``), from the discovery broadcast and from the
+        retention sampler. With persistence mode off and no process holding the
+        GPUs, one sample pays a full GPU init per device, and on castor that put
+        the driver in ``nvidia_unlocked_ioctl`` long enough that every route on the
+        node timed out, ``/api/health`` included (#238). A stale measurement is a
+        measurement, clearly labelled; a hung event loop is a node that looks dead.
+        """
+        if timeout is None:
+            timeout = NVML_SAMPLE_TIMEOUT_SECONDS
+        sample, age = self._gpu_snapshot()
+        if sample is not None and age is not None and age <= NVML_SAMPLE_MAX_AGE_SECONDS:
+            return dict(sample)
+        done = self._start_gpu_read()
+        done.wait(max(0.0, float(timeout)))
+        fresh, fresh_age = self._gpu_snapshot()
+        if fresh is not None and (sample is None or fresh is not sample):
+            return dict(fresh)
+        if sample is not None:
+            # The read is still running. Serve what we measured last, saying so.
+            return dict(sample, stale=True,
+                        sample_age_seconds=(None if age is None else round(age, 1)))
+        return {"error": "NVML has not answered yet (a slow driver read is in "
+                         "flight); check persistence mode with nvidia-smi -q | "
+                         "grep -i persistence",
+                "pending": True}
+
+    def _gpu_snapshot(self):
+        """``(sample, age_seconds)`` for the last completed read, or ``(None, None)``."""
+        with self._gpu_lock:
+            sample = self._gpu_sample
+            at = self._gpu_sampled_at
+        if sample is None or at is None:
+            return None, None
+        return sample, max(0.0, time.time() - at)
+
+    def _start_gpu_read(self) -> threading.Event:
+        """Begin one NVML read on a worker thread, or join the one in flight.
+
+        A plain daemon thread rather than a pool: a read wedged in the driver
+        must not keep the interpreter from exiting, and a ThreadPoolExecutor is
+        joined at shutdown.
+        """
+        with self._gpu_lock:
+            if self._gpu_reading is not None:
+                return self._gpu_reading
+            done = threading.Event()
+            self._gpu_reading = done
+        thread = threading.Thread(target=self._gpu_read_worker, args=(done,),
+                                  name="ainode-nvml", daemon=True)
+        thread.start()
+        return done
+
+    def _gpu_read_worker(self, done: threading.Event) -> None:
+        try:
+            sample = self.read_gpu_metrics()
+        except Exception as exc:  # pragma: no cover - read_gpu_metrics catches
+            sample = {"error": str(exc)}
+        with self._gpu_lock:
+            self._gpu_sample = sample
+            self._gpu_sampled_at = time.time()
+            self._gpu_reading = None
+            self._gpu_reads += 1
+        done.set()
+
+    @property
+    def gpu_reads(self) -> int:
+        """How many NVML reads have completed. For tests and for a diagnosis."""
+        with self._gpu_lock:
+            return self._gpu_reads
+
+    def read_gpu_metrics(self) -> dict[str, Any]:
         """Query real-time GPU stats via pynvml, for EVERY device on the node.
+
+        The BLOCKING read. Runs on the worker thread :meth:`get_gpu_metrics`
+        starts, never on an event loop: on a node with persistence mode off this
+        reopens every device and pays a full GPU init per device.
 
         Returns utilization_percent, memory_used_mb, memory_total_mb and
         temperature_c for the node as a whole, plus ``gpu_count``, ``devices``

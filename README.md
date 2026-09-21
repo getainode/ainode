@@ -962,8 +962,9 @@ ainode logs -f               # Tail the engine log the configured backend writes
 check with OK, WARN, FAIL or INFO and a one-line fix: the engine backend against what
 is actually on the node, `gpu_memory_utilization` against the stacked-load guard, the
 discovery port and `cluster_id` against what the installer writes, docker and the
-engine image, GPUs and whether the memory is unified, free space on the AINode home
-and the models dir, the pin in `image.env` against the running container and the
+engine image, GPUs and whether the memory is unified, GPU persistence mode on a node
+with discrete cards, free space on the AINode home and the models dir, the pin in
+`image.env` against the running container and the
 newest published tag, the unit, the web / engine / discovery ports, peers and whether
 the fleet agrees on a release, the fabric interface, the recorded distributed shape
 and whether it went degraded, the secrets store's mode, the TLS certificate and its
@@ -975,6 +976,12 @@ INFO never fail the run), and `--fix` applies only the changes that cannot lose
 anything (create a directory, chmod the secrets store to 0600, write the fleet
 discovery port) and then re-runs the checks so the report describes the node as it is
 now.
+
+Run inside the container, which is how the host wrapper runs it, the checks that
+only the host can answer print INFO naming the host command rather than a WARN
+nobody in there can clear; the wrapper hands the host's unit state in, so the
+service line is a real answer. `--fix` is refused with `--peer`, because a fix
+belongs to the node whose files it writes.
 
 `ainode cluster token` and `ainode join` are the whole join. The token is 32 random
 bytes, stored on the master as a SHA-256 hash with an expiry (30 minutes, `--ttl`) and

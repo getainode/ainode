@@ -2939,6 +2939,14 @@ select {
   font-weight: 600;
 }
 
+/* A checkpoint bigger than the free space on this node's models directory. The
+   download is refused by the node with the same numbers; this is the warning
+   before the click. */
+.md-meta-value.md-fit-no {
+  color: var(--amber);
+  border-color: rgba(255, 184, 0, 0.4);
+}
+
 .md-format {
   background: rgba(74, 144, 217, 0.15);
   color: #5baee5;

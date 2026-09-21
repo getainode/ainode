@@ -357,6 +357,17 @@ class NvidiaBackend(EngineBackend):
         except Exception:
             return ""
 
+    def log_tail(self, lines: int = 40) -> str:
+        """See ``EngineBackend.log_tail``: this engine's own container output.
+
+        Asked of docker rather than of the solo log file, because stacked
+        instances on a node share that file and a neighbour's traceback must
+        never be reported as this engine's reason (#235).
+        """
+        if self._launched_at is None:
+            return ""
+        return self._docker_logs_tail(self._engine_container_name(), lines=lines)
+
     def _docker_logs_tail(self, container_name: str, lines: int = 15) -> str:
         """Last N lines of a container's output — the failure reason for a
         crashed engine. Safe on a missing container (returns '')."""

@@ -358,6 +358,11 @@ class EugrBackend(EngineBackend):
             pass
         return result
 
+    def log_tail(self, lines: int = 40) -> str:
+        """See ``EngineBackend.log_tail``. This backend's engine is an attached
+        ``vllm serve``, so its own log file IS its output."""
+        return self.logs(lines)
+
     def logs(self, n: int = 100) -> str:
         log = self._distributed_log if self.config.distributed_mode == "head" else self._log_file
         if not log.exists():

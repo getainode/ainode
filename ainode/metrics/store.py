@@ -225,7 +225,10 @@ def series_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Optional[floa
 
     * A GPU block carrying an ``error`` means NVML would not answer. Every GPU
       series for that tick is None, not a row of zeros that a chart draws as an
-      idle, empty, cold node.
+      idle, empty, cold node. A block marked ``stale`` is the same answer: it is
+      the last sample the collector managed, served while a slow driver read is
+      still in flight (#238), and storing it as THIS tick's value would be the
+      previous tick carried forward, which this file exists to refuse.
     * The latency percentiles read 0 on a collector that has timed nothing,
       because that is the shape ``/api/metrics`` has always returned and this
       module does not change it. Stored, that 0 would be a claim that requests
@@ -235,7 +238,8 @@ def series_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Optional[floa
     out: dict[str, Optional[float]] = {}
 
     gpu = snapshot.get("gpu")
-    readable = isinstance(gpu, Mapping) and "error" not in gpu
+    readable = (isinstance(gpu, Mapping) and "error" not in gpu
+                and not gpu.get("stale"))
     for key in GPU_KEYS:
         out[f"gpu.{key}"] = optional_float(gpu.get(key)) if readable else None
 

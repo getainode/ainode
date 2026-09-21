@@ -153,6 +153,22 @@ class EngineBackend(abc.ABC):
         """
         return ""
 
+    def log_tail(self, lines: int = 40) -> str:
+        """The engine's last ``lines`` lines of output, or "".
+
+        Read by the startup replay BEFORE it relaunches an engine that never
+        bound, because the relaunch removes that container and with it the only
+        record of why it died: the 0.5.28 replay on Spark-4 reported "never bound
+        on :8001 after 79s (container exited)" and nothing anywhere said what the
+        engine had printed (#235).
+
+        Comes from THIS engine's own container or its own log, never from a
+        shared file that a stacked neighbour also writes, for the same reason
+        ``last_log_activity`` is per-instance. Returns "" when the backend cannot
+        say, and never raises: the caller is reporting a failure already.
+        """
+        return ""
+
     def activity_mark(self) -> Optional[float]:
         """Epoch seconds when this engine last showed ACTIVITY, or None.
 
