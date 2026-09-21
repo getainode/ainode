@@ -100,6 +100,58 @@ def test_render_latency_summary_has_standard_quantiles(collector_no_gpu):
     assert "ainode_request_latency_milliseconds_count 6" in text
 
 
+def test_the_latency_summary_is_absent_until_a_request_is_timed(collector_no_gpu):
+    """A node that has served nothing must not publish instant answers.
+
+    The collector reports 0 for all three percentiles before anything is timed,
+    which is the shape /api/metrics has always had. Exported, that reads as the
+    fastest node in the fleet, and it is the same zero the store already refuses
+    to persist. Absent means a dashboard shows no data and an alert can say
+    absent() rather than == 0.
+    """
+    text = prometheus.render(collector_no_gpu)
+    assert "ainode_request_latency_milliseconds" not in text
+    assert "# TYPE ainode_request_latency_milliseconds" not in text
+    # One request, and the whole block appears.
+    collector_no_gpu.record_request("m", latency_ms=42.0, tokens_generated=1)
+    timed = prometheus.render(collector_no_gpu)
+    assert 'ainode_request_latency_milliseconds{quantile="0.5"} 42.0' in timed
+    assert "ainode_request_latency_milliseconds_count 1" in timed
+
+
+def test_the_summary_has_no_sum_rather_than_a_zero_one(collector_no_gpu):
+    """avg = sum/count read as zero latency on every node, because the sum was 0.
+
+    The collector keeps no running total, so the only sum available was a
+    literal 0. A summary a scraper cannot average is honest; one that averages
+    to zero is not.
+    """
+    collector_no_gpu.record_request("m", latency_ms=1234.0, tokens_generated=1)
+    text = prometheus.render(collector_no_gpu)
+    assert "ainode_request_latency_milliseconds_sum" not in text
+
+
+def test_gpu_available_answers_one_on_a_healthy_node(collector_with_gpu):
+    """It only ever carried the 0, so a working node published no series at all."""
+    text = prometheus.render(collector_with_gpu)
+    assert "ainode_gpu_available 1" in text
+    assert "# TYPE ainode_gpu_available gauge" in text
+    assert prometheus.render(collector_with_gpu).count("ainode_gpu_available") == 3
+
+
+def test_a_loaded_model_says_how_wide_it_is(collector_no_gpu):
+    """TP was collected and dropped, so TP=4 and TP=1 rendered identically."""
+    text = prometheus.render(collector_no_gpu, models=[
+        {"model": "deepseek/V4-Flash", "status": "running", "port": 8000,
+         "tensor_parallel_size": 2},
+        {"model": "solo/model", "status": "running", "port": 8001},
+    ])
+    assert 'ainode_model_loaded{model="deepseek/V4-Flash",status="running",port="8000",tp="2"} 1' in text
+    # Absent rather than 1 when the record does not say: a default would claim a
+    # shape nobody reported.
+    assert 'ainode_model_loaded{model="solo/model",status="running",port="8001"} 1' in text
+
+
 def test_render_trailing_newline(collector_no_gpu):
     """Prometheus parsers strictly require a trailing newline."""
     text = prometheus.render(collector_no_gpu)

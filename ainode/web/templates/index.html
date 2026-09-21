@@ -31,6 +31,7 @@
         <button class="nav-pill active" data-view="dashboard">Cluster</button>
         <button class="nav-pill" data-view="chat">Chat</button>
         <button class="nav-pill" data-view="server">Server</button>
+        <button class="nav-pill" data-view="metrics">Metrics</button>
         <button class="nav-pill" data-view="downloads">Models</button>
         <button class="nav-pill" data-view="training">Training</button>
         <button class="nav-pill" data-view="bench">Bench</button>
@@ -135,6 +136,11 @@
           <h2>Training</h2>
         </div>
         <div id="training-content"></div>
+      </div>
+      <!-- Metrics view: charts of this node's retained history (static/js/metrics.js,
+           shaped by static/js/metrics-data.js). -->
+      <div id="view-metrics" class="view" style="display:none">
+        <div id="metrics-content"></div>
       </div>
       <!-- Bench view (markup + behaviour in static/js/bench.js) -->
       <div id="view-bench" class="view" style="display:none">
@@ -242,6 +248,10 @@
   <script src="/static/js/auth.js"></script>
   <script src="/static/js/topology.js"></script>
   <script src="/static/js/bench.js"></script>
+  <!-- The Metrics view: the shaping first (DOM-free, node-testable), then the
+       charts that draw what it returns. -->
+  <script src="/static/js/metrics-data.js"></script>
+  <script src="/static/js/metrics.js"></script>
   <!-- The "Join a cluster" card, mounted by app.js into Config > Cluster. -->
   <script src="/static/js/join.js"></script>
   <script src="/static/js/app.js"></script>
