@@ -164,12 +164,22 @@ def create_app(
             and (getattr(config, "distributed_mode", "solo") or "solo") == "solo":
         from ainode.discovery.instance import InstanceRecord
         from ainode.engine.instance_manager import InstanceManager
+        from ainode.engine.reconcile import adopted_boot_primary
         _seed = InstanceManager(base_port=config.api_port)
+        # An ADOPTED primary is already serving and was not launched by this
+        # process (#240), and both halves of that are the record's to state: the
+        # status is not "starting" (the engine is up, and a status that says
+        # otherwise makes the dashboard draw a loading card for a model answering
+        # requests) and ``adopted`` is how every reader tells a reconstructed
+        # instance from one this process launched.
+        _adopted = adopted_boot_primary()
         _seed.add(InstanceRecord(
             instance_id=f"{config.node_id or 'head'}:{config.model}",
             model=config.model, head_node_id=config.node_id or "head",
-            peer_ips=[], api_port=config.api_port, tensor_parallel_size=1,
-            status="starting"), engine)
+            peer_ips=[], api_port=config.api_port,
+            tensor_parallel_size=(_adopted or {}).get("tensor_parallel_size") or 1,
+            status=("serving" if _adopted else "starting"),
+            adopted=bool(_adopted)), engine)
         app["instances"] = _seed
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup

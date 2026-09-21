@@ -21,6 +21,7 @@ from ainode.auth.middleware import TRUST_REMOTE_CODE_RULE, is_authenticated
 from ainode.core.gpu import detect_gpu
 from ainode.engine.reconcile import (
     adopt_running_engines,
+    adopted_boot_primary,
     replay_distributed_if_needed,
 )
 from ainode.models.registry import ModelManager
@@ -1330,6 +1331,22 @@ def _engine_container_names(include_primary: bool) -> list:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _without_adopted(ids: list) -> list:
+    """``ids`` minus every container adoption has claimed (``reconcile.py``).
+
+    One home for the comparison, because `docker ps -q` prints short ids and an
+    inspect reports the full one, so the two are matched on either being a prefix
+    of the other. Three callers need the same answer: the sweep must not REMOVE an
+    adopted container, and neither poll may WAIT for one to disappear.
+    """
+    from ainode.engine.reconcile import adopted_container_ids
+    keep = adopted_container_ids()
+    if not keep:
+        return list(ids)
+    return [i for i in ids
+            if i and not any(a.startswith(i) or i.startswith(a) for a in keep)]
+
+
 def _orphan_engine_ids() -> list:
     """Stacked-engine poll seam. Kept zero-arg: tests fake it by name.
 
@@ -1337,30 +1354,25 @@ def _orphan_engine_ids() -> list:
     to disappear: counting it would spend the whole clear timeout and then warn
     about a container the node is deliberately still running (#179).
     """
-    from ainode.engine.reconcile import adopted_container_ids
-    keep = adopted_container_ids()
-    return [i for i in _engine_container_ids(include_primary=False)
-            if not any(a.startswith(i) or i.startswith(a) for a in keep)]
+    return _without_adopted(_engine_container_ids(include_primary=False))
 
 
 def _remove_engine_containers(include_primary: bool) -> list:
     """``docker rm -f`` this node's engine containers. Returns the ids removed.
 
-    An engine ADOPTED by ``engine/reconcile.py`` is excluded: adoption runs before
-    this sweep, and the point of it is that the container is still serving and now
-    has a record in the manager, so removing it here would take down the very
-    instance the node just decided to keep (#179). Nothing is adopted before the
-    boot sweep, so that one is unaffected.
+    An engine ADOPTED by ``engine/reconcile.py`` is excluded: the container is
+    still serving and has a record in the manager, so removing it here would take
+    down the very instance the node just decided to keep (#179, #240). That now
+    includes the BOOT sweep: `ainode start` asks ``adopt_boot_engines`` which
+    containers match the configured recipe and are answering BEFORE it calls the
+    sweep, which is what makes a restart keep its engine instead of reloading it.
     """
     import subprocess
 
-    from ainode.engine.reconcile import adopted_container_ids
     ps = subprocess.run(
         ["docker", "ps", "-aq", *_engine_name_filters(include_primary)],
         capture_output=True, text=True, timeout=20)
-    keep = adopted_container_ids()
-    ids = [i for i in ps.stdout.split()
-           if i and not any(a.startswith(i) or i.startswith(a) for a in keep)]
+    ids = _without_adopted(ps.stdout.split())
     if ids:
         subprocess.run(["docker", "rm", "-f", *ids],
                        capture_output=True, text=True, timeout=60)
@@ -1430,6 +1442,10 @@ def sweep_engines_before_boot() -> list:
     remove them, wait for the daemon to finish (names gone means the container and
     its process are gone), and only then launch.
 
+    An engine container the boot ADOPTED is not swept and not waited for: it
+    matched the configured recipe and is answering, so it is the engine this boot
+    is going to keep serving (#240). Everything else goes, exactly as before.
+
     Synchronous by design -- it runs in `ainode start` before the event loop
     exists. Bounded by ``_ORPHAN_CLEAR_TIMEOUT_S``: a stuck container is logged by
     name and boot continues rather than hanging forever. Returns the ids removed.
@@ -1445,7 +1461,7 @@ def sweep_engines_before_boot() -> list:
         return []
     deadline = time.monotonic() + _ORPHAN_CLEAR_TIMEOUT_S
     while True:
-        still = _engine_container_ids(include_primary=True)
+        still = _without_adopted(_engine_container_ids(include_primary=True))
         if not still:
             logger.info("pre-launch sweep freed %d engine container(s) from the "
                         "previous run", len(ids))
@@ -1501,9 +1517,12 @@ async def replay_instances_on_startup(app) -> None:
     orchestrator restart leaves the engine containers running, so the first thing
     this node has to do is find out what it is already serving: a container that
     is up is put back in the InstanceManager with its real shape, and never
-    relaunched. The distributed replay decision comes LAST, once the manager
-    reflects reality, so a shape whose container is alive is recognised rather
-    than launched a second time.
+    relaunched. `ainode start` has already made the KEEP-or-relaunch decision for
+    the boot primary and the recorded stacked instances before it swept anything
+    (#240), so by here those containers are still up and this step is what puts
+    them in the manager. The distributed replay decision comes LAST, once the
+    manager reflects reality, so a shape whose container is alive is recognised
+    rather than launched a second time.
     """
     config = app.get("config")
     if config is None:
@@ -1550,11 +1569,22 @@ async def replay_instances_on_startup(app) -> None:
 
 async def _replay_serialized(app, config, entries) -> None:
     """Boot primary, then one stacked instance at a time. Slot already held."""
+    # An ADOPTED primary is already serving, so there is nothing to wait for and
+    # nothing to relaunch (#240). It must also not go through the bind wait: that
+    # wait reports the CONTAINER's life, so an engine adopted after fourteen hours
+    # up would be written into the launch-time ledger as a fourteen-hour load and
+    # every "how long does this model take here" answer would read it.
+    adopted_primary = adopted_boot_primary()
+    boot_engine = app.get("engine")
+    if adopted_primary is not None and await _port_serving(config.api_port):
+        logger.info("boot primary %s is already serving on :%s, adopted from the "
+                    "container that outlived the restart (up %s)",
+                    adopted_primary.get("model") or config.model, config.api_port,
+                    adopted_primary.get("uptime") or "unknown")
     # Wait for the boot primary to actually serve before stacking on top of it.
     # Retry once if it died on the way up — otherwise the node comes back with
     # its main model silently missing.
-    boot_engine = app.get("engine")
-    if boot_engine is not None and getattr(config, "model", None):
+    elif boot_engine is not None and getattr(config, "model", None):
         # Pass the engine handle so the wait tracks ITS liveness (container up,
         # log advancing) instead of a fixed window a slow bind would blow past.
         await _ensure_serving(app, config.api_port, boot_engine.start,

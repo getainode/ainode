@@ -168,6 +168,21 @@ def cmd_start(args):
         config.model = None
         config._skip_replay = True
 
+    # ADOPT BEFORE SWEEPING (#240). An engine container that is still running the
+    # model this config names, on the right port, from the right image, and is
+    # answering, is the engine this node is supposed to be serving: keeping it
+    # turns a restart from a full model load (420 s on pollux, 834 s on castor)
+    # into seconds. The decision has to be made here because both things that
+    # destroy it are here: the sweep below and the boot engine's own launch.
+    # Anything that does not match is left to the sweep, so a node whose model,
+    # image or width changed reloads exactly as it did before.
+    from ainode.engine import reconcile
+    adoption = reconcile.adopt_boot_engines(config)
+    for line in adoption.get("lines") or []:
+        console.print(f"  [dim]{line}[/dim]")
+    if adoption.get("lines"):
+        console.print()
+
     # Nothing may launch while an engine from this node's previous life is still
     # running. A vLLM engine container is a sibling spawned through docker.sock, so
     # an `ainode update` restart does NOT stop it: on the 0.5.11 roll the old
@@ -285,22 +300,35 @@ def cmd_start(args):
         from ainode.engine.vllm_engine import VLLMEngine
         engine = VLLMEngine(config)
 
-    # Start the engine in the background — do NOT block the web server.
-    # The web UI comes up immediately and shows a loading state while the
-    # model warms up. Users should never have to stare at a terminal.
-    try:
-        launched = engine.start()
-    except EugrBackendError as exc:
-        console.print(f"  [red]Cannot start the engine.[/red]\n\n  {exc}\n")
-        _remove_pid()
-        sys.exit(1)
-    if not launched:
-        console.print("  [red]Failed to launch engine process.[/red] Check logs in ~/.ainode/logs/")
-        _remove_pid()
-        sys.exit(1)
+    # The engine this boot ADOPTED is already up and answering, so there is
+    # nothing to launch: hand the same backend handle to the server (its
+    # instance_id token names the running container, so stop() and is_running()
+    # both reach it) with the container's own start time as its launch stamp, so a
+    # bind wait or the UI reports the engine's real age and not this process's.
+    adopted_primary = adoption.get("primary")
+    if adopted_primary is not None:
+        reconcile.attach_adopted_backend(engine, adopted_primary)
+        console.print(
+            f"  [dim]Engine adopted, no reload: {adopted_primary['model']} is "
+            f"serving on :{adopted_primary['api_port']}.[/dim]\n")
+        console.print("  [bold green]Open http://localhost:3000 to get started.[/bold green]\n")
+    else:
+        # Start the engine in the background, and do NOT block the web server.
+        # The web UI comes up immediately and shows a loading state while the
+        # model warms up. Users should never have to stare at a terminal.
+        try:
+            launched = engine.start()
+        except EugrBackendError as exc:
+            console.print(f"  [red]Cannot start the engine.[/red]\n\n  {exc}\n")
+            _remove_pid()
+            sys.exit(1)
+        if not launched:
+            console.print("  [red]Failed to launch engine process.[/red] Check logs in ~/.ainode/logs/")
+            _remove_pid()
+            sys.exit(1)
 
-    console.print("  [dim]Engine starting in background — web UI is ready now.[/dim]\n")
-    console.print("  [bold green]Open http://localhost:3000 to get started.[/bold green]\n")
+        console.print("  [dim]Engine starting in background, the web UI is ready now.[/dim]\n")
+        console.print("  [bold green]Open http://localhost:3000 to get started.[/bold green]\n")
 
     # Run the API/web server immediately — it handles the engine's loading
     # state and surfaces it to the browser (spinner, status endpoint, etc.).
@@ -310,10 +338,15 @@ def cmd_start(args):
     except KeyboardInterrupt:
         console.print("\n  [yellow]Shutting down...[/yellow]")
     finally:
-        try:
-            engine.stop()
-        except Exception:
-            pass
+        # A still-running engine container is LEFT running (#240): it is a sibling
+        # spawned through docker.sock, every stacked engine already outlives this
+        # process, and stopping it here is what made the next boot reload the model
+        # from scratch. The next start adopts it; the line says how to free the GPU
+        # instead. A container that is not running is still stopped through the
+        # backend, which reaps a corpse and a head's peer containers.
+        left = reconcile.keep_engines_on_shutdown(engine, config)
+        if left:
+            console.print(f"  [dim]{left}[/dim]")
         _remove_pid()
 
 

@@ -122,11 +122,35 @@ Engine containers are siblings spawned through docker.sock, so they outlive the
 orchestrator. `reconcile.py` is the only home for what a boot does about that, and
 its three steps run in this order, ahead of the launch order below.
 
-- **ADOPT FIRST, and adopt rather than relaunch.** `adopt_running_engines` runs
-  before the settle wait, before the sweep and before anything launches: it asks
-  `docker inspect` about the containers this node would have created, and puts the
-  RUNNING ones back in the `InstanceManager`. **The container's own argv is the
-  authority on the shape** (model from `--served-model-name`, width from
+- **DECIDE BEFORE THE SWEEP, in `ainode start`.** `adopt_boot_engines(config)` is
+  called by `cmd_start` BEFORE `sweep_engines_before_boot()` and before the boot
+  engine launches, because those two are what destroyed a still-serving engine: a
+  restart of a solo node paid a full model load (420 s on pollux, 834 s on castor)
+  to arrive back where it started (#240). A container is KEPT only when all three
+  gates pass: it is RUNNING, `shape_mismatch()` finds nothing (model, port, image,
+  TP width and executor all as the configured recipe renders them, with the width
+  read from `extra_vllm_args` because a solo launch renders it nowhere else), and
+  `engine_unhealthy()` finds nothing (`/health` answers AND `/v1/models` names that
+  model). Any gate failing means relaunch exactly as before, with one line saying
+  which, so an update that moved the engine image still reloads. The decision is
+  per-process state (`boot_decision()`, `adopted_boot_primary()`), read afterwards
+  by `create_app` (the primary's seeded record carries `adopted`) and by the
+  replay. **The expected image has ONE home**, `backends/nvidia.py::resolve_engine_image`,
+  called by both the backend and the comparison.
+- **A graceful shutdown LEAVES a running engine container up**
+  (`keep_engines_on_shutdown`, called from `cmd_start`'s `finally`). `engine.stop()`
+  there stopped AND removed the container on every `systemctl restart`, so there
+  was nothing left for the next boot to adopt; every STACKED engine already
+  outlived the orchestrator, and this makes the primary and the head behave the
+  same way. A container that is NOT running is still stopped through the backend,
+  which is what reaps a corpse and a head's peer containers. The operator line
+  names `docker rm -f <container>` for freeing the GPU, and start-clean
+  (`touch <AINODE_HOME>/.start-clean`) adopts nothing by design.
+- **ADOPT, don't relaunch, and the container's own argv is the authority on the
+  shape.** `adopt_running_engines` runs before the settle wait, before the replay's
+  sweep and before anything launches: it asks `docker inspect` about the containers
+  this node would have created and puts the RUNNING ones back in the
+  `InstanceManager` (model from `--served-model-name`, width from
   `--tensor-parallel-size`, port from `--port`, `mp` from `--nnodes`), because
   config.json can have been edited since the launch and a stacked instance whose
   manifest write never happened has no other record at all. An adopted record
@@ -135,10 +159,24 @@ its three steps run in this order, ahead of the launch order below.
   used so `stop()` reaches the right container, and `_launched_at` is stamped from
   the container's `StartedAt` so `is_running()` asks docker instead of answering
   from a launch subprocess this process never had. An adopted backend has no log
-  follower, so a bind wait on it leans on activity and container state.
-- **The sweep may not remove an adopted container.** `_remove_engine_containers`
-  and `_orphan_engine_ids` both filter on `reconcile.adopted_container_ids()`.
-  Nothing is adopted before the boot sweep, so that one is unaffected.
+  follower, so a bind wait on it leans on activity and container state. **A stacked
+  instance the manifest describes is rebuilt from that ENTRY, not from the argv**:
+  the entry is the full override set a replay would have launched, and a snapshot
+  missing its engine image and extra flags would be written back over the entry by
+  the next `save_instance_manifest`. An orphan with no entry is the one case the
+  argv alone describes, and it is written into the manifest as it is adopted.
+- **The sweep may not remove an adopted container, and may not WAIT for one
+  either.** `_remove_engine_containers`, `_orphan_engine_ids` and the boot sweep's
+  own poll all filter through `api_routes._without_adopted`, which is the one home
+  for matching a short `docker ps` id against a full inspect id. Since #240 that
+  includes the BOOT sweep, so an adopted container must never be counted as
+  "still present": the poll would spend its whole timeout waiting for a container
+  the node is deliberately still running.
+- **An adopted primary does not go through the bind wait.** `_replay_serialized`
+  logs that it is already serving and moves on, because `_wait_for_bind` reports
+  the CONTAINER's life: an engine adopted after fourteen hours up would be written
+  into the launch-time ledger as a fourteen-hour load, and every "how long does
+  this model take on this node" answer reads that ledger.
 - **A distributed launch is PERSISTED, to `distributed.json`, not to
   `instances.json`.** The solo manifest is replayed entry by entry through
   `append_solo_instance`, so a distributed shape in that list would come back as a
@@ -162,12 +200,16 @@ its three steps run in this order, ahead of the launch order below.
   MoE back on one node. Before adoption the manager was empty after a restart, so
   the load path could not see the head and the question never came up.
 - **Tests fake the seams, not the checks.** `inspect_container`,
-  `list_engine_containers`, `probe_peer` and `port_serving` are module-level
-  functions for that reason, and `adopt_running_engines` /
-  `replay_distributed_if_needed` are module-level names in `models/api_routes.py`
-  so a replay test can neuter them. **A test that calls
+  `list_engine_containers`, `probe_peer`, `port_serving`, `port_health` and
+  `served_models` are module-level functions for that reason, and
+  `adopt_running_engines` / `replay_distributed_if_needed` are module-level names
+  in `models/api_routes.py` so a replay test can neuter them. **A test that calls
   `replay_instances_on_startup` must fake both**, or it reaches the real docker on
   the machine running the suite (the CI runner is a Spark with live engines).
+  `tests/conftest.py::no_boot_reconcile` stubs the two docker seams for the whole
+  suite for the same reason, because since #240 a test that drives `cmd_start`
+  would otherwise ask the real docker what this machine is serving; a test about
+  adoption fakes them itself and its own patch wins.
 
 ## Launch ORDER on a node: sweep, primary, bind, then stacked one at a time
 
@@ -178,19 +220,22 @@ profiling on one node at once under-provision whichever finishes second. On the
 `gpu_memory_utilization` that gave it a 600K-token cache on a settled node (#96).
 The order below is a contract, not a nicety.
 
+0. **Decide what to keep, before the sweep** (`reconcile.adopt_boot_engines`, the
+   contract above). Everything below applies to what is left after that.
 1. **Sweep before anything launches, and wait for it.** `ainode start` calls
    `models/api_routes.py::sweep_engines_before_boot()` BEFORE it starts the boot
    engine: `docker rm -f` every engine container this node owns (the primary
    `ainode-vllm-node-solo`, the stacked `-<port>` ones, a distributed
    `ainode-vllm-head`; never a peer's `ainode-vllm-worker-*`, which belongs to
-   whichever head placed it) and poll until the names are gone, because `--rm`
-   removal is asynchronous. A container that will not go is logged BY NAME and boot
-   continues. The sweep is claimed once per process, so the replay's
-   `ensure_startup_sweep()` is then a no-op. **Never widen the replay's own sweep
-   past the stacked prefix**: it runs ~10 s into boot, and a wide sweep there would
-   remove the primary this boot just launched.
+   whichever head placed it, and never one this boot adopted) and poll until the
+   names are gone, because `--rm` removal is asynchronous. A container that will
+   not go is logged BY NAME and boot continues. The sweep is claimed once per
+   process, so the replay's `ensure_startup_sweep()` is then a no-op. **Never widen
+   the replay's own sweep past the stacked prefix**: it runs ~10 s into boot, and a
+   wide sweep there would remove the primary this boot just launched.
 2. **Boot primary next**, and let it BIND before anything stacks on it
-   (`_ensure_serving`, the adaptive wait, one retry).
+   (`_ensure_serving`, the adaptive wait, one retry). An ADOPTED primary is already
+   serving: it is not launched and not waited for.
 3. **Then the stacked instances, one at a time**, each waiting for the previous one
    to bind. A launch that fails after its one retry logs and the replay moves to the
    next model; it never blocks the rest of the manifest.

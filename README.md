@@ -922,8 +922,14 @@ node pulls it (see [Quantize a model](#quantize-a-model-awq--nvfp4)).
 ```bash
 ainode update [version]      # pull, pin, restart, verify the node came back on it,
                              #   then prune the images it replaced
-ainode start                 # Start AINode (inference + web UI)
-ainode stop                  # Stop AINode
+ainode start                 # Start AINode (inference + web UI). An engine container
+                             #   already serving the configured model is ADOPTED, so a
+                             #   restart costs seconds instead of a full model load
+ainode stop                  # Stop AINode. An engine that is still serving is left
+                             #   running so the next start can adopt it; free the GPU
+                             #   with `docker rm -f ainode-vllm-node-solo`, or start
+                             #   the node idle with `touch ~/.ainode/.start-clean`
+                             #   before the next start
 ainode status                # Show cluster status
 ainode models                # List available models
 ainode role master|worker|solo  # Set or show this node's cluster role

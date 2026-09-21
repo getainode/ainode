@@ -88,6 +88,18 @@ ENGINE_IMAGE_DOCKERFILES = {
 }
 
 
+def resolve_engine_image(config) -> str:
+    """The engine image a launch on ``config`` would run.
+
+    One home for the answer, because two callers need the same one: the backend
+    renders the launch with it, and ``engine/reconcile.py`` compares it against
+    the image a container that is ALREADY running was started from, which is how
+    an update that changed the pinned image is told apart from a restart that can
+    keep its engine (#240).
+    """
+    return (getattr(config, "engine_image", "") or "").strip() or NVIDIA_VLLM_IMAGE
+
+
 def image_repo(image: str) -> str:
     """An image ref with its tag removed.
 
@@ -1148,7 +1160,7 @@ class NvidiaBackend(EngineBackend):
         """Container image for THIS instance — per-load override, else the
         fleet default. Lets one node run a 0.17 model and a 0.27 model side by
         side (both images coexist; docker doesn't care)."""
-        return (getattr(self.config, "engine_image", "") or "").strip() or NVIDIA_VLLM_IMAGE
+        return resolve_engine_image(self.config)
 
     def _serve_argv_prefix(self, image: str) -> List[str]:
         """Tokens to place before ``<model>`` so the container runs
