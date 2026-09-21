@@ -343,11 +343,11 @@ const AINodeMetrics = {
                ' · step ' + Math.round(payload.step) + 's · ' + payload.points + ' points';
     }
     this.setStatus(status);
-    this.renderStoreBlock(store);
+    this.renderStoreBlock(store, payload);
     this.draw();
   },
 
-  renderStoreBlock(store) {
+  renderStoreBlock(store, payload) {
     var el = document.getElementById('metrics-store');
     if (!el) return;
     if (!store) { el.innerHTML = ''; return; }
@@ -362,7 +362,19 @@ const AINodeMetrics = {
       parts.push('<span class="metrics-store-warn">the store is degraded: the node kept serving and stopped recording</span>');
     }
     if (store.oldest_sample) {
-      parts.push('history reaches back to ' + this.esc(this.stamp(store.oldest_sample * 1000)));
+      var reach = 'history reaches back to ' + this.esc(this.stamp(store.oldest_sample * 1000));
+      // How much of the window on screen is before this node was recording. Said
+      // here, once, because it is a fact about the node and the range rather than
+      // about any one panel: the empty left hand side of every chart above is
+      // this, and it is not a gap and not a fault.
+      var D = this.data();
+      var sampled = D.coverage(D.toPoints(payload, 'uptime_seconds'),
+                               Number(store.oldest_sample) * 1000);
+      if (sampled.slots && (sampled.beforeStart / sampled.slots) > 0.02) {
+        reach += ' (' + Math.round((sampled.beforeStart / sampled.slots) * 100) +
+                 '% of this window is before that, so the charts start where it does)';
+      }
+      parts.push(reach);
     }
     if (store.retention_hours) {
       parts.push(store.retention_hours + ' h raw, ' + store.retention_days + ' d rolled up');
@@ -540,11 +552,9 @@ const AINodeMetrics = {
     var out = [];
     if (!sampled.slots) return out;
 
-    if ((sampled.beforeStart / sampled.slots) > 0.02 && startedAt) {
-      out.push('This node has been keeping history since ' + this.stamp(startedAt) + ', so the ' +
-        Math.round((sampled.beforeStart / sampled.slots) * 100) + '% of this window before that ' +
-        'is empty because nothing was recording, not because nothing happened.');
-    }
+    // The "not recording yet" share is a fact about the NODE and the window, not
+    // about one panel, so it is said once under the grid (renderStoreBlock) and
+    // not six times down the page. What is left here is per panel.
     if ((sampled.gaps / sampled.slots) > 0.02) {
       out.push(Math.round((sampled.gaps / sampled.slots) * 100) + '% of the recorded window was ' +
         'not sampled (the node or its sampler was down). Those stretches are gaps in the lines, ' +
