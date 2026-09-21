@@ -154,9 +154,10 @@ def test_master_is_a_peer(fixed_addresses):
     assert payload["self"]["host"] == OUR_ADDRESS
     assert payload["self"]["port"] == 3000
 
+    # A peer's TLS state is not on the discovery wire, so a peer block is http.
     assert payload["master"] == {
         "name": "Spark-1", "host": "10.0.0.1", "port": 3000,
-        "url": "http://10.0.0.1:3000",
+        "tls": False, "tls_port": None, "url": "http://10.0.0.1:3000",
     }
 
     # Both nodes are offered as places to talk to, master first.
@@ -449,8 +450,12 @@ async def test_the_route_answers(client):
     assert resp.status == 200
     body = await resp.json()
     assert set(body) == {"self", "master", "nodes", "generated_at"}
-    assert set(body["self"]) == {"name", "host", "port", "version", "role"}
-    assert set(body["nodes"][0]) == {"name", "host", "port", "version", "role", "url"}
+    # `tls`, `tls_port` and `url` say which scheme to prefer; `port` is still the
+    # HTTP port every peer uses. See test_tls.py for the rules behind them.
+    assert set(body["self"]) == {"name", "host", "port", "tls", "tls_port", "url",
+                                 "version", "role"}
+    assert set(body["nodes"][0]) == {"name", "host", "port", "tls", "tls_port",
+                                     "version", "role", "url"}
 
 
 @pytest.mark.asyncio

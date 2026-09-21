@@ -658,6 +658,14 @@ async def handle_server_eject(request: web.Request) -> web.Response:
 #   * A host is only echoed back when this node really answers on it. The Host
 #     header is caller-controlled, so accepting it unchecked would let one
 #     request make a node advertise any address at all to the next reader.
+#
+# And one rule about the scheme, added when TLS grew up: a row's `url` carries
+# the scheme and port this node ACTUALLY serves, so a client learns "prefer
+# https on 3443 here" from the same payload that tells it where to knock. The
+# `port` field stays the HTTP port in every row, because the peer proxy and
+# every client build `http://host:port` from it and a node that moved that port
+# when TLS came on would leave its own cluster. Only this node's own rows can
+# say `tls: true`: a peer's TLS state is not on the discovery wire.
 
 #: Spellings that only ever mean "the machine making the request", so they can
 #: never be handed to a client as a fleet address. 127.* is matched by prefix.
@@ -865,11 +873,37 @@ def peer_host(node) -> str:
     )
 
 
-def endpoint_url(host: str, port: int) -> Optional[str]:
-    """``http://host:port`` for a usable host, else None (never a loopback URL)."""
+def endpoint_url(host: str, port: int, tls: bool = False) -> Optional[str]:
+    """The URL a client should prefer for this node, or None for an unusable host.
+
+    ``https://host:<tls port>`` when the node really serves HTTPS, plain
+    ``http://host:<web port>`` otherwise. Never a loopback URL either way.
+    """
     if not _is_usable_host(host):
         return None
-    return f"http://{host}:{int(port or 3000)}"
+    scheme = "https" if tls else "http"
+    return f"{scheme}://{host}:{int(port or 3000)}"
+
+
+def local_scheme(config) -> tuple[bool, int]:
+    """``(does THIS node serve HTTPS, on which port)``, for its own rows.
+
+    Only ever asked about this node. A peer's TLS state is not on the discovery
+    wire (the announcement is one datagram under a hard size ceiling, and TLS
+    between peers is deliberately out of scope), so a peer row says ``http`` and
+    a client that wants that node's HTTPS learns it by asking that node. Nothing
+    here probes anything.
+
+    Cheap when TLS is off, which is every node until an operator turns it on:
+    ``serves_https`` answers from the config block alone and touches no files.
+    """
+    from ainode.tls.certs import serves_https
+
+    try:
+        return serves_https(config)
+    except Exception:  # pragma: no cover - defensive, this is on /api/status
+        logger.debug("could not read this node's TLS state", exc_info=True)
+        return False, int(getattr(config, "web_port", 3000) or 3000)
 
 
 def endpoint_nodes(app, request) -> list:
@@ -902,15 +936,27 @@ def endpoint_nodes(app, request) -> list:
         logger.exception("could not read the cluster's master")
     master_id = getattr(master, "node_id", None)
 
+    local_tls, local_tls_port = local_scheme(config)
+
     rows: list[dict] = []
     for node in members:
         is_self = node.node_id == local_id
         host = self_host(request, config) if is_self else peer_host(node)
         port = web_port if is_self else int(getattr(node, "web_port", 3000) or 3000)
+        # HTTPS is reported for this node only, for the reason in local_scheme.
+        row_tls = bool(is_self and local_tls)
         rows.append({
             "name": node.node_name or node.node_id,
             "host": host,
+            # The HTTP port, always, exactly as before: a peer proxy and every
+            # older client build `http://host:port` out of these two fields, and
+            # moving this to the TLS port would take a node out of its own
+            # cluster. `url` below is the address a CLIENT should prefer, and
+            # `tls_port` is where the second listener is; they are different
+            # questions and this payload answers all three.
             "port": port,
+            "tls": row_tls,
+            "tls_port": local_tls_port if row_tls else None,
             # Our own version from the running process, a peer's from the wire
             # (``ainode_version`` on the announcement). A peer that announces
             # none reports "", the same spelling every other node-listing view
@@ -922,7 +968,7 @@ def endpoint_nodes(app, request) -> list:
             "version": (__version__ if is_self
                         else (getattr(node, "ainode_version", "") or "")),
             "role": "master" if node.node_id == master_id else "worker",
-            "url": endpoint_url(host, port),
+            "url": endpoint_url(host, local_tls_port if row_tls else port, row_tls),
         })
     rows.sort(key=lambda row: (row["role"] != "master", (row["name"] or "").lower()))
     return rows
@@ -949,16 +995,23 @@ def endpoint_payload(app, request) -> dict:
         except Exception:  # pragma: no cover - defensive
             logger.exception("could not read the cluster's master")
 
+    local_tls, local_tls_port = local_scheme(config)
+
     master_block = None
     if master is not None:
         is_self = master.node_id == local_id
         master_host = host if is_self else peer_host(master)
         master_port = web_port if is_self else int(getattr(master, "web_port", 3000) or 3000)
+        master_tls = bool(is_self and local_tls)
         master_block = {
             "name": master.node_name or master.node_id,
             "host": master_host,
             "port": master_port,
-            "url": endpoint_url(master_host, master_port),
+            "tls": master_tls,
+            "tls_port": local_tls_port if master_tls else None,
+            "url": endpoint_url(master_host,
+                                local_tls_port if master_tls else master_port,
+                                master_tls),
         }
 
     return {
@@ -966,6 +1019,12 @@ def endpoint_payload(app, request) -> dict:
             "name": getattr(config, "node_name", None) or local_id,
             "host": host,
             "port": web_port,
+            # Whether the node answering this request serves HTTPS, and where.
+            # A client reading only this block still learns the scheme to prefer.
+            "tls": local_tls,
+            "tls_port": local_tls_port if local_tls else None,
+            "url": endpoint_url(host, local_tls_port if local_tls else web_port,
+                                local_tls),
             "version": __version__,
             "role": ("master" if master is not None and master.node_id == local_id
                      else "worker"),

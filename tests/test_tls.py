@@ -17,6 +17,17 @@ What is pinned here, and why each one is worth a test:
   because the dashboard is where an operator fixes the certificate.
 * **The doctor's branches**, driven with a fake ``certificate_info`` so expiry is
   a value rather than a clock.
+* **The host wrapper's ``tls`` path**, run for real with tailscale, docker, sudo,
+  systemctl and openssl replaced by recording stubs. ``tailscale cert`` is a HOST
+  operation and the CLI is in a container, so which binary is called where and
+  with what IS the feature.
+* **The renewal decision**, which is a pure function so the timer, the CLI and
+  these tests cannot disagree, and its refusals (a self-signed pair, a name
+  outside the tailnet, an unreadable file) matter as much as its approvals
+  because the caller acts as root.
+* **What a node advertises when TLS is on**: ``url`` carries the scheme actually
+  served, ``port`` stays the HTTP port every peer uses, and only this node's own
+  rows may claim TLS.
 
 Nothing here reaches the network. Certificates are generated for real (openssl is
 present on any machine that can build this project) because a certificate the
@@ -25,8 +36,10 @@ test writes itself is the only way to check what ends up inside one.
 
 import json
 import os
+import shutil
 import socket
 import ssl
+import subprocess
 import time
 from pathlib import Path
 
@@ -52,6 +65,11 @@ from ainode.tls.config import (
     load_tls_config,
     save_tls_config,
     tls_dir,
+)
+from ainode.tls.renew import (
+    RENEW_THRESHOLD_DAYS,
+    renewal_decision,
+    tailnet_name_from_sans,
 )
 
 
@@ -596,3 +614,784 @@ def test_the_doctor_renders_an_info_line(capsys):
     assert "INFO" in out
     assert "no per-client limit" in out
     assert "1 INFO" in out
+
+
+# =============================================================================
+# `tailscale cert` is a HOST operation, so the wrapper owns it
+# =============================================================================
+#
+# The CLI runs inside the container; tailscale runs on the host and is not in the
+# image. These tests run the REAL wrapper the installer renders, with tailscale,
+# docker, sudo, systemctl and openssl replaced by recording stubs, because the
+# whole point of this path is which binary gets called where and with what.
+
+INSTALL_SH = Path(__file__).resolve().parent.parent / "scripts" / "install.sh"
+
+#: A pretty-printed `tailscale status --json`, trimmed, with the real shape:
+#: `"DNSName": "name."` with whitespace after the colon and a trailing dot. The
+#: wrapper's sed has to survive both; a pattern written against `"DNSName":"x"`
+#: matches nothing at all against the real output and the failure is silent.
+TS_STATUS_JSON = """{
+  "Version": "1.102.2-t6cac91817-g6ff0ddc72",
+  "BackendState": "Running",
+  "TailscaleIPs": [
+    "100.80.240.119",
+    "fd7a:115c:a1e0::3835:f077"
+  ],
+  "Self": {
+    "ID": "n2c1AzXDY321CNTRL",
+    "HostName": "Spark-3-DGX",
+    "DNSName": "spark-3-dgx.tailed10d2.ts.net.",
+    "OS": "linux"
+  },
+  "Peer": {
+    "nodekey:aa": {
+      "HostName": "Spark-1-DGX",
+      "DNSName": "spark-1-dgx.tailed10d2.ts.net.",
+      "OS": "linux"
+    }
+  }
+}
+"""
+
+TAILNET_NAME = "spark-3-dgx.tailed10d2.ts.net"
+
+
+def _stub(dirpath: Path, name: str, body: str) -> None:
+    path = dirpath / name
+    path.write_text("#!/usr/bin/env bash\n" + body)
+    path.chmod(0o755)
+
+
+@pytest.fixture
+def wrapper(tmp_path):
+    """The real host wrapper, rendered by the real installer in --dry-run.
+
+    --dry-run renders config.json, the unit, the renewal timer and the wrapper
+    into $AINODE_HOME and stops: no pulls, no systemd, no sudo, no GPU.
+    """
+    if shutil.which("bash") is None:  # pragma: no cover - every CI image has bash
+        pytest.skip("needs bash")
+    fake_home = tmp_path / "fake-home"
+    ainode_home = fake_home / ".ainode"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    sysfs = tmp_path / "sys-class-net"
+    sysfs.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.update(HOME=str(fake_home), AINODE_HOME=str(ainode_home),
+               AINODE_IMAGE="ghcr.io/getainode/ainode:9.9.9",
+               SYS_CLASS_NET=str(sysfs))
+    env.pop("AINODE_PEERS", None)
+    env.pop("HF_TOKEN", None)
+    proc = subprocess.run(["bash", str(INSTALL_SH), "--dry-run"],
+                          capture_output=True, text=True, timeout=180, env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    path = ainode_home / "ainode-wrapper"
+    assert path.exists(), "the installer no longer renders a host wrapper"
+    return path
+
+
+@pytest.fixture
+def host(tmp_path):
+    """A fake host for the wrapper: stub binaries plus the env that reaches it.
+
+    Everything the wrapper can call is a stub that appends its argv to one record
+    file, so a test asserts on the sequence of commands rather than on output.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    record = tmp_path / "record"
+    record.write_text("")
+    enddate = tmp_path / "enddate"
+    enddate.write_text("notAfter=Dec 19 23:58:48 2026 GMT\n")
+    tsjson = tmp_path / "ts.json"
+    tsjson.write_text(TS_STATUS_JSON)
+    ainode_home = tmp_path / "home" / ".ainode"
+    ainode_home.mkdir(parents=True, exist_ok=True)
+
+    _stub(bindir, "tailscale", f'''
+printf '%s\\n' "tailscale $*" >> "{record}"
+case "${{1:-}}" in
+    status) cat "{tsjson}" ;;
+    cert)
+        # Emulate the real thing: write both files, and move the expiry on only
+        # when the test says tailscale actually issued something new.
+        cert=""; key=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --cert-file) cert="$2"; shift 2 ;;
+                --key-file) key="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        [ "${{TS_CERT_FAILS:-0}}" = "1" ] && {{ echo "certificate not available" >&2; exit 1; }}
+        printf 'CERT\\n' > "$cert"
+        printf 'KEY\\n' > "$key"
+        [ -n "${{TS_NEW_ENDDATE:-}}" ] && printf 'notAfter=%s\\n' "$TS_NEW_ENDDATE" > "{enddate}"
+        echo "Wrote public cert to $cert"
+        ;;
+esac
+exit 0
+''')
+    _stub(bindir, "docker", f'''
+printf '%s\\n' "docker $* [AINODE_TAILNET_NAME=${{AINODE_TAILNET_NAME:-unset}}]" >> "{record}"
+for a in "$@"; do
+    if [ "$a" = "--check" ]; then
+        printf '%s\\n' "${{AINODE_DECISION:-}}"
+        exit "${{AINODE_DECISION_RC:-0}}"
+    fi
+done
+exit "${{DOCKER_RC:-0}}"
+''')
+    _stub(bindir, "systemctl", f'''
+printf '%s\\n' "systemctl $*" >> "{record}"
+# `systemctl --user is-enabled ainode.service` decides user mode: say no, so the
+# wrapper takes the system path, which is what every Spark runs. Everything else
+# succeeds, because a try-restart that fails would mask the assertion.
+[ "${{1:-}}" = "--user" ] && exit 1
+exit 0
+''')
+    _stub(bindir, "sudo", f'''
+printf '%s\\n' "sudo $*" >> "{record}"
+while [ $# -gt 0 ]; do
+    case "$1" in -n) shift ;; *) break ;; esac
+done
+exec "$@"
+''')
+    _stub(bindir, "openssl", f'''
+printf '%s\\n' "openssl $*" >> "{record}"
+cat "{enddate}"
+exit 0
+''')
+    env = dict(os.environ)
+    # A hermetic PATH, not a prefixed one: /usr/local/bin holds a REAL tailscale
+    # on any Mac with the app installed, and "there is no tailscale on this host"
+    # is one of the branches under test. Everything the wrapper reaches for in
+    # this path lives in /usr/bin or /bin on macOS and on Linux alike.
+    env["PATH"] = f"{bindir}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["HOME"] = str(tmp_path / "home")
+    env["AINODE_HOME"] = str(ainode_home)
+    # Never read a REAL /etc/systemd/system/ainode.service: the suite runs on the
+    # Sparks, which have one.
+    env["AINODE_UNIT_FILES"] = ""
+    env.pop("AINODE_TAILNET_NAME", None)
+    env.pop("AINODE_TLS_RENEW_RESTART", None)
+
+    class Host:
+        def __init__(self):
+            self.env = env
+            self.bindir = bindir
+            self.record = record
+            self.enddate = enddate
+            self.ainode_home = ainode_home
+
+        def run(self, wrapper_path, *args, **overrides):
+            run_env = dict(self.env)
+            run_env.update({k: str(v) for k, v in overrides.items()})
+            return subprocess.run(["bash", str(wrapper_path), *args],
+                                  capture_output=True, text=True, timeout=60,
+                                  env=run_env)
+
+        def calls(self, program=""):
+            lines = [ln for ln in self.record.read_text().splitlines() if ln.strip()]
+            if program:
+                lines = [ln for ln in lines if ln.startswith(program + " ")]
+            return lines
+
+        def drop_binary(self, name):
+            (self.bindir / name).unlink()
+
+        def existing_pair(self, cert_name, key_name):
+            """Seed the pair a renewal replaces, the way a real node already has one."""
+            directory = self.ainode_home / "tls"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / cert_name).write_text("CERT\n")
+            (directory / key_name).write_text("KEY\n")
+
+    return Host()
+
+
+class TestWrapperTailscaleEnable:
+    """`ainode tls enable --tailscale` on the host, end to end."""
+
+    def test_it_runs_tailscale_cert_into_the_bind_mount_and_then_the_container(
+            self, wrapper, host):
+        proc = host.run(wrapper, "tls", "enable", "--tailscale")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+        cert = host.ainode_home / "tls" / f"{TAILNET_NAME}.crt"
+        key = host.ainode_home / "tls" / f"{TAILNET_NAME}.key"
+        # The exact command the design calls for: the pair named after the one
+        # name it is issued for, inside <AINODE_HOME>/tls, which is the bind
+        # mount the containerised server reads.
+        assert any(
+            f"tailscale cert --cert-file {cert} --key-file {key} {TAILNET_NAME}" == line
+            for line in host.calls("tailscale")
+        ), host.calls("tailscale")
+        assert cert.is_file() and key.is_file()
+        # A private key in a bind-mounted directory is readable by anything else
+        # that mounts it unless this happens.
+        assert oct(key.stat().st_mode & 0o777) == "0o600"
+
+        # And then the container writes the config block, told which name to look
+        # for rather than being handed a path it would have to translate.
+        forwarded = [ln for ln in host.calls("docker") if "tls" in ln and "enable" in ln]
+        assert forwarded, host.calls("docker")
+        assert f"AINODE_TAILNET_NAME={TAILNET_NAME}" in forwarded[-1]
+        assert "-e AINODE_TAILNET_NAME" in forwarded[-1]
+
+    def test_the_magicdns_name_is_read_out_of_pretty_printed_json(self, wrapper, host):
+        """The trailing dot is stripped and the peers' names are not picked up."""
+        proc = host.run(wrapper, "tls", "enable", "--tailscale")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        named = [ln for ln in proc.stdout.splitlines() if ln.startswith("==> tailscale cert")]
+        assert named == [f"==> tailscale cert for {TAILNET_NAME}"], proc.stdout
+        assert "spark-1-dgx" not in proc.stdout, "that is a PEER's name"
+
+    def test_a_host_with_no_tailscale_says_so_and_names_the_alternative(
+            self, wrapper, host):
+        host.drop_binary("tailscale")
+        proc = host.run(wrapper, "tls", "enable", "--tailscale")
+        assert proc.returncode == 1
+        assert "No tailscale on this host" in proc.stderr
+        assert "ainode tls enable" in proc.stderr
+        # Nothing was forwarded: a node must not end up with an enabled block and
+        # no certificate.
+        assert not [ln for ln in host.calls("docker") if "enable" in ln]
+
+    def test_a_refused_certificate_names_the_admin_console_fix(self, wrapper, host):
+        proc = host.run(wrapper, "tls", "enable", "--tailscale", TS_CERT_FAILS="1")
+        assert proc.returncode == 1
+        assert "HTTPS Certificates" in proc.stderr
+        assert "--operator=" in proc.stderr, "the other real refusal"
+        assert not [ln for ln in host.calls("docker") if "enable" in ln]
+
+    def test_sudo_is_only_used_when_the_plain_call_is_refused(self, wrapper, host):
+        """`tailscale set --operator=$USER` makes the plain call work; honour it."""
+        proc = host.run(wrapper, "tls", "enable", "--tailscale")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not host.calls("sudo"), "the plain call succeeded, so sudo is noise"
+
+    def test_every_other_tls_subcommand_is_forwarded_untouched(self, wrapper, host):
+        for args in (["tls", "status"], ["tls", "disable"], ["tls", "enable"]):
+            host.record.write_text("")
+            proc = host.run(wrapper, *args)
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            assert not [ln for ln in host.calls("tailscale") if " cert " in ln], args
+            assert host.calls("docker"), args
+
+    def test_the_wrapper_refuses_rather_than_writing_the_wrong_ainode(
+            self, wrapper, host):
+        """Same rule as `update`: WHERE before WHAT (#164)."""
+        _stub(host.bindir, "id", "echo 0\n")
+        _stub(host.bindir, "getent", "exit 2\n")
+        env = dict(host.env)
+        env.pop("AINODE_HOME")
+        proc = subprocess.run(["bash", str(wrapper), "tls", "enable", "--tailscale"],
+                              capture_output=True, text=True, timeout=60,
+                              env={**env, "SUDO_USER": "nobodyatall"})
+        assert proc.returncode == 1
+        assert "Cannot tell which .ainode" in proc.stderr
+
+
+class TestWrapperRenew:
+    """`ainode tls renew`: the container decides, the host acts."""
+
+    DUE = ("renew=yes\n"
+           f"name={TAILNET_NAME}\n"
+           "days_left=11.5\n"
+           "reason=11.5 days left, inside the 14 day window.\n"
+           "cert_name=" + TAILNET_NAME + ".crt\n"
+           "key_name=" + TAILNET_NAME + ".key\n")
+    NOT_DUE = ("renew=no\n"
+               f"name={TAILNET_NAME}\n"
+               "days_left=61.0\n"
+               "reason=61.0 days left, which is more than the 14 day window.\n"
+               "cert_name=cert.pem\nkey_name=key.pem\n")
+
+    def test_nothing_is_touched_when_the_node_says_it_is_not_due(self, wrapper, host):
+        proc = host.run(wrapper, "tls", "renew",
+                        AINODE_DECISION=self.NOT_DUE, AINODE_DECISION_RC="10")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "No renewal needed" in proc.stdout
+        assert not [ln for ln in host.calls("tailscale") if " cert " in ln]
+        assert not [ln for ln in host.calls("systemctl") if "try-restart" in ln]
+
+    def test_a_due_certificate_is_replaced_and_the_node_restarted(self, wrapper, host):
+        host.existing_pair(f"{TAILNET_NAME}.crt", f"{TAILNET_NAME}.key")
+        proc = host.run(wrapper, "tls", "renew", AINODE_DECISION=self.DUE,
+                        TS_NEW_ENDDATE="Mar 19 23:58:48 2027 GMT")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        cert = host.ainode_home / "tls" / f"{TAILNET_NAME}.crt"
+        assert any(f"--cert-file {cert}" in ln for ln in host.calls("tailscale"))
+        # The listener and its SSLContext are built at boot, so without this the
+        # renewal writes a file nobody serves.
+        assert any("try-restart ainode.service" in ln for ln in host.calls("systemctl"))
+        assert "Mar 19 23:58:48 2027 GMT" in proc.stdout
+
+    def test_the_files_the_config_points_at_are_the_ones_replaced(self, wrapper, host):
+        """A pair from an earlier manual run sits at cert.pem, not <name>.crt."""
+        due = self.DUE.replace(f"cert_name={TAILNET_NAME}.crt", "cert_name=cert.pem")
+        due = due.replace(f"key_name={TAILNET_NAME}.key", "key_name=key.pem")
+        host.existing_pair("cert.pem", "key.pem")
+        proc = host.run(wrapper, "tls", "renew", AINODE_DECISION=due,
+                        TS_NEW_ENDDATE="Mar 19 23:58:48 2027 GMT")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        cert = host.ainode_home / "tls" / "cert.pem"
+        key = host.ainode_home / "tls" / "key.pem"
+        assert any(f"--cert-file {cert} --key-file {key}" in ln
+                   for ln in host.calls("tailscale")), host.calls("tailscale")
+
+    def test_the_cached_certificate_coming_back_is_not_a_restart(self, wrapper, host):
+        """tailscale hands back what it has until it decides to renew."""
+        host.existing_pair(f"{TAILNET_NAME}.crt", f"{TAILNET_NAME}.key")
+        proc = host.run(wrapper, "tls", "renew", AINODE_DECISION=self.DUE)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "same certificate" in proc.stdout
+        assert not [ln for ln in host.calls("systemctl") if "try-restart" in ln]
+
+    def test_the_restart_can_be_left_to_a_human(self, wrapper, host):
+        host.existing_pair(f"{TAILNET_NAME}.crt", f"{TAILNET_NAME}.key")
+        proc = host.run(wrapper, "tls", "renew", AINODE_DECISION=self.DUE,
+                        TS_NEW_ENDDATE="Mar 19 23:58:48 2027 GMT",
+                        AINODE_TLS_RENEW_RESTART="0")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Restart skipped" in proc.stdout
+        assert "OLD certificate" in proc.stdout
+        assert not [ln for ln in host.calls("systemctl") if "try-restart" in ln]
+
+    def test_a_node_that_is_down_is_not_a_failed_renewal(self, wrapper, host):
+        """A daily timer must not mark itself failed all through an outage."""
+        proc = host.run(wrapper, "tls", "renew", AINODE_DECISION="", DOCKER_RC="1")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Could not ask the container" in proc.stdout
+        assert not [ln for ln in host.calls("tailscale") if " cert " in ln]
+
+    def test_a_failed_renewal_leaves_the_old_pair_in_place(self, wrapper, host):
+        proc = host.run(wrapper, "tls", "renew", AINODE_DECISION=self.DUE,
+                        TS_CERT_FAILS="1")
+        assert proc.returncode == 1
+        assert "still being served" in proc.stderr
+        assert not [ln for ln in host.calls("systemctl") if "try-restart" in ln]
+
+
+class TestRenewalTimer:
+    """The actuator: a host timer, because nothing else renews unattended."""
+
+    def test_the_installer_renders_a_daily_timer_that_runs_the_wrapper(self, wrapper):
+        home = wrapper.parent
+        service = (home / "ainode-tls-renew.service").read_text()
+        timer = (home / "ainode-tls-renew.timer").read_text()
+        assert f"ExecStart={wrapper} tls renew" in service
+        assert f"Environment=AINODE_HOME={home}" in service
+        assert "Type=oneshot" in service
+        assert "OnCalendar=daily" in timer
+        # A node that was off when the timer was due is exactly the case that
+        # matters, and a whole fleet asking Let's Encrypt at once is the one to
+        # avoid.
+        assert "Persistent=true" in timer
+        assert "RandomizedDelaySec" in timer
+        assert "WantedBy=timers.target" in timer
+
+    def test_the_timer_is_installed_whatever_the_tls_state_is(self):
+        """A node that turns TLS on later must not need a reinstall to renew."""
+        text = INSTALL_SH.read_text()
+        # The rendering is not inside any conditional on the tls block: the only
+        # branch it sits under is dry run versus user scope versus system scope.
+        assert "systemctl enable --now ainode-tls-renew.timer" in text
+        assert "systemctl --user enable --now ainode-tls-renew.timer" in text
+
+    def test_the_two_fourteens_agree(self):
+        """The doctor's warning window and the timer's action window are one fact.
+
+        They live in two modules (the doctor warns, ainode/tls/renew.py decides)
+        and they must never disagree: an operator told "expires in 13 days, run
+        this" about a node whose timer already handled it is being sent to do
+        nothing, and the reverse is a certificate nobody renews.
+        """
+        assert doc.TLS_EXPIRY_WARN_DAYS == RENEW_THRESHOLD_DAYS
+
+
+# =============================================================================
+# The renewal decision itself
+# =============================================================================
+
+def _cert_info(days=None, **kw):
+    info = {"exists": True, "error": "", "self_signed": False,
+            "days_left": days, "sans": [f"DNS:{TAILNET_NAME}"]}
+    info.update(kw)
+    return info
+
+
+def test_a_tailnet_certificate_inside_the_window_is_renewed():
+    tls = TLSConfig(enabled=True, cert_file="/root/.ainode/tls/c.crt",
+                    key_file="/root/.ainode/tls/c.key")
+    decision = renewal_decision(tls, _cert_info(11.5))
+    assert decision.renew is True
+    assert decision.name == TAILNET_NAME
+    assert decision.days_left == 11.5
+    assert "14 day window" in decision.reason
+
+
+def test_a_tailnet_certificate_with_time_left_is_left_alone():
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    decision = renewal_decision(tls, _cert_info(61.0))
+    assert decision.renew is False
+    assert "nothing to do yet" in decision.reason
+
+
+@pytest.mark.parametrize("days,expected", [(14, True), (14.0, True), (14.1, False)])
+def test_the_boundary_is_inclusive(days, expected):
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    assert renewal_decision(tls, _cert_info(days)).renew is expected
+
+
+def test_tls_off_is_not_a_renewal():
+    assert renewal_decision(TLSConfig(), _cert_info(1.0)).renew is False
+
+
+def test_a_self_signed_certificate_is_never_swapped_for_a_tailnet_one():
+    """Its SANs are the hostname and every address; a tailnet cert has one name.
+
+    Swapping them silently would break every client reaching this node by IP,
+    which on a LAN is most of them.
+    """
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    info = _cert_info(3.0, self_signed=True, sans=["DNS:Spark-3-DGX", "IP:10.0.0.3"])
+    decision = renewal_decision(tls, info)
+    assert decision.renew is False
+    assert "self-signed" in decision.reason
+    assert "ainode tls enable" in decision.reason
+
+
+def test_a_certificate_for_a_name_outside_the_tailnet_says_who_has_to_renew_it():
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    info = _cert_info(2.0, sans=["DNS:ainode.example.com"])
+    decision = renewal_decision(tls, info)
+    assert decision.renew is False
+    assert decision.name == ""
+    assert "outside the tailnet" in decision.reason
+
+
+def test_an_unreadable_certificate_is_never_replaced_on_a_guess():
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    decision = renewal_decision(tls, _cert_info(None, error="could not read c.crt"))
+    assert decision.renew is False
+    assert "could not read" in decision.reason
+
+
+def test_an_enabled_block_whose_pair_vanished_is_repaired():
+    """The one missing-file case that means act: the node is serving HTTP only."""
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    decision = renewal_decision(tls, {"exists": False, "sans": [f"DNS:{TAILNET_NAME}"]})
+    assert decision.renew is True
+    assert "HTTP only" in decision.reason
+
+    # With no name to renew for, there is nothing to run, so say so instead.
+    nameless = renewal_decision(tls, {"exists": False, "sans": []})
+    assert nameless.renew is False
+    assert "no tailnet name" in nameless.reason
+
+
+def test_the_name_comes_off_the_certificate_and_not_off_the_host():
+    """A node renamed in the tailnet still renews the name it was issued for."""
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    info = _cert_info(2.0, sans=["DNS:old-name.tailed10d2.ts.net"])
+    decision = renewal_decision(tls, info, tailnet_name="new-name.tailed10d2.ts.net")
+    assert decision.name == "old-name.tailed10d2.ts.net"
+
+
+def test_the_decision_is_key_value_lines_a_shell_can_read():
+    tls = TLSConfig(enabled=True, cert_file="c.crt", key_file="c.key")
+    lines = renewal_decision(tls, _cert_info(3.0)).as_lines()
+    assert lines[0] == "renew=yes"
+    assert f"name={TAILNET_NAME}" in lines
+    assert any(ln.startswith("reason=") for ln in lines)
+    # One line each, because the wrapper reads them with sed.
+    for line in lines:
+        assert "\n" not in line
+
+
+def test_the_san_reader_ignores_ip_entries_and_non_tailnet_names():
+    assert tailnet_name_from_sans(["IP:100.80.240.119"]) == ""
+    assert tailnet_name_from_sans(["DNS:spark-3", "DNS:a.ts.net"]) == "a.ts.net"
+    assert tailnet_name_from_sans([]) == ""
+    assert tailnet_name_from_sans(None) == ""
+
+
+# =============================================================================
+# Finding this node's MagicDNS name
+# =============================================================================
+
+def test_the_wrappers_variable_wins_because_it_costs_nothing(monkeypatch):
+    monkeypatch.setenv("AINODE_TAILNET_NAME", "spark-9.tailed10d2.ts.net.")
+    # No runner, no binary, no lookup: route 1 answers before any of that.
+    assert certs_mod.tailnet_dns_name() == "spark-9.tailed10d2.ts.net"
+
+
+def test_tailscale_status_answers_when_there_is_a_binary(monkeypatch):
+    monkeypatch.delenv("AINODE_TAILNET_NAME", raising=False)
+    calls = []
+
+    def runner(argv):
+        calls.append(list(argv))
+        return 0, json.dumps({"Self": {"DNSName": f"{TAILNET_NAME}."}})
+
+    assert certs_mod.tailnet_dns_name(runner) == TAILNET_NAME
+    assert calls[0][:2] == ["tailscale", "status"]
+
+
+def test_a_reverse_lookup_of_the_tailnet_address_is_the_containers_route(monkeypatch):
+    """No tailscale binary in the image, but --network=host shares MagicDNS."""
+    monkeypatch.delenv("AINODE_TAILNET_NAME", raising=False)
+    monkeypatch.setattr(certs_mod, "tailscale_binary", lambda: None)
+    monkeypatch.setattr(certs_mod, "host_ip_addresses",
+                        lambda runner=None: ["192.168.0.13", "100.80.240.119"])
+    asked = []
+
+    def gethostbyaddr(addr):
+        asked.append(addr)
+        return (f"{TAILNET_NAME}.", [], [addr])
+
+    monkeypatch.setattr(certs_mod.socket, "gethostbyaddr", gethostbyaddr)
+    assert certs_mod.tailnet_dns_name() == TAILNET_NAME
+    # Only the CGNAT-range address is asked about, so nothing else on the box can
+    # be mistaken for a tailnet name.
+    assert asked == ["100.80.240.119"]
+
+
+def test_the_lookup_can_be_refused_by_a_caller_that_cannot_afford_to_stall(monkeypatch):
+    monkeypatch.delenv("AINODE_TAILNET_NAME", raising=False)
+    monkeypatch.setattr(certs_mod, "tailscale_binary", lambda: None)
+    monkeypatch.setattr(certs_mod, "host_ip_addresses",
+                        lambda runner=None: ["100.80.240.119"])
+
+    def boom(addr):  # pragma: no cover - must never be reached
+        raise AssertionError("allow_lookup=False still resolved a name")
+
+    monkeypatch.setattr(certs_mod.socket, "gethostbyaddr", boom)
+    assert certs_mod.tailnet_dns_name(allow_lookup=False) is None
+
+
+def test_a_resolver_that_never_answers_costs_two_seconds_and_not_the_command():
+    """gethostbyaddr cannot be interrupted, so it runs where we can walk away."""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def hang(addr):
+        started.set()
+        release.wait(30)  # released in the finally below, so no thread leaks
+        return ("never.ts.net", [], [addr])
+
+    real = certs_mod.socket.gethostbyaddr
+    certs_mod.socket.gethostbyaddr = hang
+    try:
+        began = time.monotonic()
+        assert certs_mod._reverse_lookup("100.80.240.119", timeout=0.2) == ""
+        assert time.monotonic() - began < 5.0
+        assert started.is_set(), "the lookup did run, it just was not waited for"
+    finally:
+        release.set()
+        certs_mod.socket.gethostbyaddr = real
+
+
+def test_an_answer_that_is_not_a_tailnet_name_is_not_one(monkeypatch):
+    monkeypatch.delenv("AINODE_TAILNET_NAME", raising=False)
+    monkeypatch.setattr(certs_mod, "tailscale_binary", lambda: None)
+    monkeypatch.setattr(certs_mod, "host_ip_addresses",
+                        lambda runner=None: ["100.80.240.119"])
+    monkeypatch.setattr(certs_mod.socket, "gethostbyaddr",
+                        lambda addr: ("spark-3.lan", [], [addr]))
+    assert certs_mod.tailnet_dns_name() is None
+
+
+# =============================================================================
+# Does this node actually serve HTTPS, and what does it advertise
+# =============================================================================
+
+def test_serves_https_answers_from_the_block_alone_when_tls_is_off(home):
+    """The fleet's state, and the one that must not cost a stat on /api/status."""
+    assert certs_mod.serves_https(NodeConfig(web_port=3000)) == (False, 3000)
+
+
+def test_serves_https_is_true_for_a_pair_that_loads(home, pair):
+    config = NodeConfig(web_port=3000, tls={
+        "enabled": True, "port": 3443,
+        "cert_file": pair["cert_file"], "key_file": pair["key_file"]})
+    assert certs_mod.serves_https(config) == (True, 3443)
+
+
+def test_serves_https_applies_every_condition_the_listener_does(home, pair):
+    """Same list as listener_plan, so the advertised url and the socket agree."""
+    good = {"enabled": True, "port": 3443,
+            "cert_file": pair["cert_file"], "key_file": pair["key_file"]}
+    # The HTTP port: listener_plan refuses it, so nothing may advertise it.
+    assert certs_mod.serves_https(
+        NodeConfig(web_port=3000, tls={**good, "port": 3000})) == (False, 3000)
+    # A missing pair.
+    assert certs_mod.serves_https(
+        NodeConfig(web_port=3000, tls={**good, "cert_file": "/nope/x.crt"})
+    ) == (False, 3000)
+    # A pair that cannot be loaded.
+    junk = Path(pair["cert_file"]).parent / "junk.pem"
+    junk.write_text("-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n")
+    assert certs_mod.serves_https(
+        NodeConfig(web_port=3000, tls={**good, "cert_file": str(junk)})
+    ) == (False, 3000)
+
+
+def test_a_replaced_pair_is_noticed_rather_than_cached_forever(home, pair):
+    """The loadability cache is keyed on the files, not on the process."""
+    cert = Path(pair["cert_file"])
+    key = Path(pair["key_file"])
+    assert certs_mod.pair_loadable(cert, key) is True
+    cert.write_text("-----BEGIN CERTIFICATE-----\nbroken\n-----END CERTIFICATE-----\n")
+    assert certs_mod.pair_loadable(cert, key) is False
+
+
+def test_the_endpoint_url_carries_the_scheme():
+    from ainode.api.server_routes import endpoint_url
+
+    assert endpoint_url("10.0.0.5", 3000) == "http://10.0.0.5:3000"
+    assert endpoint_url("10.0.0.5", 3443, True) == "https://10.0.0.5:3443"
+    # The loopback rule is unchanged, either way.
+    assert endpoint_url("localhost", 3443, True) is None
+    assert endpoint_url("", 3443, True) is None
+
+
+class TestEndpointAdvertisesHttps:
+    """What a client reads off a node that has TLS on.
+
+    The rule being pinned: `url` is the address to PREFER, `port` is still the
+    HTTP port every peer and every older client uses, and only this node's own
+    rows may claim TLS.
+    """
+
+    @pytest.fixture
+    def rows(self, home, pair, monkeypatch):
+        import time as _time
+
+        from ainode.api import server_routes as sr
+        from ainode.discovery.broadcast import NodeAnnouncement, NodeStatus
+        from ainode.discovery.cluster import ClusterNode, ClusterState
+
+        sr.reset_address_cache()
+        monkeypatch.setattr(sr, "own_addresses", lambda config: {"10.0.0.7"})
+        monkeypatch.setattr(sr, "lan_address", lambda config: "10.0.0.7")
+
+        def build(tls_block):
+            config = NodeConfig(node_id="spark-1", node_name="Spark-1",
+                                host="0.0.0.0", web_port=3000, tls=tls_block)
+            cluster = ClusterState(local_announcement=NodeAnnouncement(
+                node_id="spark-1", node_name="Spark-1", gpu_name="GB10",
+                gpu_memory_gb=128.0, unified_memory=True, model="m",
+                status="serving", api_port=8000, web_port=3000,
+                cluster_id="default", role="master"))
+            cluster.add_node(ClusterNode(
+                node_id="spark-2", node_name="Spark-2", gpu_name="GB10",
+                gpu_memory_gb=128.0, unified_memory=True, model="m",
+                status=NodeStatus.ONLINE, api_port=8000, web_port=3000,
+                last_seen=_time.time(), cluster_id="default", role="auto",
+                peer_ip="10.0.0.8"))
+            app = {"config": config, "cluster_state": cluster}
+
+            class _Req:
+                def __init__(self):
+                    self.app = app
+                    self.headers = {}
+
+            return sr, app, _Req()
+
+        yield build
+        sr.reset_address_cache()
+
+    def test_a_node_with_tls_on_advertises_https_on_the_tls_port(self, rows, pair):
+        sr, app, request = rows({"enabled": True, "port": 3443,
+                                 "cert_file": pair["cert_file"],
+                                 "key_file": pair["key_file"]})
+        mine = [r for r in sr.endpoint_nodes(app, request) if r["name"] == "Spark-1"][0]
+        assert mine["tls"] is True
+        assert mine["tls_port"] == 3443
+        assert mine["url"] == "https://10.0.0.7:3443"
+        # Unchanged, and deliberately: the peer proxy and every client older than
+        # this release build http://host:port out of these two.
+        assert mine["port"] == 3000
+
+    def test_a_peer_row_stays_http_because_its_tls_state_is_not_on_the_wire(
+            self, rows, pair):
+        sr, app, request = rows({"enabled": True, "port": 3443,
+                                 "cert_file": pair["cert_file"],
+                                 "key_file": pair["key_file"]})
+        peer = [r for r in sr.endpoint_nodes(app, request) if r["name"] == "Spark-2"][0]
+        assert peer["tls"] is False
+        assert peer["tls_port"] is None
+        assert peer["url"] == "http://10.0.0.8:3000"
+
+    def test_tls_off_looks_exactly_as_it_did_before(self, rows):
+        sr, app, request = rows(None)
+        for row in sr.endpoint_nodes(app, request):
+            assert row["tls"] is False
+            assert row["tls_port"] is None
+            assert row["url"].startswith("http://")
+
+    def test_the_self_and_master_blocks_say_the_same_thing_as_the_rows(
+            self, rows, pair):
+        sr, app, request = rows({"enabled": True, "port": 3443,
+                                 "cert_file": pair["cert_file"],
+                                 "key_file": pair["key_file"]})
+        payload = sr.endpoint_payload(app, request)
+        assert payload["self"]["tls"] is True
+        assert payload["self"]["url"] == "https://10.0.0.7:3443"
+        assert payload["self"]["port"] == 3000
+        # This node IS the master here, so that block says https too.
+        assert payload["master"]["tls"] is True
+        assert payload["master"]["url"] == "https://10.0.0.7:3443"
+        # And the payload still carries nothing but names, addresses, ports,
+        # schemes, roles and versions, which is what lets it answer with no key.
+        assert "cert_file" not in json.dumps(payload)
+
+    def test_an_enabled_block_with_no_usable_pair_advertises_http(self, rows):
+        """A broken certificate must not make the node advertise a dead port."""
+        sr, app, request = rows({"enabled": True, "port": 3443,
+                                 "cert_file": "/nope/cert.pem",
+                                 "key_file": "/nope/key.pem"})
+        mine = [r for r in sr.endpoint_nodes(app, request) if r["name"] == "Spark-1"][0]
+        assert mine["tls"] is False
+        assert mine["url"] == "http://10.0.0.7:3000"
+
+
+# =============================================================================
+# The doctor names THIS node's command
+# =============================================================================
+
+def test_the_doctor_names_the_magicdns_name_and_the_exact_command(monkeypatch):
+    monkeypatch.setenv("AINODE_TAILNET_NAME", TAILNET_NAME)
+    check = doc.check_tls(NodeConfig(web_port=3000))[0]
+    assert check.status == doc.WARN
+    assert TAILNET_NAME in check.detail
+    assert f"ainode tls enable --tailscale (a real certificate for {TAILNET_NAME})" \
+        in check.fix
+    assert check.data["tailnet_name"] == TAILNET_NAME
+
+
+def test_a_node_with_no_tailnet_name_gets_the_generic_command(monkeypatch):
+    # Patched at the seam the doctor imports, so the machine running the suite
+    # (which is on this very tailnet) cannot answer for the node under test.
+    monkeypatch.setattr("ainode.tls.certs.tailnet_dns_name",
+                        lambda *a, **k: None)
+    check = doc.check_tls(NodeConfig(web_port=3000))[0]
+    assert check.status == doc.WARN
+    assert "ainode tls enable" in check.fix
+    assert check.data["tailnet_name"] == ""
+
+
+def test_the_doctor_points_at_the_renewal_inside_the_window(monkeypatch):
+    monkeypatch.setenv("AINODE_TAILNET_NAME", TAILNET_NAME)
+    monkeypatch.setattr(doc, "certificate_info",
+                        lambda p: _fake_info(9.0, self_signed=False))
+    check = doc.check_tls(_tls_config())[0]
+    assert check.status == doc.WARN
+    assert "ainode tls renew" in check.fix
+    assert TAILNET_NAME in check.fix

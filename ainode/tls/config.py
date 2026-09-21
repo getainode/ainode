@@ -34,6 +34,20 @@ CERT_NAME = "cert.pem"
 KEY_NAME = "key.pem"
 
 
+def tailnet_pair_paths(name: str, home=None) -> tuple[Path, Path]:
+    """``(<AINODE_HOME>/tls/<name>.crt, .../<name>.key)`` for a MagicDNS name.
+
+    Named after the certificate's one name rather than ``cert.pem``, because this
+    pair is written by ``tailscale cert`` on the HOST and read by the server
+    inside the container: the file name is the only thing carrying which name it
+    was issued for across that boundary, and it is what lets the host wrapper and
+    the container agree on the pair without either one parsing a certificate.
+    """
+    directory = tls_dir(home)
+    stem = str(name).strip().rstrip(".")
+    return directory / f"{stem}.crt", directory / f"{stem}.key"
+
+
 @dataclass
 class TLSConfig:
     """The ``tls`` block, with the defaults a node that never ran the CLI has."""

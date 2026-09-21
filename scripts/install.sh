@@ -798,6 +798,103 @@ restart_service() {
     fi
 }
 
+# Forward a command into the running container, falling back to a one-shot
+# docker run when it is not up so \`ainode --help\`, \`ainode service install\`
+# and friends still work. Both the catch-all below and the \`tls\` case use it.
+#
+# AINODE_TAILNET_NAME rides along, set or not: the container has no tailscale
+# binary and no path to the tailnet daemon, so this variable is the cheapest way
+# for the CLI in there to know which tailnet node it is running on.
+forward_to_container() {
+    if docker exec ainode true 2>/dev/null; then
+        exec docker exec -it -e AINODE_TAILNET_NAME ainode ainode "\$@"
+    fi
+    # Same sudo trap as update: mount the .ainode the unit uses.
+    local conf_home
+    conf_home="\$(resolve_ainode_home || true)"
+    [ -n "\$conf_home" ] || conf_home="\$HOME/.ainode"
+    exec docker run --rm -it \\
+        --entrypoint ainode \\
+        -e AINODE_TAILNET_NAME \\
+        -v "\$conf_home":/root/.ainode \\
+        "\$AINODE_IMAGE" "\$@"
+}
+
+# This node's MagicDNS name without the trailing dot, or empty.
+#
+# --peers=false keeps the answer to this node alone; a tailscale old enough to
+# reject the flag exits non-zero and the plain form runs, where Self is the first
+# DNSName in the document anyway.
+tailnet_name() {
+    command -v tailscale >/dev/null 2>&1 || return 0
+    { tailscale status --peers=false --json 2>/dev/null \\
+        || tailscale status --json 2>/dev/null; } \\
+        | sed -n 's/.*"DNSName"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' \\
+        | head -1 | sed 's/\\.\$//'
+}
+
+# \`tailscale cert\` as whoever is allowed to run it. The plain call works when
+# \`sudo tailscale set --operator=\$USER\` was run once; otherwise sudo -n, which
+# never prompts, because this also runs from a timer with no terminal attached.
+tailscale_cert_into() {
+    local cert="\$1" key="\$2" name="\$3" out=""
+    if out=\$(tailscale cert --cert-file "\$cert" --key-file "\$key" "\$name" 2>&1); then
+        printf '%s\\n' "\$out"
+        return 0
+    fi
+    if out=\$(sudo -n tailscale cert --cert-file "\$cert" --key-file "\$key" "\$name" 2>&1); then
+        printf '%s\\n' "\$out"
+        return 0
+    fi
+    printf '%s\\n' "\$out" >&2
+    return 1
+}
+
+# The notAfter date in a certificate file, or empty when it cannot be read.
+# Tells "tailscale issued a new one" from "tailscale handed back the cached one",
+# which is what decides whether a restart is needed at all.
+cert_not_after() {
+    [ -r "\$1" ] || return 0
+    command -v openssl >/dev/null 2>&1 || return 0
+    openssl x509 -in "\$1" -noout -enddate 2>/dev/null \\
+        | sed -n 's/^notAfter=//p' | head -1
+}
+
+# Make the pair readable by the server and by nobody else. It is root-owned
+# after sudo, so hand it to whoever owns the .ainode the service reads: a later
+# renewal and \`ainode tls status\` are then not root-only operations.
+own_tls_pair() {
+    local home="\$1" cert="\$2" key="\$3"
+    chmod 600 "\$key" 2>/dev/null || true
+    chmod 644 "\$cert" 2>/dev/null || true
+    if [ "\$(id -u)" = "0" ]; then
+        chown --reference="\$home" "\$cert" "\$key" 2>/dev/null || true
+    fi
+}
+
+print_tls_help() {
+    cat <<TLSHELP
+Usage: ainode tls {enable|disable|status|renew} [options]
+
+Two of these run on the HOST, because tailscale does and the AINode container
+ships no tailscale binary and has no path to the tailnet daemon:
+
+  enable --tailscale   get a real Let's Encrypt certificate for this node's
+                       MagicDNS name, write it into <AINODE_HOME>/tls/, then have
+                       the container record it in config.json. Restart to serve it.
+  renew                replace that certificate when it is inside its last 14
+                       days, and restart the node so the new one is served.
+                       ainode-tls-renew.timer runs this daily.
+
+Everything else (enable with a pair or self-signed, disable, status) is forwarded
+into the container unchanged.
+
+Environment:
+  AINODE_HOME                  .ainode the unit reads (normally detected)
+  AINODE_TLS_RENEW_RESTART=0   renew the pair but leave the restart to a human
+TLSHELP
+}
+
 case "\${1:-}" in
     update)
         # Optional explicit version: 'ainode update 0.5.0'. Otherwise resolve
@@ -913,6 +1010,12 @@ Host-side:
                           the UNIT reads, not root's; override with
                           AINODE_HOME=/home/<user>/.ainode if it guesses wrong.
                           Run 'ainode update --help' for the rest.
+  tls enable --tailscale  get a real certificate for this node's MagicDNS name
+                          (tailscale runs on the host, not in the container), then
+                          record it in config.json. Restart to serve it.
+  tls renew               replace that certificate inside its last 14 days and
+                          restart so the new one is served. Run daily by
+                          ainode-tls-renew.timer. 'ainode tls --help' for the rest.
   --version               print the wrapper's pinned image tag
 
 Container-side (forwarded via docker exec):
@@ -926,26 +1029,227 @@ HELP
         docker exec ainode ainode --version 2>/dev/null || \\
             docker run --rm --entrypoint ainode "\$AINODE_IMAGE" --version 2>/dev/null || true
         ;;
-    *)
-        # Forward everything else into the running container. If the
-        # container isn't up, fall back to a one-shot docker run so
-        # \`ainode --help\`, \`ainode service install\`, etc. still work.
-        if docker exec ainode true 2>/dev/null; then
-            exec docker exec -it ainode ainode "\$@"
-        else
-            # Same sudo trap as update: mount the .ainode the unit uses.
-            CONF_HOME="\$(resolve_ainode_home || true)"
-            [ -n "\$CONF_HOME" ] || CONF_HOME="\$HOME/.ainode"
-            exec docker run --rm -it \\
-                --entrypoint ainode \\
-                -v "\$CONF_HOME":/root/.ainode \\
-                "\$AINODE_IMAGE" "\$@"
+    tls)
+        # Two shapes under \`tls\` are host work, for one reason: tailscale runs on
+        # the host and is not in the image. Getting a tailnet certificate and
+        # renewing one happen here; the container is still what writes the config
+        # block, because it is what knows its own AINODE_HOME. Every other \`tls\`
+        # subcommand is forwarded untouched.
+        TLS_SUB="\${2:-}"
+        TLS_TAILSCALE=false
+        for tls_arg in "\$@"; do
+            [ "\$tls_arg" = "--tailscale" ] && TLS_TAILSCALE=true
+            case "\$tls_arg" in -h|--help) print_tls_help; exit 0 ;; esac
+        done
+
+        if [ "\$TLS_SUB" = "enable" ] && [ "\$TLS_TAILSCALE" = "true" ]; then
+            if ! command -v tailscale >/dev/null 2>&1; then
+                echo "XX No tailscale on this host, so there is no tailnet name to" >&2
+                echo "   get a certificate for." >&2
+                echo "   Join the tailnet, or make a self-signed pair instead:" >&2
+                echo "     ainode tls enable" >&2
+                exit 1
+            fi
+            TLS_NAME="\$(tailnet_name)"
+            if [ -z "\$TLS_NAME" ]; then
+                echo "XX Could not read this node's MagicDNS name from tailscale." >&2
+                echo "   Is tailscaled up? Check: tailscale status" >&2
+                exit 1
+            fi
+            # WHERE before WHAT, the same rule \`update\` follows: a pair written
+            # into the wrong .ainode is a node with TLS enabled and no certificate.
+            if ! AINODE_HOME="\$(resolve_ainode_home)"; then
+                echo "XX Cannot tell which .ainode this service reads, so the pair" >&2
+                echo "   would land where the server does not look. Name it:" >&2
+                echo "     sudo AINODE_HOME=/home/<user>/.ainode ainode tls enable --tailscale" >&2
+                exit 1
+            fi
+            mkdir -p "\$AINODE_HOME/tls"
+            chmod 700 "\$AINODE_HOME/tls" 2>/dev/null || true
+            # Named after the certificate's one name: it is the only thing that
+            # carries WHICH name this pair is for across the container boundary,
+            # and it is how the CLI in there finds the pair with no arguments.
+            TLS_CERT="\$AINODE_HOME/tls/\$TLS_NAME.crt"
+            TLS_KEY="\$AINODE_HOME/tls/\$TLS_NAME.key"
+            echo "==> tailscale cert for \$TLS_NAME"
+            if ! tailscale_cert_into "\$TLS_CERT" "\$TLS_KEY" "\$TLS_NAME"; then
+                echo "XX tailscale could not issue a certificate for \$TLS_NAME." >&2
+                echo "   If it said HTTPS is not enabled: Tailscale admin console >" >&2
+                echo "   DNS > HTTPS Certificates > Enable." >&2
+                echo "   If it said cert access denied, run once on this host:" >&2
+                echo "     sudo tailscale set --operator=\$USER" >&2
+                echo "   A self-signed pair works meanwhile: ainode tls enable" >&2
+                exit 1
+            fi
+            own_tls_pair "\$AINODE_HOME" "\$TLS_CERT" "\$TLS_KEY"
+            echo "==> Wrote \$TLS_CERT"
+            echo "==> Recording it in config.json"
+            export AINODE_TAILNET_NAME="\$TLS_NAME"
+            forward_to_container "\$@"
         fi
+
+        if [ "\$TLS_SUB" = "renew" ]; then
+            if ! AINODE_HOME="\$(resolve_ainode_home)"; then
+                echo "XX Cannot tell which .ainode this service reads." >&2
+                exit 1
+            fi
+            # The DECISION is the container's: it can read the certificate and it
+            # owns the 14 day rule, in ainode/tls/renew.py. The ACTING is the
+            # host's. --check prints key=value lines and exits 10 for "nothing to
+            # do", so a daily timer says nothing for 75 days.
+            TLS_DECISION="\$(docker exec ainode ainode tls renew --check 2>/dev/null)" || true
+            TLS_RENEW=\$(printf '%s\n' "\$TLS_DECISION" | sed -n 's/^renew=//p' | head -1)
+            TLS_NAME=\$(printf '%s\n' "\$TLS_DECISION" | sed -n 's/^name=//p' | head -1)
+            TLS_CERT_NAME=\$(printf '%s\n' "\$TLS_DECISION" | sed -n 's/^cert_name=//p' | head -1)
+            TLS_KEY_NAME=\$(printf '%s\n' "\$TLS_DECISION" | sed -n 's/^key_name=//p' | head -1)
+            TLS_REASON=\$(printf '%s\n' "\$TLS_DECISION" | sed -n 's/^reason=//p' | head -1)
+            if [ -z "\$TLS_RENEW" ]; then
+                # A node that is down is not a renewal that failed: exit 0, so a
+                # daily timer does not mark itself failed all through an outage.
+                echo "!! Could not ask the container about the certificate."
+                echo "   Is ainode running? Nothing was changed."
+                exit 0
+            fi
+            if [ "\$TLS_RENEW" != "yes" ]; then
+                echo "==> No renewal needed: \$TLS_REASON"
+                exit 0
+            fi
+            if [ -z "\$TLS_NAME" ]; then
+                echo "XX The node says a renewal is due but names no tailnet name:" >&2
+                echo "   \$TLS_REASON" >&2
+                exit 1
+            fi
+            if ! command -v tailscale >/dev/null 2>&1; then
+                echo "XX \$TLS_REASON" >&2
+                echo "   There is no tailscale on this host to renew it with." >&2
+                exit 1
+            fi
+            # The directory can be gone: the decision above renews an enabled
+            # block whose pair vanished, and that is one of the ways it vanishes.
+            mkdir -p "\$AINODE_HOME/tls"
+            chmod 700 "\$AINODE_HOME/tls" 2>/dev/null || true
+            # The files the CONFIG points at, not name-derived ones: a pair from
+            # an earlier manual run can be sitting at cert.pem, and renewing into
+            # a new filename would leave the server reading the expiring one.
+            [ -n "\$TLS_CERT_NAME" ] || TLS_CERT_NAME="\$TLS_NAME.crt"
+            [ -n "\$TLS_KEY_NAME" ] || TLS_KEY_NAME="\$TLS_NAME.key"
+            TLS_CERT="\$AINODE_HOME/tls/\$TLS_CERT_NAME"
+            TLS_KEY="\$AINODE_HOME/tls/\$TLS_KEY_NAME"
+            TLS_BEFORE="\$(cert_not_after "\$TLS_CERT")"
+            echo "==> \$TLS_REASON"
+            echo "==> tailscale cert for \$TLS_NAME"
+            if ! tailscale_cert_into "\$TLS_CERT" "\$TLS_KEY" "\$TLS_NAME"; then
+                echo "XX tailscale could not renew the certificate for \$TLS_NAME." >&2
+                echo "   The old pair is still in place and still being served." >&2
+                echo "   Check: Tailscale admin console > DNS > HTTPS Certificates," >&2
+                echo "   and 'sudo tailscale set --operator=\$USER' for cert access." >&2
+                exit 1
+            fi
+            own_tls_pair "\$AINODE_HOME" "\$TLS_CERT" "\$TLS_KEY"
+            TLS_AFTER="\$(cert_not_after "\$TLS_CERT")"
+            if [ -n "\$TLS_BEFORE" ] && [ "\$TLS_AFTER" = "\$TLS_BEFORE" ]; then
+                echo "==> tailscale handed back the same certificate (\$TLS_AFTER)."
+                echo "    Nothing to restart; the next run tries again."
+                exit 0
+            fi
+            echo "==> New certificate valid until \$TLS_AFTER"
+            # The listener and its SSLContext are built at boot, so this restart
+            # is what makes the renewal real. Loaded models run in their own
+            # containers and are not touched by it.
+            if [ "\${AINODE_TLS_RENEW_RESTART:-1}" = "0" ]; then
+                echo "!! Restart skipped (AINODE_TLS_RENEW_RESTART=0). This node goes on"
+                echo "   serving the OLD certificate until: sudo systemctl restart ainode"
+                exit 0
+            fi
+            echo "==> Restarting \$AINODE_SERVICE so the new pair is served"
+            if is_user_mode; then
+                systemctl --user try-restart "\$AINODE_SERVICE"
+            elif [ "\$(id -u)" = "0" ]; then
+                systemctl try-restart "\$AINODE_SERVICE"
+            else
+                sudo -n systemctl try-restart "\$AINODE_SERVICE"
+            fi
+            echo "==> Renewed. Loaded models run in their own containers and were"
+            echo "    not touched."
+            exit 0
+        fi
+
+        export AINODE_TAILNET_NAME="\$(tailnet_name)"
+        forward_to_container "\$@"
+        ;;
+    *)
+        # Forward everything else into the running container.
+        forward_to_container "\$@"
         ;;
 esac
 WRAPPER
 
 $WRAPPER_SUDO chmod +x "$WRAPPER_PATH"
+
+# -- 5b. Renew the tailnet certificate without a human ----------------------
+# A `tailscale cert` pair is Let's Encrypt, so it lives 90 days, and something
+# has to notice day 76 without being asked. It cannot be the server: that runs
+# inside the container, which ships no tailscale binary and has no path to the
+# tailnet daemon, and the TLS listener is built at boot so serving a new pair is
+# a restart. It cannot be `ainode doctor` either, which warns correctly but only
+# when a human runs it. So it is a timer on the HOST, and it runs the wrapper:
+# the container decides (ainode/tls/renew.py owns the 14 day rule), the host acts.
+#
+# Installed whatever this node's TLS state is. A node with TLS off costs one
+# `docker exec` a day that prints "nothing to renew", and a node that turns TLS
+# on later is already covered rather than needing a reinstall.
+TLS_RENEW_STAGING="/tmp/ainode-tls-renew"
+[ "$DRY_RUN" = "true" ] && TLS_RENEW_STAGING="$AINODE_HOME/ainode-tls-renew"
+
+cat > "$TLS_RENEW_STAGING.service" << TLSRENEWUNIT
+[Unit]
+Description=Renew AINode's tailnet TLS certificate when it is nearly expired
+Documentation=https://ainode.dev
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+Environment=AINODE_HOME=${AINODE_HOME}
+ExecStart=${WRAPPER_PATH} tls renew
+# One run must never hold the timer open: tailscale cert is a network call and
+# the restart afterwards waits on the node coming back.
+TimeoutStartSec=600
+TLSRENEWUNIT
+
+cat > "$TLS_RENEW_STAGING.timer" << TLSRENEWTIMER
+[Unit]
+Description=Daily check on AINode's tailnet TLS certificate
+Documentation=https://ainode.dev
+
+[Timer]
+OnCalendar=daily
+# Spread the fleet out: a cluster installed in one sitting would otherwise ask
+# Let's Encrypt for every node's certificate in the same second.
+RandomizedDelaySec=4h
+# A node that was off when the timer was due still runs it once it is back,
+# which is the case that matters: a machine asleep past its renewal window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TLSRENEWTIMER
+
+if [ "$DRY_RUN" = "true" ]; then
+    log "Dry run: renewal timer rendered at $TLS_RENEW_STAGING.{service,timer}"
+elif [ "$USER_MODE" = "true" ]; then
+    mv "$TLS_RENEW_STAGING.service" "$UNIT_DIR/ainode-tls-renew.service"
+    mv "$TLS_RENEW_STAGING.timer" "$UNIT_DIR/ainode-tls-renew.timer"
+    systemctl --user daemon-reload
+    systemctl --user enable --now ainode-tls-renew.timer
+    log "Installed ainode-tls-renew.timer (user scope, daily)"
+else
+    sudo mv "$TLS_RENEW_STAGING.service" "$UNIT_DIR/ainode-tls-renew.service"
+    sudo mv "$TLS_RENEW_STAGING.timer" "$UNIT_DIR/ainode-tls-renew.timer"
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now ainode-tls-renew.timer
+    log "Installed ainode-tls-renew.timer (daily)"
+fi
 
 # -- 6. Join an existing cluster --------------------------------------------
 # AINODE_JOIN is "<host>[:<port>]:<token>". The token is the last colon-separated
@@ -1027,6 +1331,8 @@ if [ "$DRY_RUN" = "true" ]; then
     fi
     log "  ainode.service   the systemd unit (not installed)"
     log "  ainode-wrapper   the /usr/local/bin/ainode host wrapper"
+    log "  ainode-tls-renew.{service,timer}"
+    log "                   the daily tailnet certificate renewal (not installed)"
     log "  Access:          $ACCESS_LINE"
     print_api_key_box
     printf '\n'
