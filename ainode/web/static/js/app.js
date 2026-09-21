@@ -6190,7 +6190,11 @@ const AINode = {
     var stored = AINodeAuth.getKey();
     var html = '';
     html += '<h2 class="config-section-title">API access</h2>';
-    html += '<p class="config-section-desc">Who may call this node. AINode serves the dashboard, the OpenAI-compatible API and every management route on the same ports, so a key is the whole access control: with auth on, every <code>/api</code> and <code>/v1</code> route needs <code>Authorization: Bearer &lt;key&gt;</code> except <code>/api/health</code>, <code>/api/auth/status</code> and the static shell.</p>';
+    // The exempt set is auth/middleware.py::SKIP_PATHS plus SKIP_PREFIXES, spelled
+    // out in full: this sentence listed three of the six, so an operator reading it
+    // could not tell what an unauthenticated caller can still reach.
+    // tests/test_auth_usable.py checks every path in SKIP_PATHS appears here.
+    html += '<p class="config-section-desc">Who may call this node. AINode serves the dashboard, the OpenAI-compatible API and every management route on the same ports, so a key is the whole access control: with auth on, every <code>/api</code> and <code>/v1</code> route needs <code>Authorization: Bearer &lt;key&gt;</code>. What still answers without one: <code>/</code> and <code>/static/*</code> (the shell that asks for the key), <code>/api/health</code> (a liveness probe has none), <code>/api/auth/status</code> (so this page can say a key is wanted), <code>/api/cluster/endpoint</code> (names, addresses and ports, so a stranded client can find another node) and <code>/api/cluster/join</code> (a joining node holds a one-time token instead). Peers need no key of their own: a node-to-node call carries a key derived from <code>cluster_secret</code>.</p>';
 
     if (this.state.authBlocked) {
       html += '<div class="config-card config-card-alert">';

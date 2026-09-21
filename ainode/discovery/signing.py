@@ -106,8 +106,9 @@ class ClusterSecret:
 
     Callable with no arguments, which is the seam the sender and the listener
     take, so neither captures a value at startup. Rotation on a running fleet is
-    then an edit of ``config.json`` on each node (or a ``PUT /api/config``, which
-    writes the same file) and no restart: every node keeps signing with whatever
+    then an edit of ``config.json`` on each node (there is no config ROUTE that
+    can do it: the key is scrubbed from ``GET /api/config`` and not settable
+    through ``PATCH``) and no restart: every node keeps signing with whatever
     the file says at send time, and verifying with whatever it says at receive
     time. Roll the secret onto the receivers first and the senders after, or the
     other way round; the cluster is only dark for the nodes that disagree, and

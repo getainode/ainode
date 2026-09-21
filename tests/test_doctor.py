@@ -487,7 +487,7 @@ def _nodes_payload(*rows):
 
 
 def test_a_solo_node_with_no_peers_is_ok(monkeypatch):
-    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0:
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None:
                         _nodes_payload({"node_id": "me"}))
     check = _one(doc.check_peers(NodeConfig(node_id="me"), "0.5.26"))
     assert check.status == OK
@@ -495,7 +495,7 @@ def test_a_solo_node_with_no_peers_is_ok(monkeypatch):
 
 
 def test_configured_peers_that_discovery_cannot_see_warn(monkeypatch):
-    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0:
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None:
                         _nodes_payload({"node_id": "me"}))
     check = _one(doc.check_peers(
         NodeConfig(node_id="me", peer_ips=["10.0.0.2", "10.0.0.3"]), "0.5.26"))
@@ -504,7 +504,7 @@ def test_configured_peers_that_discovery_cannot_see_warn(monkeypatch):
 
 
 def test_a_fleet_on_one_release_is_ok(monkeypatch):
-    def fake(url, timeout=3.0):
+    def fake(url, timeout=3.0, headers=None):
         if url.endswith("/api/nodes"):
             return _nodes_payload(
                 {"node_id": "me"},
@@ -520,7 +520,7 @@ def test_a_fleet_on_one_release_is_ok(monkeypatch):
 
 def test_a_fleet_split_across_two_releases_warns(monkeypatch):
     """The standing rule is one release across every node; a split is a finding."""
-    def fake(url, timeout=3.0):
+    def fake(url, timeout=3.0, headers=None):
         if url.endswith("/api/nodes"):
             return _nodes_payload(
                 {"node_id": "me"},
@@ -536,7 +536,7 @@ def test_a_fleet_split_across_two_releases_warns(monkeypatch):
 
 
 def test_a_peer_announcing_no_fabric_ip_is_its_own_finding(monkeypatch):
-    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0: (
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None: (
         _nodes_payload({"node_id": "me"},
                        {"node_id": "s3", "node_name": "Spark-3", "fabric_ip": ""})
         if url.endswith("/api/nodes") else {"version": "0.5.26"}))
@@ -546,7 +546,7 @@ def test_a_peer_announcing_no_fabric_ip_is_its_own_finding(monkeypatch):
 
 
 def test_an_unreachable_peer_is_reported_as_unreachable(monkeypatch):
-    def fake(url, timeout=3.0):
+    def fake(url, timeout=3.0, headers=None):
         if url.endswith("/api/nodes"):
             return _nodes_payload(
                 {"node_id": "me"},
@@ -560,7 +560,7 @@ def test_an_unreachable_peer_is_reported_as_unreachable(monkeypatch):
 
 
 def test_a_local_api_that_is_down_cannot_enumerate_peers(monkeypatch):
-    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0: None)
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None: None)
     check = _one(doc.check_peers(NodeConfig(node_id="me"), "0.5.26"))
     assert check.status == WARN
     assert check.data == {"reachable": False}
@@ -829,7 +829,7 @@ def test_run_checks_produces_one_check_per_name_and_no_exceptions(tmp_path, monk
     monkeypatch.setattr(doc, "disk_usage", lambda path: (1000, 900))
     monkeypatch.setattr(doc, "tcp_listening", lambda port, **kw: False)
     monkeypatch.setattr(doc, "udp_listeners", lambda: None)
-    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0: None)
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None: None)
     monkeypatch.setattr(doc, "latest_image_tag", lambda: None)
     monkeypatch.setattr(doc, "probe_gpus", lambda: [])
     checks = doc.run_checks(tmp_path, tmp_path / "config.json")
@@ -851,7 +851,7 @@ def _fake_world(monkeypatch, tmp_path):
     monkeypatch.setattr(doc, "disk_usage", lambda path: (1000, 900))
     monkeypatch.setattr(doc, "tcp_listening", lambda port, **kw: False)
     monkeypatch.setattr(doc, "udp_listeners", lambda: None)
-    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0: None)
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None: None)
     monkeypatch.setattr(doc, "latest_image_tag", lambda: None)
     monkeypatch.setattr(doc, "probe_gpus", lambda: [{
         "index": 0, "name": "NVIDIA GB10", "memory_total_mb": 124620,

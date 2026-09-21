@@ -536,5 +536,7 @@ class TestUpdateVerifiesThenPrunes:
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "--keep-images N" in proc.stdout
-        assert "/api/status" in proc.stdout
+        # /api/health, not /api/status: health is the route that answers without
+        # an API key, and a fresh install requires one.
+        assert "/api/health" in proc.stdout
         assert "exits non-zero" in proc.stdout

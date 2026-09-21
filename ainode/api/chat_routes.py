@@ -35,6 +35,8 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
+from ainode.auth.fleet import fleet_headers
+
 logger = logging.getLogger(__name__)
 
 # Node states that can serve traffic: the same set _routing_candidates accepts,
@@ -214,19 +216,24 @@ def _local_instance_config(app, entry: dict):
     return None
 
 
-async def _remote_node_config(session, entry: dict) -> Optional[dict]:
+async def _remote_node_config(app, session, entry: dict) -> Optional[dict]:
     """A remote node's own live config, used only when it describes THIS model.
 
     A peer publishes its config over /api/config. That config describes the
     node's primary model, so it is only usable here when config.model matches
     the instance we are describing. Otherwise we would be showing model A's
     engine image on model B's card.
+
+    This is a node-to-node call on the peer's AINode port, not its engine port,
+    so it carries the fleet key: with auth on and no key the card lost every
+    "how it is served" field and fell back to the catalog's guess.
     """
     if session is None:
         return None
     url = f"http://{entry['host']}:{entry['web_port']}/api/config"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+        async with session.get(url, headers=fleet_headers(app),
+                               timeout=aiohttp.ClientTimeout(total=4)) as resp:
             if resp.status != 200:
                 return None
             data = await resp.json()
@@ -407,7 +414,7 @@ async def handle_model_card(request: web.Request) -> web.Response:
         extra_args = [str(a) for a in (getattr(cfg, "extra_vllm_args", None) or [])]
         quant_cfg = getattr(cfg, "quantization", None) or None
     elif not entry.get("local"):
-        remote = await _remote_node_config(session, entry)
+        remote = await _remote_node_config(app, session, entry)
         if remote:
             config_source = "node_config"
             engine_image = remote.get("engine_image") or None

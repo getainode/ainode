@@ -30,7 +30,19 @@
 #               a second one installed independently: two nodes with different
 #               secrets are invisible to each other. So a second node either joins
 #               (AINODE_JOIN, which writes the master's value) or is installed with
-#               the master's value pasted here.
+#               the master's value pasted here. It is also what node-to-node calls
+#               authenticate with once auth is on (the fleet key, ainode/auth/fleet.py).
+# AINODE_AUTH   "on" (default) or "off", and it applies to a FRESH install only.
+#               On: the installer mints one API key, stores its SHA-256 in
+#               $AINODE_HOME/auth.json with auth switched on, and prints the key
+#               once at the end. Every /api and /v1 route then needs
+#               "Authorization: Bearer <key>", the dashboard asks for it on first
+#               open, and the node's own cluster authenticates with the fleet key
+#               derived from cluster_secret, so clustering still works.
+#               Off: the node answers anyone who can reach the port, which is the
+#               pre-0.5.30 behaviour and a deliberate choice on a trusted LAN.
+#               An install over an existing $AINODE_HOME/config.json changes
+#               neither the auth state nor the keys, whatever this is set to.
 
 set -euo pipefail
 
@@ -53,6 +65,8 @@ AINODE_PEERS="${AINODE_PEERS:-}"           # comma-separated IPs
 AINODE_JOIN="${AINODE_JOIN:-}"
 # The cluster's shared discovery secret, identical on every node (see the header).
 AINODE_CLUSTER_SECRET="${AINODE_CLUSTER_SECRET:-}"
+# "on" (default) or "off": whether a FRESH install requires an API key.
+AINODE_AUTH="${AINODE_AUTH:-on}"
 AINODE_SSH_USER="${AINODE_SSH_USER:-$USER}"
 AINODE_JOB="${AINODE_JOB:-solo}"          # solo | master | worker
 SETUP_SSH="false"
@@ -84,11 +98,42 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+case "$AINODE_AUTH" in
+    on|off) ;;
+    *) echo "AINODE_AUTH must be on or off; got \"$AINODE_AUTH\"" >&2; exit 2 ;;
+esac
+
 if [ -n "$AINODE_JOIN" ] && [ "$AINODE_JOB" = "master" ]; then
     echo "AINODE_JOIN joins an existing cluster; --job master heads its own." >&2
     echo "Pick one." >&2
     exit 2
 fi
+
+# N random bytes as lowercase hex. openssl when it is there, /dev/urandom
+# otherwise, because openssl is not on every minimal image. One home for the
+# idiom: the cluster secret and the installer's API key both come from here.
+random_hex() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex "$1"
+    else
+        head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'
+    fi
+}
+
+# SHA-256 of $1 as lowercase hex, on stdout. Non-zero when this host has no
+# hasher, which is the one case where the installer leaves auth off rather than
+# writing a key it cannot store hashed: auth.json holds hashes, never a key.
+sha256_hex() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'
+    else
+        return 1
+    fi
+}
 
 log() { printf "\033[1;32m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m!!\033[0m %s\n" "$*"; }
@@ -297,11 +342,19 @@ else
     warn "    or: export HF_TOKEN=hf_... (in your shell profile)"
 fi
 
+# Is this a first install on this box, or an install over one that exists?
+# The ONLY signal is config.json: everything below that changes a node's identity
+# or its access control is gated on this being a fresh install, because an update
+# must never turn auth on under a running fleet or re-key a node whose operator
+# already holds a key.
+FRESH_INSTALL="false"
+[ -f "$AINODE_HOME/config.json" ] || FRESH_INSTALL="true"
+
 # Write initial config.json if not already present.
 # No model is set — the user picks one via the web UI after install.
 # Job role determines whether this node runs an engine (master/solo)
 # or just announces itself and waits for work (worker).
-if [ ! -f "$AINODE_HOME/config.json" ]; then
+if [ "$FRESH_INSTALL" = "true" ]; then
     log "Writing initial config (job: $AINODE_JOB)"
     case "$AINODE_JOB" in
         master)
@@ -332,10 +385,8 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
     if [ -n "$AINODE_CLUSTER_SECRET" ]; then
         CLUSTER_SECRET="$AINODE_CLUSTER_SECRET"
         log "Cluster secret: taken from AINODE_CLUSTER_SECRET"
-    elif command -v openssl >/dev/null 2>&1; then
-        CLUSTER_SECRET="$(openssl rand -hex 32)"
     else
-        CLUSTER_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        CLUSTER_SECRET="$(random_hex 32)"
     fi
     if [ -z "$AINODE_CLUSTER_SECRET" ] && [ -z "$AINODE_JOIN" ]; then
         log "Cluster secret: generated for this node"
@@ -391,7 +442,71 @@ if [ ! -f "$AINODE_HOME/config.json" ]; then
   "gpu_memory_utilization": 0.6
 }
 CONFIG
+    # 0600: this file carries cluster_secret, which signs discovery and derives
+    # the key every node-to-node call presents. NodeConfig.save() keeps it that
+    # way; the file is born here.
+    chmod 600 "$AINODE_HOME/config.json"
     log "Node configured as: $AINODE_JOB (distributed_mode=$DIST_MODE)"
+fi
+
+# -- 2d. An API key, on a fresh install -------------------------------------
+# AINode serves the dashboard, the OpenAI-compatible API and every management
+# route (load a model, unload one, PATCH the config) on the same port, so the key
+# IS the access control. Shipping open meant a node on a LAN answered anyone who
+# could reach port 3000, and the fleet ran open because auth used to break the
+# product: the UI could not send a key (#167) and a node with auth on could not
+# talk to its own peers. Both are fixed, so the default flips.
+#
+# Gated on FRESH_INSTALL, and separately on auth.json not existing: an update runs
+# this same script, and an update that turned auth on would lock out every client
+# the operator has already pointed at this node, with a key they never saw.
+AUTH_JSON="$AINODE_HOME/auth.json"
+INSTALL_API_KEY=""
+INSTALL_API_KEY_ID=""
+
+# Whether the node ALREADY requires a key, for the summary line on an install
+# over an existing home. Read with grep rather than a JSON parser because this
+# script cannot assume python, and the file is written by AuthConfig.save().
+auth_enabled_on_disk() {
+    [ -f "$AUTH_JSON" ] || return 1
+    grep -q '"enabled"[[:space:]]*:[[:space:]]*true' "$AUTH_JSON"
+}
+
+if [ "$FRESH_INSTALL" != "true" ] || [ -f "$AUTH_JSON" ]; then
+    log "API access: left exactly as it is (this is not a fresh install)"
+    log "  Change it with: ainode auth enable | ainode auth disable"
+elif [ "$AINODE_AUTH" = "off" ]; then
+    log "API access: OPEN, because you asked for it with AINODE_AUTH=off"
+    log "  Anyone who can reach port 3000 on this host can load and unload"
+    log "  models, read the config and change it. That is a reasonable choice"
+    log "  on a LAN you trust and a bad one on anything routable."
+    log "  Require a key later with: ainode auth enable"
+elif ! INSTALL_API_KEY_HASH="$(sha256_hex probe)"; then
+    warn "API access: OPEN. No sha256sum, shasum or openssl on this host, so the"
+    warn "  installer cannot store a key hashed, and it will not write one in the"
+    warn "  clear. Install coreutils or openssl, then: ainode auth enable"
+else
+    INSTALL_API_KEY="$(random_hex 16)"
+    INSTALL_API_KEY_ID="$(random_hex 4)"
+    INSTALL_API_KEY_HASH="$(sha256_hex "$INSTALL_API_KEY")"
+    # Same shape AuthConfig reads and writes (ainode/auth/middleware.py): the
+    # HASH is stored and the key itself exists only in the box printed at the end.
+    cat > "$AUTH_JSON" << AUTHJSON
+{
+  "enabled": true,
+  "api_keys": [
+    {
+      "id": "${INSTALL_API_KEY_ID}",
+      "key_hash": "${INSTALL_API_KEY_HASH}",
+      "name": "installer",
+      "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    }
+  ]
+}
+AUTHJSON
+    chmod 600 "$AUTH_JSON"
+    log "API access: PROTECTED. One key minted, stored hashed in $AUTH_JSON"
+    log "  The key is printed once at the end of this install. Copy it then."
 fi
 
 # -- 3. Optional passwordless SSH bootstrap ---------------------------------
@@ -613,9 +728,14 @@ node_web_port() {
     printf '%s\\n' "\${port:-3000}"
 }
 
-# The version /api/status reports. Empty output plus non-zero when the node does
+# The version /api/health reports. Empty output plus non-zero when the node does
 # not answer at all. "version" is the only key with that exact name in the
 # payload (driver_version and friends do not match the leading quote).
+#
+# /api/health and NOT /api/status, because health is the one route that answers
+# without an API key (ainode/auth/middleware.py::SKIP_PATHS) and a fresh install
+# requires one: reading status here made every update on a protected node pull,
+# pin, restart, read nothing and then report that the update had not applied.
 api_version() {
     local url="\$1" body=""
     body=\$(curl -fsS --max-time 5 "\$url" 2>/dev/null) || return 1
@@ -657,10 +777,11 @@ Pull a release, pin it for the systemd unit, restart, and verify.
                      ainode-base are never touched.
   -h, --help         this text
 
-After the restart the wrapper waits for this node's /api/status to report the
+After the restart the wrapper waits for this node's /api/health to report the
 version it just installed, and exits non-zero if it does not: an update that did
 not apply must not report success. Only then are the images it replaced removed,
-so a failed update still has something to fall back to.
+so a failed update still has something to fall back to. /api/health is the route
+that answers with no API key, so this works on a node that requires one.
 
 Environment:
   AINODE_HOME                     .ainode the unit reads (normally detected)
@@ -747,7 +868,7 @@ case "\${1:-}" in
         fi
 
         # Ask the node what it is running before claiming anything happened.
-        STATUS_URL="http://127.0.0.1:\$(node_web_port "\$AINODE_HOME")/api/status"
+        STATUS_URL="http://127.0.0.1:\$(node_web_port "\$AINODE_HOME")/api/health"
         if [ -z "\$TARGET_VERSION" ]; then
             echo "!! No version was resolved, so there is nothing to verify against."
             echo "   /api/status reports: \$(api_version "\$STATUS_URL" || echo 'no answer')"
@@ -863,14 +984,51 @@ if [ -n "$AINODE_JOIN" ]; then
     fi
 fi
 
+# The one thing an operator must not scroll past. Printed by both the dry run and
+# a real install, and only when THIS run minted a key: the plaintext exists
+# nowhere else, and `ainode auth key create` is the only way to get another.
+print_api_key_box() {
+    [ -n "$INSTALL_API_KEY" ] || return 0
+    printf '\n'
+    printf '    \033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
+    printf '    \033[1;33m  YOUR API KEY. SHOWN ONCE, STORED HASHED. COPY IT NOW.\033[0m\n'
+    printf '    \033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
+    printf '\n'
+    printf '      \033[1;37m%s\033[0m\n' "$INSTALL_API_KEY"
+    printf '\n'
+    printf '      Key id:     %s  (name: installer)\n' "$INSTALL_API_KEY_ID"
+    printf '      Dashboard:  http://localhost:3000 asks for it on first open\n'
+    printf '                  (Config > API access), then remembers it.\n'
+    printf '      curl:       -H "Authorization: Bearer %s"\n' "$INSTALL_API_KEY"
+    printf '      Another:    ainode auth key create --name <client>\n'
+    printf '      No key:     ainode auth disable   (the API answers everyone)\n'
+    printf '    \033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
+}
+
+# One sentence about who may call this node, decided once and printed by both the
+# dry run and the real banner. The vocabulary is the dashboard's and
+# /api/status's for the same state (ainode/api/server.py::auth_status_fields).
+if [ -n "$INSTALL_API_KEY" ]; then
+    ACCESS_LINE="API protected, one key. It is printed below, once."
+elif auth_enabled_on_disk; then
+    ACCESS_LINE="API key required. Unchanged by this install."
+else
+    ACCESS_LINE="API open, no key set. Require one in Config > API access."
+fi
+
 # -- Banner -----------------------------------------------------------------
 if [ "$DRY_RUN" = "true" ]; then
     printf '\n'
     log "Dry run complete. Rendered under $AINODE_HOME:"
     log "  config.json      the node config an install would write"
     log "                   (including a generated cluster_secret)"
+    if [ -n "$INSTALL_API_KEY" ]; then
+        log "  auth.json        auth ON with one key, stored as a SHA-256 hash"
+    fi
     log "  ainode.service   the systemd unit (not installed)"
     log "  ainode-wrapper   the /usr/local/bin/ainode host wrapper"
+    log "  Access:          $ACCESS_LINE"
+    print_api_key_box
     printf '\n'
     exit 0
 fi
@@ -882,10 +1040,11 @@ printf '    \033[1;32m━━━━━━━━━━━━━━━━━━━�
 printf '\n'
 printf '    Web:     http://localhost:3000\n'
 printf '    API:     http://localhost:8000/v1\n'
-printf '    Access:  API open, no key set. Require one in Config > API access.\n'
+printf '    Access:  %s\n' "$ACCESS_LINE"
 printf '    Status:  ainode status\n'
 printf '    Logs:    ainode logs -f\n'
 printf '    Update:  ainode update\n'
+print_api_key_box
 printf '\n'
 printf '    Made in Texas\n'
 printf '\n'

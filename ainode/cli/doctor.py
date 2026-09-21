@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Optional
 
 from ainode import __version__
+from ainode.auth.fleet import fleet_key_headers
 from ainode.core.config import (
     AINODE_HOME,
     DEFAULT_DISCOVERY_PORT,
@@ -166,13 +167,21 @@ def udp_listeners() -> Optional[set[int]]:
     return ports
 
 
-def http_json(url: str, timeout: float = 3.0) -> Optional[dict]:
-    """GET ``url`` and return the decoded JSON object, or None on any failure."""
+def http_json(url: str, timeout: float = 3.0,
+              headers: Optional[dict] = None) -> Optional[dict]:
+    """GET ``url`` and return the decoded JSON object, or None on any failure.
+
+    ``headers`` is where the fleet key goes (``auth/fleet.py``): a node that
+    requires a key answers 401 to its own doctor otherwise, and a 401 is
+    indistinguishable here from a node that is down, so every peer check would
+    have reported a healthy authenticated fleet as unreachable.
+    """
     import urllib.error
     import urllib.request
 
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        request = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             payload = json.loads(resp.read())
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         return None
@@ -768,7 +777,8 @@ def check_peers(config: NodeConfig, version: str = "") -> list[Check]:
     """
     version = version or __version__
     web_port = int(getattr(config, "web_port", 3000) or 3000)
-    payload = http_json(f"http://127.0.0.1:{web_port}/api/nodes")
+    headers = fleet_key_headers(getattr(config, "cluster_secret", ""))
+    payload = http_json(f"http://127.0.0.1:{web_port}/api/nodes", headers=headers)
     if payload is None:
         return [Check("cluster.peers", WARN,
                       f"cannot enumerate peers: the local API did not answer on {web_port}",
@@ -801,7 +811,8 @@ def check_peers(config: NodeConfig, version: str = "") -> list[Check]:
             no_fabric.append(label)
             versions[label] = None
             continue
-        status = http_json(f"http://{host}:{row.get('web_port') or 3000}/api/status")
+        status = http_json(f"http://{host}:{row.get('web_port') or 3000}/api/status",
+                           headers=headers)
         if status is None:
             unreachable.append(label)
             versions[label] = None
@@ -952,6 +963,118 @@ def check_secrets(home) -> list[Check]:
                   data=data)]
 
 
+#: Bind addresses that keep a node's API off the network. Anything else (the
+#: installer writes 0.0.0.0) is reachable by whoever can route to this host, which
+#: is what makes an unprotected API a finding rather than a preference.
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def check_cluster_secret(config: NodeConfig, peers_seen: int = 0) -> list[Check]:
+    """Is discovery signed, and does this node hold the key its fleet uses?
+
+    ``cluster_secret`` is two things at once: the HMAC key every discovery
+    announcement is signed with (``discovery/signing.py``) and the seed the fleet
+    key is derived from (``auth/fleet.py``). A node without one therefore accepts
+    any announcement on its broadcast domain AND cannot be called by its own
+    peers once auth is on, and nothing said so anywhere.
+
+    A WARN and not a FAIL when there is no secret, for the reason signing shipped
+    permissive: the whole fleet ran without one, and a check that failed every
+    node would be a check nobody reads. The FAIL for the combination that is
+    actually broken (auth on, peers, no secret) is ``auth.state``.
+    """
+    secret = str(getattr(config, "cluster_secret", "") or "").strip()
+    peer_ips = [p for p in (getattr(config, "peer_ips", []) or []) if p]
+    port = int(getattr(config, "discovery_port", DEFAULT_DISCOVERY_PORT)
+               or DEFAULT_DISCOVERY_PORT)
+    data = {"set": bool(secret), "peers_seen": int(peers_seen or 0),
+            "configured_peers": len(peer_ips), "discovery_port": port}
+    if secret:
+        return [Check("cluster.secret", OK,
+                      f"a cluster_secret is set, so discovery on {port} is signed "
+                      "and peers can authenticate to this node", data=data)]
+    return [Check("cluster.secret", WARN,
+                  f"no cluster_secret, so discovery on {port} is unauthenticated: "
+                  "any host on this broadcast domain can announce itself into this "
+                  "cluster, and peers cannot authenticate to this node",
+                  fix="ainode cluster token on the master, then the ainode join line "
+                      "it prints (or paste the same cluster_secret into every "
+                      "config.json)",
+                  data=data)]
+
+
+def check_auth(config: NodeConfig, home, peers_seen: int = 0) -> list[Check]:
+    """Is this node's API protected, and can its own cluster still reach it?
+
+    Three states, in the order they matter:
+
+    FAIL, auth on plus peers plus no ``cluster_secret``. The fleet key every
+    node-to-node call presents is derived from that secret
+    (``ainode/auth/fleet.py``), so a node with auth on and no secret answers 401
+    to its own cluster: the model card loses the peer's launch flags, a fan-out
+    unload reaches nothing and ``update-all`` cannot update this node. It is a
+    FAIL rather than a WARN because the cluster is already broken, not at risk.
+
+    WARN, auth off on a node bound to something other than loopback. That is the
+    installer's default bind, so it is the state every install before this release
+    is in: anyone who can route to the host can load a model, unload one, or
+    change the config. Not a FAIL, because it is a legitimate choice on a trusted
+    LAN and saying so is the point of ``AINODE_AUTH=off``.
+
+    OK otherwise, which is both "a key is required" and "no key, but nothing off
+    this host can reach the port".
+    """
+    path = Path(home) / "auth.json"
+    enabled = False
+    key_count = 0
+    if _exists(path):
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            return [Check("auth.state", WARN,
+                          f"cannot read {path}: {exc}; whether this API needs a "
+                          "key is unknown",
+                          fix="ainode auth status",
+                          data={"path": str(path), "readable": False})]
+        if isinstance(raw, dict):
+            enabled = bool(raw.get("enabled"))
+            key_count = len(raw.get("api_keys") or [])
+
+    secret = str(getattr(config, "cluster_secret", "") or "").strip()
+    peer_ips = [p for p in (getattr(config, "peer_ips", []) or []) if p]
+    has_peers = bool(peers_seen) or bool(peer_ips)
+    host = str(getattr(config, "host", "") or "").strip()
+    loopback = host in LOOPBACK_HOSTS
+    data = {"enabled": enabled, "key_count": key_count,
+            "cluster_secret": bool(secret), "peers": has_peers,
+            "peers_seen": int(peers_seen or 0), "host": host}
+
+    if enabled and has_peers and not secret:
+        return [Check("auth.state", FAIL,
+                      "auth is on and this node has peers but no cluster_secret, "
+                      "so every node-to-node call in this cluster answers 401",
+                      fix="join this node to the cluster (ainode cluster token on "
+                          "the master, then the ainode join line it prints), or put "
+                          "the cluster's shared cluster_secret in config.json",
+                      data=data)]
+    if not enabled:
+        if loopback:
+            return [Check("auth.state", OK,
+                          f"no key required, and the API is bound to {host}, so "
+                          "nothing off this host can reach it", data=data)]
+        return [Check("auth.state", WARN,
+                      f"no key required and the API is bound to {host or '0.0.0.0'}: "
+                      "anyone who can reach this host can load models, unload them "
+                      "and change the config",
+                      fix="ainode auth enable (it prints a key once), then paste it "
+                          "into the dashboard under Config > API access",
+                      data=data)]
+    detail = f"a key is required on /api and /v1 ({key_count} key(s) on the node)"
+    if has_peers:
+        detail += "; peers authenticate with the key derived from cluster_secret"
+    return [Check("auth.state", OK, detail, data=data)]
+
+
 def check_tls(config: NodeConfig) -> list[Check]:
     """Does anything here speak HTTPS, and is the certificate still good?
 
@@ -1091,6 +1214,8 @@ def run_checks(home=None, config_path=None) -> list[Check]:
     checks += check_fabric(config)
     checks += check_distributed(home)
     checks += check_secrets(home)
+    checks += check_cluster_secret(config, seen)
+    checks += check_auth(config, home, seen)
     checks += check_tls(config)
     checks += check_rate_limit(config)
     checks += check_hf_token(config, home)

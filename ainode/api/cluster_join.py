@@ -1,7 +1,8 @@
 """The two join routes: the one a joiner calls, and the one this node's UI calls.
 
 ``POST /api/cluster/join`` runs on the MASTER. It is the only route besides
-``/api/health`` and ``/api/auth/status`` that answers without an API key, and the
+``/`` and ``/static/*``, ``/api/health``, ``/api/auth/status`` and
+``/api/cluster/endpoint`` that answers without an API key, and the
 reason is structural: the node calling it has not joined yet, so it cannot hold
 this cluster's key. The join token IS the credential (32 random bytes, stored
 hashed, single use, expiring), and everything that follows from that lives here:

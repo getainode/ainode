@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from ainode.auth.fleet import fleet_headers
 from ainode.bench.measure import CTL_TIMEOUT, get_json, node_sample
 from ainode.metrics.collector import optional_float
 
@@ -388,13 +389,20 @@ def resolve_target(app, model: str, node_id: str = "", port: Optional[int] = Non
     )
 
 
-async def _aget_json(session, url, timeout=5.0):
-    """GET JSON in-process. Same contract as measure.get_json: never raises."""
+async def _aget_json(session, url, timeout=5.0, headers=None):
+    """GET JSON in-process. Same contract as measure.get_json: never raises.
+
+    ``headers`` carries the fleet key for a read of a NODE's own API (its
+    ``/api/status``, ``/api/config``, ``/api/server/status``), which needs a key
+    when that node requires one, even when the node is this one. A read of an
+    ENGINE port passes none: a vLLM container never saw AINode's middleware.
+    """
     if session is None:
         return {"_error": "no client session"}
     try:
         import aiohttp
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        async with session.get(url, headers=headers or {},
+                               timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             if r.status != 200:
                 return {"_error": f"HTTP {r.status}"}
             return await r.json(content_type=None)
@@ -529,12 +537,14 @@ async def describe_from_app(app, target: BenchTarget):
     # --- launch flags, from the node that owns the instance. Only trusted when
     # that node's live config names the model we are benching (see
     # _apply_live_config); otherwise the catalog recipe fills in and says so.
-    st = await _aget_json(session, f"{target.node_url}/api/status", timeout=5.0)
+    st = await _aget_json(session, f"{target.node_url}/api/status", timeout=5.0,
+                          headers=fleet_headers(app))
     if not st.get("_error") and st.get("version"):
         pl["ainode"] = st["version"]
     elif target.is_local:
         pl["ainode"] = __version__
-    cfg = await _aget_json(session, f"{target.node_url}/api/config", timeout=5.0)
+    cfg = await _aget_json(session, f"{target.node_url}/api/config", timeout=5.0,
+                           headers=fleet_headers(app))
     if not cfg.get("_error") and cfg.get("model") == target.model:
         _apply_live_config(pl, cfg)
 
@@ -564,7 +574,8 @@ async def busy_warnings(app, target: BenchTarget) -> list:
                    f"{', '.join(stacked)}; co-resident models share the node's memory "
                    "bandwidth, which is the ceiling on this hardware")
     ss = await _aget_json(app.get("client_session"),
-                          f"{target.node_url}/api/server/status", timeout=5.0)
+                          f"{target.node_url}/api/server/status", timeout=5.0,
+                          headers=fleet_headers(app))
     rpm = ss.get("request_count_last_minute")
     if isinstance(rpm, int) and rpm > 0:
         out.append(f"{target.node_name or target.host} served {rpm} request(s) in the last "
