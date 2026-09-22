@@ -83,6 +83,7 @@ from ainode.api.chat_routes import (
 )
 from ainode.api.cluster_join import register_cluster_join_routes
 from ainode.api.decide import handle_decide
+from ainode.api.systemone import handle_systemone
 from ainode.api.multipart import form_fields, is_multipart
 from ainode.bench.api_routes import register_bench_routes
 
@@ -289,6 +290,11 @@ def create_app(
     # with the proxy's own `_routing_candidates` and the shared client session,
     # so a head still reaches the node serving the requested model.
     app.router.add_post("/v1/decide", handle_decide)
+    # The same decision core behind TypeSafe's System One wire format, so a client
+    # written for the hosted Jev endpoint (Titanium's JDE, jev-ultrafast, the
+    # TypeSafe SDK) answers off a model on this fleet with its endpoint changed and
+    # nothing else. A /v1 path, so the key and the rate limiter cover it.
+    app.router.add_post("/v1/systemone", handle_systemone)
 
     # Chat view: the per-instance model card + the capability probe. Registered
     # BEFORE the model routes because aiohttp resolves in registration order and

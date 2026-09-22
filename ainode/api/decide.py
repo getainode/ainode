@@ -5,6 +5,13 @@ optional block of domain guidance and a dict of independent multiple-choice
 questions; every question is asked at once and each answer comes back with the
 probability the served model put on it.
 
+The pieces below are also the core ``POST /v1/systemone`` runs on
+(``api/systemone.py``, TypeSafe's Jev wire format over a local model): resolving
+the model, building the prompts, asking every question at once and reading the
+answers off the logprobs all happen here once, and that route translates into and
+out of this shape around them. So keep them importable, and keep the pure ones
+pure.
+
 Why this is not a proxy path: the forwarded inference routes all hand ONE
 upstream request the caller's own body (see ``server.py::proxy_to_vllm`` and the
 invariant in ``AGENTS.md``). ``/v1/decide`` composes N chat completions of its
@@ -36,7 +43,7 @@ import asyncio
 import json
 import math
 import time
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import aiohttp
 from aiohttp import web
@@ -52,6 +59,13 @@ ANSWER_INSTRUCTION = "Answer with the label of one option and nothing else."
 # letters (A..Z, AA..IU) and a 255-way softmax is already past the point where
 # the tail is measurable.
 MAX_OPTIONS = 255
+
+# How many alternatives the engine is asked for on the answer token. It is the
+# ceiling on how many options can carry a probability back from one call: a label
+# outside the top 20 is reported at 0 whatever the model thought of it, which is
+# why `/v1/systemone` refuses a question with more criteria than this rather than
+# answering one with a truncated distribution.
+TOP_LOGPROBS = 20
 
 # Room for the longest label plus the end-of-turn token the template emits.
 LABEL_TOKEN_HEADROOM = 1
@@ -70,7 +84,12 @@ DEFAULT_SCORE_MAX = 5
 
 
 class DecideError(Exception):
-    """A bad request shape. Carries the message the caller gets in a 400."""
+    """A bad request shape. Carries the message the caller gets in the 4xx.
+
+    ``/v1/decide`` answers it as a 400 and ``/v1/systemone`` as the 422 the Jev
+    format specifies, so the message says what is wrong and never which status
+    somebody is about to put it in.
+    """
 
 
 # --------------------------------------------------------------------- labels
@@ -100,7 +119,7 @@ def option_labels(count: int) -> list[str]:
 # ----------------------------------------------------------------- validation
 
 
-def _serialize_state(state: Any) -> str:
+def serialize_state(state: Any) -> str:
     """The state as the model sees it: a string verbatim, anything else compact JSON."""
     if state is None:
         return ""
@@ -222,7 +241,7 @@ def build_chat_body(model: str, messages: list[dict], labels: list[str]) -> dict
         "temperature": 0,
         "stream": False,
         "logprobs": True,
-        "top_logprobs": 20,
+        "top_logprobs": TOP_LOGPROBS,
         # Both switch names, the way ``bench/measure.py`` does it: Qwen-family
         # templates read enable_thinking, DeepSeek V4 reads thinking, and a
         # template ignores the one it does not use. A decision function must not
@@ -465,6 +484,68 @@ def node_name_for(request: web.Request, model: str, cand) -> Optional[str]:
     return entry.get("node_name") or None
 
 
+# ------------------------------------------------------------------------ run
+
+
+class DecideRun(NamedTuple):
+    """What one set of questions came back as, before anybody shapes a response.
+
+    ``decisions`` holds one entry per question the engine answered, keyed the way
+    the caller keyed the question and in the caller's order; ``payloads`` are the
+    raw engine responses, for the usage block; ``landed`` is the candidate the
+    first answer came from, for naming the node; ``failures`` is one line per
+    question that got no answer.
+    """
+
+    decisions: dict
+    payloads: list
+    landed: Optional[tuple]
+    failures: list
+
+
+async def run_questions(request: web.Request, model: str, questions: dict[str, dict],
+                        state: str, instructions: Optional[str],
+                        candidates: list) -> DecideRun:
+    """Ask every question at once against `candidates`, and read the answers.
+
+    The whole engine-facing half of a decision request, shared by ``/v1/decide``
+    and ``/v1/systemone`` so there is one path to the engines and one way the
+    probabilities are read. It reports what happened and decides nothing about
+    the response: the status, the shape and what a failure means belong to the
+    route.
+
+    All questions are in flight together. They share a byte-identical prompt
+    prefix, so once one of them has prefilled it the rest read the shared state
+    out of the engine's prefix cache instead of paying for it again.
+    """
+    session: aiohttp.ClientSession = request.app["client_session"]
+    keys = list(questions)
+    bodies = []
+    for key in keys:
+        spec = questions[key]
+        labels = option_labels(len(spec["options"]))
+        messages = build_messages(state, instructions, spec["question"],
+                                  spec["options"])
+        bodies.append(build_chat_body(model, messages, labels))
+
+    results = await asyncio.gather(
+        *(ask_one(session, candidates, b) for b in bodies))
+
+    decisions: dict = {}
+    payloads: list[dict] = []
+    failures: list[str] = []
+    landed = None
+    for key, (payload, cand, extra) in zip(keys, results):
+        if payload is None:
+            failures.append(f"{key}: {extra}")
+            continue
+        payloads.append(payload)
+        landed = landed or cand
+        decisions[key] = decision_from_payload(payload, questions[key]["options"],
+                                               float(extra))
+    return DecideRun(decisions, payloads, landed, failures)
+
+
 # -------------------------------------------------------------------- handler
 
 
@@ -474,7 +555,7 @@ def _bad_request(message: str) -> web.Response:
                              status=400)
 
 
-def _unavailable(message: str) -> web.Response:
+def unavailable(message: str) -> web.Response:
     return web.json_response({"error": {"message": message,
                                         "type": "service_unavailable"}},
                              status=503)
@@ -494,7 +575,7 @@ async def handle_decide(request: web.Request) -> web.Response:
     try:
         model = resolve_model(request, body.get("model"))
         questions = normalize_questions(body.get("questions"))
-        state = _serialize_state(body.get("state"))
+        state = serialize_state(body.get("state"))
         instructions = body.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
             raise DecideError("'instructions' must be a string when given")
@@ -509,53 +590,27 @@ async def handle_decide(request: web.Request) -> web.Response:
 
     candidates = candidates_for(request, model)
     if not candidates:
-        return _unavailable(f"no node is serving '{model}'")
+        return unavailable(f"no node is serving '{model}'")
 
-    session: aiohttp.ClientSession = request.app["client_session"]
-    keys = list(questions)
-    bodies = []
-    for key in keys:
-        spec = questions[key]
-        labels = option_labels(len(spec["options"]))
-        messages = build_messages(state, instructions, spec["question"],
-                                  spec["options"])
-        bodies.append(build_chat_body(model, messages, labels))
-
-    # All questions in flight at once. They share a byte-identical prompt prefix,
-    # so once one of them has prefilled it the rest read the shared state out of
-    # the engine's prefix cache instead of paying for it again.
-    results = await asyncio.gather(
-        *(ask_one(session, candidates, b) for b in bodies))
-
-    decisions: dict = {}
-    payloads: list[dict] = []
-    landed = None
-    failures: list[str] = []
-    for key, (payload, cand, extra) in zip(keys, results):
-        if payload is None:
-            failures.append(f"{key}: {extra}")
-            continue
-        payloads.append(payload)
-        landed = landed or cand
-        decisions[key] = decision_from_payload(payload, questions[key]["options"],
-                                               float(extra))
+    run = await run_questions(request, model, questions, state, instructions,
+                              candidates)
     collector = request.app.get("metrics_collector")
     total_ms = (time.monotonic() - started) * 1000
-    if failures:
+    if run.failures:
         # A 200 always carries every question. A partial answer set would read
         # like a decision the model declined to make, and the bench treats this
         # response shape as fixed.
         if collector is not None:
             collector.record_request(model, total_ms, error=True)
-        return _unavailable(f"engine calls failed for '{model}': "
-                            + "; ".join(failures[:5]))
+        return unavailable(f"engine calls failed for '{model}': "
+                           + "; ".join(run.failures[:5]))
 
     if collector is not None:
         collector.record_request(model, total_ms, error=False)
     return web.json_response({
         "model": model,
-        "node": node_name_for(request, model, landed),
+        "node": node_name_for(request, model, run.landed),
         "latency_ms": round(total_ms, 1),
-        "decisions": decisions,
-        "usage": merge_usage(payloads),
+        "decisions": run.decisions,
+        "usage": merge_usage(run.payloads),
     })
