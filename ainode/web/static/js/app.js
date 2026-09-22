@@ -6193,7 +6193,7 @@ const AINode = {
     // -- change password -----------------------------------------------------
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Change password</h3>';
-    html += '<p class="config-card-desc">Your current password proves it is you. The new one takes effect at once and your other sessions stay signed in.</p>';
+    html += '<p class="config-card-desc">Your current password proves it is you. The new one takes effect at once: this browser stays signed in, and every other browser signed in as you is signed out.</p>';
     html += '<form class="auth-form" id="account-password-form" autocomplete="off">';
     html += '  <label class="form-label" for="account-pw-current">Current password</label>';
     html += '  <input class="form-input" id="account-pw-current" type="password" autocomplete="current-password">';
@@ -6232,7 +6232,9 @@ const AINode = {
           if (mine) html += ' <span class="auth-badge auth-badge-current">this browser</span>';
           html += '    </div>';
           html += '    <div class="auth-row-meta">Signed in ' + self.esc(self._authWhen(s.created_at))
-                + ' · last seen ' + self.esc(self._authWhen(s.last_seen)) + '</div>';
+                + ' · last seen ' + self.esc(self._authWhen(s.last_seen))
+                + (s.agent ? ' · ' + self.esc(String(s.agent).slice(0, 80)) : '')
+                + '</div>';
           html += '  </div>';
           html += '  <div class="auth-row-actions"><button class="config-btn danger" data-revoke-session="'
                 + self.esc(s.id) + '"' + (mine ? ' data-session-current="1"' : '') + '>Revoke</button></div>';
@@ -6305,7 +6307,18 @@ const AINode = {
     if (cur) cur.value = '';
     if (next) next.value = '';
     if (again) again.value = '';
-    show(true, 'Password changed. You stay signed in here.');
+    // The node mints a fresh session for this browser and revokes the account's
+    // other ones, so the sessions list under this card is stale the moment the
+    // change lands. Re-read who we are, redraw, then say what happened on the
+    // line the redraw just rebuilt.
+    await AINodeAuth.loadMe();
+    await this.renderConfigAccount();
+    var after = document.getElementById('account-pw-result');
+    var done = 'Password changed. You stay signed in here, and your other browsers are signed out.';
+    if (!after) { this.toast(done, 'success'); return; }
+    after.style.display = '';
+    after.className = 'config-test-result ok';
+    after.textContent = done;
   },
 
   async accountRevokeSession(sessionId, isCurrent) {
@@ -6364,7 +6377,11 @@ const AINode = {
     var users = Array.isArray(body) ? body : ((body && body.users) || []);
     this.state.authUsers = users;
     var me = AINodeAuth.user();
-    var admins = users.filter(function (u) { return u.role === 'admin' && !u.disabled; }).length;
+    // The node counts its own admins; fall back to counting the rows when it
+    // does not, rather than printing a number nobody stated.
+    var admins = (body && typeof body.admin_count === 'number')
+      ? body.admin_count
+      : users.filter(function (u) { return u.role === 'admin' && !u.disabled; }).length;
 
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Accounts</h3>';
@@ -6380,7 +6397,12 @@ const AINode = {
         if (u.disabled) html += ' <span class="auth-badge auth-badge-off">disabled</span>';
         if (isMe) html += ' <span class="auth-badge auth-badge-current">you</span>';
         html += '    </div>';
-        html += '    <div class="auth-row-meta">Added ' + self.esc(self._authWhen(u.created_at)) + '</div>';
+        var signedIn = '';
+        if (typeof u.sessions === 'number') {
+          signedIn = ' · ' + (u.sessions === 0 ? 'not signed in anywhere'
+            : u.sessions + (u.sessions === 1 ? ' browser signed in' : ' browsers signed in'));
+        }
+        html += '    <div class="auth-row-meta">Added ' + self.esc(self._authWhen(u.created_at)) + self.esc(signedIn) + '</div>';
         html += '    <div class="auth-inline-form" id="user-pw-' + self.esc(u.name) + '" style="display:none">';
         html += '      <input class="form-input" type="password" data-new-password="' + self.esc(u.name) + '" placeholder="New password for ' + self.esc(u.name) + '" autocomplete="new-password">';
         html += '      <button class="config-btn" data-save-password="' + self.esc(u.name) + '">Set password</button>';
@@ -6396,7 +6418,7 @@ const AINode = {
         html += '</div>';
       });
       if (admins <= 1) {
-        html += '<p class="config-card-desc">This node has one admin. It will refuse to remove or disable the last one, so nobody can lock everybody out.</p>';
+        html += '<p class="config-card-desc">This node has one admin. It refuses to remove or disable the only admin, so nobody can lock everybody out.</p>';
       }
     }
     html += '</div>';

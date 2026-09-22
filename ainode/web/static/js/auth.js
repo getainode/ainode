@@ -319,6 +319,11 @@
      * POST /api/auth/logout. The stored API key is NOT touched: signing out ends
      * a person's session, and forgetting a program's key is a separate decision
      * the person makes in Config > API access.
+     *
+     * Logout is a write, so it sits behind the middleware like any other: a
+     * caller with no credential left meets a 401 before the handler. That IS
+     * signed out, so every answer ends the same way here, and the caller is told
+     * only whether the node did the revoking.
      */
     signOut() {
       var self = this;

@@ -6731,10 +6731,13 @@ body.signin-mode { overflow: hidden; }
 
 /* -- account and user rows ------------------------------------------------- */
 
+/* Flex rather than a grid, and wrapping on the row's OWN width: the config
+   panel is narrower than the viewport, so a media query cannot tell when three
+   buttons have squeezed "last seen" into a column three words wide. */
 .auth-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
   align-items: center;
   padding: 13px 0;
   border-bottom: 1px solid var(--border);
@@ -6746,6 +6749,7 @@ body.signin-mode { overflow: hidden; }
   flex-direction: column;
   gap: 5px;
   min-width: 0;
+  flex: 1 1 260px;
 }
 
 .auth-row-name {
@@ -6770,6 +6774,7 @@ body.signin-mode { overflow: hidden; }
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  margin-left: auto;
 }
 
 .auth-badge {
@@ -6808,8 +6813,7 @@ body.signin-mode { overflow: hidden; }
 
 @media (max-width: 720px) {
   .auth-form-add { grid-template-columns: minmax(0, 1fr); }
-  .auth-row { grid-template-columns: minmax(0, 1fr); }
-  .auth-row-actions { justify-content: flex-start; }
+  .auth-row-actions { justify-content: flex-start; margin-left: 0; }
 }
 
 /* -- the collapsed "paste a key" block in API access ----------------------- */
