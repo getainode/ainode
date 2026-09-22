@@ -191,6 +191,7 @@ ENDPOINT_CATALOG = {
     ],
     "ainode": [
         {"method": "POST", "path": "/v1/decide", "description": "Typed questions in, calibrated probabilities out: every question answered at once by the node serving the model"},
+        {"method": "POST", "path": "/v1/systemone", "description": "The same decisions in TypeSafe's System One (Jev) wire format, so a client written for the hosted endpoint answers off a model on this fleet"},
     ],
 }
 
