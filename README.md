@@ -1006,8 +1006,8 @@ belongs to the node whose files it writes.
 bytes, stored on the master as a SHA-256 hash with an expiry (30 minutes, `--ttl`) and
 one use, and it is the joiner's only credential: `POST /api/cluster/join` answers
 without an API key, because a node that has not joined cannot hold this cluster's key
-yet. It is one of five keyless paths, with `/api/health`, `/api/auth/status`,
-`/api/cluster/endpoint` and the static shell. A wrong, an expired and a spent token all get the same 403,
+yet. It is one of seven keyless paths, with `/api/health`, `/api/auth/status`,
+`/api/auth/login`, `/api/auth/me`, `/api/cluster/endpoint` and the static shell. A wrong, an expired and a spent token all get the same 403,
 and the handler allows five attempts a minute per source address. The joining side
 writes `cluster_id`, `cluster_secret`, `cluster_role`, `distributed_mode`,
 `master_address` and `discovery_port` into `config.json` and touches nothing else,
@@ -1133,7 +1133,10 @@ With auth on, every path under `/api` and `/v1` wants the key, with these delibe
 exceptions: the static shell (`/` and `/static/*`), because it is what asks for the
 key; `/api/health`, because a liveness probe has none, which is also why `ainode
 update` verifies a release there; `/api/auth/status`, so the UI can say a key is
-wanted instead of rendering blank; `/api/cluster/endpoint`, which carries names,
+wanted instead of rendering blank; `/api/auth/login`, because the caller with no
+credential is exactly who knocks on it, and `/api/auth/me`, which answers
+`{"user": null}` to a caller it does not recognise so the dashboard can draw the
+login page instead of guessing; `/api/cluster/endpoint`, which carries names,
 addresses and ports so a client stranded by its own node can find another; and `POST
 /api/cluster/join`, because a node joining this cluster cannot hold this cluster's key
 yet. That last one takes a single-use expiring join token instead, and the handler

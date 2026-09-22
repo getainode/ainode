@@ -3,6 +3,12 @@
 ``GET /api/auth/status`` is the one route here the middleware leaves open: the
 dashboard asks it before anything else so it can tell "this node wants a key"
 apart from "this node is broken". Everything else needs the key once auth is on.
+
+Every route here except that one is ADMINISTRATION, so since #261 it takes the
+same gate the account routes take (``session_routes.admin_refusal``): an admin
+session, an operator API key, or the fleet key. A member session is refused,
+because a key is the whole access control on this node and "log in as a member"
+must not be a way to mint one, revoke everybody else's, or switch the wall off.
 """
 
 from __future__ import annotations
@@ -10,6 +16,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from ainode.auth.middleware import AuthConfig, is_authenticated
+from ainode.auth.session_routes import admin_refusal
 
 
 def register_auth_routes(app: web.Application) -> None:
@@ -48,6 +55,9 @@ async def handle_auth_enable(request: web.Request) -> web.Response:
     so an existing key cannot be shown again. The caller is told to use the key
     it has, or to create a new one.
     """
+    refused = admin_refusal(request)
+    if refused is not None:
+        return refused
     auth_cfg: AuthConfig = request.app["auth_config"]
     entry = auth_cfg.enable()
     payload = {
@@ -67,6 +77,9 @@ async def handle_auth_enable(request: web.Request) -> web.Response:
 
 async def handle_auth_disable(request: web.Request) -> web.Response:
     """POST /api/auth/disable -- disable auth."""
+    refused = admin_refusal(request)
+    if refused is not None:
+        return refused
     auth_cfg: AuthConfig = request.app["auth_config"]
     auth_cfg.disable()
     return web.json_response({"enabled": False, "key_count": len(auth_cfg.api_keys)})
@@ -78,6 +91,9 @@ async def handle_list_keys(request: web.Request) -> web.Response:
     Never a hash and never a plaintext: a key is shown once, at mint time, and
     after that the only operations are "list" and "revoke".
     """
+    refused = admin_refusal(request)
+    if refused is not None:
+        return refused
     auth_cfg: AuthConfig = request.app["auth_config"]
     return web.json_response({
         "enabled": auth_cfg.enabled,
@@ -93,6 +109,9 @@ async def handle_create_key(request: web.Request) -> web.Response:
     ``GET /api/auth/keys`` and ``ainode auth key list`` can name it later. A
     request with no body is the old shape and still mints an unnamed key.
     """
+    refused = admin_refusal(request)
+    if refused is not None:
+        return refused
     auth_cfg: AuthConfig = request.app["auth_config"]
     name = ""
     try:
@@ -113,6 +132,9 @@ async def handle_create_key(request: web.Request) -> web.Response:
 
 async def handle_revoke_key(request: web.Request) -> web.Response:
     """DELETE /api/auth/keys/:key_id -- revoke a key."""
+    refused = admin_refusal(request)
+    if refused is not None:
+        return refused
     key_id = request.match_info["key_id"]
     auth_cfg: AuthConfig = request.app["auth_config"]
     revoked = auth_cfg.revoke_key(key_id)

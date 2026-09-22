@@ -1,12 +1,16 @@
 """With auth on, every route needs the key except the few that cannot.
 
 The rule this file pins (#168): when auth is enabled, every path under ``/api``
-and ``/v1`` requires ``Authorization: Bearer <key>``, except ``/api/health``,
-``/api/auth/status``, ``/api/cluster/endpoint``, ``POST /api/cluster/join`` and
-the static shell. It is checked against the REAL route
-table (``create_app``), not a list of paths typed out here, because a list is
-what drifts: the next mutating route somebody adds is covered by the rule and
+and ``/v1`` requires a credential, except ``/api/health``, ``/api/auth/status``,
+``/api/auth/login``, ``/api/auth/me``, ``/api/cluster/endpoint``,
+``POST /api/cluster/join`` and the static shell. It is checked against the REAL
+route table (``create_app``), not a list of paths typed out here, because a list
+is what drifts: the next mutating route somebody adds is covered by the rule and
 by this test on the day it is registered.
+
+"A credential" is three things since #261: an operator API key, the fleet key, or
+a login session cookie. This file drives the first; ``tests/test_session_routes.py``
+drives the third, including the CSRF header a cookie-authenticated write needs.
 
 The second half pins the ``trust_remote_code`` rule, which holds even when auth
 is switched off: setting it needs a key, or a curated catalog entry that already
@@ -97,7 +101,14 @@ async def keyed(app):
 #                      key yet, so a single-use expiring join token is the
 #                      credential and the handler rate limits per source IP
 #                      (api/cluster_join.py). Covered by tests/test_join_flow.py.
+#   /api/auth/login    the door: the caller with no credential is exactly who
+#                      posts to it. It has its own per-address throttle on FAILED
+#                      attempts instead (tests/test_session_routes.py).
+#   /api/auth/me       answers {"user": null} to a caller it does not recognise,
+#                      so the dashboard can draw the login page instead of
+#                      guessing. It tells a stranger nothing else.
 OPEN_WITH_AUTH_ON = {"/", "/api/health", "/api/auth/status",
+                     "/api/auth/login", "/api/auth/me",
                      "/api/cluster/endpoint", "/api/cluster/join"}
 
 # Routes whose path carries a variable. Filled in with something harmless: the

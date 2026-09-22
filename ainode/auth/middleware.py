@@ -1,13 +1,17 @@
-"""API key authentication middleware for aiohttp.
+"""Authentication middleware for aiohttp: an API key, a login, or the fleet.
 
 The rule, in one place: **when auth is enabled every path under ``/api`` and
-``/v1`` needs the key.** The exceptions are the five things a caller with no key
-must still be able to reach:
+``/v1`` needs a credential.** The exceptions are the seven things a caller with
+none must still be able to reach:
 
 * the static shell (``/``, ``/static/*``),
 * ``/api/health`` (liveness, for a probe that has no key),
 * ``/api/auth/status`` (so the UI can say "this node wants a key" instead of
   rendering an empty page),
+* ``/api/auth/login`` (the door: a caller with no credential is exactly who
+  posts to it),
+* ``/api/auth/me`` (which answers ``{"user": null}`` to a caller with no
+  session, so the dashboard can draw the login page instead of guessing),
 * ``/api/cluster/endpoint`` (node names, addresses and ports, nothing else: a
   client whose configured node is down has to be able to ask a reachable one
   where the rest of the fleet is, and the key it holds does not help it find an
@@ -22,21 +26,46 @@ every deployed node, because the installer and every non-TTY start set
 ``onboarded`` before the server came up, and it never joined a cluster even when
 reached.
 
-Every request is stamped with ``request["authenticated"]`` -- True only when a
-Bearer token matched a stored key hash -- and with ``request["api_key_id"]``, the
-id of the key that matched. Handlers read the first through
-``is_authenticated()`` to gate the few fields that are dangerous even when auth
-is switched off (``trust_remote_code``; see ``TRUST_REMOTE_CODE_RULE``); the rate
-limiter reads the second so a keyed caller gets its own budget.
+Every request is stamped with ``request["authenticated"]`` -- True when a
+credential matched -- and with ``request["api_key_id"]``, who matched. Handlers
+read the first through ``is_authenticated()`` to gate the few fields that are
+dangerous even when auth is switched off (``trust_remote_code``; see
+``TRUST_REMOTE_CODE_RULE``); the rate limiter reads the second so a keyed caller
+gets its own budget.
 
-There is one caller besides the operator: **the fleet**. A peer presenting the
-key derived from this node's ``cluster_secret`` is accepted as ``api_key_id ==
-"fleet"``, which is what lets a cluster run with auth on everywhere (see
-``auth/fleet.py`` for the derivation, and why it is a derivation). It is checked
-against the LIVE secret on every request, so rotating ``cluster_secret`` rotates
-the fleet's access with no restart, and a node whose secret differs from the rest
-of the cluster refuses them exactly as it drops their unverifiable discovery
-datagrams.
+**Three credentials, in one pass.**
+
+1. An operator API key, from ``Authorization: Bearer``, stamped as its key id.
+2. **The fleet.** A peer presenting the key derived from this node's
+   ``cluster_secret`` is accepted as ``api_key_id == "fleet"``, which is what
+   lets a cluster run with auth on everywhere (see ``auth/fleet.py`` for the
+   derivation, and why it is a derivation). It is checked against the LIVE
+   secret on every request, so rotating ``cluster_secret`` rotates the fleet's
+   access with no restart, and a node whose secret differs from the rest of the
+   cluster refuses them exactly as it drops their unverifiable discovery
+   datagrams.
+3. **A login session**, from the ``ainode_session`` cookie (#261), stamped as
+   ``api_key_id == "user:<name>"`` with ``request["user"]`` and
+   ``request["user_role"]`` beside it. ``auth/accounts.py`` owns the accounts
+   and the sessions; this module only decides whether one is presented.
+
+A Bearer token is tried FIRST and a cookie only when no key matched. That is
+"the key wins" for a caller holding both, without locking out the one case that
+really happens: a browser that logged in while a stale key was still sitting in
+``localStorage`` would otherwise 401 on every request with a valid session in
+the jar.
+
+**The cookie carries a CSRF rule the other two do not need.** A browser attaches
+a cookie to a cross-site request on its own, so a cookie alone would let any page
+on the internet POST to a node the operator is logged into. A Bearer token cannot
+be attached by anybody but the caller, so it needs nothing. The rule: a
+cookie-authenticated request whose method is not GET, HEAD or OPTIONS must carry
+``X-AINode-Client: dashboard``. A custom header cannot be set cross-origin
+without a CORS preflight this node never approves, so the header IS the proof
+that the caller is the dashboard's own code and not somebody else's page. Without
+it the cookie is ignored: the request proceeds as unauthenticated, which with
+auth on is a 401 whose message names the missing header rather than claiming the
+login was bad.
 """
 
 from __future__ import annotations
@@ -54,6 +83,7 @@ from typing import Optional
 
 from aiohttp import web
 
+from ainode.auth.accounts import USER_KEY_PREFIX, UsersStore
 from ainode.auth.fleet import FLEET_KEY_ID, cluster_secret_of, is_fleet_key
 from ainode.core.config import AINODE_HOME
 
@@ -82,11 +112,33 @@ def _file_stamp(path) -> Optional[tuple]:
 AUTH_FILE = AINODE_HOME / "auth.json"
 
 SKIP_PATHS: set[str] = {"/", "/api/health", "/api/auth/status",
+                        "/api/auth/login", "/api/auth/me",
                         "/api/cluster/endpoint", "/api/cluster/join"}
 SKIP_PREFIXES: tuple[str, ...] = ("/static/",)
 
+#: The cookie a logged-in browser carries. HttpOnly, so no script on the page can
+#: read it (``auth/session_routes.py`` writes it and owns the attributes).
+SESSION_COOKIE = "ainode_session"
+
+#: The header a cookie-authenticated write must carry, and its one accepted
+#: value. See the module docstring for why a custom header is the CSRF proof.
+CLIENT_HEADER = "X-AINode-Client"
+DASHBOARD_CLIENT = "dashboard"
+
+#: Methods a cookie alone is allowed to authenticate. The three that must not
+#: change anything, so a cross-site GET buys an attacker nothing it did not
+#: already have from the browser's own address bar.
+SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+
 #: ``request`` key carrying the outcome of token validation for this request.
 AUTHENTICATED_KEY = "authenticated"
+
+#: ``request`` keys carrying the logged-in account, or "" when the caller is a
+#: key, the fleet, or nobody. Handlers read them through ``request["user"]`` /
+#: ``request["user_role"]``; ``accounts.require_admin`` is the one place that
+#: turns them into a yes or no.
+USER_KEY = "user"
+USER_ROLE_KEY = "user_role"
 
 #: ``request`` key carrying the id of the API key this request presented, or "".
 #: Set by the same validation pass as AUTHENTICATED_KEY, so anything downstream
@@ -105,11 +157,23 @@ TRUST_REMOTE_CODE_RULE = (
     "recipe already declares it."
 )
 
-#: What a 401 tells the caller. The dashboard turns this into its API access
-#: panel; a curl user gets the header to send.
+#: What a 401 tells the caller. The dashboard turns this into its login page or
+#: its API access panel; a curl user gets the header to send. Both doors are
+#: named, because a person who is told only about a Bearer token pastes a machine
+#: key into a browser, which is the thing #261 exists to stop.
 MISSING_KEY_MESSAGE = (
-    "This node requires an API key. Send Authorization: Bearer <key>, or paste "
-    "the key into the dashboard under Config > API access."
+    "This node requires a login or an API key. Sign in on the dashboard, or send "
+    "Authorization: Bearer <key>."
+)
+
+#: What a 401 tells a caller whose session cookie was ignored for want of the
+#: client header. Distinct from MISSING_KEY_MESSAGE on purpose: the credential
+#: was fine and the request shape was not, and a message blaming the login sends
+#: somebody to re-type a password that was never wrong.
+CSRF_HEADER_MESSAGE = (
+    f"A session cookie only authenticates a write that carries "
+    f"{CLIENT_HEADER}: {DASHBOARD_CLIENT}. Send that header, or use "
+    f"Authorization: Bearer <key>."
 )
 
 
@@ -344,6 +408,67 @@ def identify_caller(app, auth_cfg: "AuthConfig | None",
     return False, ""
 
 
+def session_token(request) -> str:
+    """The session token in this request's cookie jar, or "".
+
+    ``request.cookies`` is tolerant of a request-like stub with none, because the
+    handlers in this package are called with one in several tests.
+    """
+    cookies = getattr(request, "cookies", None) or {}
+    try:
+        return str(cookies.get(SESSION_COOKIE) or "")
+    except Exception:  # pragma: no cover - a stub with a hostile mapping
+        return ""
+
+
+def csrf_header_ok(request) -> bool:
+    """Is this request allowed to authenticate on a cookie alone?
+
+    True for a safe method, and for any method carrying
+    ``X-AINode-Client: dashboard``. See the module docstring: the header is the
+    proof that the caller is the dashboard's own code, because a cross-origin
+    page cannot set one without a preflight this node never approves.
+    """
+    method = str(getattr(request, "method", "GET") or "GET").upper()
+    if method in SAFE_METHODS:
+        return True
+    headers = getattr(request, "headers", None) or {}
+    try:
+        sent = str(headers.get(CLIENT_HEADER) or "")
+    except Exception:  # pragma: no cover - a stub with a hostile mapping
+        sent = ""
+    return sent.strip().casefold() == DASHBOARD_CLIENT
+
+
+def identify_session(request) -> tuple[Optional[dict], bool]:
+    """``(session, refused for want of the client header)`` for this request.
+
+    The session is None whenever the cookie does not name a live one: no cookie,
+    a token nobody holds, or an account that has since been removed or disabled
+    (``UsersStore.session_for_token`` owns that last rule).
+
+    The second value is True only in the one case worth a different message: the
+    cookie DID name a live session and the method needed the client header, which
+    was not there. The caller is refused either way; the flag is how the 401 says
+    which thing to fix.
+    """
+    app = getattr(request, "app", None)
+    getter = getattr(app, "get", None)
+    store: Optional[UsersStore] = getter("users_store") if callable(getter) else None
+    if store is None:
+        return None, False
+    token = session_token(request)
+    if not token:
+        return None, False
+    if not csrf_header_ok(request):
+        # Look the session up anyway, so the message can tell "your cookie is
+        # fine, the header is missing" from "that cookie is stale". Without
+        # touching last_seen: this request is about to be refused, and a refused
+        # request is not activity.
+        return None, store.session_for_token(token, touch=False) is not None
+    return store.session_for_token(token), False
+
+
 def is_authenticated(request) -> bool:
     """True when this request presented a token matching a stored key.
 
@@ -375,26 +500,51 @@ async def auth_middleware(request: web.Request, handler):
         # One stat, so an `ainode auth ...` on this box is live rather than
         # waiting for a restart nobody was told to do.
         auth_cfg.reload_if_changed()
+    users: UsersStore | None = request.app.get("users_store")
+    if users is not None:
+        # The same one stat, for the same reason: `ainode auth user add`, a
+        # password change and a revoked session all land on a running server.
+        users.reload_if_changed()
     token = bearer_token(request)
     # Stamped on every request, enabled or not: handlers gate on it (see
     # is_authenticated) even when the node is running open. The key id goes on
     # with it so the rate limiter can count a keyed caller as itself rather than
-    # as its address (see API_KEY_ID_KEY), and so a peer reads as "fleet".
+    # as its address (see API_KEY_ID_KEY), so a peer reads as "fleet", and so a
+    # logged-in person reads as "user:<name>".
     matched, key_id = identify_caller(request.app, auth_cfg, token)
+    user_name = ""
+    user_role = ""
+    csrf_refused = False
+    if not matched:
+        # Only when no key matched: a Bearer token wins, and a stale one in a
+        # browser's localStorage must not cost a valid session its request.
+        session, csrf_refused = identify_session(request)
+        if session is not None and users is not None:
+            user_name = str(session.get("user") or "")
+            user_role = users.role_of(user_name)
+            matched = True
+            key_id = f"{USER_KEY_PREFIX}{user_name}"
     request[AUTHENTICATED_KEY] = matched
     request[API_KEY_ID_KEY] = key_id
+    request[USER_KEY] = user_name
+    request[USER_ROLE_KEY] = user_role
     if auth_cfg is None or not auth_cfg.enabled:
         return await handler(request)
     if _should_skip(request):
         return await handler(request)
-    if not token:
+    if matched:
+        return await handler(request)
+    if csrf_refused:
         return web.json_response(
-            {"error": {"message": MISSING_KEY_MESSAGE, "type": "auth_error"}},
+            {"error": {"message": CSRF_HEADER_MESSAGE, "type": "auth_error"}},
             status=401,
         )
-    if not request[AUTHENTICATED_KEY]:
+    if token:
         return web.json_response(
             {"error": {"message": "Invalid API key", "type": "auth_error"}},
             status=401,
         )
-    return await handler(request)
+    return web.json_response(
+        {"error": {"message": MISSING_KEY_MESSAGE, "type": "auth_error"}},
+        status=401,
+    )
