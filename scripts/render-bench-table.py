@@ -26,7 +26,12 @@ block instead of throughput. It sits between its own markers,
 `--harness-begin` / `--harness-end`, right after the speed table. A third,
 "Agentic rubric runs", does the same for records carrying an `agentic` block,
 between `--agentic-begin` / `--agentic-end`. A fourth, "Decision runs", does it for
-records carrying a `decide` block, between `--decide-begin` / `--decide-end`. A
+records carrying a `decide` block, between `--decide-begin` / `--decide-end`. That
+table holds both decision measurements: a record with a `decide.jevals` block was
+scored by the Jevals recipe over the public question sets and fills the Decision
+Score, ECE and hand-off columns; a legacy 110-item record fills Brier and the
+wrong-at-gate count instead, and each says "not measured" in the other's columns
+rather than borrowing a number computed under a different definition. A
 fifth, "Embedding runs", does it for records carrying an `embed` block, between
 `--embed-begin` / `--embed-end`. A sixth, "Speech runs", does it for records carrying
 a `speech` block, between `--speech-begin` / `--speech-end`. `--check` covers all six
@@ -94,8 +99,10 @@ DECIDE_HEADERS = [
     "Placement",
     "Items",
     "Accuracy",
+    "Decision Score",
     "Brier",
     "ECE",
+    "Hand-off at 95%",
     "Wrong at 0.9",
     "p50 ms",
     "Cost",
@@ -568,6 +575,76 @@ def fmt_wrong_at(decide, threshold=DECIDE_THRESHOLD):
     return f"{wrong} of {kept}"
 
 
+def decide_set_blocks(decide):
+    """The per-set metrics blocks of a Jevals-recipe record, or ``[]`` for a legacy one.
+
+    A record carrying a `decide.jevals` block was scored by the recipe recorded in
+    `bench/decide/JEVALS.md` over the public question sets; one with no such block is a
+    legacy 110-item run. The two are not the same measurement, so the three columns
+    below read from the first and say "not measured" for the second rather than
+    borrowing a number from a different definition.
+    """
+    return list(((decide.get("jevals") or {}).get("sets") or {}).values())
+
+
+def fmt_decision_score(decide):
+    """The mean Decision Score over the sets this run scored, or "not measured".
+
+    100 is perfect, 0 is answering with the label base rates and negative is worse than
+    that, so this column is the one to read first on a Jevals-recipe row. The mean over
+    several sets is only shown when every set has a score, which is the recipe's rule.
+    """
+    overall = (decide.get("jevals") or {}).get("overall") or {}
+    value = overall.get("mean_decision_score")
+    if value is None:
+        blocks = decide_set_blocks(decide)
+        scores = [b.get("decision_score") for b in blocks]
+        if not scores or any(s is None for s in scores):
+            return NOT_MEASURED
+        value = sum(scores) / len(scores)
+    return f"{value:.1f}"
+
+
+def fmt_decide_ece(decide):
+    """The calibration gap, in the units of whichever recipe produced it.
+
+    A Jevals-recipe row shows the ten-bin top-label ECE in POINTS with the unit in the
+    cell (`5.8 pt`, which is 0.058); a legacy row shows its own five-bin ratio
+    (`0.059`). The unit travels with the number because two definitions in one column
+    with no unit is how a comparison becomes a lie.
+    """
+    blocks = decide_set_blocks(decide)
+    if blocks:
+        points = [b.get("ece_points") for b in blocks]
+        points = [p for p in points if p is not None]
+        if not points:
+            return NOT_MEASURED
+        return f"{sum(points) / len(points):.1f} pt"
+    value = (decide.get("overall") or {}).get("ece")
+    return NOT_MEASURED if value is None else f"{value:.3f}"
+
+
+def fmt_handoff_share(decide):
+    """`share @ threshold`: the largest share it can take alone while staying 95% right.
+
+    Averaged over the sets when there are several, and "not measured" as soon as one set
+    never reached 95 percent at any threshold, because a mean over the sets that did
+    would read as a hand-off the model does not have.
+    """
+    blocks = decide_set_blocks(decide)
+    if not blocks:
+        return NOT_MEASURED
+    hands = [b.get("handoff_95") for b in blocks]
+    if not hands or any(not h for h in hands):
+        return NOT_MEASURED
+    shares = [h.get("share") for h in hands]
+    thresholds = [h.get("threshold") for h in hands]
+    if any(s is None for s in shares) or any(t is None for t in thresholds):
+        return NOT_MEASURED
+    return (f"{sum(shares) / len(shares):.2f} @ "
+            f"{sum(thresholds) / len(thresholds):.2f}")
+
+
 def fmt_latency_ms(decide):
     value = (decide.get("overall") or {}).get("p50_ms")
     return NOT_MEASURED if value is None else f"{value:.0f}"
@@ -601,8 +678,10 @@ def row_for_decide(run, base_url):
         fmt_placement_decide(run),
         fmt_items(decide),
         fmt_ratio(overall.get("accuracy")),
+        fmt_decision_score(decide),
         fmt_ratio(overall.get("brier")),
-        fmt_ratio(overall.get("ece")),
+        fmt_decide_ece(decide),
+        fmt_handoff_share(decide),
         fmt_wrong_at(decide),
         fmt_latency_ms(decide),
         fmt_usd(decide),

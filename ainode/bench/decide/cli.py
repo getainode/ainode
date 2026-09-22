@@ -5,28 +5,49 @@ not how fast the model generates, not whether it can drive a coding agent, not
 whether it can hold an agent loop together, but whether its typed decisions can be
 trusted by code that acts on them. Accuracy, calibration, latency, cost.
 
-    scripts/ainode-bench.py decide --backend jev --label "jev-latest, 110 items"
+Two measurements live under this one word, because they ask that of the same endpoints
+and write the same record. **The Jevals recipe** scores the three public question sets
+the independent Jevals boards use, with their formulas, so an AINode-served model can be
+read next to Jev and its clones; **the legacy 110-item path** scores AINode's own hand
+built set, which is five shapes of the job a router or a triage step actually does.
+``--suite``/``--questions`` picks the first and ``--backend`` the second, and mixing them
+is an error rather than a guess.
 
-    scripts/ainode-bench.py decide --backend chat \\
+    # the Jevals recipe. Fetch the question sets once; the item text is not committed
+    scripts/ainode-bench.py decide download
+
+    scripts/ainode-bench.py decide --suite all --transport decide \\
         --endpoint http://100.122.26.9:3000/v1 \\
         --ainode http://100.122.26.9:3000 \\
         --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 \\
-        --label "Ornith stacked Spark-1, chat fallback"
+        --label "Ornith on Spark-1, Jevals 0.1.0"
 
+    # any server that speaks the Jev wire format, TypeSafe's hosted Jev included
+    scripts/ainode-bench.py decide --suite all --transport systemone \\
+        --endpoint https://api.typesafe.ai/v1 --label "jev-latest, Jevals 0.1.0"
+
+    # a private blind set, in the same shape, never committed
+    scripts/ainode-bench.py decide --questions /path/to/blind.json \\
+        --transport systemone --endpoint http://kev-host:8080/v1 --label blind-1
+
+    # the legacy 110-item path
+    scripts/ainode-bench.py decide --backend jev --label "jev-latest, 110 items"
     scripts/ainode-bench.py decide --backend chat --compare jev ...   # side by side
 
-``--dry-run`` prints the item counts, the backend and one example request and
-touches nothing: no request, no file. The API key is never printed, only where it
-came from.
+``--dry-run`` prints the plan, the sets and one example request per question shape and
+touches nothing: no request, no file. The API key is never printed, only where it came
+from.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import pathlib
+import sys
 import time
 
 from ainode.bench import auth
+from ainode.bench.decide import jevals, sets, suite
 from ainode.bench.decide.backends import (
     BACKENDS,
     DEFAULT_API_KEY,
@@ -104,6 +125,40 @@ def build_parser() -> argparse.ArgumentParser:
                         "Never printed and never written into a record")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and one example request, write nothing")
+
+    # The Jevals-recipe mode. A second measurement in the same subcommand, because it
+    # asks the same question of the same endpoints and writes the same record; what it
+    # changes is the question sets (the three public ones the independent boards use),
+    # the repeats and the formulas. See bench/decide/JEVALS.md.
+    jev = p.add_argument_group(
+        "the Jevals recipe (suite 0.1.0)",
+        "score the same public question sets the independent Jevals boards use, with "
+        "their formulas, so an AINode-served model can be read next to Jev and its "
+        "clones. `decide download` fetches the item text first; it is not committed")
+    jev.add_argument("--suite", default="",
+                     help="comma list of " + ", ".join(sets.SUITES) + ", or `all`. "
+                          "Turns on the Jevals recipe and needs --transport")
+    jev.add_argument("--questions", default="",
+                     help="run a question file in the same shape instead of a suite, so "
+                          "a private blind set is scored by the same code without being "
+                          "committed. Repeatable as a comma list")
+    jev.add_argument("--transport", default="", choices=list(suite.TRANSPORTS),
+                     help="decide (AINode's POST /v1/decide) or systemone (POST "
+                          "/v1/systemone in the Jev wire format: TypeSafe's hosted Jev, "
+                          "or any server that speaks it). The key is resolved from the "
+                          "endpoint's HOST, so a fleet key can never reach a vendor")
+    jev.add_argument("--repeats", type=int, default=jevals.REPEATS,
+                     help=f"answers per question (default {jevals.REPEATS}, which is the "
+                          "suite's figure; a board listing needs a complete run at 5)")
+    jev.add_argument("--limit", type=int, default=0,
+                     help="take only the first N questions of each set. A transport "
+                          "proof, not a suite result, and the record says so")
+    jev.add_argument("--price-in", type=float, default=0.0,
+                     help="USD per million input tokens for this endpoint, from its "
+                          "posted rate. Without it the cost column reads $0 rather than "
+                          "an estimate")
+    jev.add_argument("--price-out", type=float, default=0.0,
+                     help="USD per million output tokens for this endpoint")
     return p
 
 
@@ -273,10 +328,260 @@ def run_backend(args, backend_name, item_set, names, out_dir, stamp, log=say):
     return block, title, path
 
 
-def main(argv=None, out_dir=None) -> int:
+# --------------------------------------------------------------- the Jevals recipe
+
+def download_main(argv, out=say) -> int:
+    """``decide download [suite,...]``: fetch the item text, verify it, write the cache.
+
+    The only networked call in :mod:`ainode.bench.decide.sets`, and the only thing that
+    writes under ``bench/decide/cache/``, which is gitignored. Item text is not
+    committed: Jevals does not republish it either, the three upstream licences are the
+    item text's and not ours to relicense, and every state is checked against its
+    published ``state_sha256`` on the way in, so a download proves itself rather than
+    being trusted.
+    """
+    wanted = name_list(argv[0]) if argv and not argv[0].startswith("-") else None
+    if wanted == ["all"]:
+        wanted = None
+    try:
+        out("\n  ainode-bench decide download  -> " + str(sets.cache_dir()))
+        for suite_id in (wanted or sets.SUITES):
+            summary = sets.manifest_summary(suite_id)
+            out(f"    {summary['id']:<12} {summary['type']:<7} "
+                f"{summary['items']:3d} items  {summary['options']:3d} options  "
+                f"{summary['dataset']} {summary['split']} @ "
+                f"{summary['hf_revision'][:8]}  {summary['license']}")
+        paths = sets.download(wanted, progress=lambda line: out(f"    {line}"))
+    except sets.SetError as exc:
+        out(f"\n  {exc}")
+        return 1
+    out(f"\n  {len(paths)} question file(s) written and hash-verified. They are "
+        "gitignored on purpose (bench/decide/JEVALS.md).")
+    return 0
+
+
+def suite_docs(args, p):
+    """The question files this run scores: named suites, named files, or an error."""
+    docs = []
+    if args.suite:
+        wanted = name_list(args.suite)
+        if wanted == ["all"]:
+            wanted = list(sets.SUITES)
+        docs += sets.load_suite_questions(wanted)
+    for path in name_list(args.questions):
+        docs.append(sets.load_questions(path))
+    if not docs:
+        p.error("--suite or --questions names nothing to run")
+    seen = set()
+    for doc in docs:
+        name = doc.get("set") or doc["id"]
+        if name in seen:
+            p.error(f"two question files both call themselves {name!r}; a set is one "
+                    "measurement and two of them cannot share a name")
+        seen.add(name)
+    return docs
+
+
+def suite_settings(args, transport, docs) -> dict:
+    return {"mode": suite.MODE,
+            "transport": transport.name,
+            "endpoint": transport.endpoint,
+            "model_requested": args.model or "",
+            "suite": name_list(args.suite),
+            "questions_files": name_list(args.questions),
+            "sets": [(doc.get("set") or doc["id"]) for doc in docs],
+            "repeats": args.repeats,
+            "limit": args.limit or None,
+            "concurrency": args.concurrency,
+            "timeout_s": args.timeout}
+
+
+def suite_dry_run(args, transport, docs, out=say) -> int:
+    """The plan, one example request per primitive, and what the key source was."""
+    work = suite.plan(docs, args.repeats, args.limit)
+    out(f"\n  ainode-bench decide  the Jevals recipe, suite {suite.RECIPE['suite']}")
+    out(f"  recipe   : {suite.RECIPE['source']} read {suite.RECIPE['read']}, "
+        f"recorded in {suite.RECIPE['doc']}")
+    out(f"  transport: {transport.name}  {transport.endpoint}")
+    out(f"  model    : {transport.model or 'server default'}")
+    out(f"  key      : from {transport.key_source or 'the default'} (never printed)")
+    out(f"  cost     : ${transport.input_usd_per_mtok:g}/M input, "
+        f"${transport.output_usd_per_mtok:g}/M output")
+    out(f"  plan     : {len(work)} decisions, {args.repeats} repeats, concurrency "
+        f"{args.concurrency}")
+    for doc in docs:
+        summary = suite.set_summary(doc, args.limit)
+        source = summary["source"]
+        out(f"    {summary['id']:<12} {summary['type']:<7} "
+            f"{summary['questions']:3d} questions  {summary['options']:3d} options  "
+            f"seed {summary['seed']}")
+        if source:
+            out(f"      {source.get('dataset', '')} "
+                f"{source.get('split', '')} @ {str(source.get('hf_revision', ''))[:8]}"
+                f"  {source.get('license', '')}")
+        # One example per primitive the set holds, so a mixed set shows every shape it
+        # will really send rather than whichever question happens to be first.
+        shown = set()
+        for question in doc["questions"]:
+            spec = suite.spec_for(doc, question)
+            if spec["type"] in shown:
+                continue
+            shown.add(spec["type"])
+            presented = suite.presented_options(spec["options"], question["id"],
+                                                doc.get("seed"), 0, spec["type"])
+            request = transport.request(doc, question, presented)
+            line = request.curl_safe()
+            out(f"      example ({spec['type']}): {line[:400]}"
+                f"{' ...' if len(line) > 400 else ''}")
+            leaks = suite.wire_leaks(request.payload)
+            out(f"      wire    : "
+                f"{'CARRIES ' + ', '.join(leaks) if leaks else 'no answer key'}")
+    out("\n  dry run: nothing was requested and no file was written")
+    return 0
+
+
+def run_suite(args, out_dir, stamp, log=say):
+    """One transport over the question sets, five repeats each. Writes one record."""
     p = build_parser()
-    args = p.parse_args(argv)
+    docs = suite_docs(args, p)
+    transport = suite.build_transport(
+        args.transport, endpoint=args.endpoint, model=args.model,
+        api_key=args.api_key, timeout=args.timeout,
+        input_usd_per_mtok=args.price_in, output_usd_per_mtok=args.price_out)
+    names = [(doc.get("set") or doc["id"]) for doc in docs]
+
+    log(f"\n  ainode-bench decide  the Jevals recipe, suite {suite.RECIPE['suite']}: "
+        f"{', '.join(names)}")
+    log(f"  recipe  : {suite.RECIPE['source']} read {suite.RECIPE['read']} "
+        f"({suite.RECIPE['doc']} names every deviation)")
+    log("  metrics : accuracy with its guessing floor, Decision Score against the "
+        "label prior, ECE over 10 bins with the reliability table, hand-off share at "
+        "95%, the published gate, pick flips and confidence swing, p50/p95 latency, "
+        "questions per second, malformed answers, cost")
+    if args.dry_run:
+        return suite_dry_run(args, transport, docs), None
+    log(f"  {transport.name}  {transport.model or 'server default'}  "
+        f"{transport.endpoint}")
+    log(f"  key from {transport.key_source or 'the default'} (never printed)")
+    if transport.local:
+        refused = auth.preflight(args.endpoint, transport.api_key)
+        if refused:
+            raise auth.EndpointRefused(refused)
+
+    def progress(done, count, decision):
+        if done == count or done % 50 == 0:
+            mark = "err " if decision.get("error") else (
+                "bad " if decision.get("malformed") else
+                ("ok  " if decision.get("pick") == decision.get("label") else "MISS"))
+            log(f"    {done:5d}/{count}  last {decision['id']:<16} "
+                f"r{decision['repeat']} {mark}")
+
+    decisions, seconds = suite.run(transport, docs, repeats=args.repeats,
+                                   concurrency=args.concurrency, limit=args.limit,
+                                   progress=progress)
+    block = suite.build_decide_block(transport, docs, decisions, seconds,
+                                     args.repeats, args.concurrency, args.limit,
+                                     model_reported=suite.reported_model(transport))
+    model_block, placement, warnings = describe_suite(args, transport)
+    for warning in warnings:
+        log(f"  warn    : {warning}")
+    notes = suite.build_notes(transport, docs, decisions, seconds, args.repeats,
+                              args.limit) + list(warnings)
+    record = build_record(args.label, model_block, placement, block,
+                          suite_settings(args, transport, docs), notes, stamp)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = record_path(out_dir, stamp, model_block.get("id") or transport.name,
+                       args.label, transport.name)
+    path.write_text(json.dumps(record, indent=1) + "\n")
+    title = (f"{transport.name}  "
+             f"{model_block.get('name') or model_block.get('id')}  "
+             f"({len(decisions)} decisions in {round(seconds)}s)")
+    suite.print_table(block["jevals"], title, out=log)
+    suite.print_wrong(decisions, out=log)
+    log(f"\n  saved {path}")
+    return 0, path
+
+
+def describe_suite(args, transport):
+    """``(model_block, placement, warnings)`` for a Jevals-recipe record.
+
+    The same rule the other sections follow: a hosted endpoint gets the one honest
+    placement string there is, and a local run that was not told where the control plane
+    is records NO placement rather than stamping the endpoint's host as the node.
+    """
+    model_id = suite.reported_model(transport)
+    if not transport.local:
+        return ({"id": model_id, "name": model_id, "vendor": "typesafe.ai"},
+                dict(HOSTED_PLACEMENT), [])
+    if not args.ainode:
+        return {"id": model_id}, {}, []
+    from ainode.bench.fleet import describe_via_http, resolve_serving_node
+
+    base = args.ainode.rstrip("/")
+    key = transport.api_key
+    node_name, engine_port, gpu_name, resolve_warn = resolve_serving_node(
+        base, args.model, api_key=key)
+    model_block, placement, _node_id, warnings = describe_via_http(
+        base, base, args.model, api_key=key)
+    if node_name:
+        placement["node"] = node_name
+        placement["port"] = engine_port
+        if gpu_name:
+            placement["gpu"] = gpu_name
+    warnings = list(warnings)
+    if resolve_warn:
+        warnings.insert(0, resolve_warn)
+    return model_block, placement, warnings
+
+
+def main(argv=None, out_dir=None) -> int:
+    words = list(argv) if argv is not None else sys.argv[1:]
     out_dir = pathlib.Path(out_dir) if out_dir else pathlib.Path.cwd() / "bench" / "results"
+    # One positional, dispatched before argparse sees it, the way `ainode-bench`
+    # dispatches its own subcommands: `decide download` fetches the question sets and
+    # asks a model nothing at all, so it shares none of the run's flags.
+    if words and words[0] == "download":
+        return download_main(words[1:])
+
+    p = build_parser()
+    args = p.parse_args(words)
+
+    if args.concurrency < 1:
+        p.error("--concurrency must be at least 1")
+    if args.timeout <= 0:
+        p.error("--timeout must be positive")
+    if not args.dry_run and not args.label:
+        p.error("--label is required")
+
+    if args.suite or args.questions:
+        if args.backend:
+            p.error("--suite/--questions run the Jevals recipe and pick their wire with "
+                    "--transport; --backend is the legacy 110-item path")
+        if not args.transport:
+            p.error("--transport is required with --suite/--questions; pick from "
+                    + ", ".join(suite.TRANSPORTS))
+        if args.repeats < 1:
+            p.error("--repeats must be at least 1")
+        if args.limit < 0:
+            p.error("--limit cannot be negative")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        try:
+            code, path = run_suite(args, out_dir, stamp)
+        except (sets.SetError, BackendError) as exc:
+            return p.error(str(exc))
+        except auth.EndpointRefused as exc:
+            # The node refused, before or during the run. Nothing is scored and no
+            # record is written: a Decision Score computed over answers nobody gave is
+            # worse than no record.
+            return auth.stop(str(exc), out=say)
+        if path:
+            say("\n  render the README table with: python3 "
+                "scripts/render-bench-table.py")
+        return code
+    if args.transport:
+        p.error("--transport belongs to --suite/--questions; the legacy 110-item path "
+                "picks its wire with --backend")
 
     if not args.backend:
         p.error("--backend is required; pick from " + ", ".join(BACKENDS))
@@ -331,5 +636,7 @@ def run() -> int:
         return 130
 
 
-__all__ = ["HOSTED_PLACEMENT", "SOURCE", "build_parser", "describe", "dry_run",
-           "main", "name_list", "run", "run_backend", "settings_for"]
+__all__ = ["HOSTED_PLACEMENT", "SOURCE", "build_parser", "describe",
+           "describe_suite", "download_main", "dry_run", "main", "name_list", "run",
+           "run_backend", "run_suite", "settings_for", "suite_docs", "suite_dry_run",
+           "suite_settings"]

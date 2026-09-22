@@ -69,3 +69,9 @@ node_modules/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# The decision bench's question sets: item text fetched by `ainode-bench decide
+# download` and verified against the committed manifests' state hashes. Never committed,
+# because upstream does not republish item text either and the upstream licences are not
+# ours to relicense (bench/decide/sets/README.md).
+bench/decide/cache/
