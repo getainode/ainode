@@ -806,14 +806,22 @@ restart_service() {
 # binary and no path to the tailnet daemon, so this variable is the cheapest way
 # for the CLI in there to know which tailnet node it is running on.
 forward_to_container() {
+    # A TTY is allocated only when there is one to pass on. \`docker exec -t\` with
+    # a pipe or an \`ssh host ainode ...\` command line dies with "the input device
+    # is not a TTY" before the CLI in the container runs at all, so a hardcoded
+    # -it is what would stop
+    # \`echo pw | ainode auth user add x --password-stdin\` working and what
+    # \`ainode doctor --peer\` already has to route around (cli/doctor.py).
+    local exec_tty="-i"
+    if [ -t 0 ] && [ -t 1 ]; then exec_tty="-it"; fi
     if docker exec ainode true 2>/dev/null; then
-        exec docker exec -it -e AINODE_TAILNET_NAME -e AINODE_HOST_SERVICE_STATE ainode ainode "\$@"
+        exec docker exec \$exec_tty -e AINODE_TAILNET_NAME -e AINODE_HOST_SERVICE_STATE ainode ainode "\$@"
     fi
     # Same sudo trap as update: mount the .ainode the unit uses.
     local conf_home
     conf_home="\$(resolve_ainode_home || true)"
     [ -n "\$conf_home" ] || conf_home="\$HOME/.ainode"
-    exec docker run --rm -it \\
+    exec docker run --rm \$exec_tty \\
         --entrypoint ainode \\
         -e AINODE_TAILNET_NAME \\
         -e AINODE_HOST_SERVICE_STATE \\
@@ -1346,6 +1354,19 @@ else
     ACCESS_LINE="API open, no key set. Require one in Config > API access."
 fi
 
+# The two commands a human needs to be able to open the dashboard with a name and
+# a password instead of pasting an API key (#261). Printed only when this node
+# requires a credential, because with auth off the dashboard opens without a login
+# and these lines would be advice about a problem nobody has. There is no route
+# that mints the first admin: the first account is made on the box, by the operator.
+print_login_lines() {
+    [ -n "$INSTALL_API_KEY" ] || auth_enabled_on_disk || return 0
+    printf '    Login:   ainode auth enable\n'
+    printf '             ainode auth user add <name> --admin\n'
+    printf '             [the account is how a human signs in instead of pasting\n'
+    printf '              the key; --password-stdin where there is no terminal]\n'
+}
+
 # -- Banner -----------------------------------------------------------------
 if [ "$DRY_RUN" = "true" ]; then
     printf '\n'
@@ -1361,6 +1382,7 @@ if [ "$DRY_RUN" = "true" ]; then
     log "                   the daily tailnet certificate renewal (not installed)"
     log "  Access:          $ACCESS_LINE"
     print_api_key_box
+    print_login_lines
     printf '\n'
     exit 0
 fi
@@ -1377,6 +1399,7 @@ printf '    Status:  ainode status\n'
 printf '    Logs:    ainode logs -f\n'
 printf '    Update:  ainode update\n'
 print_api_key_box
+print_login_lines
 printf '\n'
 printf '    Made in Texas\n'
 printf '\n'

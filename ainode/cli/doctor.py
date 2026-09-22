@@ -1259,6 +1259,206 @@ def check_auth(config: NodeConfig, home, peers_seen: int = 0) -> list[Check]:
     return [Check("auth.state", OK, detail, data=data)]
 
 
+def users_file_records(raw) -> list[dict]:
+    """The account records out of whatever ``users.json`` holds.
+
+    The file belongs to the account store (``ainode/auth/accounts.py``), and the
+    doctor reads it rather than importing the store so that a node whose store
+    cannot be imported still gets an answer. Tolerant about the shape for the same
+    reason: a list under ``users``, a map keyed by name, or a bare list all read as
+    the same set of accounts. Never returns a password hash to a caller: only the
+    name and the role are kept, because this check counts admins and nothing else.
+    """
+    if isinstance(raw, dict):
+        holder = raw.get("users", raw.get("accounts"))
+    else:
+        holder = raw
+    rows: list = []
+    if isinstance(holder, dict):
+        for name, value in holder.items():
+            row = dict(value) if isinstance(value, dict) else {}
+            row.setdefault("name", name)
+            rows.append(row)
+    elif isinstance(holder, list):
+        for value in holder:
+            rows.append(dict(value) if isinstance(value, dict) else {"name": str(value)})
+    return [{"name": str(row.get("name") or ""),
+             "role": str(row.get("role") or "member"),
+             "disabled": row.get("disabled") is True or row.get("enabled") is False}
+            for row in rows]
+
+
+def _auth_required(home) -> Optional[bool]:
+    """Does this node require an API key? None when ``auth.json`` cannot be read.
+
+    ``check_auth`` is the check that judges that file; this is the one fact the
+    Login check needs from it, because whether a missing account is a problem
+    depends entirely on whether anything is refused without one.
+    """
+    path = Path(home) / "auth.json"
+    if not _exists(path):
+        return False
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return bool(raw.get("enabled")) if isinstance(raw, dict) else None
+
+
+def check_login(config: NodeConfig, home, peers_seen: int = 0) -> list[Check]:
+    """Can a human sign in to the dashboard, and is this node's list the fleet's?
+
+    Three facts, and each one is a different way the login (#261) goes wrong:
+
+    ``login.state``. A node with auth ON and no admin account has a dashboard
+    nobody can open without pasting an API key, which is the state the login exists
+    to replace: a FAIL, because the node cannot do its job for a human. With auth
+    OFF nothing is refused without a credential, so having no account is not a
+    finding, and accounts that exist are reported as the fact they are.
+
+    ``login.store``. ``users.json`` holds password hashes, so it is 0600 like
+    ``auth.json`` and the secrets store, and ``--fix`` tightens it.
+
+    ``login.sync``. Accounts come from the master (``auth/replication.py``), so a
+    WORKER holding a list older than the master's is about to surprise somebody:
+    the password they just set on the master does not work here yet. The comparison
+    is between two of the MASTER's own stamps, the one this node recorded when it
+    last imported and the one the master reports now, so it cannot drift with how
+    either side hashes a list.
+    """
+    from ainode.auth.replication import local_role, read_sync_state
+
+    path = Path(home) / "users.json"
+    auth_on = _auth_required(home)
+    role = local_role(config)
+    checks: list[Check] = []
+
+    records: Optional[list[dict]] = None
+    unreadable = ""
+    if _exists(path):
+        try:
+            records = users_file_records(json.loads(path.read_text()))
+        except (OSError, ValueError) as exc:
+            unreadable = str(exc)
+    else:
+        records = []
+
+    admins = [r for r in (records or []) if r["role"] == "admin" and not r["disabled"]]
+    data = {"path": str(path), "exists": _exists(path), "auth_enabled": auth_on,
+            "users": None if records is None else len(records),
+            "admins": None if records is None else len(admins),
+            "role": role, "peers_seen": int(peers_seen or 0)}
+
+    if unreadable:
+        checks.append(Check("login.state", WARN,
+                            f"cannot read {path}: {unreadable}; whether anybody can "
+                            "sign in to this dashboard is unknown",
+                            fix="ainode auth user list", data=data))
+    elif auth_on is None:
+        checks.append(Check("login.state", WARN,
+                            "cannot tell whether this node requires a credential, so "
+                            "whether it needs a dashboard account is unknown",
+                            fix="ainode auth status", data=data))
+    elif not auth_on:
+        detail = ("no credential is required on this node, so the dashboard opens "
+                  "without a login")
+        if records:
+            detail += f" ({len(records)} account(s) on the node, unused until auth is on)"
+        checks.append(Check("login.state", OK, detail, data=data))
+    elif not records:
+        checks.append(Check("login.state", FAIL,
+                            "a key is required and there is no dashboard account, so "
+                            "the UI can only be opened by pasting an API key",
+                            fix="ainode auth user add <name> --admin (it prompts for "
+                                "a password; add --password-stdin with no TTY)",
+                            data=data))
+    elif not admins:
+        checks.append(Check("login.state", WARN,
+                            f"{len(records)} account(s) and no enabled admin, so "
+                            "nobody can manage users or sessions from the dashboard",
+                            fix="ainode auth user add <name> --admin",
+                            data=data))
+    else:
+        checks.append(Check("login.state", OK,
+                            f"{len(records)} dashboard account(s), {len(admins)} of "
+                            "them admin, and a credential is required",
+                            data=data))
+
+    if _exists(path):
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError as exc:
+            checks.append(Check("login.store", WARN, f"cannot stat {path}: {exc}",
+                                data={"path": str(path)}))
+        else:
+            store_data = {"path": str(path), "mode": oct(mode),
+                          "fix_action": "chmod600"}
+            if mode == 0o600:
+                checks.append(Check("login.store", OK, f"{path} is mode 0600",
+                                    data=store_data))
+            else:
+                checks.append(Check("login.store", WARN,
+                                    f"{path} is mode {oct(mode)} and holds password "
+                                    "hashes, so it is readable beyond its owner",
+                                    fix="ainode doctor --fix chmods it to 0600",
+                                    data=store_data))
+
+    if role == "worker":
+        checks += _check_account_sync(config, read_sync_state(home))
+    return checks
+
+
+def _check_account_sync(config: NodeConfig, recorded: dict) -> list[Check]:
+    """Is this worker's account list the master's current one?
+
+    Split out because it is the one part of the Login check that leaves the box:
+    it asks the master for the stamp of its list, with the fleet key, the way every
+    other node-to-node read in the product does.
+    """
+    from ainode.auth.replication import EXPORT_PATH, master_target
+
+    base = master_target(config=config)
+    data = {"role": "worker", "master": base,
+            "recorded_stamp": str(recorded.get("stamp") or ""),
+            "recorded_at": str(recorded.get("at") or "")}
+    if not base:
+        return [Check("login.sync", WARN,
+                      "this node is a cluster worker and nothing names its master, so "
+                      "the master's accounts cannot reach it",
+                      fix="ainode cluster token on the master, then the ainode join "
+                          "line it prints",
+                      data=data)]
+
+    headers = fleet_key_headers(getattr(config, "cluster_secret", ""))
+    payload = http_json(f"{base}{EXPORT_PATH}", headers=headers)
+    if not isinstance(payload, dict):
+        return [Check("login.sync", WARN,
+                      f"the master at {base} did not answer for its account list, so "
+                      "this node cannot tell whether its logins are current",
+                      fix="check the master's service, and that both nodes share one "
+                          "cluster_secret",
+                      data=data)]
+
+    theirs = str(payload.get("stamp") or "")
+    data["master_stamp"] = theirs
+    if theirs and data["recorded_stamp"] == theirs:
+        return [Check("login.sync", OK,
+                      f"accounts match the master at {base}", data=data)]
+    if not data["recorded_stamp"]:
+        return [Check("login.sync", WARN,
+                      f"this node has never imported the master's accounts ({base} "
+                      "reports a list), so a login made there does not work here yet",
+                      fix="restart the service to pull now, or wait for the 5 minute "
+                          "pull",
+                      data=data)]
+    return [Check("login.sync", WARN,
+                  f"this node's account list is older than the master's at {base} "
+                  f"(imported {data['recorded_at'] or 'at an unknown time'}), so a "
+                  "password changed there does not work here yet",
+                  fix="restart the service to pull now, or wait for the 5 minute pull",
+                  data=data)]
+
+
 def check_tls(config: NodeConfig) -> list[Check]:
     """Does anything here speak HTTPS, and is the certificate still good?
 
@@ -1433,6 +1633,7 @@ def run_checks(home=None, config_path=None) -> list[Check]:
     checks += check_secrets(home)
     checks += check_cluster_secret(config, seen)
     checks += check_auth(config, home, seen)
+    checks += check_login(config, home, seen)
     checks += check_tls(config)
     checks += check_rate_limit(config)
     checks += check_hf_token(config, home)

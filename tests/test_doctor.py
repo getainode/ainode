@@ -675,6 +675,220 @@ def test_a_world_readable_secrets_store_warns_and_is_fixable(tmp_path):
     assert check.data["fix_action"] == "chmod600"
 
 
+# -------------------------------------------------------------------- login
+
+def _write_users(home, records, mode=0o600):
+    """``users.json`` as the account store writes it: hashes included, 0600."""
+    path = home / "users.json"
+    path.write_text(json.dumps({"users": records}))
+    os.chmod(path, mode)
+    return path
+
+
+def _admin(name="jason", disabled=False):
+    return {"name": name, "role": "admin", "disabled": disabled,
+            "password_hash": "hash"}
+
+
+def _member(name="ops"):
+    return {"name": name, "role": "member", "disabled": False,
+            "password_hash": "hash"}
+
+
+def _auth_on(home, enabled=True):
+    (home / "auth.json").write_text(json.dumps(
+        {"enabled": enabled, "api_keys": [{"id": "k1", "key_hash": "h"}]}))
+
+
+def test_auth_on_with_an_admin_account_is_the_pass(tmp_path):
+    _auth_on(tmp_path)
+    _write_users(tmp_path, [_admin(), _member()])
+    checks = doc.check_login(NodeConfig(), tmp_path)
+
+    state = _by_name(checks, "login.state")
+    assert state.status == OK
+    assert state.data["users"] == 2 and state.data["admins"] == 1
+    assert _by_name(checks, "login.store").status == OK
+
+
+def test_auth_off_is_a_pass_whether_or_not_anybody_has_an_account(tmp_path):
+    """Nothing is refused without a credential, so a missing login is not a finding."""
+    check = _by_name(doc.check_login(NodeConfig(), tmp_path), "login.state")
+    assert check.status == OK
+    assert "without a login" in check.detail
+
+    _write_users(tmp_path, [_admin()])
+    check = _by_name(doc.check_login(NodeConfig(), tmp_path), "login.state")
+    assert check.status == OK
+    assert "unused until auth is on" in check.detail
+
+
+def test_auth_on_with_no_account_at_all_is_the_fail(tmp_path):
+    """The dashboard is then reachable only by pasting an API key, which is the
+    thing the login exists to replace."""
+    _auth_on(tmp_path)
+    check = _by_name(doc.check_login(NodeConfig(), tmp_path), "login.state")
+
+    assert check.status == FAIL
+    assert "only be opened by pasting an API key" in check.detail
+    assert "ainode auth user add" in check.fix
+    assert doc.exit_code([check]) == 1
+
+
+def test_auth_on_with_accounts_but_no_enabled_admin_warns(tmp_path):
+    _auth_on(tmp_path)
+    _write_users(tmp_path, [_admin(disabled=True), _member()])
+    check = _by_name(doc.check_login(NodeConfig(), tmp_path), "login.state")
+
+    assert check.status == WARN
+    assert "no enabled admin" in check.detail
+
+
+def test_a_world_readable_users_file_warns_and_is_fixable(tmp_path):
+    """It holds password hashes, so it is 0600 like auth.json and secrets.json."""
+    _auth_on(tmp_path)
+    _write_users(tmp_path, [_admin()], mode=0o644)
+    check = _by_name(doc.check_login(NodeConfig(), tmp_path), "login.store")
+
+    assert check.status == WARN
+    assert check.data["fix_action"] == "chmod600"
+    assert "password hashes" in check.detail
+
+
+def test_the_login_fix_action_is_applied_by_fix(tmp_path):
+    _auth_on(tmp_path)
+    path = _write_users(tmp_path, [_admin()], mode=0o644)
+    checks = doc.check_login(NodeConfig(), tmp_path)
+
+    done = doc.apply_fixes(checks, tmp_path / "config.json")
+
+    assert any("chmod 0600" in line for line in done)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_an_unreadable_users_file_warns_rather_than_crashing(tmp_path):
+    _auth_on(tmp_path)
+    (tmp_path / "users.json").write_text("{not json")
+    check = _by_name(doc.check_login(NodeConfig(), tmp_path), "login.state")
+
+    assert check.status == WARN
+    assert "cannot read" in check.detail
+
+
+def test_a_users_file_in_any_of_the_stores_shapes_is_counted(tmp_path):
+    """The file belongs to the account store, so the doctor reads it tolerantly
+    rather than importing a module that may not be there."""
+    for raw in ({"users": [_admin()]},
+                {"users": {"jason": {"role": "admin"}}},
+                [_admin()]):
+        assert [r["role"] for r in doc.users_file_records(raw)] == ["admin"]
+    assert doc.users_file_records({"users": []}) == []
+    assert doc.users_file_records("nonsense") == []
+
+
+def test_a_worker_whose_accounts_match_the_master_is_ok(tmp_path, monkeypatch):
+    from ainode.auth import replication as rep
+
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    _auth_on(tmp_path)
+    _write_users(tmp_path, [_admin()])
+    rep.write_sync_state("master-stamp-1", master="http://10.0.0.1:3000", users=1,
+                         home=tmp_path)
+    monkeypatch.setattr(doc, "http_json",
+                        lambda url, timeout=3.0, headers=None:
+                        {"users": [], "stamp": "master-stamp-1"})
+    config = NodeConfig(cluster_role="worker", master_address="10.0.0.1:3000",
+                        cluster_secret="s" * 32)
+
+    check = _by_name(doc.check_login(config, tmp_path), "login.sync")
+
+    assert check.status == OK
+
+
+def test_a_worker_behind_the_masters_stamp_warns(tmp_path, monkeypatch):
+    """The password somebody just set on the master does not work here yet, and the
+    two stamps compared are both the MASTER's own, so they cannot drift."""
+    from ainode.auth import replication as rep
+    from ainode.auth.fleet import fleet_key
+
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    _auth_on(tmp_path)
+    _write_users(tmp_path, [_admin()])
+    rep.write_sync_state("master-stamp-1", master="http://10.0.0.1:3000", users=1,
+                         home=tmp_path)
+    seen = []
+
+    def fake_http_json(url, timeout=3.0, headers=None):
+        seen.append({"url": url, "headers": headers or {}})
+        return {"users": [], "stamp": "master-stamp-2"}
+
+    monkeypatch.setattr(doc, "http_json", fake_http_json)
+    config = NodeConfig(cluster_role="worker", master_address="10.0.0.1:3000",
+                        cluster_secret="s" * 32)
+
+    check = _by_name(doc.check_login(config, tmp_path), "login.sync")
+
+    assert check.status == WARN
+    assert "older than the master's" in check.detail
+    # Asked of the master, with the fleet key, like every other node-to-node read.
+    assert seen[0]["url"] == "http://10.0.0.1:3000/api/auth/users/export"
+    assert seen[0]["headers"]["Authorization"] == f"Bearer {fleet_key('s' * 32)}"
+
+
+def test_a_worker_that_has_never_pulled_warns(tmp_path, monkeypatch):
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    _auth_on(tmp_path)
+    monkeypatch.setattr(doc, "http_json",
+                        lambda url, timeout=3.0, headers=None:
+                        {"users": [_admin()], "stamp": "master-stamp-1"})
+    config = NodeConfig(cluster_role="worker", master_address="10.0.0.1:3000")
+
+    check = _by_name(doc.check_login(config, tmp_path), "login.sync")
+
+    assert check.status == WARN
+    assert "never imported" in check.detail
+
+
+def test_a_worker_whose_master_does_not_answer_warns(tmp_path, monkeypatch):
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    _auth_on(tmp_path)
+    _write_users(tmp_path, [_admin()])
+    monkeypatch.setattr(doc, "http_json", lambda url, timeout=3.0, headers=None: None)
+    config = NodeConfig(cluster_role="worker", master_address="10.0.0.1:3000")
+
+    check = _by_name(doc.check_login(config, tmp_path), "login.sync")
+
+    assert check.status == WARN
+    assert "did not answer" in check.detail
+
+
+def test_a_worker_with_no_master_named_anywhere_warns(tmp_path, monkeypatch):
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    monkeypatch.setattr(doc, "http_json",
+                        lambda url, timeout=3.0, headers=None:
+                        pytest.fail("there is nobody to ask"))
+    config = NodeConfig(cluster_role="worker")
+
+    check = _by_name(doc.check_login(config, tmp_path), "login.sync")
+
+    assert check.status == WARN
+    assert "nothing names its master" in check.detail
+    assert "ainode join" in check.fix
+
+
+def test_a_master_and_a_solo_node_ask_nobody_anything(tmp_path, monkeypatch):
+    """The sync check is the one part of this that leaves the box, so it runs on a
+    worker and nowhere else."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    monkeypatch.setattr(doc, "http_json",
+                        lambda url, timeout=3.0, headers=None:
+                        pytest.fail("a master pulls from nobody"))
+    for config in (NodeConfig(cluster_role="master", peer_ips=["10.0.0.2"]),
+                   NodeConfig()):
+        names = [c.name for c in doc.check_login(config, tmp_path)]
+        assert "login.sync" not in names
+
+
 # ------------------------------------------------------------------ hf token
 
 def test_an_hf_token_in_config_is_reported_without_its_value(tmp_path):
