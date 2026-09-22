@@ -1151,15 +1151,6 @@ def test_the_cli_says_the_change_is_live(capsys):
 # 8. The copy that describes the rule matches the rule
 # =============================================================================
 
-#: Keyless paths whose sentence in the dashboard's API access panel lands with the
-#: FRONT-END half of #261 (``ainode/web/static/js/app.js``, a different worker's
-#: file in the same wave, PR 264). Only these two are excused, and only until that
-#: PR lands: once the panel names them, DELETE them from this set, because every
-#: entry left here is a keyless path this test has stopped checking. The set is
-#: asserted to be a subset of SKIP_PATHS, so it cannot outlive the paths it names.
-COPY_PENDING_IN_THE_PANEL = {"/api/auth/login", "/api/auth/me"}
-
-
 def test_the_dashboard_panel_lists_every_keyless_path():
     """One rule, one wording: the panel used to name three of the six."""
     from ainode.auth.middleware import SKIP_PATHS, SKIP_PREFIXES
@@ -1169,10 +1160,7 @@ def test_the_dashboard_panel_lists_every_keyless_path():
                if "config-section-desc" in line and "Who may call this node" in line]
     assert len(section) == 1, "the API access panel's description moved"
     text = section[0]
-    assert COPY_PENDING_IN_THE_PANEL <= SKIP_PATHS, (
-        "COPY_PENDING_IN_THE_PANEL names a path that is no longer keyless: "
-        f"{COPY_PENDING_IN_THE_PANEL - SKIP_PATHS}. Delete those entries.")
-    missing = [path for path in sorted(SKIP_PATHS - COPY_PENDING_IN_THE_PANEL)
+    missing = [path for path in sorted(SKIP_PATHS)
                if f"<code>{path}</code>" not in text]
     assert not missing, (
         f"these paths answer with no key and the dashboard's API access panel does "
