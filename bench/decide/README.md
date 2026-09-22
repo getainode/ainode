@@ -13,19 +13,131 @@ guessing, because **a wrong answer at 0.95 gets acted on and a wrong answer at 0
 is an abstention a person looks at**. So read the calibration columns before the
 accuracy column.
 
+**Two measurements live under one subcommand**, because they ask that of the same
+endpoints and write the same record. **The Jevals recipe** scores the public question
+sets the independent boards use, with their formulas, so an AINode-served model can be read
+next to Jev and its clones. **The legacy 110-item path** scores AINode's own hand-built
+set, five shapes of the job a router or a triage step actually does. A number from one is
+not a number from the other, and a record says which produced it (`decide.mode`).
+
 | Path | What it is |
 |------|-----------|
 | `ainode/bench/decide/` | The bench, as a package |
-| `ainode/bench/decide/items.py` | The labeled set, loaded and validated strictly |
-| `ainode/bench/decide/metrics.py` | Accuracy, Brier, calibration, thresholds, latency, cost |
-| `ainode/bench/decide/backends.py` | The three backends, each a request builder plus a parser |
-| `ainode/bench/decide/runner.py` | The loop, the tables, the record |
+| `ainode/bench/decide/jevals.py` | The Jevals recipe as pure functions: Decision Score, ECE, hand-off, the gate, the flips, the two losses |
+| `ainode/bench/decide/sets.py` | The four public sets: manifests, the download, the question files, the state-hash check |
+| `ainode/bench/decide/suite.py` | The Jevals run: the two transports, the repeats, the record |
+| `ainode/bench/decide/items.py` | The legacy labeled set, loaded and validated strictly |
+| `ainode/bench/decide/metrics.py` | The legacy metrics: accuracy, Brier, calibration, thresholds |
+| `ainode/bench/decide/backends.py` | The three legacy backends, each a request builder plus a parser |
+| `ainode/bench/decide/runner.py` | The legacy loop, the tables, the record |
 | `ainode/bench/decide/cli.py` | `scripts/ainode-bench.py decide ...` |
-| `bench/decide/items.json` | The 110 labeled items. Repo data, versioned next to the results |
+| `bench/decide/JEVALS.md` | **The recipe, the URL, the date read, and every deviation.** Authoritative for what a number here means |
+| `bench/decide/sets/` | The four committed manifests. No item text (`sets/README.md`) |
+| `bench/decide/cache/` | Where `decide download` puts the item text. Gitignored |
+| `bench/decide/items.json` | The 110 legacy labeled items. Repo data, versioned next to the results |
 | `bench/results/*.json` | Where a run lands, schema 1 with a `decide` block |
 | `bench/SCHEMA.md` | The record format. Authoritative |
 
-## Run it
+## The Jevals recipe
+
+```bash
+# once: fetch the item text. It is not committed (bench/decide/sets/README.md)
+python3 scripts/ainode-bench.py decide download
+
+# an AINode-served model through its own decision endpoint
+python3 scripts/ainode-bench.py decide --suite all --transport decide \
+    --endpoint http://100.122.26.9:3000/v1 --ainode http://100.122.26.9:3000 \
+    --model ornith-ai/Ornith-1.5-35B-A3B-NVFP4 \
+    --label "Ornith on Spark-1, Jevals 0.1.0"
+
+# anything that speaks the Jev wire format: TypeSafe's hosted Jev, Kev, laya.cpp
+python3 scripts/ainode-bench.py decide --suite all --transport systemone \
+    --endpoint https://api.typesafe.ai/v1 --price-in 0.042 \
+    --label "jev-latest, Jevals 0.1.0"
+python3 scripts/ainode-bench.py decide --suite banking77 --transport systemone \
+    --endpoint http://kev-host:8080/v1 --label "Kev 9B, choice"
+
+# a private blind set in the same shape, never committed
+python3 scripts/ainode-bench.py decide --questions /path/to/blind.json \
+    --transport systemone --endpoint http://kev-host:8080/v1 --label blind-1
+
+# prove a transport without spending a suite on it
+python3 scripts/ainode-bench.py decide --suite pubmedqa --transport decide \
+    --endpoint https://node:3443/v1 --repeats 1 --limit 10 --label "transport smoke"
+```
+
+`--dry-run` prints the plan, every set, one example request per primitive and whether the
+wire body carries an answer key, and touches nothing. Run it first.
+
+Flags, on top of the shared ones below:
+
+- `--suite pubmedqa,banking77,helpsteer2,typed-decisions` or `--suite all` - which sets.
+  Turns on the recipe and requires `--transport`.
+- `--questions FILE[,FILE]` - run any question file in the same shape instead, which is how
+  a private blind set is scored without being committed.
+- `--transport decide|systemone` - **the wire.** `decide` is AINode's own
+  `POST /v1/decide`; `systemone` is `POST /v1/systemone` in the Jev wire format, which is
+  what TypeSafe's hosted Jev speaks and what JevBench's own `typesafe` adapter drives, so
+  any server implementing it is a flag rather than a fork.
+- `--repeats 5` - answers per question. Five is the suite's figure and a board listing
+  needs a complete run at five.
+- `--limit N` - the first N questions of each set. A transport proof; the record is marked
+  `partial` and says so in its notes.
+- `--price-in` / `--price-out` - USD per million tokens from the endpoint's posted rate.
+  Without them the cost column reads $0 and the record's `cost_basis` says why, rather than
+  an estimate.
+
+**Which key goes where is decided by the endpoint's HOST, not by a flag.** A request to
+`api.typesafe.ai` resolves TypeSafe's credential (`--api-key`, `$TYPESAFE_API_KEY`,
+`~/.jev_api_key`); anything else resolves the node's (`--api-key`, `$AINODE_API_KEY`, the
+placeholder an open node accepts). No ordering of flags can post a fleet key to a vendor.
+
+### What it measures, per set
+
+Every number below is defined in `bench/decide/JEVALS.md` against the page it came from,
+and **every block carries its guessing floor** (`prior_accuracy`, which is also written as
+JevBench's `majority_class_accuracy`) so an accuracy is never read without it.
+
+- **Decision Score** - `100 * (1 - L / L_prior)`. 100 perfect, 0 no better than answering
+  with the label base rates, negative worse than that and never clamped. `L` is the mean
+  per-item loss: a multiclass Brier for `choice` and `noul`, a ranked probability score over
+  cumulative levels for `score`. Read this before accuracy.
+- **Accuracy**, over items times repeats, with malformed and refused answers counted wrong.
+- **ECE in points** on the top label, ten bins, with the full reliability table
+  (`bins`: count, observed accuracy and mean confidence per bin) so a model card can draw
+  the calibration curve straight from the record.
+- **Hand-off at 95 percent** - the largest share it can take alone while staying 95 percent
+  right, at the lowest threshold on the 0.01 grid that does it over at least 100 decisions.
+  A dash when its accuracy never reaches 95 percent.
+- **The gate** - the published frozen gate for that primitive (`choice` 0.96, `noul` 0.91,
+  `score` none) with this run's coverage and accuracy at it, plus a `gate_local` computed
+  over this one run and labelled as not a board number.
+- **Flips** - `pick_flip_rate` is the share of questions whose pick changed at least once
+  over the repeats, and `confidence_swing` the largest spread one question's confidence
+  showed. The board's own two are beside them: `repeat_flip_rate` (repeats 0 and 1, which
+  are byte-identical requests) and `order_flip_rate` (a `choice` set's four option orders).
+- **p50 / p95 latency**, nearest-rank, and **questions per second** over the run's own
+  clock with the concurrency recorded beside it.
+- **Malformed answers**, with `schema_validity` and `schema_validity_strict` under
+  JevBench's two sum tolerances, and **failures** counted separately: a transport failure is
+  never scored, which is both boards' rule.
+- **Cost** when a price is given, as `usd_per_1k_decisions` beside the total, with a
+  `cost_basis` saying which it is.
+- **`vs_gold`** for a set that ships gold distributions: soft accuracy, total variation, KL
+  and a Brier against the teacher's spread. Those four are AINode's definitions and the
+  block says so.
+- **`ordinal_mae`** and **`within_one_level`** on a `score` set, beside argmax accuracy
+  rather than instead of it.
+
+A set holding more than one **answer space** (one `(type, options)` pair) is broken down by
+answer space, with a per-primitive roll-up beside it. That is not presentation: the label
+prior is the base rates of the labels in one option list, so pooling two questions with
+different option lists would build the baseline that defines 0 over an answer space neither
+of them has. `typed-decisions` has twenty spaces, named `<workflow>/<question>`; its
+Decision Score is the plain mean over them. `tests/test_bench_decide_jevals.py` pins that
+the label prior scores exactly 0 on every committed set and every one of its spaces.
+
+## The legacy 110-item path
 
 ```bash
 # the hosted comparison (well under a cent for 110 items)
@@ -173,7 +285,24 @@ of ours behind it, which is why its records carry the placement
 
 ## Honesty rules
 
-The same ones the rest of `bench/` runs under, plus three of its own.
+The same ones the rest of `bench/` runs under, plus three of its own. The Jevals-recipe
+mode adds four more:
+
+- **The model is never shown the answer.** Labels live in a question file's separate
+  `labels` map, a question carrying anything answer-key-shaped is a load error, and the
+  assembled request body is checked again before it is sent: a leak refuses the request
+  rather than producing a very good score. Both halves are in `sets.answer_key_leaks` and
+  `suite.wire_leaks`.
+- **Every state is checked against its hash before the run.** A moved upstream row is a load
+  error, because a number measured against moved bytes is not comparable to the board it
+  sits next to.
+- **Every figure names its recipe.** Two boards use the same words for different arithmetic,
+  so each metrics block carries `recipe` and each set carries `recipe_of_record`. A record
+  also carries `probability_source` (`logprob`, `native` or `verbalized`), because a row is
+  only comparable to a row that got its probabilities the same way.
+- **A contaminated set says so in the record.** Banking77 is in Kev's and Laya's published
+  training data; PubMedQA sits inside decider's development loop. The finding, the evidence
+  and the primary source travel with the run.
 
 - **Nothing is loaded, unloaded or restarted.** The run drives inference against an
   endpoint that is already serving and adds real load to it.

@@ -857,13 +857,17 @@ def _write(directory, name, obj):
 
 
 def test_a_decide_record_renders_a_row(tmp_path):
+    """A legacy 110-item record fills its own columns and says "not measured" in the
+    two the Jevals recipe added (Decision Score and the hand-off share), because those
+    are a different measurement and not a number this record took."""
     m = _renderer()
     _write(tmp_path, "20260101-000001-decide.json", _decide_record())
     table = m.render_decide_table(m.load_runs(tmp_path))
     lines = table.splitlines()
     assert len(lines) == 3                     # header + rule + one row
-    assert ("| jev / Jev 1.13.0 | typesafe.ai hosted | 110 | 0.964 | 0.024 | 0.059 "
-            "| 2 of 106 | 290 | $0.0017 |") in table
+    assert (f"| jev / Jev 1.13.0 | typesafe.ai hosted | 110 | 0.964 "
+            f"| {m.NOT_MEASURED} | 0.024 | 0.059 | {m.NOT_MEASURED} "
+            f"| 2 of 106 | 290 | $0.0017 |") in table
     assert "[my-run](https://github.com/getainode/ainode/blob/main/bench/results/" \
         in table
 
@@ -975,17 +979,30 @@ def test_the_committed_readme_matches_the_committed_records():
 
 
 def test_every_decide_record_in_the_repo_has_the_documented_shape():
-    """bench/SCHEMA.md's `decide` block, checked against the committed records."""
+    """bench/SCHEMA.md's `decide` block, checked against the committed records.
+
+    The legacy assertions apply to a legacy record, which is one with no `jevals` block:
+    a Jevals-recipe record's `overall` deliberately carries no `brier`, `ece`, `bins` or
+    `thresholds`, because those names mean the legacy definitions and filling them from
+    the recipe's own arithmetic would put two incomparable numbers under one name. Its
+    own shape is pinned in `tests/test_bench_decide_jevals.py`.
+    """
+    from ainode.bench.decide import suite as su
+
     m = _renderer()
     runs = [r for r in m.load_runs(REPO / "bench" / "results") if r.get("decide")]
     item_ids = {i.id for i in load_items(ITEMS).items}
     for run in runs:
         block = run["decide"]
-        assert block["backend"] in be.BACKENDS
+        assert block["backend"] in tuple(be.BACKENDS) + tuple(su.TRANSPORTS)
         assert set(block) >= {"backend", "endpoint", "item_set", "protocol",
                               "overall", "sets", "rows"}
         overall = block["overall"]
         assert overall["n"] == len(block["rows"])
+        if block.get("jevals"):
+            assert block["mode"] == su.MODE
+            assert block["jevals"]["sets"]
+            continue
         assert overall["n"] == sum(s["n"] for s in block["sets"].values())
         assert len(overall["bins"]) == mt.BINS
         assert set(overall["thresholds"]) == {"0.8", "0.9"}

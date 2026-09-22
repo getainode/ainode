@@ -330,6 +330,183 @@ Rules specific to this block, all load-bearing:
 - No API key is ever in the record. Not in `settings`, not in `protocol`, not in a
   note.
 
+### The `decide.jevals` sub-block
+
+A run of the **Jevals recipe** (`scripts/ainode-bench.py decide --suite ... --transport
+...`, the recipe recorded in `bench/decide/JEVALS.md` with the URL and the date it was
+read) writes the same `decide` block with three additions and two deliberate absences.
+It exists so an AINode-served model can be read next to Jev and its clones on the same
+public question sets with the same formulas. **Old records stay valid**: everything above
+still describes a record with no `jevals` key.
+
+The additions: `decide.mode` is `"jevals-0.1.0"`, `decide.recipe` names the source page
+and the date it was read, `decide.sources` describes each question set (its dataset,
+split, pinned revision, licence, seed and whether its state hashes are upstream's or
+ours), and `decide.jevals` holds the measurement.
+
+The absences, both load-bearing: `decide.sets` is `{}` and `decide.overall` carries **no
+`brier`, `ece`, `bins` or `thresholds`**. Those four names mean the legacy definitions
+above (a one-term Brier on the labeled option, five bins, gates at 0.8 and 0.9), and the
+recipe's own arithmetic is a multiclass Brier over ten bins with a per-primitive gate.
+Putting one under the other's name would make two incomparable numbers look like one, so
+`scripts/render-bench-table.py` renders those cells as "not measured" for such a record
+and reads the recipe's figures from `jevals` instead. `decide.overall` keeps only what
+means the same thing either way: `n`, `answered`, `errors`, `accuracy`, `tokens`,
+`cost_usd`, `p50_ms`, `p95_ms`.
+
+```json
+"decide": {
+  "backend": "decide", "mode": "jevals-0.1.0",
+  "endpoint": "https://spark-1-dgx...:3443/v1/decide",
+  "recipe": { "source": "https://jevals.com/methodology", "read": "2026-09-21",
+              "suite": "0.1.0", "doc": "bench/decide/JEVALS.md",
+              "attribution": "Jevals (jevals.com), suite 0.1.0" },
+  "item_set": { "id": "jevals-0.1.0", "version": "0.1.0",
+                "file": "bench/decide/sets/", "count": 900,
+                "sets": {"pubmedqa": 300, "banking77": 300, "helpsteer2": 300} },
+  "protocol": { "transport": "decide", "concurrency": 4, "repeats": 5,
+                "batch_size": 1, "timeout_s": 120,
+                "input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0,
+                "confidence": "...", "loss": "..." },
+  "sources": [ { "id": "pubmedqa", "type": "noul", "questions": 300, "options": 2,
+                 "seed": 20260918, "recipe_of_record": "jevals-0.1.0",
+                 "gold_distributions": false,
+                 "contamination": [ { "system": "...", "evidence": "...",
+                                      "source": "https://..." } ],
+                 "source": { "dataset": "qiaojin/PubMedQA", "split": "train",
+                             "hf_revision": "9001f285...", "license": "MIT",
+                             "state_hash_source": "jevals" } } ],
+  "overall": { "n": 4500, "answered": 4500, "errors": 0, "accuracy": 0.712,
+               "tokens": {"in": 1, "out": 1}, "cost_usd": 0.0,
+               "p50_ms": 1420, "p95_ms": 7028 },
+  "sets": {},
+  "jevals": {
+    "recipe": { "...": "the same block as decide.recipe" },
+    "formulas": "jevals-0.1.0",
+    "repeats": 5, "concurrency": 4, "batch_size": 1, "bins": 10,
+    "handoff_target": 0.95, "handoff_min_decisions": 100, "grid": 0.01,
+    "published_gates": { "pubmedqa": 0.91, "banking77": 0.96, "helpsteer2": null },
+    "recipe_of_record": { "pubmedqa": "jevals-0.1.0" },
+    "contamination": { "banking77": [ { "system": "...", "source": "https://..." } ] },
+    "seconds": 812.4,
+    "sets": {
+      "pubmedqa": {
+        "recipe": "jevals-0.1.0", "type": "noul",
+        "items": 300, "repeats": 5, "decisions": 1500,
+        "failed": 0, "malformed": 0, "one_hot": 0, "calibrated_over": 1483,
+        "accuracy": 0.712, "prior_accuracy": 0.62,
+        "decision_score": 41.2, "loss": 0.188, "loss_prior": 0.32,
+        "ece_points": 5.8,
+        "bins": [ { "lo": 0.9, "hi": 1.0, "count": 900, "accuracy": 0.96,
+                    "confidence": 0.991 } ],
+        "handoff_95": { "threshold": 0.93, "share": 0.62, "n": 930,
+                        "accuracy": 0.951 },
+        "gate": { "threshold": 0.91, "source": "jevals.com/methodology, suite 0.1.0, frozen",
+                  "coverage": 0.6, "n": 900, "accuracy": 0.833 },
+        "gate_local": 0.94,
+        "pick_flip_rate": 0.04, "pick_flip_over": 300,
+        "confidence_swing": { "max": 0.44, "mean": 0.02,
+                              "question": "pubmedqa-37", "over": 300 },
+        "repeat_flip_rate": 0.01, "repeat_flip_over": 300,
+        "order_flip_rate": null, "order_flip_over": 0,
+        "questions_per_second": 1.85,
+        "tokens": {"in": 748500, "out": 3000}, "cost_usd": 0.0,
+        "usd_per_1k_decisions": 0.0,
+        "p50_ms": 1420, "p95_ms": 7028
+      }
+    },
+    "overall": { "sets": ["pubmedqa"], "scored": ["pubmedqa"],
+                 "mean_decision_score": 41.2 }
+  },
+  "rows": [
+    { "id": "pubmedqa-0", "set": "pubmedqa", "kind": "noul", "repeat": 0, "order": 0,
+      "label": "yes", "answer": "yes", "correct": true,
+      "p_answer": 0.999769, "p_label": 0.999769,
+      "top": {"yes": 0.999769, "no": 0.000231},
+      "malformed": false, "malformed_reason": null, "one_hot": false,
+      "wall_ms": 7028, "tokens_in": 499, "tokens_out": 2, "error": null }
+  ]
+}
+```
+
+Rules specific to this sub-block:
+
+- **The unit is a decision, not an item.** `decisions` is items times repeats, and
+  `accuracy` is over all of them. `items` and `repeats` say which is which, and
+  `decide.rows` is one row per decision with its `repeat` and its `order`.
+- **`decision_score` is `100 * (1 - loss / loss_prior)`**, with both losses in the same
+  block so a reader can recompute it. 100 is perfect, 0 is answering with the label base
+  rates, and **a negative score is written as it is, never clamped**. `null` when the
+  prior's loss is 0, which happens only on a set where every item carries one label.
+- **`prior_accuracy` is the guessing floor and travels with every block.** It is the
+  base-rate answer's own accuracy on the same items, so an accuracy of 0.62 next to a
+  floor of 0.62 reads as what it is. A block never states an accuracy without it.
+- `loss` is the mean over items of the mean over that item's repeats: a multiclass Brier
+  for `choice` and `noul`, a ranked probability score over cumulative levels for `score`.
+  One item answered five times weighs the same as one answered once.
+- **`ece_points` is in POINTS** (5.8 means 0.058), on the top label, over ten equal-width
+  bins by `min(9, floor(round(100*c)/10))`, and `bins` is the reliability table behind it:
+  ten rows always, `count: 0` and nulls for an empty one, which is the per-set
+  confidence-versus-accuracy data a model card draws a calibration curve from. `null`
+  when nothing could be calibrated, which is the board's dash.
+- **`calibrated_over` can be smaller than `decisions`.** Malformed answers and answers
+  that carried no probabilities at all (`one_hot`) are in the accuracy and the Decision
+  Score and out of the ECE, the flip rates and the gate, which is the recipe's rule.
+- `handoff_95` is the system's own threshold: the lowest confidence on the 0.01 grid
+  where at least 100 decisions clear it and at least 95 percent of those are right.
+  `share` is those decisions over **all** decisions, malformed included. `null` when no
+  threshold qualifies.
+- `gate` is the **published frozen** gate for that primitive with this run's coverage and
+  accuracy at it, and `source` says where the threshold came from. `threshold: null` for
+  `score`, which has no gate in suite 0.1.0. `gate_local` is the same rule computed over
+  this one run and is **not** a board number.
+- **Three flip figures, because they answer three questions.** `pick_flip_rate` is the
+  share of questions whose pick changed at least once across the repeats, which is the
+  one a caller who has to trust a single answer wants; `repeat_flip_rate` compares only
+  repeats 0 and 1 (byte-identical requests, so nondeterminism) and `order_flip_rate`
+  only the four distinct option orders of a `choice` set. Each carries its own `*_over`
+  count, and a rate nothing could be compared for is `null` with `over: 0`, never 0.0.
+- `confidence_swing` is the largest spread one question's confidence showed across its
+  repeats, with the question named, plus the mean over questions.
+- **A set holding more than one ANSWER SPACE is broken down by answer space, not by
+  primitive.** An answer space is one `(type, options)` pair, and it is the unit the
+  Decision Score is defined over: the label prior is the base rates of the labels in that
+  option list, so pooling two questions with different option lists builds a baseline over
+  an answer space neither of them has, and the thing that is meant to define 0 stops
+  defining it. Such a block carries `spaces` (one full metrics block each, with its
+  `options` beside it), a `types` roll-up per primitive the way a board shows one, a
+  `decision_score` that is the plain mean over the spaces, and `loss` / `loss_prior` of
+  `null` because a loss over two answer spaces is not a number. Its accuracy, its latency
+  and its ECE are over everything, because those do carry across. A space is named by the
+  question file (`<group>/<question>` for a mixed manifest) and `type#n` in first-seen
+  order otherwise.
+- `vs_gold` is present only for a set that ships gold DISTRIBUTIONS rather than only
+  labels: `soft_accuracy` (the gold probability of the pick), `total_variation`, `kl`
+  (with its `kl_floor`) and `brier_vs_gold`. Its `definition` string states the
+  arithmetic, because these are **AINode's definitions and not a set card's columns of
+  the same names**.
+- `within_one_level` is present only on a `score` block: the share of picks within one
+  level of the labeled one.
+- **Every block names its recipe** (`recipe`), and every source names the recipe its own
+  published third-party numbers follow (`recipe_of_record`). Where those differ, only the
+  figures under this record's recipe are comparable across rows.
+- **`contamination` is a finding, not a footnote.** A set in a listed system's published
+  training data carries that system, the evidence and the primary source URL, and the
+  record's notes repeat it in words. It says nothing about an AINode-served model that
+  did not train on the set; it says a row for THAT system on THAT set measures
+  memorisation.
+- `batch_size` is always 1: one question per request, which is the recipe's rule and
+  removes the cross-question order effect. A set card whose own reference row was
+  measured several questions per request is reporting a different latency and a different
+  cost, and those columns are not comparable to this record's.
+- **A row carries no state and no full vector.** The state is rebuilt from
+  `bench/decide/sets/<id>.json` under the same `id` and verified against its
+  `state_sha256`; `top` keeps the five options the system was surest about and `p_label`
+  the labeled option's own probability, which is what a reader of a wrong answer needs.
+- `partial: true` with a `limit` means `--limit` took only the first N questions of each
+  set. It is a transport proof, not a suite result, and the notes say so. A board listing
+  needs a complete run of every task in the tab at 5 repeats.
+
 ## The `embed` block
 
 An embedding-bench run (`scripts/ainode-bench.py embed`) writes the same record with a
