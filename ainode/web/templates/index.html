@@ -18,7 +18,12 @@
   <link rel="shortcut icon" href="/static/img/favicon.ico">
 </head>
 <body>
-  <div class="command-center">
+  <!-- The front door (#261). app.js reads /api/auth/me before anything else and
+       fills this instead of the shell when this node wants a sign-in and nobody
+       is signed in. Markup and behaviour: static/js/signin.js. -->
+  <div class="signin-screen" id="signin-screen" style="display:none"></div>
+
+  <div class="command-center" id="app-shell">
     <!-- Top Bar -->
     <header class="top-bar">
       <div class="logo">
@@ -38,11 +43,17 @@
         <button class="nav-pill" data-view="config">Config</button>
       </nav>
       <div class="top-bar-status">
+        <!-- Who is signed in, and the way out. Hidden on an open node and when a
+             stored API key is doing the talking. app.js::renderUserChip. -->
+        <div class="user-chip" id="user-chip" style="display:none">
+          <button class="user-chip-name" id="user-chip-name" title="Your account">account</button>
+          <button class="user-chip-signout" id="sign-out" title="Sign out of this node">Sign out</button>
+        </div>
         <!-- How this port is protected, in the words /api/status uses. Click to
              land on Config > API access. Filled by app.js::renderAuthChip. -->
         <button class="api-chip" id="api-access-chip" title="API access">
           <span class="api-chip-dot"></span>
-          <span class="api-chip-label" id="api-chip-label">API open, no key set</span>
+          <span class="api-chip-label" id="api-chip-label">Open, no key required</span>
         </button>
         <span class="status-dot"></span>
         <span class="node-count" id="top-node-count">1</span>
@@ -153,6 +164,8 @@
             <div class="config-sidebar-title">SETTINGS</div>
             <nav class="config-nav" id="config-nav">
               <button class="config-nav-item active" data-section="credentials">🔑 Credentials</button>
+              <button class="config-nav-item" data-section="account">👤 Account</button>
+              <button class="config-nav-item" data-section="users">👥 Users</button>
               <button class="config-nav-item" data-section="api">🛡️ API access</button>
               <button class="config-nav-item" data-section="cluster">🌐 Cluster</button>
               <button class="config-nav-item" data-section="node">🖥️ Node Identity</button>
@@ -244,8 +257,11 @@
     </footer>
   </div>
 
-  <!-- auth.js first: every fetch in the other four files goes through it. -->
+  <!-- auth.js first: every fetch in the other files goes through it. -->
   <script src="/static/js/auth.js"></script>
+  <!-- The front door. Loaded before app.js, because app.js decides on load
+       whether this browser gets the shell or this screen (#261). -->
+  <script src="/static/js/signin.js"></script>
   <script src="/static/js/topology.js"></script>
   <script src="/static/js/bench.js"></script>
   <!-- The Metrics view: the shaping first (DOM-free, node-testable), then the
