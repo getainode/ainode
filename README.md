@@ -960,6 +960,10 @@ ainode auth enable|disable|status   # Require an API key on /api and /v1, or sto
 ainode auth key create --name <client>   # Mint a key for one client, printed once
 ainode auth key list         # Which clients hold a key, by id and name
 ainode auth key revoke ID    # Take one away, live
+ainode auth user add NAME --admin   # Make an account a person signs in with. It
+                             #   prompts for the password, --password-stdin in a script
+ainode auth user list|passwd|disable|enable|remove   # Manage accounts, on the master
+ainode auth session list|revoke|clear   # Who is signed in, and end a session
 ainode tls enable            # Serve HTTPS on its own port (3443), HTTP untouched.
                              #   --cert/--key installs a pair you have, --tailscale
                              #   gets a real Let's Encrypt cert for this node's
@@ -1119,24 +1123,42 @@ gets 8001, 8002 and so on the same way.
 
 **A fresh install requires an API key.** The installer mints one, stores its
 SHA-256 in `~/.ainode/auth.json` and prints the key once in a box at the end of the
-install; the dashboard asks for it the first time you open the node and remembers it
-after that. Everything on both ports is behind it, because AINode serves the
+install. Everything on both ports is behind it, because AINode serves the
 dashboard, the OpenAI-compatible API and every management route (load a model, unload
-one, change the config) on the same ports, so the key is the whole access control.
-Install with `AINODE_AUTH=off` for the old behaviour on a LAN you trust, and the
-installer prints what that choice means. An update never changes the auth state or
-the keys of a node that is already installed: `ainode auth enable` and
+one, change the config) on the same ports, so nothing reaches a node without a
+credential. Install with `AINODE_AUTH=off` for the old behaviour on a LAN you trust,
+and the installer prints what that choice means. An update never changes the auth
+state or the keys of a node that is already installed: `ainode auth enable` and
 `ainode auth disable` are how that changes, and both take effect on the running node
 with no restart.
 
-With auth on, every path under `/api` and `/v1` wants the key, with these deliberate
-exceptions: the static shell (`/` and `/static/*`), because it is what asks for the
-key; `/api/health`, because a liveness probe has none, which is also why `ainode
-update` verifies a release there; `/api/auth/status`, so the UI can say a key is
-wanted instead of rendering blank; `/api/auth/login`, because the caller with no
-credential is exactly who knocks on it, and `/api/auth/me`, which answers
-`{"user": null}` to a caller it does not recognise so the dashboard can draw the
-login page instead of guessing; `/api/cluster/endpoint`, which carries names,
+**People sign in, programs use keys.** A person opens the dashboard and signs in with
+a name and a password, and the session lasts until they sign out or until an admin
+revokes it. Programs are unchanged: a coding agent, AINode Desktop, the bench and curl
+all keep presenting `Authorization: Bearer <key>`. Two commands on the master set the
+first account up, and the first one prompts for the password (`--password-stdin` in a
+script):
+
+```bash
+ainode auth user add <name> --admin
+ainode auth enable           # only if this node is not requiring auth yet
+```
+
+Accounts are managed on the master and replicated to every node in the cluster, and
+sessions are per node. The roles are `admin` (users, keys and the auth switch) and
+`member` (the dashboard). Your own account page changes your password and revokes your
+sessions; admins get a Users page to add, remove, reset, disable and enable accounts.
+`~/.ainode/users.json` holds the accounts, 0600 and hashes only, beside `auth.json`.
+The whole walkthrough, including why a login belongs behind HTTPS, is on the docs site:
+[Sign in and accounts](https://docs.ainode.dev/security/sign-in).
+
+With auth on, every path under `/api` and `/v1` wants a credential, with these
+deliberate exceptions: the static shell (`/` and `/static/*`), because it is what
+asks you for one; `/api/health`, because a liveness probe has none, which is also why
+`ainode update` verifies a release there; `/api/auth/status`, so the UI can say a
+credential is wanted instead of rendering blank; `/api/auth/me` and `/api/auth/login`,
+because the page has to be able to ask whether you are signed in and the request that
+signs you in cannot need a session first; `/api/cluster/endpoint`, which carries names,
 addresses and ports so a client stranded by its own node can find another; and `POST
 /api/cluster/join`, because a node joining this cluster cannot hold this cluster's key
 yet. That last one takes a single-use expiring join token instead, and the handler
