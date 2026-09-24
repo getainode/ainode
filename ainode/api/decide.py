@@ -29,6 +29,15 @@ generated token's logprobs restricted to the label tokens, renormalized. The
 engine's own refusal to produce anything but a label is what makes that
 restriction sound.
 
+Calibration, when the model ships its own: a decision adapter's store directory
+can carry ``temperatures.json`` beside the weights, one fitted temperature per
+question kind (``choice``, ``noul``, ``score``). When the served model's
+directory on this node has one, the label logprobs are divided by that kind's
+temperature before the softmax, so the distribution and the confidence read the
+way the adapter was fitted to be read. A request may opt out with
+``"calibration": "raw"``, and every response says what was applied so a caller
+can refit against the raw numbers.
+
 vLLM field note: on the pinned engine image (``vllm/vllm-openai:v0.27.1``) the
 constraint is ``structured_outputs: {"choice": [...]}``. The older
 ``guided_choice`` extra field is still accepted and then SILENTLY IGNORED on
@@ -42,13 +51,17 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import logging
 import time
+from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 import aiohttp
 from aiohttp import web
 
 from ainode.api.chat_routes import instance_caps_index
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = ("You are a decision function. Answer with the single letter "
                  "of the best option and nothing else.")
@@ -70,9 +83,15 @@ TOP_LOGPROBS = 20
 # Room for the longest label plus the end-of-turn token the template emits.
 LABEL_TOKEN_HEADROOM = 1
 
-# A question's engine call. Long enough for a cold-ish engine to answer two
-# tokens, short enough that a wedged node does not hold the whole request open.
-CALL_TIMEOUT_S = 180.0
+# A question's engine call. Long enough for a cold engine to compile the answer
+# grammar for a new question shape, which measured 60 to 90 s per shape on a GB10
+# and can queue behind the other questions of the same request (#277), short
+# enough that a wedged node does not hold the whole request open for good.
+CALL_TIMEOUT_S = 300.0
+
+# The warm-up's engine call, per question kind. A first compile on a busy node is
+# allowed to take a long time: nobody is waiting on it.
+WARM_TIMEOUT_S = 600.0
 
 # A dead or ghost node must fail the connect fast so failover moves on.
 CONNECT_TIMEOUT_S = 5.0
@@ -81,6 +100,24 @@ BOOLEAN_OPTIONS = ("yes", "no")
 
 DEFAULT_SCORE_MIN = 1
 DEFAULT_SCORE_MAX = 5
+
+# The question kinds a decision adapter is fitted per. ``/v1/systemone`` speaks
+# them natively; ``/v1/decide`` maps ``type: "boolean"`` to ``noul``,
+# ``type: "score"`` to ``score`` and an explicit ``options`` list to ``choice``.
+CHOICE = "choice"
+NOUL = "noul"
+SCORE = "score"
+QUESTION_KINDS = (CHOICE, NOUL, SCORE)
+
+# What marks a decision model's store directory: the adapter's prompt contract
+# and its fitted temperatures, either one. Only the second is read here.
+PROMPT_CONTRACT_FILE = "prompt_contract.json"
+TEMPERATURES_FILE = "temperatures.json"
+DECISION_MODEL_FILES = (PROMPT_CONTRACT_FILE, TEMPERATURES_FILE)
+
+# The one value a request's ``calibration`` field takes: the distribution exactly
+# as the engine reported it, with the adapter's temperatures left off.
+CALIBRATION_RAW = "raw"
 
 
 class DecideError(Exception):
@@ -167,6 +204,7 @@ def normalize_questions(raw: Any) -> dict[str, dict]:
         if not isinstance(text, str) or not text.strip():
             raise DecideError(f"question '{key}' needs a non-empty 'question' string")
         qtype = spec.get("type")
+        kind = NOUL if qtype == "boolean" else SCORE if qtype == "score" else CHOICE
         if "options" in spec:
             options = spec["options"]
         elif qtype == "boolean":
@@ -198,7 +236,7 @@ def normalize_questions(raw: Any) -> dict[str, dict]:
             raise DecideError(
                 f"question '{key}': duplicate options {dupes}. Every option must "
                 f"be distinct so an answer is unambiguous")
-        out[key] = {"question": text.strip(), "options": list(options)}
+        out[key] = {"question": text.strip(), "options": list(options), "kind": kind}
     return out
 
 
@@ -275,9 +313,13 @@ def first_token_top_logprobs(payload: dict) -> list[dict]:
     return [t for t in tops if isinstance(t, dict) and isinstance(t.get("token"), str)]
 
 
-def distribution_from_logprobs(labels: list[str],
-                               top_logprobs: list[dict]) -> Optional[dict]:
+def distribution_from_logprobs(labels: list[str], top_logprobs: list[dict],
+                               temperature: float = 1.0) -> Optional[dict]:
     """Softmax over the first token's logprobs, restricted to the label tokens.
+
+    ``temperature`` divides the logprobs before the softmax, which is the same as
+    dividing the logits: the log-normalizer is one constant across the labels and
+    drops out when the result is renormalized. 1.0 is the engine's own spread.
 
     A label is scored by the LONGEST token in ``top_logprobs`` that is a prefix
     of it, which is an exact match whenever the tokenizer gives the whole label
@@ -323,7 +365,8 @@ def distribution_from_logprobs(labels: list[str],
         return None
 
     top = max(scored.values())
-    weights = {label: math.exp(lp - top) for label, lp in scored.items()}
+    weights = {label: math.exp((lp - top) / temperature)
+               for label, lp in scored.items()}
     total = sum(weights.values())
     if total <= 0:
         return None
@@ -362,17 +405,19 @@ def constrained_label(payload: dict, labels: list[str]) -> Optional[str]:
 
 
 def decision_from_payload(payload: dict, options: list[str],
-                          latency_ms: float) -> dict:
+                          latency_ms: float, temperature: float = 1.0) -> dict:
     """One ``decisions`` entry from one engine response. Pure.
 
     Probabilities are reported against the OPTION strings, not the labels: the
     labels are an implementation detail of constraining the engine, and a caller
-    that had to map them back would be doing our job.
+    that had to map them back would be doing our job. ``temperature`` is the
+    adapter's fitted temperature for this question's kind, 1.0 for none.
     """
     labels = option_labels(len(options))
     by_label = dict(zip(labels, options))
     chosen = constrained_label(payload, labels)
-    dist = distribution_from_logprobs(labels, first_token_top_logprobs(payload))
+    dist = distribution_from_logprobs(labels, first_token_top_logprobs(payload),
+                                      temperature)
     answer_label = pick_answer(labels, dist, chosen)
     entry: dict = {
         "answer": by_label.get(answer_label),
@@ -389,6 +434,91 @@ def decision_from_payload(payload: dict, options: list[str],
     entry["distribution"] = {by_label[label]: dist[label] for label in labels}
     entry["confidence"] = dist.get(answer_label)
     return entry
+
+
+# ---------------------------------------------------------------- calibration
+
+
+def calibration_mode(value: Any) -> Optional[str]:
+    """A request's ``calibration`` field: absent for the adapter's, or ``"raw"``."""
+    if value is None or value == CALIBRATION_RAW:
+        return value
+    raise DecideError(f"'calibration' must be \"{CALIBRATION_RAW}\" when given "
+                      f"(got {value!r})")
+
+
+def model_store_dir(models_dir, model: str) -> Optional[Path]:
+    """The directory holding ``model``'s files in this node's store, or None.
+
+    The store's own resolver (``models/registry.py::snapshot_dir_for``) answers
+    for a repo id in every layout AINode writes; a model served straight from an
+    absolute path is its own directory.
+    """
+    from ainode.models.registry import snapshot_dir_for
+    if not model:
+        return None
+    try:
+        direct = Path(model)
+        if direct.is_absolute() and direct.is_dir():
+            return direct
+    except OSError:
+        pass
+    return snapshot_dir_for(model, Path(models_dir) if models_dir else None)
+
+
+def is_decision_model_dir(directory: Optional[Path]) -> bool:
+    """True when the directory carries a decision adapter's prompt contract or
+    temperatures, which is how a decision model is recognised."""
+    if directory is None:
+        return False
+    try:
+        return any((Path(directory) / name).is_file() for name in DECISION_MODEL_FILES)
+    except OSError:
+        return False
+
+
+def read_temperatures(directory: Optional[Path]) -> Optional[dict]:
+    """``{kind: T}`` from the directory's ``temperatures.json``, or None.
+
+    Only the three kinds are read, and only a finite positive number is a
+    temperature: anything else leaves that kind at the engine's own spread rather
+    than failing a request over an adapter's file.
+    """
+    if directory is None:
+        return None
+    try:
+        raw = json.loads((Path(directory) / TEMPERATURES_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    temps = raw.get("temperatures") if isinstance(raw, dict) else None
+    if not isinstance(temps, dict):
+        return None
+    out: dict[str, float] = {}
+    for kind in QUESTION_KINDS:
+        value = temps.get(kind)
+        if isinstance(value, bool):
+            continue
+        try:
+            t = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(t) and t > 0:
+            out[kind] = t
+    return out or None
+
+
+def calibration_for(models_dir, model: str, mode: Optional[str]) -> dict:
+    """The ``calibration`` block a response carries: ``{applied, temperatures}``.
+
+    ``temperatures`` is what the model's directory on this node carries, whether
+    or not it was applied, so a caller that opted out still sees what it opted
+    out of; it is null when there is none. The directory is looked up on the node
+    answering the route: a model this node routes to a peer and does not hold a
+    copy of answers raw, and says so with ``applied: false``.
+    """
+    temps = read_temperatures(model_store_dir(models_dir, model))
+    return {"applied": bool(temps) and mode != CALIBRATION_RAW,
+            "temperatures": temps}
 
 
 # -------------------------------------------------------------------- routing
@@ -429,18 +559,22 @@ def candidates_for(request: web.Request, model: str) -> list:
     return candidates
 
 
-async def ask_one(session: aiohttp.ClientSession, candidates: list, body: dict
-                  ) -> tuple:
+async def ask_one(session: aiohttp.ClientSession, candidates: list, body: dict,
+                  timeout_s: float = CALL_TIMEOUT_S) -> tuple:
     """One question, with the proxy's failover. Returns (payload, cand, latency_ms).
 
     A transport failure or a 5xx moves to the next candidate: a ghost node that
     still advertises the model is indistinguishable from a live one in cluster
     state. Any other non-200 is the engine's own answer and stops the loop. On
     failure the third element is the error string instead of a latency.
+
+    A call that connected and then ran out of time is reported as what it almost
+    always is, an engine compiling the answer grammar for a question shape it has
+    not seen (#277), rather than as an unreachable node.
     """
     started = time.monotonic()
     last_err = "no candidate node"
-    timeout = aiohttp.ClientTimeout(total=CALL_TIMEOUT_S,
+    timeout = aiohttp.ClientTimeout(total=timeout_s,
                                     sock_connect=CONNECT_TIMEOUT_S)
     for host, port in candidates:
         url = f"http://{host}:{port}/v1/chat/completions"
@@ -459,7 +593,15 @@ async def ask_one(session: aiohttp.ClientSession, candidates: list, body: dict
                 last_err = f"{host}:{port} answered {resp.status}: {str(text)[:200]}"
                 if 400 <= resp.status < 500:
                     break
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except aiohttp.ServerTimeoutError as exc:
+            # The connect itself timed out (no read timeout is set): a dead node.
+            last_err = f"{host}:{port} unreachable: {exc}"
+            continue
+        except asyncio.TimeoutError:
+            last_err = (f"{host}:{port} gave no answer in {timeout_s:.0f}s: the engine "
+                        "is compiling the answer grammar, retry")
+            continue
+        except aiohttp.ClientError as exc:
             last_err = f"{host}:{port} unreachable: {exc}"
             continue
     return None, None, last_err
@@ -494,18 +636,21 @@ class DecideRun(NamedTuple):
     the caller keyed the question and in the caller's order; ``payloads`` are the
     raw engine responses, for the usage block; ``landed`` is the candidate the
     first answer came from, for naming the node; ``failures`` is one line per
-    question that got no answer.
+    question that got no answer; ``calibration`` is the ``{applied,
+    temperatures}`` block both routes report.
     """
 
     decisions: dict
     payloads: list
     landed: Optional[tuple]
     failures: list
+    calibration: Optional[dict] = None
 
 
 async def run_questions(request: web.Request, model: str, questions: dict[str, dict],
                         state: str, instructions: Optional[str],
-                        candidates: list) -> DecideRun:
+                        candidates: list, calibration: Optional[str] = None
+                        ) -> DecideRun:
     """Ask every question at once against `candidates`, and read the answers.
 
     The whole engine-facing half of a decision request, shared by ``/v1/decide``
@@ -517,8 +662,17 @@ async def run_questions(request: web.Request, model: str, questions: dict[str, d
     All questions are in flight together. They share a byte-identical prompt
     prefix, so once one of them has prefilled it the rest read the shared state
     out of the engine's prefix cache instead of paying for it again.
+
+    ``calibration`` is the request's mode (``calibration_mode``). Unless it is
+    ``"raw"``, each question's logprobs are divided by the temperature the
+    model's directory carries for that question's ``kind`` before the softmax.
     """
     session: aiohttp.ClientSession = request.app["client_session"]
+    config = request.app.get("config")
+    block = await asyncio.get_running_loop().run_in_executor(
+        None, calibration_for, getattr(config, "models_dir", None), model,
+        calibration)
+    temps = block["temperatures"] if block["applied"] else {}
     keys = list(questions)
     bodies = []
     for key in keys:
@@ -541,9 +695,135 @@ async def run_questions(request: web.Request, model: str, questions: dict[str, d
             continue
         payloads.append(payload)
         landed = landed or cand
-        decisions[key] = decision_from_payload(payload, questions[key]["options"],
-                                               float(extra))
-    return DecideRun(decisions, payloads, landed, failures)
+        decisions[key] = decision_from_payload(
+            payload, questions[key]["options"], float(extra),
+            temps.get(questions[key].get("kind"), 1.0))
+    return DecideRun(decisions, payloads, landed, failures, block)
+
+
+# -------------------------------------------------------------------- warm-up
+#
+# The first grammar-constrained request per question shape makes vLLM compile
+# the answer grammar, 60 to 90 s on a GB10, and the route's caller is the one who
+# waits for it (#277). So a decision model is sent one minimal question of each
+# kind as soon as its engine binds, through the same body builder and the same
+# ``ask_one`` the routes use, and the instance reports ``warm`` on /api/status.
+# Readiness is not held for it: the engine serves while it warms.
+
+# Warm-ups in flight. The loop holds only a weak reference to a task.
+_WARM_TASKS: set = set()
+
+
+def warm_questions() -> dict[str, dict]:
+    """One minimal question per kind: a two-option choice, a noul, a two-level score.
+
+    The noul's options are ``true`` / ``false`` in the order ``/v1/systemone``
+    always sends them.
+    """
+    return {
+        CHOICE: {"question": "Which option fits the state?",
+                 "options": ["first", "second"]},
+        NOUL: {"question": "Is the state empty?", "options": ["true", "false"]},
+        SCORE: {"question": "How complete is the state?", "options": ["1", "2"]},
+    }
+
+
+def served_model_id(backend) -> str:
+    """The id an engine answers to: its first ``--served-model-name``, else its model."""
+    cfg = getattr(backend, "config", None)
+    names = getattr(cfg, "served_model_name", None) or []
+    if isinstance(names, str):
+        names = [names]
+    return str(names[0] if names else getattr(cfg, "model", "") or "")
+
+
+async def warm_decision_engine(session: aiohttp.ClientSession, port: int, model: str,
+                               status: dict, timeout_s: float = WARM_TIMEOUT_S
+                               ) -> bool:
+    """Ask the engine on ``port`` one question per kind, in turn, and time each.
+
+    One at a time so each compile is timed on its own and logged. ``status`` is
+    the instance's entry in ``app["decision_warm"]`` and is updated in place:
+    ``warm`` turns True only when every kind answered, ``compile_seconds`` holds
+    each kind's time and ``error`` the first failure.
+    """
+    status.update(warm=False, warming=True, compile_seconds={}, error=None)
+    for kind, spec in warm_questions().items():
+        labels = option_labels(len(spec["options"]))
+        messages = build_messages("", None, spec["question"], spec["options"])
+        started = time.monotonic()
+        payload, _, extra = await ask_one(session, [("localhost", port)],
+                                          build_chat_body(model, messages, labels),
+                                          timeout_s)
+        seconds = round(time.monotonic() - started, 1)
+        if payload is None:
+            status.update(warming=False, error=f"{kind}: {extra}")
+            logger.warning("decision warm-up of %s on :%s failed at %s after %.1fs: %s",
+                           model, port, kind, seconds, extra)
+            return False
+        status["compile_seconds"][kind] = seconds
+        logger.info("decision warm-up of %s on :%s: %s grammar ready in %.1fs",
+                    model, port, kind, seconds)
+    status.update(warm=True, warming=False)
+    return True
+
+
+async def _run_warmup(app, port: int, model: str, status: dict) -> bool:
+    try:
+        session = app.get("client_session")
+        if session is not None:
+            return await warm_decision_engine(session, port, model, status)
+        async with aiohttp.ClientSession() as own:
+            return await warm_decision_engine(own, port, model, status)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception("decision warm-up of %s on :%s raised", model, port)
+        status.update(warm=False, warming=False, error=str(exc))
+        return False
+
+
+def schedule_decision_warmup(app, port: int, backend) -> bool:
+    """Warm ``backend`` in the background if it serves a decision model. Called on bind.
+
+    A decision model is one whose store directory carries ``prompt_contract.json``
+    or ``temperatures.json``. Anything else is left alone and its entry cleared,
+    so a port that used to hold a decision model does not go on reporting it.
+    Returns True when a warm-up was started.
+    """
+    table = app.get("decision_warm") if hasattr(app, "get") else None
+    if table is None or backend is None:
+        return False
+    cfg = getattr(backend, "config", None)
+    model = str(getattr(cfg, "model", "") or "")
+    models_dir = (getattr(cfg, "models_dir", None)
+                  or getattr(app.get("config"), "models_dir", None))
+    if not is_decision_model_dir(model_store_dir(models_dir, model)):
+        table.pop(port, None)
+        return False
+    status = {"model": model, "warm": False, "warming": True,
+              "compile_seconds": {}, "error": None}
+    table[port] = status
+    task = asyncio.get_running_loop().create_task(
+        _run_warmup(app, port, served_model_id(backend), status))
+    _WARM_TASKS.add(task)
+    task.add_done_callback(_WARM_TASKS.discard)
+    return True
+
+
+def instance_warm_fields(app, record) -> dict:
+    """``warm`` and ``warm_compile_seconds`` for one instance on /api/status.
+
+    ``warm`` is True once every question kind has compiled, False while a
+    decision model is still warming or its warm-up failed, and null for a model
+    that is not a decision model (nothing to warm).
+    """
+    table = app.get("decision_warm") or {}
+    entry = table.get(getattr(record, "api_port", None))
+    if not entry or entry.get("model") != getattr(record, "model", None):
+        return {"warm": None, "warm_compile_seconds": None}
+    return {"warm": bool(entry.get("warm")),
+            "warm_compile_seconds": dict(entry.get("compile_seconds") or {})}
 
 
 # -------------------------------------------------------------------- handler
@@ -579,6 +859,7 @@ async def handle_decide(request: web.Request) -> web.Response:
         instructions = body.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
             raise DecideError("'instructions' must be a string when given")
+        calibration = calibration_mode(body.get("calibration"))
     except DecideError as exc:
         return _bad_request(str(exc))
 
@@ -593,7 +874,7 @@ async def handle_decide(request: web.Request) -> web.Response:
         return unavailable(f"no node is serving '{model}'")
 
     run = await run_questions(request, model, questions, state, instructions,
-                              candidates)
+                              candidates, calibration)
     collector = request.app.get("metrics_collector")
     total_ms = (time.monotonic() - started) * 1000
     if run.failures:
@@ -613,4 +894,5 @@ async def handle_decide(request: web.Request) -> web.Response:
         "latency_ms": round(total_ms, 1),
         "decisions": run.decisions,
         "usage": merge_usage(run.payloads),
+        "calibration": run.calibration,
     })

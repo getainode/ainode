@@ -452,7 +452,9 @@ async def test_every_question_type_round_trips(client, engine_fake):
     data = await resp.json()
     assert data["model"] == MODEL
     assert data["latency_ms"] > 0
-    assert set(data) == {"model", "answers", "usage", "latency_ms"}
+    assert set(data) == {"model", "answers", "usage", "latency_ms", "calibration"}
+    # No temperatures.json in this node's store: the engine's own spread.
+    assert data["calibration"] == {"applied": False, "temperatures": None}
     assert list(data["answers"]) == ["queue", "needs_human", "severity"]
     assert parse_answers_like_jde(data["answers"]) is not None
 

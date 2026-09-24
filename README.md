@@ -1278,6 +1278,37 @@ tokenizer does not give a two-letter label its own token, that label's mass is
 its first letter's token mass, which the single-letter label of the same letter
 also claims. Read such a pair as jointly calibrated.
 
+**Decision adapters bring their own temperatures.** When the served model's
+directory in the node's store carries a `temperatures.json`
+(`{"temperatures": {"choice": T, "noul": T, "score": T}}`, which the
+`frontier-infra/jebadiah-*` checkpoints ship), each question's label logprobs are
+divided by the temperature for its kind before the softmax, so `distribution`
+and `confidence` read the way the adapter was fitted. `type: "boolean"` counts as
+`noul`, `type: "score"` as `score` and an `options` list as `choice`. Every
+response says what was applied, and `POST /v1/systemone` carries the same block
+(these temperatures are illustrative, not fitted):
+
+```json
+"calibration": {"applied": true, "temperatures": {"choice": 1.5, "noul": 0.8, "score": 1.2}}
+```
+
+Send `"calibration": "raw"` to get the engine's own spread instead; the block
+then reads `"applied": false` and still lists the temperatures you opted out of,
+so you can refit against the raw numbers. The file is read on the node that
+answers the route, so a model this node routes to a peer without holding a copy
+itself answers raw.
+
+**A decision model warms up when it loads.** The first constrained request per
+question shape makes the engine compile the answer grammar, 60 to 90 s on a
+GB10. So when an engine binds on a model whose directory carries
+`prompt_contract.json` or `temperatures.json`, AINode sends it one small
+question of each kind in the background and logs each compile time. Each row of
+`/api/status`'s `instances` carries `warm` (`true` once warm, `false` while
+warming or after a failed warm-up, `null` for a model with nothing to warm) and
+`warm_compile_seconds`. A request that still meets a cold compile and runs past
+the 300 s engine-call limit gets a `503` saying the engine is compiling the
+answer grammar and to retry.
+
 ### Metrics: `/metrics` (Prometheus) and `/api/metrics` (JSON)
 
 AINode exposes its own metrics on port 3000, the same port as its API. The engine's
