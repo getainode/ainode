@@ -8,22 +8,26 @@ path, on a node, so pointing any of them at a model on this fleet is one string
 and no fork of the client. ONE adapter, so none of them needs an AINode-shaped
 branch.
 
-What it does NOT promise: calibration. The hosted service's numbers are a
+What it does NOT promise: the hosted service's calibration. Its numbers are a
 property of the model TypeSafe trained and of how they fit it; these are the
 probabilities the served model put on the option labels, read off its logprobs
-and renormalized, and nothing here corrects, tempers or rescales them. A local
-model's confidence is worth what that model's confidence is worth, and the way
-to find out is ``scripts/ainode-bench.py decide``, which scores exactly this
-against labels. So: same wire, same client, same typed answers, and no claim at
-all about how well those answers are spread.
+and renormalized. The one correction applied is the served model's OWN: a
+decision adapter that ships ``temperatures.json`` beside its weights gets each
+question's logprobs divided by the temperature fitted for that question's type,
+in the decision core (``api/decide.py``), and the response's top-level
+``calibration`` block says whether that happened and with which temperatures. A
+request sends ``"calibration": "raw"`` to get the engine's own spread instead. A
+local model's confidence is worth what that model's confidence is worth, and the
+way to find out is ``scripts/ainode-bench.py decide``, which scores exactly this
+against labels.
 
 Two numbers on the way out are inferences rather than readings, and each says so
 where it is computed: ``confidence`` is the hosted service's chance-corrected
 formula (``normalized_confidence``), reproduced from its published examples
 because no document states it, and the usage block falls back to the bench's own
-estimate when an engine reports no usage at all (``usage_block``). The raw
-distribution goes out beside them untouched, so a caller who disagrees with
-either has the numbers they came from.
+estimate when an engine reports no usage at all (``usage_block``). The
+distribution goes out beside them unchanged by either, so a caller who disagrees
+with either has the numbers they came from.
 
 One engine call answers one question, which is also what bounds a question: only
 the top ``MAX_CRITERIA`` labels come back with a probability, so a wider option
@@ -61,8 +65,12 @@ from typing import Any, NamedTuple, Optional
 from aiohttp import web
 
 from ainode.api.decide import (
+    CHOICE,
+    NOUL,
+    SCORE,
     TOP_LOGPROBS,
     DecideError,
+    calibration_mode,
     candidates_for,
     merge_usage,
     normalize_questions,
@@ -72,12 +80,10 @@ from ainode.api.decide import (
     unavailable,
 )
 
-# The three question types the format defines. Anything else is a 422 rather than
-# a guess: a client that asked for a kind of judgement this route does not have is
-# better off being told which kinds it has.
-CHOICE = "choice"
-NOUL = "noul"
-SCORE = "score"
+# The three question types the format defines, which are also the kinds a decision
+# adapter's temperatures are fitted per (``decide.py``). Anything else is a 422
+# rather than a guess: a client that asked for a kind of judgement this route does
+# not have is better off being told which kinds it has.
 QUESTION_TYPES = (CHOICE, NOUL, SCORE)
 
 # A noul's two options, in this order, always. The answer is P(true), so `true`
@@ -283,11 +289,15 @@ def decide_questions(translated: dict[str, Translated]) -> dict[str, dict]:
 
     Goes through the core's own ``normalize_questions`` rather than around it, so
     the option ceiling, the two-option floor and distinct options are checked in
-    one place for both routes.
+    one place for both routes. Each question keeps its Jev type as its ``kind``,
+    which is what picks the adapter's temperature for it.
     """
-    return normalize_questions({key: {"question": item.question,
-                                      "options": item.options}
-                                for key, item in translated.items()})
+    questions = normalize_questions({key: {"question": item.question,
+                                           "options": item.options}
+                                     for key, item in translated.items()})
+    for key, item in translated.items():
+        questions[key]["kind"] = item.kind
+    return questions
 
 
 # ---------------------------------------------------------------- translate out
@@ -322,9 +332,9 @@ def normalized_confidence(top: Any, options: int) -> float:
 
     INFERRED, not specified: it reproduces every example in TypeSafe's published
     docs and SDK types for both choice and score, and Kev's playground authors
-    arrived at the same formula for choice, but no document states it. The raw
-    distribution goes out untouched in ``probabilities`` beside it, so a caller
-    who disagrees with the formula has the numbers it came from.
+    arrived at the same formula for choice, but no document states it. The
+    distribution it came from goes out in ``probabilities`` beside it, so a
+    caller who disagrees with the formula has the numbers it came from.
     """
     spread = probability(top)
     if options < 2:
@@ -461,6 +471,7 @@ async def handle_systemone(request: web.Request) -> web.Response:
         translated = translate_questions(body.get("questions"))
         questions = decide_questions(translated)
         state = serialize_state(body.get("state"))
+        calibration = calibration_mode(body.get("calibration"))
     except DecideError as exc:
         return unprocessable(str(exc))
 
@@ -477,7 +488,8 @@ async def handle_systemone(request: web.Request) -> web.Response:
     # No shared instructions block: in this format a question's own instructions
     # are the whole prompt for it, and the questions of one ask still never see
     # each other's answers.
-    run = await run_questions(request, model, questions, state, None, candidates)
+    run = await run_questions(request, model, questions, state, None, candidates,
+                              calibration)
 
     answers: dict[str, dict] = {}
     failures = list(run.failures)
@@ -503,4 +515,5 @@ async def handle_systemone(request: web.Request) -> web.Response:
         "answers": answers,
         "usage": usage_block(run.payloads, state, translated, len(answers)),
         "latency_ms": round(total_ms, 1),
+        "calibration": run.calibration,
     })

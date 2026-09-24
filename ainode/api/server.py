@@ -192,6 +192,9 @@ def create_app(
         app["instances"] = _seed
     app["start_time"] = time.time()
     app["client_session"] = None  # lazy-init in startup
+    # Decision-model warm-up state by engine port (api/decide.py, #277). Created
+    # here because the app is frozen by the time an engine binds.
+    app["decision_warm"] = {}
     app["metrics_collector"] = collector
     # On a unified-memory node the collector has no usage figure of its own to
     # report, and host RAM is not VRAM (#175). Give it the one number this node
@@ -1393,6 +1396,17 @@ async def handle_status(request: web.Request) -> web.Response:
         _own = _manager.by_port(getattr(config, "api_port", 0) or 0)
         engine_adopted = bool(_own is not None and getattr(_own.record, "adopted", False))
 
+    # Every instance this process manages, with whether a decision model's answer
+    # grammar has been compiled yet (#277). ``warm`` is null for a model with
+    # nothing to warm.
+    from ainode.api.decide import instance_warm_fields
+    instances = [{"instance_id": inst.record.instance_id,
+                  "model": inst.record.model,
+                  "api_port": inst.record.api_port,
+                  "status": inst.record.status,
+                  **instance_warm_fields(request.app, inst.record)}
+                 for inst in (_manager.instances() if _manager is not None else [])]
+
     return web.json_response({
         "node_id": config.node_id,
         "node_name": config.node_name,
@@ -1400,6 +1414,7 @@ async def handle_status(request: web.Request) -> web.Response:
         "gpu": gpu_info,
         "engine_ready": engine_ready,
         "engine_adopted": engine_adopted,
+        "instances": instances,
         # Coarse engine load phase for the UI launching card (3c), derived from
         # the live /v1/models probe above rather than the engine's own latch:
         # see engine_load_phase.

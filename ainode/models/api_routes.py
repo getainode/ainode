@@ -1270,13 +1270,29 @@ async def _wait_for_bind(app, port: int, backend, timeout: float = 300.0,
     Every verdict this returns, bound or not, is appended to the node's
     launch-time ledger, the only place a load time is written down where the
     interface can read it back afterwards (see ``record_launch_time``).
+
+    A bind is also where a decision model starts warming its answer grammar
+    (``api/decide.py::schedule_decision_warmup``, #277), in the background and
+    without holding the verdict: every launch path waits here, so no path can
+    skip it.
     """
     bound, reason, alive = await _bind_wait(app, port, backend, timeout,
                                             loading=loading)
     await record_launch_time(app, port, backend, seconds=alive,
                              outcome="ready" if bound else "failed",
                              reason="" if bound else reason)
+    if bound:
+        _schedule_decision_warmup(app, port, backend)
     return bound, reason, alive
+
+
+def _schedule_decision_warmup(app, port: int, backend) -> None:
+    """Start a decision model's warm-up. Never lets a failure reach the bind."""
+    try:
+        from ainode.api.decide import schedule_decision_warmup
+        schedule_decision_warmup(app, port, backend)
+    except Exception:
+        logger.exception("could not schedule the decision warm-up on :%s", port)
 
 
 async def _bind_wait(app, port: int, backend, timeout: float = 300.0,
@@ -1796,6 +1812,9 @@ async def _await_primary_bind(app, config, loading: int = 1) -> bool:
                     "container that outlived the restart (up %s)",
                     adopted_primary.get("model") or model, port,
                     adopted_primary.get("uptime") or "unknown")
+        # The warm flag died with the old process. An engine that already
+        # compiled answers the warm-up at once, and one that did not needs it.
+        _schedule_decision_warmup(app, port, boot_engine)
         return True
     # Otherwise wait for it to serve, retrying it once if it died on the way up:
     # a node that comes back with its main model silently missing is the #96 shape.
