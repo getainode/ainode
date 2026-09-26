@@ -1887,6 +1887,40 @@ def _no_multimodal_instance(model: str, tried: list) -> web.Response:
     )
 
 
+def own_model(app, config) -> str:
+    """The model a request with no ``model`` field falls back to, or "".
+
+    Only a node that SERVES a primary has one: ``config.model`` names what boots
+    on the node's own api_port, and ``app["engine"]`` is that engine. A config can
+    name a model the node does not serve (the dataclass default, a config.json
+    copied from another node, a primary whose launch failed), so the name alone is
+    not enough, and a routing-only master serves nothing at all.
+    """
+    if app.get("engine") is None:
+        return ""
+    return (getattr(config, "model", "") or "").strip()
+
+
+def _missing_json_model() -> web.Response:
+    """400 for a JSON request that names no model, on a node with none of its own.
+
+    The old fallback routed it to ``config.model``, which on a node that serves
+    nothing is a name nobody is serving, and the caller saw a 404 or a 502 about a
+    model they never asked for. Names the field instead, the way the multipart
+    paths do.
+    """
+    return web.json_response(
+        {"error": {
+            "message": ("this request names no model and this node serves none of "
+                        "its own to default to: add a \"model\" field to the JSON "
+                        "body (GET /v1/models lists what the fleet is serving)"),
+            "type": "invalid_request_error",
+            "param": "model",
+            "code": "missing_model_field"}},
+        status=400,
+    )
+
+
 def _missing_form_model() -> web.Response:
     """400 for a multipart request that never says which model to route to.
 
@@ -1912,8 +1946,11 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     config: NodeConfig = request.app["config"]
     session: aiohttp.ClientSession = request.app["client_session"]
     collector: MetricsCollector = request.app["metrics_collector"]
-    # Extract the model name first — it drives BOTH routing and metrics.
-    model = config.model or "unknown"
+    # Extract the model name first: it drives BOTH routing and metrics. A request
+    # that names none falls back to this node's OWN model, and only when it serves
+    # one (see own_model).
+    default_model = own_model(request.app, config)
+    model = default_model or "unknown"
     body_bytes = None
     body_obj: dict = {}
     if request.method == "POST":
@@ -1938,9 +1975,15 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                 parsed = _json.loads(body_bytes)
                 if isinstance(parsed, dict):
                     body_obj = parsed
-                    model = parsed.get("model", model)
+                    named = parsed.get("model")
+                    if isinstance(named, str) and named.strip():
+                        model = named
             except Exception:
                 pass
+            if not isinstance(body_obj.get("model"), str) or not body_obj["model"].strip():
+                if not default_model:
+                    collector.record_request(model, 0.0, error=True)
+                    return _missing_json_model()
     # Tag the request so the server-view log middleware can capture the model
     try:
         request["_log_model"] = model

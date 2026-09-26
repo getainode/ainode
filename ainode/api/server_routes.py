@@ -584,16 +584,18 @@ async def handle_server_eject(request: web.Request) -> web.Response:
                 pass
             manager.remove(inst.record.instance_id)
             if request.app.get("engine") is inst.backend:
-                request.app["engine"] = None  # the primary went away
-                # routing-truth: the node must stop claiming a model it no longer
-                # serves, or the master keeps advertising a ghost.
+                # The primary went away. routing-truth: the node must stop
+                # claiming a model it no longer serves, or the master keeps
+                # advertising a ghost, and its launch parameters go with it.
+                request.app["engine"] = None
                 config = request.app.get("config")
-                if config is not None and getattr(config, "model", None) == model_id:
-                    config.model = None
+                if config is not None:
+                    from ainode.models.api_routes import release_primary
                     try:
-                        config.save()
+                        release_primary(request.app, config)
                     except Exception:
-                        pass
+                        logger.warning("eject: failed to persist the cleared primary",
+                                       exc_info=True)
             # Persist the shrunken instance set. Without this the eject was
             # memory-only: startup replay reads the manifest, so the ejected model
             # came BACK on the next reboot (spark-4, 2026-08-13 — an ejected 0.5B
