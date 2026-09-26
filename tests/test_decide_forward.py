@@ -37,6 +37,14 @@ def _jev_body(**over):
     return body
 
 
+@pytest.fixture(autouse=True)
+def _fresh_peer_cache():
+    """The fallback path reads PR 284's peer-table cache; no test may inherit one."""
+    decide._peer_temperatures.clear()
+    yield
+    decide._peer_temperatures.clear()
+
+
 @pytest_asyncio.fixture
 async def engine():
     fake = FakeEngine()
