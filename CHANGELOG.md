@@ -12,6 +12,18 @@ _Nothing yet._
 
 ---
 
+## [0.5.33] - 2026-09-26
+
+The owner answers: a decision request is answered by the node that serves the model, so its calibration and warm grammar apply wherever the request enters, and a slow resolver can no longer freeze a node, which is what stopped the master routing to its peers after the 0.5.32 roll.
+
+### Fixed
+- **A decision is answered by the node that owns the model, wherever the request enters** (#285). `/v1/decide` and `/v1/systemone` for a model the receiving node does not serve (the master, usually) are forwarded whole to the serving node's AINode over the fleet key, so the answer carries that node's temperatures and warm grammar instead of `calibration: {applied: false, temperatures: null}`. Replicas are tried in turn when one is down; a forwarded request is never forwarded again and does not count against the owner's rate limit; with no owner answering, the node calls the engines itself as before. A locally served model is unchanged.
+- **When the receiving node does have to call the engines itself, it tempers with the serving node's table** (#284). A node with no copy of the model fetches the table from the node it routes to over the fleet key (`GET /api/decide/calibration?model=<id>`, new) and caches it for five minutes.
+- **A slow resolver can no longer freeze a node** (#284). `/api/server/status` looked up this host's name on the event loop, so a node whose hostname is not in /etc/hosts, with a nameserver that does not answer, stopped serving every route for 20 s per poll. On 2026-09-26 that made the master's peers go stale, and it stopped routing to them. The lookup now runs in a thread, is cached for five minutes, and a request waits at most one second for it.
+- **A decision model kept across a restart on a stacked port warms its answer grammar again** (#284). Adoption skipped the #277 warm-up, so `/api/status` reported `warm: null` for it and the first real question paid the compile.
+
+---
+
 ## [0.5.32] - 2026-09-26
 
 Decisions use the model's own calibration: `/v1/decide` and `/v1/systemone` apply a decision adapter's fitted temperatures and say so in every answer, a decision model warms its answer grammar the moment it binds, the decision bench scores any model on the public Jevals sets with the boards' own formulas, and a master that serves no model is safe to run, which is the first step of moving the fleet's control plane to Atlas.
