@@ -260,3 +260,123 @@ async def test_systemone_refuses_an_unknown_calibration_with_a_422(calibrated):
     resp = await calibrated.post("/v1/systemone", json=_jev_body(calibration=1))
     assert resp.status == 422
     assert "'calibration'" in (await resp.json())["error"]["message"]
+
+
+# ------------------------------------------ the table from the node that serves it
+
+
+class FakePeer:
+    """An AINode web port that answers /api/decide/calibration and counts asks."""
+
+    def __init__(self, temps=TEMPS, status=200):
+        self.temps = temps
+        self.status = status
+        self.asked: list = []
+
+    def app(self):
+        from aiohttp import web
+        app = web.Application()
+        app.router.add_get("/api/decide/calibration", self.calibration)
+        return app
+
+    async def calibration(self, request):
+        from aiohttp import web
+        self.asked.append((request.query.get("model"),
+                           request.headers.get("Authorization", "")))
+        if self.status != 200:
+            return web.json_response({"error": "nope"}, status=self.status)
+        return web.json_response({"model": request.query.get("model"),
+                                  "temperatures": self.temps})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_peer_cache():
+    from ainode.api import decide
+    decide._peer_temperatures.clear()
+    yield
+    decide._peer_temperatures.clear()
+
+
+async def _routing_client(engine_port, peer_port, tmp_path):
+    """A node with NO copy of the model, routing to a peer that serves it."""
+    (tmp_path / "empty-store").mkdir()
+    app = _calibrated_app(engine_port, tmp_path / "empty-store")
+    app["config"].cluster_secret = "fleet-secret-for-tests"
+    for member in app["cluster_state"].members():
+        member.web_port = peer_port
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    return client
+
+
+@pytest_asyncio.fixture
+async def peer_server():
+    peer = FakePeer()
+    server = TestServer(peer.app())
+    await server.start_server()
+    try:
+        yield peer, server.port
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_routing_node_applies_the_serving_node_s_temperatures(engine_server,
+                                                                       peer_server,
+                                                                       tmp_path):
+    """Through the master, calibration was {applied: false, temperatures: null}
+    while the same call on the serving node was tempered (2026-09-26)."""
+    peer, peer_port = peer_server
+    client = await _routing_client(engine_server.port, peer_port, tmp_path)
+    try:
+        resp = await client.post("/v1/decide", json=_decide_body())
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["calibration"] == {"applied": True, "temperatures": TEMPS}
+
+        resp = await client.post("/v1/systemone", json=_jev_body())
+        assert resp.status == 200
+        assert (await resp.json())["calibration"] == {"applied": True,
+                                                      "temperatures": TEMPS}
+
+        resp = await client.post("/v1/decide", json=_decide_body(calibration="raw"))
+        assert (await resp.json())["calibration"] == {"applied": False,
+                                                      "temperatures": TEMPS}
+    finally:
+        await client.close()
+    assert len(peer.asked) == 1, "the table is cached, not asked for per request"
+    model, auth = peer.asked[0]
+    assert model == MODEL
+    assert auth.startswith("Bearer "), "asked with the fleet key"
+
+
+@pytest.mark.asyncio
+async def test_a_peer_without_the_route_leaves_the_answer_raw(engine_server, tmp_path):
+    peer = FakePeer(status=404)  # a peer on a release before this route
+    server = TestServer(peer.app())
+    await server.start_server()
+    client = await _routing_client(engine_server.port, server.port, tmp_path)
+    try:
+        for _ in range(2):
+            resp = await client.post("/v1/decide", json=_decide_body())
+            assert resp.status == 200
+            assert (await resp.json())["calibration"] == {"applied": False,
+                                                          "temperatures": None}
+    finally:
+        await client.close()
+        await server.close()
+    assert len(peer.asked) == 1, "a peer that did not answer is not asked every time"
+
+
+@pytest.mark.asyncio
+async def test_the_node_that_holds_the_model_serves_its_table(calibrated):
+    resp = await calibrated.get("/api/decide/calibration", params={"model": MODEL})
+    assert resp.status == 200
+    assert await resp.json() == {"model": MODEL, "temperatures": TEMPS}
+
+    resp = await calibrated.get("/api/decide/calibration",
+                                params={"model": "org/not-here"})
+    assert (await resp.json())["temperatures"] is None
+
+    resp = await calibrated.get("/api/decide/calibration")
+    assert resp.status == 400

@@ -1320,6 +1320,33 @@ def _schedule_decision_warmup(app, port: int, backend) -> None:
         logger.exception("could not schedule the decision warm-up on :%s", port)
 
 
+def _warm_adopted_stacked(app, config, adopted) -> None:
+    """Warm every adopted STACKED instance, the way a bind warms a launched one.
+
+    An adopted engine never goes through the bind wait (it is already serving,
+    and the wait would write the container's whole life into the launch ledger),
+    so the #277 hook there never saw it. The boot primary is warmed in
+    ``_await_primary_bind``; a stacked decision model kept across a restart was
+    left with no warm flag at all and reported ``warm: null`` on /api/status
+    (Spark-4, 2026-09-26, both jebadiah adapters). The primary's port is skipped
+    here so it is not warmed twice. A non-decision model is a no-op inside
+    ``schedule_decision_warmup``.
+    """
+    primary_port = int(getattr(config, "api_port", 8000) or 8000)
+    manager = app.get("instances")
+    for record in adopted or []:
+        port = getattr(record, "api_port", None)
+        if not port or int(port) == primary_port:
+            continue
+        # One still starting will bind later; a warm-up now would only fail.
+        if getattr(record, "status", "serving") != "serving":
+            continue
+        inst = manager.by_port(int(port)) if manager is not None else None
+        if inst is None:
+            continue
+        _schedule_decision_warmup(app, int(port), inst.backend)
+
+
 async def _bind_wait(app, port: int, backend, timeout: float = 300.0,
                      loading: int = 1):
     """The wait itself. The contract, the signals and the verdicts are documented
@@ -1772,6 +1799,7 @@ async def replay_instances_on_startup(app) -> None:
         adopted = await adopt_running_engines(app)
         if adopted:
             logger.info("adopted %d running engine container(s) on startup", len(adopted))
+            _warm_adopted_stacked(app, config, adopted)
     except Exception:
         logger.exception("engine adoption failed; continuing with the replay")
 

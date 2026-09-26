@@ -189,3 +189,39 @@ async def test_status_reports_warm_per_instance(tmp_path):
         rows = {row["api_port"]: row
                 for row in (await (await client.get("/api/status")).json())["instances"]}
         assert rows[8001]["warm"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_stacked_decision_model_is_warmed(fake, tmp_path):
+    """A stacked engine kept across a restart never binds, so the hook there never
+    saw it and /api/status reported warm: null (Spark-4, 2026-09-26)."""
+    engine, port = fake
+    _decision_store(tmp_path)
+    manager = InstanceManager(base_port=8000)
+    record = InstanceRecord(instance_id="n1:judge", model=MODEL, api_port=port,
+                            status="serving", adopted=True)
+    manager.add(record, _backend(tmp_path))
+    app = {"decision_warm": {}, "client_session": None, "instances": manager}
+    api_routes._warm_adopted_stacked(app, NodeConfig(api_port=8000), [record])
+    assert app["decision_warm"][port]["warming"] is True
+    await _drain()
+    assert app["decision_warm"][port]["warm"] is True
+    assert len(engine.seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_adoption_does_not_warm_the_primary_port_or_a_starting_engine(fake, tmp_path):
+    engine, port = fake
+    _decision_store(tmp_path)
+    manager = InstanceManager(base_port=port)
+    primary = InstanceRecord(instance_id="n1:primary", model=MODEL, api_port=port,
+                             status="serving", adopted=True)
+    starting = InstanceRecord(instance_id="n1:late", model=MODEL, api_port=port + 1,
+                              status="starting", adopted=True)
+    manager.add(primary, _backend(tmp_path))
+    manager.add(starting, _backend(tmp_path))
+    app = {"decision_warm": {}, "client_session": None, "instances": manager}
+    # The primary is warmed by _await_primary_bind; warming it here would do it twice.
+    api_routes._warm_adopted_stacked(app, NodeConfig(api_port=port), [primary, starting])
+    assert app["decision_warm"] == {}
+    assert engine.seen == []
