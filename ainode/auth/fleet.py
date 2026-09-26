@@ -59,6 +59,12 @@ FLEET_KEY_LABEL = b"ainode-fleet-key-v1"
 #: dashboard: revoking the fleet's access to a node means changing that node's
 #: ``cluster_secret``, which is the same act as removing it from the cluster.
 FLEET_KEY_ID = "fleet"
+#: Set by a node that hands a decision request (/v1/decide, /v1/systemone) to the
+#: node that owns the model. The owner answers it itself and never forwards it
+#: again, and its rate limiter does not count it: the node the caller reached has
+#: already counted the caller, and every forwarded request arrives under the one
+#: fleet key, so counting them here would make the whole fleet one client.
+FORWARDED_BY_HEADER = "X-AINode-Forwarded-By"
 
 
 def fleet_key(secret: Optional[str]) -> str:

@@ -72,6 +72,7 @@ from ainode.api.decide import (
     DecideError,
     calibration_mode,
     candidates_for,
+    forward_to_owner,
     merge_usage,
     normalize_questions,
     resolve_model,
@@ -484,6 +485,11 @@ async def handle_systemone(request: web.Request) -> web.Response:
     candidates = candidates_for(request, model)
     if not candidates:
         return unavailable(f"no node is serving '{model}'")
+
+    # A model another node serves is answered by that node, calibration and all.
+    forwarded = await forward_to_owner(request, dict(body, model=model), candidates)
+    if forwarded is not None:
+        return forwarded
 
     # No shared instructions block: in this format a question's own instructions
     # are the whole prompt for it, and the questions of one ask still never see

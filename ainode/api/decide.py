@@ -682,6 +682,103 @@ def candidates_for(request: web.Request, model: str) -> list:
     return candidates
 
 
+# ------------------------------------------------------- the owner answers
+#
+# A decision model's temperatures.json and its warm state live on the node that
+# serves it. When a request enters on a node that does not serve the model (the
+# master, above all, which is the endpoint clients use), that node used to call
+# the remote ENGINE itself, so the answer came back raw with
+# ``calibration: {applied: false, temperatures: null}`` while the same request
+# sent to the owner was tempered (2026-09-26, jebadiah-9b-v2 through Spark-1).
+# Now the whole request goes to the owner's AINode, on the same route and under
+# the fleet key, and the owner answers it exactly as if the caller had come
+# straight to it. A request served locally takes the local path, unchanged.
+
+#: How long one owner has to answer a forwarded decision: its own engine limit,
+#: plus room for the hop.
+FORWARD_TIMEOUT_S = CALL_TIMEOUT_S + 30.0
+
+
+def owner_web_ports(app, candidates: list) -> list[tuple[str, int]]:
+    """``(host, web_port)`` of each remote node in *candidates*, in routing order.
+
+    A candidate is an engine ``(fabric_ip, api_port)``, and a node with two
+    replicas stacked on it appears once. The web port is the one the node
+    announces, which is not always 3000 (Atlas serves on 3100).
+    """
+    cluster = app.get("cluster_state")
+    by_host: dict = {}
+    for member in (cluster.members() if cluster is not None else []):
+        host = getattr(member, "fabric_ip", "") or ""
+        if host and host not in by_host:
+            by_host[host] = member
+    owners: list[tuple[str, int]] = []
+    for host, _port in candidates:
+        if host == "localhost":  # _routing_candidates' name for this node
+            continue
+        member = by_host.get(host)
+        if member is None:
+            continue
+        owner = (host, int(getattr(member, "web_port", 3000) or 3000))
+        if owner not in owners:
+            owners.append(owner)
+    return owners
+
+
+async def forward_to_owner(request: web.Request, body: dict,
+                           candidates: list) -> Optional[web.Response]:
+    """Hand the request to the node that serves the model, and return its answer.
+
+    None means "answer here": the model is served on this node (the local path
+    is unchanged), the request was itself forwarded (it is never forwarded
+    twice), no owner can be named, or no owner answered, in which case the old
+    path calls the engines directly and the answer is raw rather than missing.
+
+    Owners are tried in routing order. A transport failure, a timeout, a 5xx
+    (including an owner whose engine is down), or a 401/403/404 (a key it does
+    not share, or a release without the route) moves on to the next replica.
+    Any other status is the owner's own answer, a 4xx naming a field included,
+    and is returned as it came.
+    """
+    from ainode.auth.fleet import FORWARDED_BY_HEADER, fleet_headers
+    if request.headers.get(FORWARDED_BY_HEADER):
+        return None
+    if any(host == "localhost" for host, _ in candidates):
+        return None
+    app = request.app
+    owners = owner_web_ports(app, candidates)
+    session = app.get("client_session")
+    if not owners or session is None:
+        return None
+    config = app.get("config")
+    headers = fleet_headers(app, {
+        "Content-Type": "application/json",
+        FORWARDED_BY_HEADER: str(getattr(config, "node_id", "") or "peer"),
+    })
+    timeout = aiohttp.ClientTimeout(total=FORWARD_TIMEOUT_S,
+                                    sock_connect=CONNECT_TIMEOUT_S)
+    payload = json.dumps(body).encode()
+    tried: list[str] = []
+    for host, web_port in owners:
+        url = f"http://{host}:{web_port}{request.path}"
+        try:
+            async with session.post(url, data=payload, headers=headers,
+                                    timeout=timeout) as resp:
+                answer = await resp.read()
+                if resp.status >= 500 or resp.status in (401, 403, 404):
+                    tried.append(f"{host}:{web_port} {resp.status}")
+                    continue
+                return web.Response(status=resp.status, body=answer,
+                                    content_type="application/json")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            tried.append(f"{host}:{web_port} {type(exc).__name__}")
+    logger.warning("no owner of %s answered %s (%s); calling the engines directly",
+                   body.get("model"), request.path, "; ".join(tried))
+    return None
+
+
 async def ask_one(session: aiohttp.ClientSession, candidates: list, body: dict,
                   timeout_s: float = CALL_TIMEOUT_S) -> tuple:
     """One question, with the proxy's failover. Returns (payload, cand, latency_ms).
@@ -1000,6 +1097,11 @@ async def handle_decide(request: web.Request) -> web.Response:
     candidates = candidates_for(request, model)
     if not candidates:
         return unavailable(f"no node is serving '{model}'")
+
+    # A model another node serves is answered by that node, calibration and all.
+    forwarded = await forward_to_owner(request, dict(body, model=model), candidates)
+    if forwarded is not None:
+        return forwarded
 
     run = await run_questions(request, model, questions, state, instructions,
                               candidates, calibration)
