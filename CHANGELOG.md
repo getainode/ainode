@@ -12,6 +12,26 @@ _Nothing yet._
 
 ---
 
+## [0.5.32] - 2026-09-26
+
+Decisions use the model's own calibration: `/v1/decide` and `/v1/systemone` apply a decision adapter's fitted temperatures and say so in every answer, a decision model warms its answer grammar the moment it binds, the decision bench scores any model on the public Jevals sets with the boards' own formulas, and a master that serves no model is safe to run, which is the first step of moving the fleet's control plane to Atlas.
+
+### Added
+- **`/v1/decide` and `/v1/systemone` apply a decision adapter's own temperatures** (#276, #281). When the served model's directory carries `temperatures.json`, each question's label logprobs are divided by the temperature fitted for its kind (`choice`, `noul`, `score`) before the softmax. Both responses report `calibration: {applied, temperatures}`, and `"calibration": "raw"` returns the engine's own spread.
+- **A decision model warms its answer grammar as soon as its engine binds** (#277, #281). One small constrained question per kind is sent in the background, with each compile time logged. `/api/status` gains `instances[]` with `warm` and `warm_compile_seconds` per instance.
+- **The decision bench scores models on the public question sets the independent Jevals boards use, with the boards' own formulas** (#272), so an AINode-served model can be compared with Jev and its clones on one recipe. `ainode-bench decide --suite all --transport decide|systemone` runs PubMedQA (`noul`, 300), Banking77 (`choice`, 300, K=77), HelpSteer2 helpfulness (`score`, 300) and `LocalLLaMA/typed-decisions` (mixed, 2000 decisions over 400 cases) at 5 repeats per question, against either AINode's own `POST /v1/decide` or any endpoint speaking the Jev `POST /v1/systemone` wire format. Per set it reports the Decision Score against the label prior (100 perfect, 0 the base rates, negative worse), accuracy with its guessing floor, the calibration gap in points over ten bins with the reliability table behind it, the hand-off share at 95 percent, the published gate with this run's coverage, pick flips and confidence swing across the repeats, p50 and p95 latency, questions per second, malformed answers, and cost when a price is given. `--questions <file>` scores any question file in the same shape, so a private blind set never has to be committed. The recipe, the date each source page was read and every deviation from it are in `bench/decide/JEVALS.md`; the sets are `bench/decide/sets/` and `ainode-bench decide download` fetches the item text, which is not committed, and verifies every state against its published hash.
+
+### Changed
+- **A decision request that meets a cold grammar compile gets a 503 saying so, and has longer to finish** (#281). The engine-call limit is 300 s, up from 180, and a call that times out after connecting reads "the engine is compiling the answer grammar, retry" instead of "unreachable".
+- **`ainode doctor` passes on a node that loads no model** (#282). "No model loaded" is INFO, and docker and engine-backend findings are INFO on such a node, so a routing-only node whose GPU belongs to something else no longer fails. A node that pins a model still fails exactly as before.
+
+### Fixed
+- **A request with no `model` on a node that serves no model of its own gets a 400 `missing_model_field` naming the field** (#282), instead of being routed to a model the node does not serve. Nodes that serve a primary keep their default.
+- **Unloading or ejecting a node's primary no longer promotes another instance** (#282), for example Whisper, into `config.model` with the old primary's engine parameters. The primary slot and its overrides are cleared, and stacked instances stay on their own ports.
+- **An empty account list is never replicated** (#282). The master's push, a worker's pull, the CLI push and `/api/auth/users/sync` (409 `empty_account_list`) all refuse it and log how to fix the store, so a master with an empty `users.json` can no longer sign every dashboard user out of the fleet.
+
+---
+
 ## [0.5.31] - 2026-09-21
 
 AINode gets a front door: a person signs in to the dashboard with a name and a password and stays signed in until they sign out, while programs keep using API keys; accounts live on the master and replicate to every node, sessions stay per node, admins manage users from the dashboard or the box, the doctor checks for an account, any client written for TypeSafe's Jev can point at a node through /v1/systemone, and the bench can present a key and no longer scores a refused run as a model that could not answer.
@@ -38,7 +58,6 @@ AINode gets a front door: a person signs in to the dashboard with a name and a p
 
 ### Fixed
 - **The host wrapper the installer writes asks for a TTY only when it has one.** It ran every forwarded command with `docker exec -it`, so any piped input (now including `ainode auth user add --password-stdin`) died on "the input device is not a TTY" before the CLI in the container ran.
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
 ---
 
@@ -195,7 +214,6 @@ AINode grows up: a fresh install is protected by default and a fleet can run wit
   source address.** It read `n.host`, which `ClusterNode` does not have, so one such
   peer took the whole handler down with an `AttributeError` instead of updating the
   fleet. It uses the one derivation of a peer's reachable address.
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 - **A restart no longer reloads a model the node is already serving.** Engine
   containers outlive the orchestrator, but `ainode start` freed every one of them
   before the boot engine relaunched `config.model`, and the orchestrator stopped its
@@ -394,7 +412,6 @@ The announcement grew one field (`gpu_count`) and made four existing telemetry f
   with `--mount type=bind`, so the service fails at container start when it is missing, and
   the path is where downloaded weights are staged. The same message also printed literal
   `\n` characters instead of line breaks, because `die()` prints through `printf`'s `%s`.
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 - **Every launch and unload button does what it says.** A round of UI-truth fixes, all of them the same failure: a control that reported success for something it had not done.
   - **The Models view no longer offers a second, broken way to launch across the cluster.** "Shard Across Cluster" drew a sharding plan and its "Launch Sharded" button then posted the model id alone, so `min_nodes` stayed 1 and `/api/sharding/launch` fell straight through to a plain solo load on the local node, of a model the card only offered while it was NOT downloaded, and toasted "Sharded model launching" ([#188](https://github.com/getainode/ainode/issues/188)). The plan behind it was invented as well: `ShardingPlanner` sizes a model as params x 2 bytes from a Llama-3.x-era name table (an NVFP4 27B came out as 54 GB, a name it cannot parse as a flat 14 GB) and derived the "Layers 0-39" range as `size_gb / 2`, and none of the four CSS classes the preview emitted had a rule, so it rendered unstyled. Both are gone, along with the `GET /api/sharding/plan` route that served the preview and the `active_sharding` field that was declared, read and never assigned. A card for a model that needs more than one node now points at the right-panel LAUNCH INSTANCE, which posts the picked `node_ids` and genuinely launches TP = node count.
   - **The model-detail modal's "Launch Model" launches.** It posted `/api/engine/set-model`, which stops whatever `app["engine"]` is serving (including stacked instances it has no accounting of) and, with no engine object at all, saves the config and starts nothing while still answering `{"status": "restarting"}`. The UI toasted "engine restarting" for all three outcomes ([#189](https://github.com/getainode/ainode/issues/189)). It now goes through the same one call the right-hand LAUNCH panel uses (`POST /api/cluster/load`, InstanceManager-aware, stacks instead of replacing), on a node the modal lets you pick, and the toast says what the handler actually started. `/api/engine/set-model` is documented as the destructive boot-config route it is, and nothing in the UI calls it.
