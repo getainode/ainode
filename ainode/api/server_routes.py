@@ -10,6 +10,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 import time
@@ -125,18 +126,76 @@ async def request_log_middleware(request: web.Request, handler):
 # Helpers
 # ------------------------------------------------------------------
 
-def _reachable_urls(host: str, port: int) -> list[str]:
+#: How long a looked-up address list is reused. The answer only changes when an
+#: interface does, and a lookup is the one part of the Server view that can hang.
+HOST_ADDRS_TTL_SECONDS = 300.0
+#: How long a request waits on a lookup before answering without it.
+HOST_ADDRS_WAIT_SECONDS = 1.0
+
+# (expires_at, addresses) of the last finished lookup, and the lookup in flight.
+_host_addrs_cache: Optional[tuple[float, list[str]]] = None
+_host_addrs_pending: Optional[asyncio.Future] = None
+
+
+def _lookup_host_addrs() -> list[str]:
+    """This host's IPv4 addresses by name. BLOCKING: resolver time, unbounded."""
+    try:
+        _, _, addrs = socket.gethostbyname_ex(socket.gethostname())
+        return list(addrs)
+    except Exception:
+        return []
+
+
+async def _host_addrs() -> list[str]:
+    """This host's addresses, without ever holding the event loop on DNS.
+
+    ``gethostbyname_ex`` goes through the resolver when the hostname is not in
+    /etc/hosts, and a resolver with a dead nameserver takes 10 to 20 s to give
+    up. Run on the loop, that froze every request on the node for that long, on
+    every poll of /api/server/status: on 2026-09-26 the master's heartbeats went
+    stale and it stopped routing to its peers. The lookup now runs in a thread,
+    one at a time, and its answer is kept for HOST_ADDRS_TTL_SECONDS. A request
+    waits at most HOST_ADDRS_WAIT_SECONDS and otherwise answers with the last
+    known list (empty the first time); a slow lookup still fills the cache when
+    it finishes.
+    """
+    global _host_addrs_cache, _host_addrs_pending
+    now = time.monotonic()
+    cached = _host_addrs_cache
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    stale = cached[1] if cached is not None else []
+
+    if _host_addrs_pending is None or _host_addrs_pending.done():
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, _lookup_host_addrs)
+
+        def _store(fut: asyncio.Future) -> None:
+            global _host_addrs_cache, _host_addrs_pending
+            try:
+                addrs = fut.result()
+            except Exception:
+                addrs = []
+            _host_addrs_cache = (time.monotonic() + HOST_ADDRS_TTL_SECONDS, addrs)
+            _host_addrs_pending = None
+
+        future.add_done_callback(_store)
+        _host_addrs_pending = future
+
+    try:
+        return list(await asyncio.wait_for(asyncio.shield(_host_addrs_pending),
+                                           timeout=HOST_ADDRS_WAIT_SECONDS))
+    except Exception:
+        return stale
+
+
+async def _reachable_urls(host: str, port: int) -> list[str]:
     """Return a list of URLs this server can be reached at."""
     urls: list[str] = [f"http://localhost:{port}"]
-    try:
-        hostname = socket.gethostname()
-        _, _, addrs = socket.gethostbyname_ex(hostname)
-        for addr in addrs:
-            url = f"http://{addr}:{port}"
-            if url not in urls:
-                urls.append(url)
-    except Exception:
-        pass
+    for addr in await _host_addrs():
+        url = f"http://{addr}:{port}"
+        if url not in urls:
+            urls.append(url)
     # Also include the configured bind host if it is a specific IP
     if host and host not in ("0.0.0.0", "127.0.0.1", "localhost"):
         url = f"http://{host}:{port}"
@@ -516,7 +575,7 @@ async def handle_server_status(request: web.Request) -> web.Response:
         "status": status,
         "host": host,
         "port": web_port,
-        "reachable_at": _reachable_urls(host, web_port),
+        "reachable_at": await _reachable_urls(host, web_port),
         "uptime_seconds": uptime,
         "loaded_models": loaded_models,
         "models_ready": ready,
