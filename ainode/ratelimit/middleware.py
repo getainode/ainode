@@ -278,6 +278,19 @@ def client_key(request) -> str:
     return f"ip:{remote or 'unknown'}"
 
 
+def is_forwarded_by_fleet(request) -> bool:
+    """A decision request another node forwarded here under the fleet key.
+
+    Only the fleet key stamps ``api_key_id == "fleet"``, so a client cannot claim
+    the exemption by sending the header. See ``auth/fleet.py::FORWARDED_BY_HEADER``.
+    """
+    from ainode.auth.fleet import FLEET_KEY_ID, FORWARDED_BY_HEADER
+    getter = getattr(request, "get", None)
+    key_id = getter("api_key_id", "") if callable(getter) else ""
+    headers = getattr(request, "headers", None) or {}
+    return key_id == FLEET_KEY_ID and bool(headers.get(FORWARDED_BY_HEADER))
+
+
 def too_many_requests(decision: Decision, config: RateLimitConfig) -> web.Response:
     """The 429: a Retry-After header and a body that names the limit."""
     if decision.limit == "max_inflight":
@@ -318,6 +331,8 @@ async def rate_limit_middleware(request: web.Request, handler):
     """
     limiter: Optional[RateLimiter] = request.app.get("rate_limiter")
     if limiter is None or not limiter.enabled or not is_limited_path(request.path):
+        return await handler(request)
+    if is_forwarded_by_fleet(request):
         return await handler(request)
     key = client_key(request)
     decision = limiter.admit(key)
