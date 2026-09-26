@@ -706,6 +706,11 @@ async def handle_sync_users(request: web.Request) -> web.Response:
     untouched, because a half-adopted list is a node whose logins quietly differ
     from the rest of the cluster. ``changed`` is false for a list this node
     already has, which is what makes a replication pass cheap to repeat.
+
+    An EMPTY list is refused with a 409 and this node keeps its accounts. The
+    import replaces the whole list, so an empty push is a fleet-wide logout, and
+    the sender that makes one is a master whose own store is empty (promoted
+    before users.json reached it), or a release from before it refused to.
     """
     refused = fleet_only_refusal(request)
     if refused is not None:
@@ -715,6 +720,12 @@ async def handle_sync_users(request: web.Request) -> web.Response:
     body = await _body(request)
     if "users" not in body:
         return _error("Send a 'users' list.", "invalid_request", 400)
+    if isinstance(body.get("users"), list) and not body["users"]:
+        logger.warning("refused an empty account list from a peer; this node keeps "
+                       "its %d account(s)", len(store.users))
+        return _error("Refusing an empty account list: it would delete every account "
+                      "on this node. The sender's account store is empty; copy "
+                      "users.json to it first.", "empty_account_list", 409)
     try:
         changed = store.import_users(body.get("users"))
     except ValueError as exc:

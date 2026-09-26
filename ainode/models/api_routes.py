@@ -793,6 +793,31 @@ def _persist_primary_overrides(config, gmu, overrides) -> None:
         setattr(config, k, v)
 
 
+def release_primary(app, config) -> None:
+    """The node's primary is gone: clear the slot and its launch parameters.
+
+    The primary is the instance on the node's OWN api_port, the one config.json
+    boots. When it goes, nothing is promoted into its place. Promoting a survivor
+    was the old behaviour, and on Spark-4 it made Whisper, a stacked instance on
+    :8001, the node's ``config.model`` while config.json still carried the previous
+    primary's gpu_memory_utilization, image and vLLM flags: the node advertised
+    Whisper on :8000, where nothing served it, and the next boot would have
+    launched Whisper on :8000 with another model's engine parameters beside the
+    manifest's own copy on :8001. A survivor stays exactly what it was, a stacked
+    instance on its own port, replayed from the manifest.
+
+    So ``app["engine"]`` and ``config.model`` go to None, every per-load override
+    goes back to its NodeConfig default (the same reset a bare load applies), and
+    a head flips back to solo. Saves the config; raises what ``save`` raises.
+    """
+    app["engine"] = None
+    config.model = None
+    _persist_primary_overrides(config, None, None)
+    if getattr(config, "distributed_mode", "") == "head":
+        config.distributed_mode = "solo"
+    config.save()
+
+
 def _will_own_primary_port(manager, config, existing) -> bool:
     """Will this load end up on the node's OWN api_port, i.e. be the primary?
 
@@ -2149,21 +2174,12 @@ async def handle_model_unload(request: web.Request) -> web.Response:
             except Exception as exc:
                 errors.append(f"instance.stop(): {exc}")
             manager.remove(inst.record.instance_id)
-            # If the primary went away, repoint app["engine"]/config to a survivor
-            # so the status/proxy back-compat path doesn't dangle on a dead backend.
+            # If the primary went away, the node HAS no primary until a load takes
+            # the primary port again: see release_primary for why no survivor is
+            # promoted into its place.
             if request.app.get("engine") is inst.backend:
-                survivors = manager.instances()
-                if survivors:
-                    keep = survivors[0]
-                    request.app["engine"] = keep.backend
-                    config.model = keep.record.model
-                else:
-                    request.app["engine"] = None
-                    config.model = None
-                    if getattr(config, "distributed_mode", "") == "head":
-                        config.distributed_mode = "solo"
                 try:
-                    config.save()
+                    release_primary(request.app, config)
                 except Exception as exc:
                     errors.append(f"config.save: {exc}")
             # Persist the reduced set so a restart doesn't resurrect the unloaded one.

@@ -24,6 +24,13 @@ the only thing that moves them:
   credential it never issued, and revoking a session would have to be a fan-out
   to be true. ``ainode auth session ...`` is therefore a per-node command, and
   that is the honest shape rather than a limitation.
+* **An EMPTY account list never crosses the wire, in either direction.** The
+  receiving end REPLACES its list with what it is sent (``import_users``), so a
+  master whose ``users.json`` is missing or empty (a new master that was promoted
+  before its store was copied over) would log every dashboard user out of the
+  whole fleet on its first push. The master refuses to push it, a worker refuses
+  to pull it, and ``/api/auth/users/sync`` refuses to take it, each with a log
+  line naming the fix. Removing the last account is therefore a per-node act.
 * **A node with no ``cluster_secret``, or with nobody to talk to, does nothing.**
   The fleet key is derived from that secret (``ainode/auth/fleet.py``), so a node
   without one cannot authenticate to a peer and must not pretend to: it keeps the
@@ -75,6 +82,12 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 #: ask the master for its current stamp and compare two values of the same kind.
 #: No hashes and no passwords go in here, so it is not a credential file.
 SYNC_STATE_NAME = "users-sync.json"
+
+#: Why an empty list is not replicated. One sentence, shared by the master's push,
+#: the worker's pull and the CLI, so the three log lines read the same.
+EMPTY_LIST_REASON = "empty account store"
+EMPTY_LIST_FIX = ("copy users.json from a node that has the accounts (or add one "
+                  "with `ainode auth user add`) before this node replicates")
 
 #: The fallback minimum password length, used only when the account store does not
 #: publish one of its own. The store is the authority and refuses a short password
@@ -440,6 +453,7 @@ class AccountReplicator:
         self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._master_unreachable_logged = False
+        self._empty_list_logged = False
         self._next_pull = 0.0
 
     # -- state ------------------------------------------------------------
@@ -482,6 +496,15 @@ class AccountReplicator:
         except Exception:
             logger.exception("could not export this node's accounts")
             return {"pushed": [], "failed": [], "reason": "export failed"}
+
+        if not users:
+            # import_users on the far side REPLACES its list, so this push would
+            # delete every account on every worker. Refuse, and say so once: the
+            # retry timer wakes this every 60 seconds.
+            self._refuse_empty("this master holds no accounts; not pushing an "
+                               "empty list to the workers")
+            return {"pushed": [], "failed": [], "reason": EMPTY_LIST_REASON}
+        self._empty_list_logged = False
 
         stamp = users_stamp(users)
         targets = peer_targets(self.app)
@@ -568,6 +591,13 @@ class AccountReplicator:
             return self._master_unreachable(base, "answered a body with no user list")
 
         users = body["users"]
+        if not users:
+            # A master with an empty store (a new one promoted before users.json
+            # was copied to it) must not log everybody out of this node too.
+            self._refuse_empty(f"the master at {base} answered an empty account "
+                               f"list; keeping this node's accounts")
+            return {"imported": False, "reason": EMPTY_LIST_REASON, "master": base}
+        self._empty_list_logged = False
         try:
             changed = bool(store.import_users(users))
         except Exception:
@@ -582,6 +612,14 @@ class AccountReplicator:
                         base, len(users))
         return {"imported": True, "changed": changed, "count": len(users),
                 "stamp": stamp, "master": base}
+
+    def _refuse_empty(self, what: str) -> None:
+        """Log a refused empty list: a WARNING the first time, debug after."""
+        if not self._empty_list_logged:
+            self._empty_list_logged = True
+            logger.warning("account replication refused: %s. %s", what, EMPTY_LIST_FIX)
+        else:
+            logger.debug("account replication still refused: %s", what)
 
     def _master_unreachable(self, base: str, reason: str) -> dict:
         if not self._master_unreachable_logged:
@@ -837,6 +875,14 @@ def replicate_from_cli(config, users: list, info: Optional[dict] = None) -> dict
     tick, which is the mechanism that actually guarantees delivery.
     """
     targets = peer_targets_from_info(info, config) or peer_targets_from_config(config)
+    if not users:
+        # The same refusal as the server's own push: the peers would REPLACE
+        # their lists with nothing.
+        logger.warning("account replication refused: no accounts to push. %s",
+                       EMPTY_LIST_FIX)
+        return {"pushed": [], "failed": [], "peers": len(targets),
+                "reason": (f"{EMPTY_LIST_REASON}; the peers keep their accounts "
+                           f"(remove the last account on each node by hand)")}
     headers = fleet_key_headers(getattr(config, "cluster_secret", ""))
     if not headers:
         return {"pushed": [], "failed": [], "peers": len(targets),

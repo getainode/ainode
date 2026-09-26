@@ -19,6 +19,11 @@ Shape, so this stays testable and stays honest:
   :func:`udp_listeners`, :func:`http_json`, :func:`latest_image_tag`,
   :func:`probe_gpus`, :func:`running_in_container`, :func:`host_service_state`).
   Tests monkeypatch the seam, not the check.
+* A node that loads no model under AINode (a routing-only master, a bare-metal
+  box whose GPU belongs to something else) passes. "No model loaded" is an INFO,
+  and the checks that only matter to an engine launch (docker, the engine
+  backend and its image) are INFO there too, with the reason on the line, because
+  nothing on that node will ever launch one until a model is loaded.
 * A check that needs something only the HOST can see says so as an INFO naming
   the host command, rather than a WARN. The documented deployment runs this
   inside the container, so a WARN about the absence of systemd in there was a
@@ -574,13 +579,60 @@ def check_cluster_id(config: NodeConfig, peers_seen: int = 0) -> list[Check]:
     return [Check("config.cluster_id", OK, cluster_id, data=data)]
 
 
+#: The launch state a node keeps under AINODE_HOME: the stacked instances replayed
+#: at boot (``models/api_routes.py::_manifest_path``) and the distributed shape
+#: (``engine/reconcile.py::RECORD_FILENAME``).
+INSTANCE_MANIFEST_NAME = "instances.json"
+DISTRIBUTED_RECORD_NAME = "distributed.json"
+
+#: Appended to an engine-only check on a node that loads no model.
+NO_MODEL_NOTE = ("no model is loaded under AINode on this node, so this only "
+                 "matters once one is")
+
+
+def engine_expected(config: NodeConfig, home) -> bool:
+    """Will anything on this node launch an engine container?
+
+    True when a primary is pinned (``config.model``), when stacked instances are
+    recorded to replay at boot, or when a distributed shape is recorded. False is
+    a node that serves nothing under AINode: a routing-only master, or a
+    bare-metal box whose GPU is used by something else.
+    """
+    if (getattr(config, "model", "") or "").strip():
+        return True
+    home = Path(home)
+    try:
+        manifest = json.loads((home / INSTANCE_MANIFEST_NAME).read_text())
+        if isinstance(manifest, dict) and manifest.get("instances"):
+            return True
+    except (OSError, ValueError):
+        pass
+    return _exists(home / DISTRIBUTED_RECORD_NAME)
+
+
+def as_no_model_info(checks: list[Check]) -> list[Check]:
+    """Engine-only checks on a node that loads no model: a finding becomes INFO.
+
+    The fact is still printed, with the fix, so an operator about to load a model
+    knows what to sort out first; it just is not a reason for this node to fail.
+    """
+    for check in checks:
+        if check.status in (WARN, FAIL):
+            check.data = dict(check.data, status_with_a_model=check.status,
+                              engine_expected=False)
+            check.status = INFO
+            check.detail = f"{check.detail}; {NO_MODEL_NOTE}"
+    return checks
+
+
 def check_model(config: NodeConfig) -> list[Check]:
     model = (getattr(config, "model", "") or "").strip()
     models_dir = getattr(config, "models_dir", "") or ""
     data = {"model": model or None, "models_dir": models_dir}
     if not model:
-        return [Check("config.model", OK,
-                      "no model pinned, so nothing loads at boot", data=data)]
+        return [Check("config.model", INFO,
+                      "no model loaded under AINode: none is pinned, so nothing "
+                      "loads at boot", data=data)]
     found = model_dir_on_disk(models_dir, model)
     if found is not None:
         return [Check("config.model", OK, f"{model} is on disk at {found}",
@@ -928,7 +980,7 @@ def check_ports(config: NodeConfig, udp_bound: Optional[set[int]] = None) -> lis
                             fix="launch the model from the dashboard, or watch ainode logs -f",
                             data={"port": api_port, "listening": False, "model": model}))
     else:
-        checks.append(Check("port.engine", OK,
+        checks.append(Check("port.engine", INFO,
                             f"{api_port} is free and no model is pinned, which is the "
                             f"idle shape",
                             data={"port": api_port, "listening": False}))
@@ -1609,9 +1661,15 @@ def run_checks(home=None, config_path=None) -> list[Check]:
     docker_checks = check_docker(_engine_image_for(config))
     docker_ok = bool(docker_checks[0].data.get("reachable"))
     image_present = docker_checks[0].data.get("image_present")
+    backend_checks = check_engine_backend(config, config_path, docker_ok, image_present,
+                                          in_container=inside)
+    # Docker, the backend and its image are how an engine is LAUNCHED. A node
+    # that loads no model launches nothing, so they must not fail it.
+    if not engine_expected(config, home):
+        as_no_model_info(docker_checks)
+        as_no_model_info(backend_checks)
 
-    checks += check_engine_backend(config, config_path, docker_ok, image_present,
-                                   in_container=inside)
+    checks += backend_checks
     checks += check_gpu_memory_utilization(config)
     checks += check_discovery_port(config)
     checks += check_model(config)

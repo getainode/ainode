@@ -953,6 +953,29 @@ class TestReplicationRoutes:
         assert client.app["users_store"].export_users() == before
 
     @pytest.mark.asyncio
+    async def test_an_empty_sync_is_refused_and_the_node_keeps_its_accounts(
+            self, protected):
+        """import_users REPLACES the list, so an empty push is a fleet-wide logout.
+
+        The sender is a master whose own store is empty (promoted before users.json
+        reached it), or an older release that still pushes one.
+        """
+        client, _ = protected
+        headers = {"Authorization": f"Bearer {fleet_key(SECRET)}"}
+        before = client.app["users_store"].export_users()
+
+        resp = await client.post("/api/auth/users/sync", json={"users": []},
+                                 headers=headers)
+
+        assert resp.status == 409
+        body = await resp.json()
+        assert body["error"]["type"] == "empty_account_list"
+        assert "users.json" in body["error"]["message"]
+        assert client.app["users_store"].export_users() == before
+        assert client.app["users_store"].verify_password(
+            "jason", ADMIN_PASSWORD) is True
+
+    @pytest.mark.asyncio
     async def test_export_is_not_swallowed_by_the_name_route(self, protected):
         """``/users/export`` must not resolve as ``/users/{name}``."""
         client, _ = protected

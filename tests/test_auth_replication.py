@@ -613,6 +613,78 @@ def test_a_cli_push_with_no_cluster_secret_says_so_and_sends_nothing(monkeypatch
 
 
 # =============================================================================
+# 5b. An empty list never crosses the wire (the Atlas cutover guard)
+# =============================================================================
+#
+# import_users REPLACES the whole list, so a master promoted before its users.json
+# was copied would log every dashboard user out of the fleet on its first push,
+# and every worker would do the same to itself on its next pull.
+
+@pytest.mark.asyncio
+async def test_a_master_with_an_empty_store_pushes_nothing_and_warns_once(
+        peer, session, caplog):
+    app = _master_app(session, peer.port, StubStore([]))
+    replicator = rep.AccountReplicator(app)
+
+    with caplog.at_level(logging.WARNING, logger=rep.logger.name):
+        first = await replicator.tick()
+        second = await replicator.tick()
+
+    assert peer.posts == [], "an empty list reached a worker"
+    assert peer.users == USERS
+    assert first["reason"] == rep.EMPTY_LIST_REASON
+    assert first["pushed"] == [] and second["pushed"] == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "the 60 second retry must not warn on every tick"
+    assert "no accounts" in warnings[0].getMessage()
+    assert "users.json" in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_master_pushes_again_once_its_store_has_accounts(peer, session):
+    store = StubStore([])
+    replicator = rep.AccountReplicator(_master_app(session, peer.port, store))
+    await replicator.broadcast()
+    assert peer.posts == []
+
+    store.users = [dict(u) for u in USERS]
+    result = await replicator.broadcast()
+
+    assert result["pushed"] == ["spark2"]
+    assert peer.posts[0]["body"] == {"users": USERS}
+
+
+@pytest.mark.asyncio
+async def test_a_worker_refuses_an_empty_list_from_its_master(peer, session, home,
+                                                              caplog):
+    peer.users = []
+    store = StubStore(USERS)
+
+    with caplog.at_level(logging.WARNING, logger=rep.logger.name):
+        result = await rep.AccountReplicator(
+            _worker_app(session, peer.port, store)).pull()
+
+    assert result["imported"] is False
+    assert result["reason"] == rep.EMPTY_LIST_REASON
+    assert store.imports == [], "the worker wiped its accounts to match an empty master"
+    assert store.users == USERS
+    assert rep.read_sync_state(home) == {}, "a refused pull is not a successful sync"
+    assert any("empty account list" in r.getMessage() for r in caplog.records)
+
+
+def test_a_cli_push_of_an_empty_list_is_refused_and_sends_nothing(monkeypatch):
+    monkeypatch.setattr(rep, "http_json",
+                        lambda *a, **kw: pytest.fail("an empty list went out"))
+    config = NodeConfig(node_id="m1", cluster_secret=SECRET, cluster_role="master",
+                        peer_ips=["10.0.0.2"])
+
+    result = rep.replicate_from_cli(config, [])
+
+    assert result["pushed"] == [] and result["failed"] == []
+    assert rep.EMPTY_LIST_REASON in result["reason"]
+
+
+# =============================================================================
 # 6. The stamp, and the store seam
 # =============================================================================
 

@@ -187,9 +187,11 @@ def test_an_empty_cluster_id_fails():
 
 # ---------------------------------------------------------------------- model
 
-def test_no_model_pinned_is_ok():
+def test_no_model_pinned_is_info():
+    """A node that loads no model is a fact, not a finding (Atlas serves nothing)."""
     check = _one(doc.check_model(NodeConfig(model=None)))
-    assert check.status == OK
+    assert check.status == doc.INFO
+    assert "no model loaded" in check.detail
     assert "nothing loads at boot" in check.detail
 
 
@@ -443,7 +445,7 @@ def test_the_expected_port_shape_on_an_idle_node(monkeypatch):
     monkeypatch.setattr(doc, "tcp_listening", lambda port, **kw: port == 3000)
     checks = doc.check_ports(NodeConfig(model=None, discovery_port=5679),
                              udp_bound={5679})
-    assert [c.status for c in checks] == [OK, OK, OK]
+    assert [c.status for c in checks] == [OK, doc.INFO, OK]
     assert "idle shape" in _by_name(checks, "port.engine").detail
 
 
