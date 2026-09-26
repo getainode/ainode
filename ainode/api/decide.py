@@ -490,7 +490,15 @@ def read_temperatures(directory: Optional[Path]) -> Optional[dict]:
         raw = json.loads((Path(directory) / TEMPERATURES_FILE).read_text())
     except (OSError, ValueError):
         return None
-    temps = raw.get("temperatures") if isinstance(raw, dict) else None
+    return valid_temperatures(raw.get("temperatures") if isinstance(raw, dict) else None)
+
+
+def valid_temperatures(temps: Any) -> Optional[dict]:
+    """``{kind: T}`` for the kinds in *temps* that carry a finite positive number.
+
+    The one filter for a temperature table, whether it came off this node's disk
+    or from the peer that holds the model (``fetch_peer_temperatures``).
+    """
     if not isinstance(temps, dict):
         return None
     out: dict[str, float] = {}
@@ -514,11 +522,126 @@ def calibration_for(models_dir, model: str, mode: Optional[str]) -> dict:
     or not it was applied, so a caller that opted out still sees what it opted
     out of; it is null when there is none. The directory is looked up on the node
     answering the route: a model this node routes to a peer and does not hold a
-    copy of answers raw, and says so with ``applied: false``.
+    copy of answers raw here; ``run_questions`` then asks the serving node for
+    its table (``fetch_peer_temperatures``) before it gives up on one.
     """
-    temps = read_temperatures(model_store_dir(models_dir, model))
+    return calibration_block(read_temperatures(model_store_dir(models_dir, model)),
+                             mode)
+
+
+def calibration_block(temps: Optional[dict], mode: Optional[str]) -> dict:
+    """``{applied, temperatures}`` for a temperature table and a request's mode."""
     return {"applied": bool(temps) and mode != CALIBRATION_RAW,
             "temperatures": temps}
+
+
+# ------------------------------------------------- temperatures from the owner
+#
+# The temperatures live beside the weights, on the node that serves the model.
+# A request that enters on a node without a copy (the master, above all, which
+# is the endpoint clients use) used to answer raw with ``temperatures: null``
+# while the same question asked on the serving node was tempered. So the node
+# that routes asks the node it routes to, over the fleet key, and keeps the
+# answer for a while: a temperature table changes only when an adapter is
+# re-fitted and re-downloaded.
+
+#: The route a node answers with its own table for a model.
+CALIBRATION_PATH = "/api/decide/calibration"
+#: How long a peer's answer is reused, found or not.
+PEER_TEMPERATURES_TTL_S = 300.0
+#: How long "no peer answered" is remembered before asking again.
+PEER_TEMPERATURES_RETRY_S = 30.0
+#: How long a request waits on one peer for the table.
+PEER_TEMPERATURES_TIMEOUT_S = 3.0
+
+# model -> (expires_at, table or None)
+_peer_temperatures: dict[str, tuple[float, Optional[dict]]] = {}
+
+
+def _peer_web_ports(app, candidates: list) -> list[tuple[str, int]]:
+    """``(host, web_port)`` of every remote node in *candidates*, in their order.
+
+    A candidate is an engine ``(fabric_ip, api_port)``; the table is on the same
+    node's web port, which the node announces.
+    """
+    cluster = app.get("cluster_state")
+    by_host: dict = {}
+    for member in (cluster.members() if cluster is not None else []):
+        host = getattr(member, "fabric_ip", "") or ""
+        if host and host not in by_host:
+            by_host[host] = member
+    peers: list[tuple[str, int]] = []
+    for host, _port in candidates:
+        if host == "localhost":  # _routing_candidates names this node so
+            continue
+        member = by_host.get(host)
+        if member is None:
+            continue
+        peer = (host, int(getattr(member, "web_port", 3000) or 3000))
+        if peer not in peers:
+            peers.append(peer)
+    return peers
+
+
+async def fetch_peer_temperatures(app, model: str, candidates: list) -> Optional[dict]:
+    """The serving node's temperature table for *model*, or None.
+
+    Asked of each remote candidate's node in routing order until one answers,
+    with the fleet key. A node that answers without a table is an answer too
+    (the model has none), and both are cached for ``PEER_TEMPERATURES_TTL_S``.
+    Nothing that goes wrong here fails a decision: the worst case is the old
+    behaviour, an untempered answer that says ``applied: false``.
+    """
+    now = time.monotonic()
+    cached = _peer_temperatures.get(model)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    peers = _peer_web_ports(app, candidates)
+    if not peers:
+        return None
+    session = app.get("client_session")
+    if session is None:
+        return None
+    from ainode.auth.fleet import fleet_headers
+    headers = fleet_headers(app)
+    timeout = aiohttp.ClientTimeout(total=PEER_TEMPERATURES_TIMEOUT_S)
+    for host, web_port in peers:
+        base = f"http://{host}:{web_port}"
+        try:
+            async with session.get(base + CALIBRATION_PATH, params={"model": model},
+                                   headers=headers, timeout=timeout) as resp:
+                if resp.status != 200:
+                    continue
+                body = await resp.json(content_type=None)
+        except Exception as exc:
+            logger.debug("temperatures for %s from %s: %s", model, base, exc)
+            continue
+        if not isinstance(body, dict):
+            continue
+        temps = valid_temperatures(body.get("temperatures"))
+        _peer_temperatures[model] = (time.monotonic() + PEER_TEMPERATURES_TTL_S, temps)
+        return temps
+    # Nobody answered (a peer on an older release has no such route, or is down):
+    # remember that briefly, so a dead peer does not add a timeout to every request.
+    _peer_temperatures[model] = (time.monotonic() + PEER_TEMPERATURES_RETRY_S, None)
+    return None
+
+
+async def handle_decide_calibration(request: web.Request) -> web.Response:
+    """GET /api/decide/calibration?model=<id>: this node's temperature table.
+
+    What a routing node asks the node that serves the model, so a decision is
+    tempered wherever the request entered. ``temperatures`` is null when this
+    node holds no table for the model.
+    """
+    model = (request.query.get("model") or "").strip()
+    if not model:
+        return _bad_request("'model' query parameter is required")
+    config = request.app.get("config")
+    temps = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: read_temperatures(
+            model_store_dir(getattr(config, "models_dir", None), model)))
+    return web.json_response({"model": model, "temperatures": temps})
 
 
 # -------------------------------------------------------------------- routing
@@ -672,6 +795,11 @@ async def run_questions(request: web.Request, model: str, questions: dict[str, d
     block = await asyncio.get_running_loop().run_in_executor(
         None, calibration_for, getattr(config, "models_dir", None), model,
         calibration)
+    if block["temperatures"] is None:
+        # No copy here: the node this request is routed to holds the table.
+        peer = await fetch_peer_temperatures(request.app, model, candidates)
+        if peer:
+            block = calibration_block(peer, calibration)
     temps = block["temperatures"] if block["applied"] else {}
     keys = list(questions)
     bodies = []

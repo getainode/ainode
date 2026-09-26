@@ -1294,9 +1294,12 @@ response says what was applied, and `POST /v1/systemone` carries the same block
 
 Send `"calibration": "raw"` to get the engine's own spread instead; the block
 then reads `"applied": false` and still lists the temperatures you opted out of,
-so you can refit against the raw numbers. The file is read on the node that
-answers the route, so a model this node routes to a peer without holding a copy
-itself answers raw.
+so you can refit against the raw numbers. The file lives on the node that serves
+the model. A node that routes the request there without a copy of its own (the
+master, usually) asks that node for its table over the fleet key
+(`GET /api/decide/calibration?model=<id>`) and caches it for five minutes, so the
+answer is tempered the same wherever the request enters. A peer on an older
+release has no such route, and then the answer is raw with `"temperatures": null`.
 
 **A decision model warms up when it loads.** The first constrained request per
 question shape makes the engine compile the answer grammar, 60 to 90 s on a
