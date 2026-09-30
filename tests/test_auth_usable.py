@@ -20,6 +20,7 @@ rather than by firing the "your session ended" handler at it.
 import json
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ TEMPLATES = Path(__file__).parent.parent / "ainode" / "web" / "templates"
 AUTH_JS = STATIC / "js" / "auth.js"
 SIGNIN_JS = STATIC / "js" / "signin.js"
 APP_JS = STATIC / "js" / "app.js"
+NODE = shutil.which("node")
 
 # Every file that talks to the API from a browser.
 UI_SOURCES = [
@@ -185,12 +187,86 @@ def test_pasting_a_key_in_a_browser_is_collapsed_and_still_works():
     assert "Forget the stored key" in app_js
 
 
-def test_the_switch_that_opens_the_port_is_shown_only_to_an_authenticated_caller():
-    """#262: an unauthenticated browser pressing it got a 401 and a dead panel."""
-    app_js = APP_JS.read_text()
-    gate = app_js.index("if (st.authenticated || signedIn) {")
-    button = app_js.index('id="auth-disable"')
-    assert gate < button < gate + 600, "the disable button escaped its gate"
+API_ACCESS_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const mount = {
+  innerHTML: '',
+  querySelectorAll() { return []; },
+};
+global.document = {
+  addEventListener() {},
+  getElementById(id) { return id === 'config-content' ? mount : null; },
+};
+global.window = { location: { href: 'http://localhost:3000/' }, addEventListener() {} };
+global.navigator = {};
+global.localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+global.performance = { now: () => Date.now() };
+global.requestAnimationFrame = (fn) => fn();
+global.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+
+let signedIn = null;
+global.AINodeAuth = {
+  me: null,
+  user() { return signedIn; },
+  getKey() { return ''; },
+  hasKey() { return false; },
+  maskKey(value) { return value; },
+};
+
+const src = fs.readFileSync(process.argv[2], 'utf8') + '\nglobalThis.AINode = AINode;\n';
+vm.runInThisContext(src, { filename: 'app.js' });
+AINode.esc = (value) => String(value);
+
+async function render(authenticated, staleUser) {
+  const status = { enabled: true, authenticated: authenticated, key_count: 1 };
+  signedIn = staleUser ? { name: 'stale', role: 'admin' } : null;
+  AINodeAuth.me = signedIn ? { user: signedIn, auth_enabled: true, has_users: true } : null;
+  AINode.refreshAuthStatus = async () => status;
+  AINode.fetchJSON = async (url) => url === '/api/auth/keys' ? { keys: [] } : {};
+  await AINode.renderConfigApiAccess();
+  return mount.innerHTML;
+}
+
+(async function () {
+  const locked = await render(false, false);
+  const stale = await render(false, true);
+  const authenticated = await render(true, false);
+  console.log(JSON.stringify({
+    lockedHasPaste: locked.includes('id="auth-key-save"'),
+    lockedHasDisable: locked.includes('id="auth-disable"'),
+    staleIsLocked: stale.includes('data-state="locked"'),
+    stalePasteIsOpen: stale.includes('<details class="config-details" open>'),
+    staleHasDisable: stale.includes('id="auth-disable"'),
+    authenticatedHasDisable: authenticated.includes('id="auth-disable"'),
+  }));
+})().catch(function (error) {
+  console.error(error && error.stack || String(error));
+  process.exit(1);
+});
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_switch_that_opens_the_port_is_shown_only_to_an_authenticated_caller(tmp_path):
+    """#262: stale browser state cannot expose a control the server will reject."""
+    harness = tmp_path / "api-access.js"
+    harness.write_text(textwrap.dedent(API_ACCESS_HARNESS))
+    proc = subprocess.run(
+        [NODE, str(harness), str(APP_JS)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out == {
+        "lockedHasPaste": True,
+        "lockedHasDisable": False,
+        "staleIsLocked": True,
+        "stalePasteIsOpen": True,
+        "staleHasDisable": False,
+        "authenticatedHasDisable": True,
+    }
 
 
 def test_sign_out_does_not_forget_a_program_key_nobody_asked_it_to():
@@ -202,8 +278,6 @@ def test_sign_out_does_not_forget_a_program_key_nobody_asked_it_to():
 # =============================================================================
 # The wrapper, run under node
 # =============================================================================
-
-NODE = shutil.which("node")
 
 # Exercised as a browser would: a storage that can be made to throw, a fetch
 # that records what it was called with, and the real auth.js in between.

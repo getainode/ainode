@@ -6792,7 +6792,7 @@ const AINode = {
     // -- state ---------------------------------------------------------------
     html += '<div class="config-card">';
     html += '<h3 class="config-card-title">Status</h3>';
-    html += '<div class="api-access-state" data-state="' + (st.enabled ? ((st.authenticated || signedIn) ? 'keyed' : 'locked') : 'open') + '">';
+    html += '<div class="api-access-state" data-state="' + (st.enabled ? (st.authenticated ? 'keyed' : 'locked') : 'open') + '">';
     html += '<strong>' + this.esc(this.apiStateText()) + '</strong>';
     html += '<span class="api-access-who">' + this.esc(this.authChipText()) + '</span>';
     html += '</div>';
@@ -6808,7 +6808,7 @@ const AINode = {
       // The switch that opens the port is shown only to a caller this node has
       // actually authenticated. An unauthenticated browser pressing it got a 401
       // and a panel that looked broken (#262).
-      if (st.authenticated || signedIn) {
+      if (st.authenticated) {
         html += '<button class="config-btn secondary" id="auth-disable">Stop requiring a key</button>';
       } else {
         html += '<p class="config-card-desc">Sign in, or paste a key below, to turn this back off.</p>';
@@ -6827,7 +6827,7 @@ const AINode = {
       ? 'This browser is sending <code>' + this.esc(AINodeAuth.maskKey(stored)) + '</code> with every request.'
       : 'Nothing stored, which is the normal case: you signed in instead.') + '</p>';
     var openKeyBox = !!(stored || (this.state.authBlocked && this.state.authBlocked.hadKey)
-      || (st.enabled && !signedIn));
+      || (st.enabled && !st.authenticated));
     html += '<details class="config-details"' + (openKeyBox ? ' open' : '') + '>';
     html += '  <summary>Use a key in this browser instead</summary>';
     html += '  <p class="config-card-desc">For a browser with no account on this node. The key is sent as a Bearer token on every request from this browser, exactly as a program would.</p>';
