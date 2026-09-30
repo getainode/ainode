@@ -20,7 +20,9 @@ so every request the master answered itself was a ``dependency_missing`` 503.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from typing import List, Optional
 
 import aiohttp
@@ -83,6 +85,21 @@ def _error(message: str, *, code: str = "invalid_request_error", status: int = 4
     return web.json_response(
         {"error": {"message": message, "type": code}}, status=status
     )
+
+
+def _prompt_tokens(body: bytes) -> int:
+    """Prompt tokens reported by an OpenAI-compatible embeddings reply."""
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return 0
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    value = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if value < 0 or int(value) != value:
+        return 0
+    return int(value)
 
 
 def fleet_candidates(app, model: str) -> list:
@@ -173,21 +190,31 @@ async def handle_v1_embeddings(request: web.Request) -> web.Response:
     takes a list of strings, not a body.
     """
     manager: EmbeddingManager = request.app["embedding_manager"]
+    collector = request.app.get("metrics_collector")
+    started = time.time()
+    metric_model = "unknown"
+
+    def finish(response: web.Response, tokens: int = 0) -> web.Response:
+        if collector is not None:
+            collector.record_request(
+                metric_model, (time.time() - started) * 1000,
+                tokens_generated=tokens, error=response.status >= 400,
+            )
+        return response
 
     body_bytes = await request.read()
     try:
-        import json as _json
-
-        body = _json.loads(body_bytes) if body_bytes else None
+        body = json.loads(body_bytes) if body_bytes else None
     except Exception:
-        return _error("Invalid JSON body")
+        return finish(_error("Invalid JSON body"))
 
     if not isinstance(body, dict):
-        return _error("Body must be a JSON object")
+        return finish(_error("Body must be a JSON object"))
 
     model_id = body.get("model")
     if not model_id or not isinstance(model_id, str):
-        return _error("'model' is required and must be a string")
+        return finish(_error("'model' is required and must be a string"))
+    metric_model = model_id
 
     # Tag the request so the server-view log shows the embedding model, whichever
     # of the two paths answers it.
@@ -199,36 +226,37 @@ async def handle_v1_embeddings(request: web.Request) -> web.Response:
     # --- the fleet, if anything in it serves this model id --------------------
     candidates = fleet_candidates(request.app, model_id)
     if candidates:
-        return await forward_to_fleet(request, model_id, body_bytes, candidates)
+        response = await forward_to_fleet(request, model_id, body_bytes, candidates)
+        return finish(response, _prompt_tokens(response.body))
 
     # --- otherwise this process, on the CPU ----------------------------------
     raw_input = body.get("input")
     if raw_input is None:
-        return _error("'input' is required (string or array of strings)")
+        return finish(_error("'input' is required (string or array of strings)"))
 
     if isinstance(raw_input, str):
         texts: List[str] = [raw_input]
     elif isinstance(raw_input, list):
         if not all(isinstance(x, str) for x in raw_input):
-            return _error("'input' array must contain only strings")
+            return finish(_error("'input' array must contain only strings"))
         texts = raw_input
     else:
-        return _error("'input' must be a string or array of strings")
+        return finish(_error("'input' must be a string or array of strings"))
 
     try:
         vectors = await manager.aembed(model_id, texts)
     except RuntimeError as exc:
-        return _error(str(exc), code="dependency_missing", status=503)
+        return finish(_error(str(exc), code="dependency_missing", status=503))
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("embedding failure for %s", model_id)
-        return _error(f"embedding failed: {exc}", code="server_error", status=500)
+        return finish(_error(f"embedding failed: {exc}", code="server_error", status=500))
 
     total_tokens = sum(_approx_tokens(t) for t in texts)
     data = [
         {"object": "embedding", "embedding": vec, "index": idx}
         for idx, vec in enumerate(vectors)
     ]
-    return web.json_response(
+    return finish(web.json_response(
         {
             "object": "list",
             "data": data,
@@ -238,7 +266,7 @@ async def handle_v1_embeddings(request: web.Request) -> web.Response:
                 "total_tokens": total_tokens,
             },
         }
-    )
+    ), total_tokens)
 
 
 async def handle_list_embedding_models(request: web.Request) -> web.Response:

@@ -56,14 +56,6 @@
   // sawtooths back to zero the moment the process came up, so a gap in the other
   // series can be told apart from a dead GPU.
   //
-  // NOT here: requests.tokens_generated and requests.tokens_per_second. The
-  // store keeps both and the collector reports both, but nothing in the product
-  // ever passes `tokens_generated` to `MetricsCollector.record_request`, so both
-  // are 0 on every node forever. Drawn, that is a flat line at zero saying "this
-  // node generated no tokens", when the truth is "no code path counts tokens".
-  // A chart may not say the first when it means the second. Wire the proxy to
-  // pass the usage block through (and tally the SSE path), and then a tokens
-  // panel is one entry here and one in metrics.js::PANELS.
   var SERIES = [
     'gpu.memory_used_mb',
     'gpu.memory_total_mb',
@@ -72,6 +64,7 @@
     'gpu.temperature_c',
     'requests.total',
     'requests.errors',
+    'requests.tokens_generated',
     'requests.latency_ms.p50',
     'requests.latency_ms.p95',
     'requests.latency_ms.p99',

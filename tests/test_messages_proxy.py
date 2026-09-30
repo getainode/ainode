@@ -18,7 +18,7 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from ainode.api.server import create_app
+from ainode.api.server import SSETokenCounter, create_app, response_body_output_tokens
 from ainode.core.config import NodeConfig
 from ainode.discovery.broadcast import NodeStatus
 from ainode.discovery.cluster import ClusterNode
@@ -61,6 +61,8 @@ class FakeEngine:
             ("message_start", {"type": "message_start", "message": {"id": "msg_01"}}),
             ("content_block_delta", {"type": "content_block_delta", "index": 0,
                                      "delta": {"type": "text_delta", "text": ANSWER}}),
+            ("message_delta", {"type": "message_delta",
+                               "usage": {"output_tokens": 9}}),
             ("message_stop", {"type": "message_stop"}),
         ):
             await asyncio.sleep(0.002)
@@ -132,6 +134,7 @@ async def test_messages_is_routed_by_the_model_in_the_body(client, engine_fake):
     # It reached the node that advertises this model, at the path it was sent to.
     assert [s["path"] for s in engine_fake.seen] == ["/v1/messages"]
     assert engine_fake.seen[0]["body"]["model"] == MODEL
+    assert client.server.app["metrics_collector"].get_request_stats()["tokens_generated"] == 9
 
 
 @pytest.mark.asyncio
@@ -176,6 +179,33 @@ async def test_a_streamed_answer_passes_through_as_sse(client, engine_fake):
         < text.index("message_stop")
     assert ANSWER in text
     assert engine_fake.seen[0]["body"]["stream"] is True
+    assert client.server.app["metrics_collector"].get_request_stats()["tokens_generated"] == 9
+
+
+def test_openai_json_usage_uses_completion_tokens():
+    body = json.dumps({"usage": {"prompt_tokens": 11, "completion_tokens": 7}}).encode()
+    assert response_body_output_tokens(body) == 7
+
+
+def test_responses_json_usage_uses_output_tokens():
+    body = json.dumps({"usage": {"input_tokens": 11, "output_tokens": 6}}).encode()
+    assert response_body_output_tokens(body) == 6
+
+
+def test_stream_counter_handles_split_events_and_counts_deltas_without_usage():
+    counter = SSETokenCounter()
+    counter.feed(b'data: {"choices":[{"delta":{"content":"a"}}]}\n')
+    counter.feed(b'\ndata: {"choices":[{"delta":{"content":"b"}}]}\n\n')
+    counter.feed(b'data: [DONE]\n\n')
+    assert counter.finish() == 2
+
+
+def test_stream_reported_usage_wins_over_delta_counting():
+    counter = SSETokenCounter()
+    counter.feed(b'data: {"type":"response.output_text.delta","delta":"many"}\n\n')
+    counter.feed(b'data: {"type":"response.completed","response":'
+                 b'{"usage":{"output_tokens":12}}}\n\n')
+    assert counter.finish() == 12
 
 
 # --------------------------------------------------------------- count_tokens
