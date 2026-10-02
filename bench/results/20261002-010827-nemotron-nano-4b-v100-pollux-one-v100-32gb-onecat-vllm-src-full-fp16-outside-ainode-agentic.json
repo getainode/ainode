@@ -1,0 +1,298 @@
+{
+ "schema": 1,
+ "stamp": "20261002-010827",
+ "label": "pollux one v100 32gb, onecat-vllm src-full fp16, outside ainode",
+ "model": {
+  "id": "nemotron-nano-4b-v100"
+ },
+ "placement": {},
+ "settings": {
+  "groups": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "E",
+   "F",
+   "G"
+  ],
+  "needle_tokens": [
+   8000
+  ],
+  "quick": false,
+  "temperature": 1.0,
+  "timeout_s": 900,
+  "thinking_switch": "enable_thinking",
+  "probes_requested": 22
+ },
+ "agentic": {
+  "score": {
+   "pass": 1,
+   "total": 22
+  },
+  "groups": {
+   "A": {
+    "pass": 0,
+    "total": 4
+   },
+   "B": {
+    "pass": 0,
+    "total": 4
+   },
+   "C": {
+    "pass": 0,
+    "total": 3
+   },
+   "D": {
+    "pass": 0,
+    "total": 4
+   },
+   "E": {
+    "pass": 0,
+    "total": 1
+   },
+   "F": {
+    "pass": 1,
+    "total": 1
+   },
+   "G": {
+    "pass": 0,
+    "total": 5
+   }
+  },
+  "endpoint": "http://100.124.227.93:8100/v1",
+  "protocol": {
+   "groups": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+   ],
+   "needle_tokens": [
+    8000
+   ],
+   "temperature": 1.0,
+   "timeout_s": 900,
+   "thinking_switch": "enable_thinking",
+   "max_turns": 4,
+   "verdicts": "mechanical; group C is executed, group G is a judged tool trace"
+  },
+  "probes": [
+   {
+    "id": "A1_format",
+    "group": "A",
+    "pass": false,
+    "wall_s": 0.51,
+    "completion_tokens": 35,
+    "note": "0 line(s), wanted 5",
+    "excerpt": ""
+   },
+   {
+    "id": "A2_json_only",
+    "group": "A",
+    "pass": false,
+    "wall_s": 0.36,
+    "completion_tokens": 22,
+    "note": "not raw JSON: Expecting value: line 1 column 1 (char 0)",
+    "excerpt": ""
+   },
+   {
+    "id": "A3_constraints",
+    "group": "A",
+    "pass": false,
+    "wall_s": 0.61,
+    "completion_tokens": 43,
+    "note": "0 full stop(s), wanted about 3 sentences",
+    "excerpt": ""
+   },
+   {
+    "id": "A4_persona",
+    "group": "A",
+    "pass": false,
+    "wall_s": 0.94,
+    "completion_tokens": 71,
+    "note": "dropped the persona: no trailing 'Arr!'",
+    "excerpt": ""
+   },
+   {
+    "id": "B1_tool_single",
+    "group": "B",
+    "pass": false,
+    "wall_s": 0.54,
+    "completion_tokens": 35,
+    "note": "0 call(s), wanted 1: no calls",
+    "excerpt": ""
+   },
+   {
+    "id": "B2_tool_parallel",
+    "group": "B",
+    "pass": false,
+    "wall_s": 1.51,
+    "completion_tokens": 115,
+    "note": "0 call(s), wanted 3: no calls",
+    "excerpt": ""
+   },
+   {
+    "id": "B3_tool_not_needed",
+    "group": "B",
+    "pass": false,
+    "wall_s": 0.4,
+    "completion_tokens": 23,
+    "note": "no tool call and no text either",
+    "excerpt": ""
+   },
+   {
+    "id": "B4_tool_roundtrip",
+    "group": "B",
+    "pass": false,
+    "wall_s": 0.54,
+    "completion_tokens": 35,
+    "note": "no tool call to answer from",
+    "excerpt": ""
+   },
+   {
+    "id": "C1_ttl_cache",
+    "group": "C",
+    "pass": false,
+    "wall_s": 3.92,
+    "completion_tokens": 319,
+    "note": "NameError: name 'TTLCache' is not defined",
+    "excerpt": ""
+   },
+   {
+    "id": "C2_intervals",
+    "group": "C",
+    "pass": false,
+    "wall_s": 3.68,
+    "completion_tokens": 299,
+    "note": "NameError: name 'merge_intervals' is not defined",
+    "excerpt": ""
+   },
+   {
+    "id": "C3_bugfix",
+    "group": "C",
+    "pass": false,
+    "wall_s": 1.03,
+    "completion_tokens": 78,
+    "note": "NameError: name 'top_k_words' is not defined",
+    "excerpt": ""
+   },
+   {
+    "id": "D1_decimal",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.15,
+    "completion_tokens": 4,
+    "note": "wanted 9.9",
+    "excerpt": ""
+   },
+   {
+    "id": "D2_strawberry",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.12,
+    "completion_tokens": 2,
+    "note": "wanted 3",
+    "excerpt": ""
+   },
+   {
+    "id": "D3_sisters",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.12,
+    "completion_tokens": 2,
+    "note": "wanted 2",
+    "excerpt": ""
+   },
+   {
+    "id": "D4_knights",
+    "group": "D",
+    "pass": false,
+    "wall_s": 0.22,
+    "completion_tokens": 10,
+    "note": "wanted A=Knight, B=Knave",
+    "excerpt": ""
+   },
+   {
+    "id": "E_needle_8000",
+    "group": "E",
+    "pass": false,
+    "wall_s": 1.42,
+    "completion_tokens": 11,
+    "note": "did not find the password; prompt_tokens=6516",
+    "excerpt": ""
+   },
+   {
+    "id": "F1_thinking_off",
+    "group": "F",
+    "pass": true,
+    "wall_s": 0.15,
+    "completion_tokens": 4,
+    "note": "answered with no reasoning channel",
+    "excerpt": "391"
+   },
+   {
+    "id": "G1_tool_chain",
+    "group": "G",
+    "pass": false,
+    "wall_s": 0.28,
+    "completion_tokens": 14,
+    "note": "answered without calling a tool",
+    "excerpt": ""
+   },
+   {
+    "id": "G2_tool_error",
+    "group": "G",
+    "pass": false,
+    "wall_s": 0.58,
+    "completion_tokens": 38,
+    "note": "never called the weather tool",
+    "excerpt": ""
+   },
+   {
+    "id": "G3_arg_schema",
+    "group": "G",
+    "pass": false,
+    "wall_s": 0.68,
+    "completion_tokens": 47,
+    "note": "0 call(s), wanted 1: no calls",
+    "excerpt": "[]"
+   },
+   {
+    "id": "G4_structured",
+    "group": "G",
+    "pass": false,
+    "wall_s": 2.2,
+    "completion_tokens": 45,
+    "note": "no JSON object in the reply [json_schema]",
+    "excerpt": ""
+   },
+   {
+    "id": "G5_persistence",
+    "group": "G",
+    "pass": false,
+    "wall_s": 0.89,
+    "completion_tokens": 41,
+    "note": "0/4 turns ended with DONE; missed turn(s) [1, 2, 3, 4]",
+    "excerpt": ""
+   }
+  ],
+  "needle": {
+   "8000": false
+  },
+  "thinking_off_supported": true,
+  "vision_supported": null,
+  "structured_output_mode": "json_schema"
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py agentic in 21s; nothing loaded, unloaded or restarted.",
+  "Every verdict is mechanical: no judge model and no reply was read by a person to reach a score.",
+  "Group C runs the model's own code against asserts it never saw, in a subprocess on the machine driving the bench.",
+  "Group G drives real tool loops and judges the call trace: the order of the calls, the arguments, and whether a stated fact came back from a tool.",
+  "Groups run: A, B, C, D, E, F, G. A group that did not run is absent from the score rather than counted as zero."
+ ],
+ "source": "scripts/ainode-bench.py agentic"
+}

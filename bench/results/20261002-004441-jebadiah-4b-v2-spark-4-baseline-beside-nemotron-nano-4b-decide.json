@@ -1,0 +1,2670 @@
+{
+ "schema": 1,
+ "stamp": "20261002-004441",
+ "label": "spark-4 baseline beside nemotron nano 4b",
+ "model": {
+  "id": "frontier-infra/jebadiah-4b-v2"
+ },
+ "placement": {
+  "engine": "vllm",
+  "node": "Spark-4-GX10",
+  "gpu": "NVIDIA GB10",
+  "ainode": "0.5.33",
+  "tp": 1,
+  "gpus": 1,
+  "stacked_with": [
+   "frontier-infra/jebadiah-9b-v2"
+  ],
+  "port": 8003
+ },
+ "settings": {
+  "backend": "chat",
+  "endpoint": "http://100.72.9.84:3000/v1/chat/completions",
+  "model_requested": "frontier-infra/jebadiah-4b-v2",
+  "items_file": "bench/decide/items.json",
+  "item_set": "decide-110",
+  "items": 110,
+  "sets": [
+   "route",
+   "triage",
+   "urgency",
+   "pr_safe",
+   "fact"
+  ],
+  "concurrency": 8,
+  "timeout_s": 120
+ },
+ "decide": {
+  "backend": "chat",
+  "endpoint": "http://100.72.9.84:3000/v1/chat/completions",
+  "model_reported": "frontier-infra/jebadiah-4b-v2",
+  "item_set": {
+   "id": "decide-110",
+   "version": 1,
+   "file": "items.json",
+   "count": 110,
+   "sets": {
+    "route": 30,
+    "triage": 20,
+    "urgency": 20,
+    "pr_safe": 20,
+    "fact": 20
+   }
+  },
+  "protocol": {
+   "backend": "chat",
+   "endpoint": "http://100.72.9.84:3000/v1/chat/completions",
+   "timeout_s": 120,
+   "input_usd_per_mtok": 0.0,
+   "output_usd_per_mtok": 0.0,
+   "concurrency": 8,
+   "bins": 5,
+   "thresholds": [
+    "0.8",
+    "0.9"
+   ],
+   "confidence": "the probability the backend put on the answer it gave; its reported confidence when it gave no distribution",
+   "brier": "one term, on the labeled option's probability"
+  },
+  "overall": {
+   "n": 110,
+   "answered": 110,
+   "errors": 0,
+   "accuracy": 0.973,
+   "brier": 0.027,
+   "ece": 0.08,
+   "bins": [
+    {
+     "lo": 0.0,
+     "hi": 0.2,
+     "count": 0,
+     "accuracy": null,
+     "confidence": null
+    },
+    {
+     "lo": 0.2,
+     "hi": 0.4,
+     "count": 0,
+     "accuracy": null,
+     "confidence": null
+    },
+    {
+     "lo": 0.4,
+     "hi": 0.6,
+     "count": 2,
+     "accuracy": 0.5,
+     "confidence": 0.492
+    },
+    {
+     "lo": 0.6,
+     "hi": 0.8,
+     "count": 16,
+     "accuracy": 0.875,
+     "confidence": 0.738
+    },
+    {
+     "lo": 0.8,
+     "hi": 1.0,
+     "count": 92,
+     "accuracy": 1.0,
+     "confidence": 0.929
+    }
+   ],
+   "thresholds": {
+    "0.8": {
+     "kept": 92,
+     "wrong": 0,
+     "abstained": 18,
+     "no_confidence": 0
+    },
+    "0.9": {
+     "kept": 65,
+     "wrong": 0,
+     "abstained": 45,
+     "no_confidence": 0
+    }
+   },
+   "tokens": {
+    "in": 12275,
+    "out": 220
+   },
+   "cost_usd": 0.0,
+   "p50_ms": 492,
+   "p95_ms": 1722
+  },
+  "sets": {
+   "route": {
+    "n": 30,
+    "answered": 30,
+    "errors": 0,
+    "accuracy": 0.933,
+    "brier": 0.046,
+    "ece": 0.109,
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.2,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.4,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.6,
+      "count": 1,
+      "accuracy": 0.0,
+      "confidence": 0.421
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.8,
+      "count": 6,
+      "accuracy": 0.833,
+      "confidence": 0.729
+     },
+     {
+      "lo": 0.8,
+      "hi": 1.0,
+      "count": 23,
+      "accuracy": 1.0,
+      "confidence": 0.903
+     }
+    ],
+    "thresholds": {
+     "0.8": {
+      "kept": 23,
+      "wrong": 0,
+      "abstained": 7,
+      "no_confidence": 0
+     },
+     "0.9": {
+      "kept": 11,
+      "wrong": 0,
+      "abstained": 19,
+      "no_confidence": 0
+     }
+    },
+    "tokens": {
+     "in": 3997,
+     "out": 60
+    },
+    "cost_usd": 0.0,
+    "p50_ms": 529,
+    "p95_ms": 1516
+   },
+   "triage": {
+    "n": 20,
+    "answered": 20,
+    "errors": 0,
+    "accuracy": 1.0,
+    "brier": 0.013,
+    "ece": 0.088,
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.2,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.4,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.6,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.8,
+      "count": 2,
+      "accuracy": 1.0,
+      "confidence": 0.743
+     },
+     {
+      "lo": 0.8,
+      "hi": 1.0,
+      "count": 18,
+      "accuracy": 1.0,
+      "confidence": 0.93
+     }
+    ],
+    "thresholds": {
+     "0.8": {
+      "kept": 18,
+      "wrong": 0,
+      "abstained": 2,
+      "no_confidence": 0
+     },
+     "0.9": {
+      "kept": 14,
+      "wrong": 0,
+      "abstained": 6,
+      "no_confidence": 0
+     }
+    },
+    "tokens": {
+     "in": 2432,
+     "out": 40
+    },
+    "cost_usd": 0.0,
+    "p50_ms": 575,
+    "p95_ms": 1932
+   },
+   "urgency": {
+    "n": 20,
+    "answered": 20,
+    "errors": 0,
+    "accuracy": 0.95,
+    "brier": 0.033,
+    "ece": 0.063,
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.2,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.4,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.6,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.8,
+      "count": 3,
+      "accuracy": 0.667,
+      "confidence": 0.71
+     },
+     {
+      "lo": 0.8,
+      "hi": 1.0,
+      "count": 17,
+      "accuracy": 1.0,
+      "confidence": 0.933
+     }
+    ],
+    "thresholds": {
+     "0.8": {
+      "kept": 17,
+      "wrong": 0,
+      "abstained": 3,
+      "no_confidence": 0
+     },
+     "0.9": {
+      "kept": 12,
+      "wrong": 0,
+      "abstained": 8,
+      "no_confidence": 0
+     }
+    },
+    "tokens": {
+     "in": 2132,
+     "out": 40
+    },
+    "cost_usd": 0.0,
+    "p50_ms": 474,
+    "p95_ms": 2427
+   },
+   "pr_safe": {
+    "n": 20,
+    "answered": 20,
+    "errors": 0,
+    "accuracy": 1.0,
+    "brier": 0.022,
+    "ece": 0.122,
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.2,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.4,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.6,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.8,
+      "count": 5,
+      "accuracy": 1.0,
+      "confidence": 0.763
+     },
+     {
+      "lo": 0.8,
+      "hi": 1.0,
+      "count": 15,
+      "accuracy": 1.0,
+      "confidence": 0.917
+     }
+    ],
+    "thresholds": {
+     "0.8": {
+      "kept": 15,
+      "wrong": 0,
+      "abstained": 5,
+      "no_confidence": 0
+     },
+     "0.9": {
+      "kept": 10,
+      "wrong": 0,
+      "abstained": 10,
+      "no_confidence": 0
+     }
+    },
+    "tokens": {
+     "in": 2225,
+     "out": 40
+    },
+    "cost_usd": 0.0,
+    "p50_ms": 472,
+    "p95_ms": 1453
+   },
+   "fact": {
+    "n": 20,
+    "answered": 20,
+    "errors": 0,
+    "accuracy": 1.0,
+    "brier": 0.013,
+    "ece": 0.055,
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.2,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.4,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.6,
+      "count": 1,
+      "accuracy": 1.0,
+      "confidence": 0.562
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.8,
+      "count": 0,
+      "accuracy": null,
+      "confidence": null
+     },
+     {
+      "lo": 0.8,
+      "hi": 1.0,
+      "count": 19,
+      "accuracy": 1.0,
+      "confidence": 0.965
+     }
+    ],
+    "thresholds": {
+     "0.8": {
+      "kept": 19,
+      "wrong": 0,
+      "abstained": 1,
+      "no_confidence": 0
+     },
+     "0.9": {
+      "kept": 18,
+      "wrong": 0,
+      "abstained": 2,
+      "no_confidence": 0
+     }
+    },
+    "tokens": {
+     "in": 1489,
+     "out": 40
+    },
+    "cost_usd": 0.0,
+    "p50_ms": 423,
+    "p95_ms": 896
+   }
+  },
+  "rows": [
+   {
+    "id": "route-01",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.929255,
+    "p_label": 0.929255,
+    "distribution": {
+     "code": 0.929255,
+     "chat": 0.067315,
+     "vision": 0.002033,
+     "long_document": 0.001397
+    },
+    "wall_ms": 696,
+    "server_latency_ms": null,
+    "tokens_in": 133,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-02",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.988709,
+    "p_label": 0.988709,
+    "distribution": {
+     "chat": 0.988709,
+     "vision": 0.005188,
+     "code": 0.003147,
+     "long_document": 0.002956
+    },
+    "wall_ms": 514,
+    "server_latency_ms": null,
+    "tokens_in": 132,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-03",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.851495,
+    "p_label": 0.851495,
+    "distribution": {
+     "vision": 0.851495,
+     "chat": 0.115237,
+     "long_document": 0.017672,
+     "code": 0.015596
+    },
+    "wall_ms": 384,
+    "server_latency_ms": null,
+    "tokens_in": 130,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-04",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "long_document",
+    "correct": true,
+    "p_answer": 0.822619,
+    "p_label": 0.822619,
+    "distribution": {
+     "long_document": 0.822619,
+     "chat": 0.098248,
+     "vision": 0.076515,
+     "code": 0.002618
+    },
+    "wall_ms": 520,
+    "server_latency_ms": null,
+    "tokens_in": 139,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-05",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.668021,
+    "p_label": 0.668021,
+    "distribution": {
+     "code": 0.668021,
+     "chat": 0.315551,
+     "vision": 0.013864,
+     "long_document": 0.002565
+    },
+    "wall_ms": 1578,
+    "server_latency_ms": null,
+    "tokens_in": 138,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-06",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.985968,
+    "p_label": 0.985968,
+    "distribution": {
+     "chat": 0.985968,
+     "long_document": 0.007528,
+     "vision": 0.003556,
+     "code": 0.002948
+    },
+    "wall_ms": 514,
+    "server_latency_ms": null,
+    "tokens_in": 131,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-07",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.906211,
+    "p_label": 0.906211,
+    "distribution": {
+     "vision": 0.906211,
+     "chat": 0.074386,
+     "long_document": 0.014648,
+     "code": 0.004755
+    },
+    "wall_ms": 695,
+    "server_latency_ms": null,
+    "tokens_in": 134,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-08",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "long_document",
+    "correct": true,
+    "p_answer": 0.822619,
+    "p_label": 0.822619,
+    "distribution": {
+     "long_document": 0.822619,
+     "chat": 0.098248,
+     "vision": 0.076515,
+     "code": 0.002618
+    },
+    "wall_ms": 512,
+    "server_latency_ms": null,
+    "tokens_in": 139,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-09",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.858495,
+    "p_label": 0.858495,
+    "distribution": {
+     "code": 0.858495,
+     "chat": 0.131654,
+     "vision": 0.006555,
+     "long_document": 0.003296
+    },
+    "wall_ms": 485,
+    "server_latency_ms": null,
+    "tokens_in": 133,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-10",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.989074,
+    "p_label": 0.989074,
+    "distribution": {
+     "chat": 0.989074,
+     "vision": 0.00519,
+     "code": 0.002957,
+     "long_document": 0.002778
+    },
+    "wall_ms": 472,
+    "server_latency_ms": null,
+    "tokens_in": 131,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-11",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.77479,
+    "p_label": 0.77479,
+    "distribution": {
+     "vision": 0.77479,
+     "chat": 0.195898,
+     "long_document": 0.023397,
+     "code": 0.005916
+    },
+    "wall_ms": 471,
+    "server_latency_ms": null,
+    "tokens_in": 134,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-12",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "long_document",
+    "correct": true,
+    "p_answer": 0.855873,
+    "p_label": 0.855873,
+    "distribution": {
+     "long_document": 0.855873,
+     "vision": 0.061999,
+     "chat": 0.061999,
+     "code": 0.020128
+    },
+    "wall_ms": 470,
+    "server_latency_ms": null,
+    "tokens_in": 139,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-13",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.792855,
+    "p_label": 0.792855,
+    "distribution": {
+     "code": 0.792855,
+     "chat": 0.200465,
+     "vision": 0.004714,
+     "long_document": 0.001965
+    },
+    "wall_ms": 464,
+    "server_latency_ms": null,
+    "tokens_in": 135,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-14",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.989278,
+    "p_label": 0.989278,
+    "distribution": {
+     "chat": 0.989278,
+     "vision": 0.005191,
+     "code": 0.004043,
+     "long_document": 0.001487
+    },
+    "wall_ms": 441,
+    "server_latency_ms": null,
+    "tokens_in": 127,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-15",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.881346,
+    "p_label": 0.881346,
+    "distribution": {
+     "vision": 0.881346,
+     "chat": 0.105262,
+     "long_document": 0.009791,
+     "code": 0.003602
+    },
+    "wall_ms": 589,
+    "server_latency_ms": null,
+    "tokens_in": 129,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-16",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "vision",
+    "correct": false,
+    "p_answer": 0.421152,
+    "p_label": 0.421152,
+    "distribution": {
+     "vision": 0.421152,
+     "long_document": 0.421152,
+     "chat": 0.136728,
+     "code": 0.020968
+    },
+    "wall_ms": 417,
+    "server_latency_ms": null,
+    "tokens_in": 132,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-17",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "chat",
+    "correct": false,
+    "p_answer": 0.610571,
+    "p_label": 0.37033,
+    "distribution": {
+     "chat": 0.610571,
+     "code": 0.37033,
+     "vision": 0.016271,
+     "long_document": 0.002828
+    },
+    "wall_ms": 595,
+    "server_latency_ms": null,
+    "tokens_in": 133,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-18",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.984647,
+    "p_label": 0.984647,
+    "distribution": {
+     "chat": 0.984647,
+     "vision": 0.006635,
+     "code": 0.005167,
+     "long_document": 0.003551
+    },
+    "wall_ms": 604,
+    "server_latency_ms": null,
+    "tokens_in": 132,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-19",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.877865,
+    "p_label": 0.877865,
+    "distribution": {
+     "vision": 0.877865,
+     "code": 0.049526,
+     "long_document": 0.038571,
+     "chat": 0.034039
+    },
+    "wall_ms": 599,
+    "server_latency_ms": null,
+    "tokens_in": 131,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-20",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "long_document",
+    "correct": true,
+    "p_answer": 0.812535,
+    "p_label": 0.812535,
+    "distribution": {
+     "long_document": 0.812535,
+     "chat": 0.159998,
+     "vision": 0.024536,
+     "code": 0.00293
+    },
+    "wall_ms": 599,
+    "server_latency_ms": null,
+    "tokens_in": 138,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-21",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.904748,
+    "p_label": 0.904748,
+    "distribution": {
+     "code": 0.904748,
+     "chat": 0.084155,
+     "vision": 0.006908,
+     "long_document": 0.00419
+    },
+    "wall_ms": 460,
+    "server_latency_ms": null,
+    "tokens_in": 127,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-22",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.989241,
+    "p_label": 0.989241,
+    "distribution": {
+     "chat": 0.989241,
+     "vision": 0.005191,
+     "code": 0.002958,
+     "long_document": 0.00261
+    },
+    "wall_ms": 1516,
+    "server_latency_ms": null,
+    "tokens_in": 130,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-23",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.827079,
+    "p_label": 0.827079,
+    "distribution": {
+     "vision": 0.827079,
+     "chat": 0.143725,
+     "long_document": 0.022041,
+     "code": 0.007156
+    },
+    "wall_ms": 894,
+    "server_latency_ms": null,
+    "tokens_in": 133,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-24",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "long_document",
+    "correct": true,
+    "p_answer": 0.870018,
+    "p_label": 0.870018,
+    "distribution": {
+     "long_document": 0.870018,
+     "vision": 0.071415,
+     "chat": 0.055618,
+     "code": 0.002948
+    },
+    "wall_ms": 492,
+    "server_latency_ms": null,
+    "tokens_in": 141,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-25",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.813165,
+    "p_label": 0.813165,
+    "distribution": {
+     "code": 0.813165,
+     "chat": 0.181442,
+     "vision": 0.004009,
+     "long_document": 0.001385
+    },
+    "wall_ms": 547,
+    "server_latency_ms": null,
+    "tokens_in": 139,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-26",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.988508,
+    "p_label": 0.988508,
+    "distribution": {
+     "chat": 0.988508,
+     "vision": 0.005187,
+     "code": 0.003349,
+     "long_document": 0.002956
+    },
+    "wall_ms": 542,
+    "server_latency_ms": null,
+    "tokens_in": 129,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-27",
+    "set": "route",
+    "kind": "choice",
+    "label": "vision",
+    "answer": "vision",
+    "correct": true,
+    "p_answer": 0.82754,
+    "p_label": 0.82754,
+    "distribution": {
+     "vision": 0.82754,
+     "chat": 0.143805,
+     "long_document": 0.019462,
+     "code": 0.009193
+    },
+    "wall_ms": 1375,
+    "server_latency_ms": null,
+    "tokens_in": 132,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-28",
+    "set": "route",
+    "kind": "choice",
+    "label": "long_document",
+    "answer": "long_document",
+    "correct": true,
+    "p_answer": 0.755645,
+    "p_label": 0.755645,
+    "distribution": {
+     "long_document": 0.755645,
+     "vision": 0.131311,
+     "chat": 0.102265,
+     "code": 0.010779
+    },
+    "wall_ms": 537,
+    "server_latency_ms": null,
+    "tokens_in": 135,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-29",
+    "set": "route",
+    "kind": "choice",
+    "label": "code",
+    "answer": "code",
+    "correct": true,
+    "p_answer": 0.773829,
+    "p_label": 0.773829,
+    "distribution": {
+     "code": 0.773829,
+     "chat": 0.221706,
+     "vision": 0.002971,
+     "long_document": 0.001494
+    },
+    "wall_ms": 529,
+    "server_latency_ms": null,
+    "tokens_in": 129,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "route-30",
+    "set": "route",
+    "kind": "choice",
+    "label": "chat",
+    "answer": "chat",
+    "correct": true,
+    "p_answer": 0.986957,
+    "p_label": 0.986957,
+    "distribution": {
+     "chat": 0.986957,
+     "vision": 0.00665,
+     "code": 0.003789,
+     "long_document": 0.002604
+    },
+    "wall_ms": 632,
+    "server_latency_ms": null,
+    "tokens_in": 132,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-01",
+    "set": "triage",
+    "kind": "choice",
+    "label": "billing",
+    "answer": "billing",
+    "correct": true,
+    "p_answer": 0.98892,
+    "p_label": 0.98892,
+    "distribution": {
+     "billing": 0.98892,
+     "sales": 0.00588,
+     "technical": 0.00458,
+     "account": 0.00062
+    },
+    "wall_ms": 577,
+    "server_latency_ms": null,
+    "tokens_in": 120,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-02",
+    "set": "triage",
+    "kind": "choice",
+    "label": "technical",
+    "answer": "technical",
+    "correct": true,
+    "p_answer": 0.941269,
+    "p_label": 0.941269,
+    "distribution": {
+     "technical": 0.941269,
+     "billing": 0.053103,
+     "sales": 0.002814,
+     "account": 0.002814
+    },
+    "wall_ms": 544,
+    "server_latency_ms": null,
+    "tokens_in": 128,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-03",
+    "set": "triage",
+    "kind": "choice",
+    "label": "sales",
+    "answer": "sales",
+    "correct": true,
+    "p_answer": 0.852747,
+    "p_label": 0.852747,
+    "distribution": {
+     "sales": 0.852747,
+     "billing": 0.130773,
+     "technical": 0.010734,
+     "account": 0.005746
+    },
+    "wall_ms": 575,
+    "server_latency_ms": null,
+    "tokens_in": 121,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-04",
+    "set": "triage",
+    "kind": "choice",
+    "label": "account",
+    "answer": "account",
+    "correct": true,
+    "p_answer": 0.932898,
+    "p_label": 0.932898,
+    "distribution": {
+     "account": 0.932898,
+     "technical": 0.059638,
+     "sales": 0.005547,
+     "billing": 0.001917
+    },
+    "wall_ms": 575,
+    "server_latency_ms": null,
+    "tokens_in": 121,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-05",
+    "set": "triage",
+    "kind": "choice",
+    "label": "billing",
+    "answer": "billing",
+    "correct": true,
+    "p_answer": 0.950728,
+    "p_label": 0.950728,
+    "distribution": {
+     "billing": 0.950728,
+     "account": 0.025336,
+     "sales": 0.011968,
+     "technical": 0.011968
+    },
+    "wall_ms": 522,
+    "server_latency_ms": null,
+    "tokens_in": 121,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-06",
+    "set": "triage",
+    "kind": "choice",
+    "label": "technical",
+    "answer": "technical",
+    "correct": true,
+    "p_answer": 0.958517,
+    "p_label": 0.958517,
+    "distribution": {
+     "technical": 0.958517,
+     "billing": 0.022542,
+     "account": 0.010648,
+     "sales": 0.008293
+    },
+    "wall_ms": 401,
+    "server_latency_ms": null,
+    "tokens_in": 124,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-07",
+    "set": "triage",
+    "kind": "choice",
+    "label": "sales",
+    "answer": "sales",
+    "correct": true,
+    "p_answer": 0.920108,
+    "p_label": 0.920108,
+    "distribution": {
+     "sales": 0.920108,
+     "billing": 0.058821,
+     "technical": 0.014872,
+     "account": 0.0062
+    },
+    "wall_ms": 2107,
+    "server_latency_ms": null,
+    "tokens_in": 121,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-08",
+    "set": "triage",
+    "kind": "choice",
+    "label": "account",
+    "answer": "account",
+    "correct": true,
+    "p_answer": 0.930621,
+    "p_label": 0.930621,
+    "distribution": {
+     "account": 0.930621,
+     "sales": 0.046333,
+     "technical": 0.021886,
+     "billing": 0.00116
+    },
+    "wall_ms": 454,
+    "server_latency_ms": null,
+    "tokens_in": 120,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-09",
+    "set": "triage",
+    "kind": "choice",
+    "label": "billing",
+    "answer": "billing",
+    "correct": true,
+    "p_answer": 0.885373,
+    "p_label": 0.885373,
+    "distribution": {
+     "billing": 0.885373,
+     "technical": 0.093318,
+     "sales": 0.012629,
+     "account": 0.00868
+    },
+    "wall_ms": 452,
+    "server_latency_ms": null,
+    "tokens_in": 120,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-10",
+    "set": "triage",
+    "kind": "choice",
+    "label": "technical",
+    "answer": "technical",
+    "correct": true,
+    "p_answer": 0.911915,
+    "p_label": 0.911915,
+    "distribution": {
+     "technical": 0.911915,
+     "account": 0.045402,
+     "billing": 0.031204,
+     "sales": 0.011479
+    },
+    "wall_ms": 453,
+    "server_latency_ms": null,
+    "tokens_in": 123,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-11",
+    "set": "triage",
+    "kind": "choice",
+    "label": "sales",
+    "answer": "sales",
+    "correct": true,
+    "p_answer": 0.827511,
+    "p_label": 0.827511,
+    "distribution": {
+     "sales": 0.827511,
+     "billing": 0.162946,
+     "technical": 0.004921,
+     "account": 0.004622
+    },
+    "wall_ms": 453,
+    "server_latency_ms": null,
+    "tokens_in": 117,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-12",
+    "set": "triage",
+    "kind": "choice",
+    "label": "account",
+    "answer": "account",
+    "correct": true,
+    "p_answer": 0.943325,
+    "p_label": 0.943325,
+    "distribution": {
+     "account": 0.943325,
+     "technical": 0.036577,
+     "sales": 0.017278,
+     "billing": 0.00282
+    },
+    "wall_ms": 1932,
+    "server_latency_ms": null,
+    "tokens_in": 126,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-13",
+    "set": "triage",
+    "kind": "choice",
+    "label": "billing",
+    "answer": "billing",
+    "correct": true,
+    "p_answer": 0.963311,
+    "p_label": 0.963311,
+    "distribution": {
+     "billing": 0.963311,
+     "sales": 0.032963,
+     "technical": 0.00198,
+     "account": 0.001747
+    },
+    "wall_ms": 1834,
+    "server_latency_ms": null,
+    "tokens_in": 118,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-14",
+    "set": "triage",
+    "kind": "choice",
+    "label": "technical",
+    "answer": "technical",
+    "correct": true,
+    "p_answer": 0.973288,
+    "p_label": 0.973288,
+    "distribution": {
+     "technical": 0.973288,
+     "account": 0.017826,
+     "billing": 0.005787,
+     "sales": 0.003098
+    },
+    "wall_ms": 1722,
+    "server_latency_ms": null,
+    "tokens_in": 119,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-15",
+    "set": "triage",
+    "kind": "choice",
+    "label": "sales",
+    "answer": "sales",
+    "correct": true,
+    "p_answer": 0.87142,
+    "p_label": 0.87142,
+    "distribution": {
+     "sales": 0.87142,
+     "technical": 0.104076,
+     "account": 0.015961,
+     "billing": 0.008543
+    },
+    "wall_ms": 1637,
+    "server_latency_ms": null,
+    "tokens_in": 120,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-16",
+    "set": "triage",
+    "kind": "choice",
+    "label": "account",
+    "answer": "account",
+    "correct": true,
+    "p_answer": 0.738489,
+    "p_label": 0.738489,
+    "distribution": {
+     "account": 0.738489,
+     "technical": 0.239752,
+     "sales": 0.017368,
+     "billing": 0.004391
+    },
+    "wall_ms": 1639,
+    "server_latency_ms": null,
+    "tokens_in": 127,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-17",
+    "set": "triage",
+    "kind": "choice",
+    "label": "billing",
+    "answer": "billing",
+    "correct": true,
+    "p_answer": 0.934925,
+    "p_label": 0.934925,
+    "distribution": {
+     "billing": 0.934925,
+     "sales": 0.059768,
+     "technical": 0.004067,
+     "account": 0.00124
+    },
+    "wall_ms": 1637,
+    "server_latency_ms": null,
+    "tokens_in": 122,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-18",
+    "set": "triage",
+    "kind": "choice",
+    "label": "technical",
+    "answer": "technical",
+    "correct": true,
+    "p_answer": 0.970984,
+    "p_label": 0.970984,
+    "distribution": {
+     "technical": 0.970984,
+     "account": 0.022835,
+     "sales": 0.00309,
+     "billing": 0.00309
+    },
+    "wall_ms": 1637,
+    "server_latency_ms": null,
+    "tokens_in": 126,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-19",
+    "set": "triage",
+    "kind": "choice",
+    "label": "sales",
+    "answer": "sales",
+    "correct": true,
+    "p_answer": 0.747254,
+    "p_label": 0.747254,
+    "distribution": {
+     "sales": 0.747254,
+     "billing": 0.242598,
+     "technical": 0.006465,
+     "account": 0.003684
+    },
+    "wall_ms": 317,
+    "server_latency_ms": null,
+    "tokens_in": 119,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "triage-20",
+    "set": "triage",
+    "kind": "choice",
+    "label": "account",
+    "answer": "account",
+    "correct": true,
+    "p_answer": 0.98727,
+    "p_label": 0.98727,
+    "distribution": {
+     "account": 0.98727,
+     "sales": 0.008542,
+     "billing": 0.00216,
+     "technical": 0.002029
+    },
+    "wall_ms": 534,
+    "server_latency_ms": null,
+    "tokens_in": 119,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-01",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.731059,
+    "p_label": 0.731059,
+    "distribution": {
+     "true": 0.731059,
+     "false": 0.268941
+    },
+    "wall_ms": 2428,
+    "server_latency_ms": null,
+    "tokens_in": 105,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-02",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.991423,
+    "p_label": 0.991423,
+    "distribution": {
+     "true": 0.991423,
+     "false": 0.008577
+    },
+    "wall_ms": 533,
+    "server_latency_ms": null,
+    "tokens_in": 113,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-03",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.977023,
+    "p_label": 0.977023,
+    "distribution": {
+     "false": 0.977023,
+     "true": 0.022977
+    },
+    "wall_ms": 2427,
+    "server_latency_ms": null,
+    "tokens_in": 106,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-04",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": false,
+    "correct": false,
+    "p_answer": 0.622459,
+    "p_label": 0.377541,
+    "distribution": {
+     "false": 0.622459,
+     "true": 0.377541
+    },
+    "wall_ms": 532,
+    "server_latency_ms": null,
+    "tokens_in": 106,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-05",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.835484,
+    "p_label": 0.835484,
+    "distribution": {
+     "false": 0.835484,
+     "true": 0.164516
+    },
+    "wall_ms": 532,
+    "server_latency_ms": null,
+    "tokens_in": 106,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-06",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.984094,
+    "p_label": 0.984094,
+    "distribution": {
+     "false": 0.984094,
+     "true": 0.015906
+    },
+    "wall_ms": 517,
+    "server_latency_ms": null,
+    "tokens_in": 109,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-07",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.985936,
+    "p_label": 0.985936,
+    "distribution": {
+     "false": 0.985936,
+     "true": 0.014064
+    },
+    "wall_ms": 355,
+    "server_latency_ms": null,
+    "tokens_in": 106,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-08",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.939913,
+    "p_label": 0.939913,
+    "distribution": {
+     "false": 0.939913,
+     "true": 0.060087
+    },
+    "wall_ms": 403,
+    "server_latency_ms": null,
+    "tokens_in": 105,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-09",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.952574,
+    "p_label": 0.952574,
+    "distribution": {
+     "true": 0.952574,
+     "false": 0.047426
+    },
+    "wall_ms": 405,
+    "server_latency_ms": null,
+    "tokens_in": 105,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-10",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.835484,
+    "p_label": 0.835484,
+    "distribution": {
+     "false": 0.835484,
+     "true": 0.164516
+    },
+    "wall_ms": 473,
+    "server_latency_ms": null,
+    "tokens_in": 108,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-11",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.987568,
+    "p_label": 0.987568,
+    "distribution": {
+     "false": 0.987568,
+     "true": 0.012432
+    },
+    "wall_ms": 474,
+    "server_latency_ms": null,
+    "tokens_in": 102,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-12",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.904651,
+    "p_label": 0.904651,
+    "distribution": {
+     "true": 0.904651,
+     "false": 0.095349
+    },
+    "wall_ms": 472,
+    "server_latency_ms": null,
+    "tokens_in": 111,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-13",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.835484,
+    "p_label": 0.835484,
+    "distribution": {
+     "false": 0.835484,
+     "true": 0.164516
+    },
+    "wall_ms": 394,
+    "server_latency_ms": null,
+    "tokens_in": 103,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-14",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.817574,
+    "p_label": 0.817574,
+    "distribution": {
+     "true": 0.817574,
+     "false": 0.182426
+    },
+    "wall_ms": 305,
+    "server_latency_ms": null,
+    "tokens_in": 104,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-15",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.982014,
+    "p_label": 0.982014,
+    "distribution": {
+     "false": 0.982014,
+     "true": 0.017986
+    },
+    "wall_ms": 1622,
+    "server_latency_ms": null,
+    "tokens_in": 105,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-16",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.987568,
+    "p_label": 0.987568,
+    "distribution": {
+     "true": 0.987568,
+     "false": 0.012432
+    },
+    "wall_ms": 404,
+    "server_latency_ms": null,
+    "tokens_in": 112,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-17",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.7773,
+    "p_label": 0.7773,
+    "distribution": {
+     "false": 0.7773,
+     "true": 0.2227
+    },
+    "wall_ms": 558,
+    "server_latency_ms": null,
+    "tokens_in": 107,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-18",
+    "set": "urgency",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.893309,
+    "p_label": 0.893309,
+    "distribution": {
+     "true": 0.893309,
+     "false": 0.106691
+    },
+    "wall_ms": 404,
+    "server_latency_ms": null,
+    "tokens_in": 111,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-19",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.977023,
+    "p_label": 0.977023,
+    "distribution": {
+     "false": 0.977023,
+     "true": 0.022977
+    },
+    "wall_ms": 518,
+    "server_latency_ms": null,
+    "tokens_in": 104,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "urgency-20",
+    "set": "urgency",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.974043,
+    "p_label": 0.974043,
+    "distribution": {
+     "false": 0.974043,
+     "true": 0.025957
+    },
+    "wall_ms": 1453,
+    "server_latency_ms": null,
+    "tokens_in": 104,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-01",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.924142,
+    "p_label": 0.924142,
+    "distribution": {
+     "true": 0.924142,
+     "false": 0.075858
+    },
+    "wall_ms": 425,
+    "server_latency_ms": null,
+    "tokens_in": 114,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-02",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.974043,
+    "p_label": 0.974043,
+    "distribution": {
+     "true": 0.974043,
+     "false": 0.025957
+    },
+    "wall_ms": 409,
+    "server_latency_ms": null,
+    "tokens_in": 107,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-03",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.7773,
+    "p_label": 0.7773,
+    "distribution": {
+     "false": 0.7773,
+     "true": 0.2227
+    },
+    "wall_ms": 388,
+    "server_latency_ms": null,
+    "tokens_in": 107,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-04",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.979668,
+    "p_label": 0.979668,
+    "distribution": {
+     "false": 0.979668,
+     "true": 0.020332
+    },
+    "wall_ms": 367,
+    "server_latency_ms": null,
+    "tokens_in": 107,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-05",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.851953,
+    "p_label": 0.851953,
+    "distribution": {
+     "true": 0.851953,
+     "false": 0.148047
+    },
+    "wall_ms": 320,
+    "server_latency_ms": null,
+    "tokens_in": 119,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-06",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.798187,
+    "p_label": 0.798187,
+    "distribution": {
+     "false": 0.798187,
+     "true": 0.201813
+    },
+    "wall_ms": 303,
+    "server_latency_ms": null,
+    "tokens_in": 113,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-07",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.992423,
+    "p_label": 0.992423,
+    "distribution": {
+     "true": 0.992423,
+     "false": 0.007577
+    },
+    "wall_ms": 988,
+    "server_latency_ms": null,
+    "tokens_in": 109,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-08",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.962673,
+    "p_label": 0.962673,
+    "distribution": {
+     "false": 0.962673,
+     "true": 0.037327
+    },
+    "wall_ms": 680,
+    "server_latency_ms": null,
+    "tokens_in": 110,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-09",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.952574,
+    "p_label": 0.952574,
+    "distribution": {
+     "true": 0.952574,
+     "false": 0.047426
+    },
+    "wall_ms": 474,
+    "server_latency_ms": null,
+    "tokens_in": 107,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-10",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.754915,
+    "p_label": 0.754915,
+    "distribution": {
+     "false": 0.754915,
+     "true": 0.245085
+    },
+    "wall_ms": 472,
+    "server_latency_ms": null,
+    "tokens_in": 112,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-11",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.952574,
+    "p_label": 0.952574,
+    "distribution": {
+     "true": 0.952574,
+     "false": 0.047426
+    },
+    "wall_ms": 474,
+    "server_latency_ms": null,
+    "tokens_in": 113,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-12",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.817574,
+    "p_label": 0.817574,
+    "distribution": {
+     "false": 0.817574,
+     "true": 0.182426
+    },
+    "wall_ms": 474,
+    "server_latency_ms": null,
+    "tokens_in": 116,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-13",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.932453,
+    "p_label": 0.932453,
+    "distribution": {
+     "true": 0.932453,
+     "false": 0.067547
+    },
+    "wall_ms": 444,
+    "server_latency_ms": null,
+    "tokens_in": 112,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-14",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.932453,
+    "p_label": 0.932453,
+    "distribution": {
+     "false": 0.932453,
+     "true": 0.067547
+    },
+    "wall_ms": 437,
+    "server_latency_ms": null,
+    "tokens_in": 112,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-15",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.754915,
+    "p_label": 0.754915,
+    "distribution": {
+     "true": 0.754915,
+     "false": 0.245085
+    },
+    "wall_ms": 488,
+    "server_latency_ms": null,
+    "tokens_in": 110,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-16",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.851953,
+    "p_label": 0.851953,
+    "distribution": {
+     "false": 0.851953,
+     "true": 0.148047
+    },
+    "wall_ms": 488,
+    "server_latency_ms": null,
+    "tokens_in": 119,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-17",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.851953,
+    "p_label": 0.851953,
+    "distribution": {
+     "true": 0.851953,
+     "false": 0.148047
+    },
+    "wall_ms": 354,
+    "server_latency_ms": null,
+    "tokens_in": 109,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-18",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.731059,
+    "p_label": 0.731059,
+    "distribution": {
+     "false": 0.731059,
+     "true": 0.268941
+    },
+    "wall_ms": 1506,
+    "server_latency_ms": null,
+    "tokens_in": 108,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-19",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.939913,
+    "p_label": 0.939913,
+    "distribution": {
+     "true": 0.939913,
+     "false": 0.060087
+    },
+    "wall_ms": 1453,
+    "server_latency_ms": null,
+    "tokens_in": 107,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "pr_safe-20",
+    "set": "pr_safe",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.835484,
+    "p_label": 0.835484,
+    "distribution": {
+     "false": 0.835484,
+     "true": 0.164516
+    },
+    "wall_ms": 1422,
+    "server_latency_ms": null,
+    "tokens_in": 114,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-01",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.991423,
+    "p_label": 0.991423,
+    "distribution": {
+     "true": 0.991423,
+     "false": 0.008577
+    },
+    "wall_ms": 818,
+    "server_latency_ms": null,
+    "tokens_in": 76,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-02",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.924142,
+    "p_label": 0.924142,
+    "distribution": {
+     "false": 0.924142,
+     "true": 0.075858
+    },
+    "wall_ms": 887,
+    "server_latency_ms": null,
+    "tokens_in": 78,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-03",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.999643,
+    "p_label": 0.999643,
+    "distribution": {
+     "true": 0.999643,
+     "false": 0.000357
+    },
+    "wall_ms": 843,
+    "server_latency_ms": null,
+    "tokens_in": 68,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-04",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.932453,
+    "p_label": 0.932453,
+    "distribution": {
+     "true": 0.932453,
+     "false": 0.067547
+    },
+    "wall_ms": 896,
+    "server_latency_ms": null,
+    "tokens_in": 70,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-05",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.562177,
+    "p_label": 0.562177,
+    "distribution": {
+     "true": 0.562177,
+     "false": 0.437823
+    },
+    "wall_ms": 791,
+    "server_latency_ms": null,
+    "tokens_in": 83,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-06",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.977023,
+    "p_label": 0.977023,
+    "distribution": {
+     "false": 0.977023,
+     "true": 0.022977
+    },
+    "wall_ms": 1347,
+    "server_latency_ms": null,
+    "tokens_in": 77,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-07",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.914901,
+    "p_label": 0.914901,
+    "distribution": {
+     "false": 0.914901,
+     "true": 0.085099
+    },
+    "wall_ms": 434,
+    "server_latency_ms": null,
+    "tokens_in": 74,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-08",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.99929,
+    "p_label": 0.99929,
+    "distribution": {
+     "true": 0.99929,
+     "false": 0.00071
+    },
+    "wall_ms": 433,
+    "server_latency_ms": null,
+    "tokens_in": 77,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-09",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.999089,
+    "p_label": 0.999089,
+    "distribution": {
+     "true": 0.999089,
+     "false": 0.000911
+    },
+    "wall_ms": 421,
+    "server_latency_ms": null,
+    "tokens_in": 70,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-10",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.939913,
+    "p_label": 0.939913,
+    "distribution": {
+     "false": 0.939913,
+     "true": 0.060087
+    },
+    "wall_ms": 360,
+    "server_latency_ms": null,
+    "tokens_in": 74,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-11",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.99883,
+    "p_label": 0.99883,
+    "distribution": {
+     "true": 0.99883,
+     "false": 0.00117
+    },
+    "wall_ms": 398,
+    "server_latency_ms": null,
+    "tokens_in": 82,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-12",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.994089,
+    "p_label": 0.994089,
+    "distribution": {
+     "true": 0.994089,
+     "false": 0.005911
+    },
+    "wall_ms": 398,
+    "server_latency_ms": null,
+    "tokens_in": 74,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-13",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.992423,
+    "p_label": 0.992423,
+    "distribution": {
+     "false": 0.992423,
+     "true": 0.007577
+    },
+    "wall_ms": 394,
+    "server_latency_ms": null,
+    "tokens_in": 71,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-14",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.99903,
+    "p_label": 0.99903,
+    "distribution": {
+     "true": 0.99903,
+     "false": 0.00097
+    },
+    "wall_ms": 431,
+    "server_latency_ms": null,
+    "tokens_in": 73,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-15",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.932453,
+    "p_label": 0.932453,
+    "distribution": {
+     "false": 0.932453,
+     "true": 0.067547
+    },
+    "wall_ms": 424,
+    "server_latency_ms": null,
+    "tokens_in": 71,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-16",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.817574,
+    "p_label": 0.817574,
+    "distribution": {
+     "true": 0.817574,
+     "false": 0.182426
+    },
+    "wall_ms": 423,
+    "server_latency_ms": null,
+    "tokens_in": 79,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-17",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.989013,
+    "p_label": 0.989013,
+    "distribution": {
+     "false": 0.989013,
+     "true": 0.010987
+    },
+    "wall_ms": 371,
+    "server_latency_ms": null,
+    "tokens_in": 72,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-18",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.952574,
+    "p_label": 0.952574,
+    "distribution": {
+     "true": 0.952574,
+     "false": 0.047426
+    },
+    "wall_ms": 372,
+    "server_latency_ms": null,
+    "tokens_in": 80,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-19",
+    "set": "fact",
+    "kind": "noul",
+    "label": false,
+    "answer": false,
+    "correct": true,
+    "p_answer": 0.982014,
+    "p_label": 0.982014,
+    "distribution": {
+     "false": 0.982014,
+     "true": 0.017986
+    },
+    "wall_ms": 414,
+    "server_latency_ms": null,
+    "tokens_in": 69,
+    "tokens_out": 2,
+    "error": null
+   },
+   {
+    "id": "fact-20",
+    "set": "fact",
+    "kind": "noul",
+    "label": true,
+    "answer": true,
+    "correct": true,
+    "p_answer": 0.999089,
+    "p_label": 0.999089,
+    "distribution": {
+     "true": 0.999089,
+     "false": 0.000911
+    },
+    "wall_ms": 414,
+    "server_latency_ms": null,
+    "tokens_in": 71,
+    "tokens_out": 2,
+    "error": null
+   }
+  ]
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py decide in 10s over 110 labeled items from items.json (decide-110); nothing was loaded, unloaded or restarted.",
+  "Accuracy is the weakest number here: the failure mode automation cares about is a wrong answer at high confidence, which is what the Brier score, the calibration error and the wrong-at-threshold counts measure.",
+  "Confidence is the probability the backend put on the answer it gave. Brier is a single term on the labeled option's probability, and the calibration error uses 5 bins over the reliability table in the same block.",
+  "Cost is $0 for the chat backend: it runs on our own hardware and nobody bills per token for it. The electricity is real and is not a number this record claims to have measured.",
+  "The chat backend is the fallback instrument: lettered options with thinking off, and a distribution softmaxed from the top logprobs of the one letter token. Those probabilities are over letters rather than over meanings, so they are a weaker statement than a decision endpoint's.",
+  "Spark-4-GX10 does not report serving frontier-infra/jebadiah-4b-v2; placement and telemetry may describe the wrong node",
+  "frontier-infra/jebadiah-4b-v2 is not in the AINode catalog; fill model metadata (params_b, license, context) by hand"
+ ],
+ "source": "scripts/ainode-bench.py decide"
+}
