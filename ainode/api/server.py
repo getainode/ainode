@@ -1001,7 +1001,7 @@ def pinned_candidate(cluster, config, node_id: Optional[str], port: Optional[int
     """
     if node_id and node_id != config.node_id:
         node = cluster.get_node(node_id) if cluster is not None else None
-        host = (getattr(node, "fabric_ip", "") or "") if node is not None else ""
+        host = best_host(cluster, config.node_id, node) if node is not None else ""
         if not host:
             return None
         return (host, port or getattr(node, "api_port", None) or config.api_port)
@@ -1742,10 +1742,11 @@ async def _cluster_dispatch(request: web.Request, path: str):
         return await handler(_Shim(request, body))
 
     node = cluster.get_node(node_id) if cluster is not None else None
-    host = (getattr(node, "fabric_ip", "") or "") if node else ""
+    local_id = getattr(request.app.get("config"), "node_id", None)
+    host = best_host(cluster, local_id, node) if node else ""
     if not host:
         return web.json_response(
-            {"error": f"node '{node_id}' not found or has no fabric IP"}, status=404)
+            {"error": f"node '{node_id}' not found or has no address"}, status=404)
     url = f"http://{host}:{node.web_port}{path}"
     session: aiohttp.ClientSession = request.app["client_session"]
     fwd = {k: v for k, v in body.items() if k != "node_id"}
@@ -1776,6 +1777,53 @@ async def handle_cluster_unload(request: web.Request) -> web.Response:
     return await _cluster_dispatch(request, "/api/models/unload")
 
 
+def _same_subnet(a: str, b: str) -> bool:
+    """True when two IPv4 addresses share a /24. Anything else answers False."""
+    if not a or not b or a.count(".") != 3 or b.count(".") != 3:
+        return False
+    return a.rsplit(".", 1)[0] == b.rsplit(".", 1)[0]
+
+
+def _local_fabric_ip(cluster, local_node_id: str) -> str:
+    """This node's own announced fabric IP, from cluster state, or ""."""
+    for n in (cluster.members() if cluster is not None else []):
+        if n.node_id == local_node_id:
+            return getattr(n, "fabric_ip", "") or ""
+    return ""
+
+
+def member_hosts(node, local_fabric: str) -> list:
+    """Addresses to reach a REMOTE member on, best first, or [] (#295).
+
+    A member announces its fabric IP, and the UDP source of that announcement
+    is its LAN address (``peer_ip``). The fabric is the right path between nodes
+    that share it. A router that is not on it (a master on the R750, whose own
+    fabric IP is its LAN address) has no route there, so every request would
+    time out. When this node's own fabric IP and the member's are on different
+    /24s, the LAN address goes first. The other one stays in the list as a
+    failover target, so a wrong guess costs a retry rather than the request.
+    With no fabric IP of our own known, the fabric stays first, as before.
+    """
+    fabric = getattr(node, "fabric_ip", "") or ""
+    peer = getattr(node, "peer_ip", "") or ""
+    hosts = [h for h in (fabric, peer) if h]
+    if fabric and peer and local_fabric and not _same_subnet(local_fabric, fabric):
+        hosts = [peer, fabric]
+    return list(dict.fromkeys(hosts))
+
+
+def best_host(cluster, local_node_id: str, node) -> str:
+    """The one address to reach remote *node* on (``member_hosts``), or ""."""
+    hosts = member_hosts(node, _local_fabric_ip(cluster, local_node_id)) if node else []
+    return hosts[0] if hosts else ""
+
+
+def member_addresses(node) -> tuple:
+    """Every address *node* may appear under in a routing candidate."""
+    return tuple(h for h in (getattr(node, "fabric_ip", "") or "",
+                             getattr(node, "peer_ip", "") or "") if h)
+
+
 def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int) -> list:
     """All (host, port) currently serving `model` (routing-truth).
 
@@ -1783,34 +1831,38 @@ def _routing_candidates(cluster, model: str, local_node_id: str, local_port: int
     stale/ghost claim (a node that crashed but still advertises the model). A
     crashed node is indistinguishable from a live one in cluster state, so
     failover — not ordering — is what makes routing robust. Local node first
-    (cheapest hop), then remote peers.
+    (cheapest hop), then remote peers on their best address (``member_hosts``),
+    then the same peers on their other address, so every node's best guess is
+    tried before any second guess.
     """
-    local, remote = [], []
+    local, remote, fallback = [], [], []
+    local_fabric = _local_fabric_ip(cluster, local_node_id)
     for n in (cluster.members() if cluster is not None else []):
         status = n.status.value if hasattr(n.status, "value") else str(n.status)
         if status not in ("online", "serving", "member-ready"):
             continue
         is_local = n.node_id == local_node_id
-        host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
-        if not host:
+        hosts = ["localhost"] if is_local else member_hosts(n, local_fabric)
+        if not hosts:
             continue
         node_port = local_port if is_local else n.api_port
-        bucket = local if is_local else remote
-        seen = set()
+        ports = []
         # The node's primary/solo model is served on its main api_port.
-        if getattr(n, "model", "") == model and node_port not in seen:
-            bucket.append((host, node_port))
-            seen.add(node_port)
+        if getattr(n, "model", "") == model:
+            ports.append(node_port)
         # Each stacked instance is served on its OWN port — a co-resident 2nd
         # model on this node lives at :8001, not the node's main :8000.
         for inst in (getattr(n, "instances", []) or []):
             if inst.get("model") != model:
                 continue
             iport = inst.get("api_port") or node_port
-            if iport not in seen:
-                bucket.append((host, iport))
-                seen.add(iport)
-    return local + remote
+            if iport not in ports:
+                ports.append(iport)
+        primary = local if is_local else remote
+        for port in ports:
+            primary.append((hosts[0], port))
+            fallback.extend((host, port) for host in hosts[1:])
+    return local + remote + fallback
 
 
 def _routing_table(cluster, local_node_id: str, local_port: int) -> dict:
@@ -1818,17 +1870,20 @@ def _routing_table(cluster, local_node_id: str, local_port: int) -> dict:
 
     Built from cluster broadcast state: each node advertises its solo model and
     any instances it heads. The local node routes to localhost; remote nodes to
-    their fabric IP (reachable from the master over the cluster fabric).
+    their best address (``member_hosts``): the fabric IP when this node shares
+    the fabric, else the LAN address the announcement came from.
     """
     table: dict = {}
+    local_fabric = _local_fabric_ip(cluster, local_node_id)
     for n in cluster.members():
         status = n.status.value if hasattr(n.status, "value") else str(n.status)
         if status not in ("online", "serving", "member-ready"):
             continue
         is_local = n.node_id == local_node_id
-        host = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
-        if not host:
+        hosts = ["localhost"] if is_local else member_hosts(n, local_fabric)
+        if not hosts:
             continue
+        host = hosts[0]
         port = local_port if is_local else n.api_port
         if getattr(n, "model", ""):
             table.setdefault(n.model, (host, port))

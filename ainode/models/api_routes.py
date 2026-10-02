@@ -2275,10 +2275,12 @@ async def handle_model_unload(request: web.Request) -> web.Response:
     remote_stopped = False
     peers_reached = 0
     if cluster is not None and session is not None and model:
+        from ainode.api.server import best_host
+
         for node in cluster.members():
             if node.node_id == config.node_id:
                 continue
-            host = node.fabric_ip or node.node_name
+            host = best_host(cluster, config.node_id, node) or node.node_name
             if not host:
                 continue
             url = f"http://{host}:{node.web_port}/api/models/unload?fanout=0"

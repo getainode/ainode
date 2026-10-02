@@ -566,10 +566,11 @@ def _peer_web_ports(app, candidates: list) -> list[tuple[str, int]]:
     """
     cluster = app.get("cluster_state")
     by_host: dict = {}
+    from ainode.api.server import member_addresses
+
     for member in (cluster.members() if cluster is not None else []):
-        host = getattr(member, "fabric_ip", "") or ""
-        if host and host not in by_host:
-            by_host[host] = member
+        for host in member_addresses(member):
+            by_host.setdefault(host, member)
     peers: list[tuple[str, int]] = []
     for host, _port in candidates:
         if host == "localhost":  # _routing_candidates names this node so
@@ -708,10 +709,11 @@ def owner_web_ports(app, candidates: list) -> list[tuple[str, int]]:
     """
     cluster = app.get("cluster_state")
     by_host: dict = {}
+    from ainode.api.server import member_addresses
+
     for member in (cluster.members() if cluster is not None else []):
-        host = getattr(member, "fabric_ip", "") or ""
-        if host and host not in by_host:
-            by_host[host] = member
+        for host in member_addresses(member):
+            by_host.setdefault(host, member)
     owners: list[tuple[str, int]] = []
     for host, _port in candidates:
         if host == "localhost":  # _routing_candidates' name for this node
