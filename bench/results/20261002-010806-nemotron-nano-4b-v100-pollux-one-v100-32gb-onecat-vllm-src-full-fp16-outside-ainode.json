@@ -1,0 +1,90 @@
+{
+ "schema": 1,
+ "stamp": "20261002-010806",
+ "label": "pollux one v100 32gb, onecat-vllm src-full fp16, outside ainode",
+ "model": {
+  "id": "nemotron-nano-4b-v100"
+ },
+ "placement": {
+  "engine": "vllm",
+  "max_model_len": 32768
+ },
+ "settings": {
+  "thinking": false,
+  "max_tokens": 200,
+  "temperature": null,
+  "sustained_tokens": 1500,
+  "reasoning_tokens": 600,
+  "depths_requested": [
+   4000,
+   16000,
+   32000,
+   64000,
+   120000
+  ],
+  "streams_requested": [
+   1,
+   2,
+   4,
+   8
+  ],
+  "chars_per_token_probe": 5.38
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 83.8,
+   "gen_tokens": 189,
+   "ttft_ms": 121,
+   "prompt_tokens": 83
+  },
+  "concurrency": [
+   {
+    "streams": 1,
+    "aggregate_tok_s": 80.1,
+    "ok": 1,
+    "failed": 0,
+    "wall_s": 2.28,
+    "per_stream_tok_s": 83.8,
+    "median_ttft_ms": 113
+   },
+   {
+    "streams": 2,
+    "aggregate_tok_s": 43.6,
+    "ok": 2,
+    "failed": 0,
+    "wall_s": 9.17,
+    "per_stream_tok_s": 74.5,
+    "median_ttft_ms": 6490
+   },
+   {
+    "streams": 4,
+    "aggregate_tok_s": 244.0,
+    "ok": 4,
+    "failed": 0,
+    "wall_s": 2.95,
+    "per_stream_tok_s": 72.2,
+    "median_ttft_ms": 217
+   },
+   {
+    "streams": 8,
+    "aggregate_tok_s": 463.2,
+    "ok": 8,
+    "failed": 0,
+    "wall_s": 3.27,
+    "per_stream_tok_s": 66.8,
+    "median_ttft_ms": 311
+   }
+  ],
+  "sustained": {
+   "decode_tok_s": 83.33,
+   "gen_tokens": 1153,
+   "wall_s": 13.939,
+   "ttft_ms": 114
+  }
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py in 34s; nothing loaded, unloaded or restarted.",
+  "Sections other than reasoning_tax ran with enable_thinking=false."
+ ],
+ "source": "scripts/ainode-bench.py"
+}

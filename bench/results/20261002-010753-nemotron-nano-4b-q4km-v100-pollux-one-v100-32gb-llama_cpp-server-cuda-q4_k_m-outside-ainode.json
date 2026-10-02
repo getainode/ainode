@@ -1,0 +1,79 @@
+{
+ "schema": 1,
+ "stamp": "20261002-010753",
+ "label": "pollux one v100 32gb, llama.cpp server-cuda q4_k_m, outside ainode",
+ "model": {
+  "id": "nemotron-nano-4b-q4km-v100"
+ },
+ "placement": {
+  "engine": "vllm"
+ },
+ "settings": {
+  "thinking": false,
+  "max_tokens": 200,
+  "temperature": null,
+  "sustained_tokens": 1500,
+  "reasoning_tokens": 600,
+  "depths_requested": [
+   4000,
+   16000,
+   32000,
+   64000,
+   120000
+  ],
+  "streams_requested": [
+   1,
+   2,
+   4
+  ],
+  "chars_per_token_probe": 5.38
+ },
+ "results": {
+  "single_stream": {
+   "decode_tok_s": 152.58,
+   "gen_tokens": 200,
+   "ttft_ms": 657,
+   "prompt_tokens": 78
+  },
+  "concurrency": [
+   {
+    "streams": 1,
+    "aggregate_tok_s": 106.7,
+    "ok": 1,
+    "failed": 0,
+    "wall_s": 1.67,
+    "per_stream_tok_s": 153.2,
+    "median_ttft_ms": 513
+   },
+   {
+    "streams": 2,
+    "aggregate_tok_s": 164.5,
+    "ok": 2,
+    "failed": 0,
+    "wall_s": 2.4,
+    "per_stream_tok_s": 119.4,
+    "median_ttft_ms": 736
+   },
+   {
+    "streams": 4,
+    "aggregate_tok_s": 192.0,
+    "ok": 4,
+    "failed": 0,
+    "wall_s": 3.95,
+    "per_stream_tok_s": 79.4,
+    "median_ttft_ms": 1431
+   }
+  ],
+  "sustained": {
+   "decode_tok_s": 152.65,
+   "gen_tokens": 831,
+   "wall_s": 6.722,
+   "ttft_ms": 1284
+  }
+ },
+ "notes": [
+  "Measured by scripts/ainode-bench.py in 17s; nothing loaded, unloaded or restarted.",
+  "Sections other than reasoning_tax ran with enable_thinking=false."
+ ],
+ "source": "scripts/ainode-bench.py"
+}
