@@ -187,3 +187,67 @@ def test_the_master_routes_to_an_announced_head_and_its_stack():
                                       "spark1", 3000) == [("10.100.0.12", 8000)]
     assert server._routing_candidates(cluster, "Qwen/Qwen3-Embedding-0.6B",
                                       "spark1", 3000) == [("10.100.0.12", 8001)]
+
+
+# #295: a router off the fabric (a master on the R750) reaches members on the
+# LAN address their announcement came from, not their fabric IP.
+
+def _peer_node(nid, model="", fabric="", peer=None, instances=None):
+    n = _node(nid, model=model, fabric=fabric, instances=instances)
+    n.peer_ip = peer
+    return n
+
+
+def test_off_fabric_router_prefers_the_lan_address():
+    from ainode.api.server import _routing_candidates
+    c = _cluster([
+        _peer_node("atlas", fabric="192.168.0.98"),
+        _peer_node("spark1", model="Q", fabric="10.100.0.11", peer="192.168.0.10"),
+    ])
+    assert _routing_table(c, "atlas", 8100)["Q"] == ("192.168.0.10", 8000)
+    # LAN first, the fabric kept as a last-resort failover target.
+    assert _routing_candidates(c, "Q", "atlas", 8100) == [
+        ("192.168.0.10", 8000), ("10.100.0.11", 8000)]
+
+
+def test_on_fabric_router_keeps_the_fabric_first():
+    from ainode.api.server import _routing_candidates
+    c = _cluster([
+        _peer_node("spark1", fabric="10.100.0.11", peer="192.168.0.10"),
+        _peer_node("spark2", model="Q", fabric="10.100.0.13", peer="192.168.0.11"),
+    ])
+    assert _routing_table(c, "spark1", 8000)["Q"] == ("10.100.0.13", 8000)
+    assert _routing_candidates(c, "Q", "spark1", 8000) == [
+        ("10.100.0.13", 8000), ("192.168.0.11", 8000)]
+
+
+def test_every_best_guess_is_tried_before_any_fallback():
+    from ainode.api.server import _routing_candidates
+    inst = {"model": "Q", "api_port": 8001}
+    c = _cluster([
+        _peer_node("atlas", fabric="192.168.0.98"),
+        _peer_node("spark1", model="Q", fabric="10.100.0.11", peer="192.168.0.10"),
+        _peer_node("spark4", fabric="10.100.0.17", peer="192.168.0.199", instances=[inst]),
+    ])
+    got = _routing_candidates(c, "Q", "atlas", 8100)
+    assert got[:2] == [("192.168.0.10", 8000), ("192.168.0.199", 8001)]
+    assert set(got[2:]) == {("10.100.0.11", 8000), ("10.100.0.17", 8001)}
+
+
+def test_unknown_own_fabric_keeps_the_old_order():
+    from ainode.api.server import member_hosts
+    n = _peer_node("spark2", fabric="10.100.0.13", peer="192.168.0.11")
+    assert member_hosts(n, "") == ["10.100.0.13", "192.168.0.11"]
+
+
+def test_lan_only_member_is_now_routable():
+    c = _cluster([_peer_node("box", model="Q", fabric="", peer="192.168.0.50")])
+    assert _routing_table(c, "spark1", 8000)["Q"] == ("192.168.0.50", 8000)
+
+
+def test_decide_owner_lookup_matches_the_lan_address():
+    from ainode.api.decide import owner_web_ports
+    n = _peer_node("spark1", model="Q", fabric="10.100.0.11", peer="192.168.0.10")
+    n.web_port = 3000
+    app = {"cluster_state": _cluster([n])}
+    assert owner_web_ports(app, [("192.168.0.10", 8000)]) == [("192.168.0.10", 3000)]

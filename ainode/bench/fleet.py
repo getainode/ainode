@@ -340,10 +340,12 @@ def _owning_node(cluster, local_node_id, host, port):
     the node. Matched the same way the candidate was built: the local node is
     addressed as "localhost", peers by fabric IP.
     """
+    from ainode.api.server import member_addresses
+
     for n in (cluster.members() if cluster is not None else []):
         is_local = n.node_id == local_node_id
-        nhost = "localhost" if is_local else (getattr(n, "fabric_ip", "") or "")
-        if nhost != host:
+        nhosts = ("localhost",) if is_local else member_addresses(n)
+        if host not in nhosts:
             continue
         ports = {getattr(n, "api_port", 0)}
         for inst in (getattr(n, "instances", []) or []):

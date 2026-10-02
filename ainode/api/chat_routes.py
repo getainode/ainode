@@ -116,13 +116,17 @@ def fleet_instances(app) -> list[dict]:
                     out[i] = entry
                     return
 
+    from ainode.api.server import _local_fabric_ip, member_hosts
+
+    local_fabric = _local_fabric_ip(cluster, local_id)
     for node in (cluster.members() if cluster is not None else []):
         if _status_of(node) not in _SERVING_STATES:
             continue
         is_local = node.node_id == local_id
-        host = "localhost" if is_local else (getattr(node, "fabric_ip", "") or "")
-        if not host:
-            continue  # remote node with no fabric IP is unroutable, so unreportable
+        hosts = ["localhost"] if is_local else member_hosts(node, local_fabric)
+        if not hosts:
+            continue  # remote node with no address is unroutable, so unreportable
+        host = hosts[0]
         node_port = local_port if is_local else node.api_port
         base = {
             "node_id": node.node_id,
