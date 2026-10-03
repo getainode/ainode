@@ -2311,7 +2311,7 @@ def main():
     )
     try:
         if args.command is None:
-            # No subcommand — default to start
+            # No subcommand: default to start
             cmd_start(args)
         else:
             # A command that returns a code means it: `ainode prune-images` failing
