@@ -1,16 +1,15 @@
 """Shared pytest fixtures.
 
 Six are global, all there to keep the suite from reading or touching the machine
-it runs on: netdev isolation, the metrics-store redirect, the users-store
-redirect, the boot-reconcile guard and the Hub size lookup (per test), and the
-engine-container guard (per session, at the bottom of this file).
+it runs on: netdev isolation, the metrics-store redirect, the boot-reconcile
+guard and the Hub size lookup (per test), and the AINode home and
+engine-container guards (per session).
 
-``isolate_users_store``: ``create_app`` loads the login accounts
-(``ainode/auth/accounts.py``) the way it loads ``auth.json``, so without this
-every test that starts an application would read, and any test that created an
-account would WRITE, the developer's own ``~/.ainode/users.json``. Point the
-module constant at a temporary file per test. A test that wants a specific path
-passes one to ``UsersStore``, which this does not touch.
+``isolate_ainode_home``: AINode derives several paths at module import time, and
+pytest imports test modules before it starts fixtures.  Set ``AINODE_HOME`` as
+soon as this conftest is imported, before collection can import AINode, then keep
+the temporary directory alive for the session.  The fixture also verifies that
+the real home directory's mtime did not change while the suite ran.
 
 ``isolate_netdev``: ``ainode.cluster.netdev`` reads the
 real host (``ip -o -4 addr show``, ``/sys/class/net``) and caches the answer
@@ -64,10 +63,55 @@ refused". The tests for the preflight call the real function with a faked
 ``urlopen``, and the tests for a refusal set this seam to their own answer.
 """
 
+import os
+from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 import pytest
+
+
+def _mtime_ns(path: Path):
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+# This must happen at conftest import time, before pytest collects test modules.
+# A session fixture alone starts too late: imports performed during collection
+# would already have captured the operator's real paths in module constants and
+# in NodeConfig's dataclass defaults.
+_REAL_AINODE_HOME = Path(
+    os.environ.get("AINODE_HOME", Path.home() / ".ainode")
+).expanduser().resolve()
+_REAL_AINODE_HOME_MTIME_NS = _mtime_ns(_REAL_AINODE_HOME)
+_SESSION_AINODE_HOME = Path(tempfile.mkdtemp(prefix="ainode-tests-"))
+_ORIGINAL_AINODE_HOME = os.environ.get("AINODE_HOME")
+os.environ["AINODE_HOME"] = str(_SESSION_AINODE_HOME)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolate_ainode_home():
+    """Keep every default AINode path inside one disposable session home."""
+    yield _SESSION_AINODE_HOME
+
+    try:
+        after = _mtime_ns(_REAL_AINODE_HOME)
+        if after != _REAL_AINODE_HOME_MTIME_NS:
+            pytest.fail(
+                "The unit suite changed the operator's AINODE_HOME directory "
+                f"mtime: {_REAL_AINODE_HOME}. A default path escaped the "
+                "session-wide test home.",
+                pytrace=False,
+            )
+    finally:
+        shutil.rmtree(_SESSION_AINODE_HOME, ignore_errors=True)
+        if _ORIGINAL_AINODE_HOME is None:
+            os.environ.pop("AINODE_HOME", None)
+        else:
+            os.environ["AINODE_HOME"] = _ORIGINAL_AINODE_HOME
 
 
 @pytest.fixture(autouse=True)
@@ -87,20 +131,6 @@ def isolate_metrics_store(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(
         metrics_store, "default_store_path", lambda: home / "metrics.db"
     )
-    yield
-
-
-@pytest.fixture(autouse=True)
-def isolate_users_store(monkeypatch, tmp_path):
-    """Keep the login accounts out of the operator's real AINODE_HOME.
-
-    ``UsersStore`` resolves ``accounts.USERS_FILE`` at call time rather than in
-    ``__init__`` precisely so this one patch reaches a store that already exists,
-    the same way the ``auth_home`` fixtures redirect ``AUTH_FILE``.
-    """
-    from ainode.auth import accounts
-
-    monkeypatch.setattr(accounts, "USERS_FILE", tmp_path / "users.json")
     yield
 
 
