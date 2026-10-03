@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ainode import __version__
+from ainode.cli.agent_line import AGENT_LINE, render as render_agent_line, suppressed
 from ainode.core.config import (
     AINODE_HOME,
     DEFAULT_ENGINE_BACKEND,
@@ -28,6 +29,23 @@ console = Console()
 
 PID_FILE = AINODE_HOME / "ainode.pid"
 VLLM_LOG = LOGS_DIR / "vllm.log"
+
+
+class _HumanArgumentParser(argparse.ArgumentParser):
+    """Keep the agent footer on argparse's human-only exit paths."""
+
+    def print_help(self, file=None):
+        super().print_help(file)
+        if not suppressed():
+            print(AGENT_LINE, file=file or sys.stdout)
+
+
+class _VersionAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(f"ainode {__version__}")
+        if not suppressed():
+            print(AGENT_LINE)
+        parser.exit()
 
 
 
@@ -2001,11 +2019,11 @@ def cmd_tls(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
+    parser = _HumanArgumentParser(
         prog="ainode",
         description="AINode -- Turn any NVIDIA GPU into a local AI platform.",
     )
-    parser.add_argument("--version", action="version", version=f"ainode {__version__}")
+    parser.add_argument("--version", nargs=0, action=_VersionAction)
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -2279,15 +2297,31 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command is None:
-        # No subcommand — default to start
-        cmd_start(args)
-    else:
-        # A command that returns a code means it: `ainode prune-images` failing
-        # inside `ainode update` has to be visible to the shell that called it.
-        code = args.func(args)
-        if code:
-            sys.exit(int(code))
+    # Doctor owns its human report footer and keeps `--json` clean itself.
+    # `tls renew --check` is a machine contract whose key=value output is parsed
+    # by the host renewal timer. Every other human command gets the line exactly
+    # once here, including commands that exit non-zero.
+    machine_output = (
+        args.command == "doctor"
+        or (
+            args.command == "tls"
+            and getattr(args, "tls_action", None) == "renew"
+            and bool(getattr(args, "check", False))
+        )
+    )
+    try:
+        if args.command is None:
+            # No subcommand — default to start
+            cmd_start(args)
+        else:
+            # A command that returns a code means it: `ainode prune-images` failing
+            # inside `ainode update` has to be visible to the shell that called it.
+            code = args.func(args)
+            if code:
+                sys.exit(int(code))
+    finally:
+        if not machine_output:
+            render_agent_line(console)
 
 
 if __name__ == "__main__":

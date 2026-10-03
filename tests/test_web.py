@@ -20,6 +20,8 @@ def test_get_index_html():
     assert "chat" in html
     assert "models" in html
     assert "training" in html
+    assert "https://ainode.dev/support/llms.txt" in html
+    assert "https://ainode.dev/support/agent.md" in html
 
 
 def test_get_index_html_has_js():

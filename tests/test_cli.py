@@ -8,6 +8,7 @@ from ainode.cli.main import (
     _tail_log, _gpu_info_table,
     cmd_config, cmd_logs, cmd_stop,
 )
+from ainode.cli.agent_line import AGENT_LINE
 
 
 def test_version(capsys):
@@ -21,6 +22,17 @@ def test_version(capsys):
     captured = capsys.readouterr()
     assert __version__ in captured.out
     assert captured.out.startswith("ainode ")
+    assert captured.out.count(AGENT_LINE) == 1
+
+
+def test_help_prints_the_agent_line_once(capsys):
+    with patch.object(sys, "argv", ["ainode", "--help"]):
+        with patch("sys.exit", side_effect=SystemExit):
+            try:
+                main()
+            except SystemExit:
+                pass
+    assert capsys.readouterr().out.count(AGENT_LINE) == 1
 
 
 def test_no_args_calls_start(monkeypatch):
@@ -42,6 +54,13 @@ def test_status_subcommand(monkeypatch):
     with patch.object(sys, "argv", ["ainode", "status"]):
         main()
     assert called.get("status") is True
+
+
+def test_human_command_prints_the_agent_line_once(monkeypatch, capsys):
+    monkeypatch.setattr("ainode.cli.main.cmd_status", lambda args: None)
+    with patch.object(sys, "argv", ["ainode", "status"]):
+        main()
+    assert capsys.readouterr().out.count(AGENT_LINE) == 1
 
 
 def test_models_subcommand(monkeypatch):

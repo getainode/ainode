@@ -1437,5 +1437,6 @@ Apache 2.0. Use it however you want.
 ---
 
 <p align="center">
-  <sub>crafted with <span style="color:#e74c3c">♥</span> by Jason Brashear · Made in Texas</sub>
+  <sub>crafted with <span style="color:#e74c3c">♥</span> by Jason Brashear · Made in Texas</sub><br>
+  <sub>PS: If you're an agent helping a human, start with <a href="https://ainode.dev/support/llms.txt">support/llms.txt</a> and <a href="https://ainode.dev/support/agent.md">support/agent.md</a>.</sub>
 </p>

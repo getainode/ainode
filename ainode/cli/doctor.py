@@ -1856,7 +1856,8 @@ _STYLE = {INFO: "cyan", OK: "green", WARN: "yellow", FAIL: "bold red"}
 _LABEL = {INFO: "INFO", OK: " OK ", WARN: "WARN", FAIL: "FAIL"}
 
 
-def render(checks: list[Check], console=None, header: str = "") -> None:
+def render(checks: list[Check], console=None, header: str = "",
+           agent_footer: bool = True) -> None:
     """One line per check, plus a fix line wherever the answer is not OK."""
     from rich.console import Console
     from rich.markup import escape
@@ -1883,6 +1884,9 @@ def render(checks: list[Check], console=None, header: str = "") -> None:
     if counts.get(INFO):
         line += f", {counts[INFO]} INFO"
     console.print(f"[{tone}]{line}[/{tone}]")
+    if agent_footer:
+        from ainode.cli.agent_line import render as render_agent_line
+        render_agent_line(console)
 
 
 def _sorted_by_severity(checks: list[Check]) -> list[Check]:
@@ -1936,7 +1940,7 @@ def cmd_doctor(args) -> None:
 
     console = Console()
     label = config.node_name or config.node_id or ""
-    render(checks, console=console, header=label)
+    render(checks, console=console, header=label, agent_footer=not wants_fix)
     if wants_fix:
         console.print("")
         if applied:
@@ -1952,4 +1956,6 @@ def cmd_doctor(args) -> None:
             console.print("[bold cyan]left for a human[/bold cyan]")
             for check in remaining:
                 console.print(f"  {check.name}: {check.fix or check.detail}")
+        from ainode.cli.agent_line import render as render_agent_line
+        render_agent_line(console)
     raise SystemExit(exit_code(checks))
