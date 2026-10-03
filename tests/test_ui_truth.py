@@ -61,7 +61,7 @@ class _Collector:
     def __init__(self):
         self.calls: list = []
 
-    def record_request(self, model, ms, error=False):
+    def record_request(self, model, ms, tokens_generated=0, error=False):
         self.calls.append((model, error))
 
 

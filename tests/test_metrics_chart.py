@@ -159,32 +159,14 @@ def test_a_series_that_measured_nothing_is_said_in_words():
     assert "n/a" in view          # the legend, for the same series
 
 
-def test_there_is_no_tokens_per_second_panel_while_the_counter_is_dead():
-    """Nothing in the product ever increments the token counter.
-
-    ``MetricsCollector.record_request`` takes ``tokens_generated`` and not one of
-    its eight call sites passes it, so ``requests.tokens_generated`` and
-    ``requests.tokens_per_second`` are 0 on every node forever. A panel over that
-    draws a flat line at zero saying "this node generated no tokens", when the
-    truth is "no code path counts tokens", and a chart may not say the first when
-    it means the second. When the proxy passes the usage block through, the panel
-    is one entry in SERIES and one in PANELS, and this test goes away.
-    """
-    import inspect
-
-    from ainode.metrics.collector import MetricsCollector
-
-    source = inspect.getsource(MetricsCollector)
-    assert "tokens_generated: int = 0" in source, "the signature changed; recheck"
-
+def test_token_throughput_is_derived_from_the_generated_token_counter():
+    """The proxy now fills the counter, so the view may state its interval rate."""
     view = METRICS_JS.read_text()
-    assert "key: 'tokens'" not in view
-    # And the reason is written down where the next person will look.
-    assert "nothing counts tokens" in view
-    # The series is not even asked for: the store answers it, and a payload full
-    # of zeros invites exactly the panel this test exists to prevent.
+    assert "key: 'tokens'" in view
+    assert "D.rate(series('requests.tokens_generated'), 1, gap)" in view
     asked = _js_ranges()["series"]
-    assert "requests.tokens_generated" not in asked
+    assert "requests.tokens_generated" in asked
+    # The collector's process-lifetime average is not the chart's interval rate.
     assert "requests.tokens_per_second" not in asked
 
 

@@ -76,6 +76,13 @@ const AINodeMetrics = {
       axis: { zeroFloor: true, minSpan: 20, pad: 0.12 },
     },
     {
+      key: 'tokens',
+      title: 'Token throughput',
+      hint: 'output tokens, or input tokens for embeddings, reported by the serving engine',
+      unit: ' tok/s',
+      axis: { zeroFloor: true, minSpan: 1, pad: 0.1 },
+    },
+    {
       key: 'uptime',
       title: 'Process uptime',
       hint: 'sawtooths to zero at a restart, which is how a gap above reads as one',
@@ -83,13 +90,6 @@ const AINodeMetrics = {
       axis: { zeroFloor: true, minSpan: 0.5, pad: 0.08 },
     },
   ],
-
-  // There is no tokens per second panel, and that is deliberate. See the note on
-  // SERIES in metrics-data.js: the counter behind it is never incremented by
-  // anything in the product, so the panel would be a flat zero reading "this node
-  // generated no tokens" when the truth is "nothing counts tokens". Uptime took
-  // the slot because it is a series that is actually measured, and because it is
-  // what tells a reader whether a gap in the charts above was a restart.
 
   // ======================================================================
   //  ENTRY POINT (called from app.js's refresh switch, once per poll tick)
@@ -446,6 +446,12 @@ const AINodeMetrics = {
         { name: 'p99', color: palette.line3, points: series('requests.latency_ms.p99'), digits: 0 },
       ];
     }
+    if (key === 'tokens') {
+      return [{
+        name: 'tokens', color: palette.line2,
+        points: D.rate(series('requests.tokens_generated'), 1, gap), digits: 1,
+      }];
+    }
     if (key === 'uptime') {
       return [{
         name: 'uptime', color: palette.line2,
@@ -487,6 +493,10 @@ const AINodeMetrics = {
     if (key === 'requests' && !measured) {
       return ['No request has been counted in this window. A rate needs two samples of ' +
         'the counter, so the first point of the window is always absent.'];
+    }
+    if (key === 'tokens' && !measured) {
+      return ['No token rate is available in this window. A rate needs two ' +
+        'samples of the counter, so the first point of the window is always absent.'];
     }
     if (key === 'temp' && !measured) {
       return ['This node reports no temperature. Nothing is drawn rather than a zero, which ' +

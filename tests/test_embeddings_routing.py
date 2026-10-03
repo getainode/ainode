@@ -37,6 +37,7 @@ from ainode.embeddings.api_routes import (
     handle_v1_embeddings,
 )
 from ainode.embeddings.manager import EmbeddingManager
+from ainode.metrics.collector import MetricsCollector
 
 EMBED = "Qwen/Qwen3-Embedding-0.6B"
 CHAT = "fraserprice/DeepSeek-V4-Flash-DSpark"
@@ -163,6 +164,7 @@ def _app(cluster, session=None, node_id="spark1", api_port=8000):
         "cluster_state": cluster,
         "client_session": session if session is not None else _Session(),
         "embedding_manager": EmbeddingManager(),
+        "metrics_collector": MetricsCollector(),
     }
 
 
@@ -229,6 +231,7 @@ def test_a_fleet_instance_gets_the_body_verbatim():
     # caller's exact float formatting) reaches the engine untouched.
     assert json.loads(session.bodies[0]) == body
     assert request.tags["_log_model"] == EMBED
+    assert app["metrics_collector"].get_request_stats()["tokens_generated"] == 3
 
 
 def test_the_upstream_status_and_content_type_come_back():
@@ -306,14 +309,16 @@ def test_a_model_no_node_serves_is_answered_in_process():
     """Unchanged behaviour, which is the point: the CPU path is the fallback, not the
     thing that was removed."""
     session = _Session()
-    response, payload, request = _post(_app(_fleet_with_stacked_embedder(), session),
-                                       {"model": MINILM, "input": ["a", "b"]})
+    app = _app(_fleet_with_stacked_embedder(), session)
+    response, payload, request = _post(app, {"model": MINILM, "input": ["a", "b"]})
     assert response.status == 200
     assert session.tried == []                      # nothing left this process
     assert payload["model"] == MINILM
     assert len(payload["data"]) == 2
     assert len(payload["data"][0]["embedding"]) == 8  # the fake's width
     assert request.tags["_log_model"] == MINILM
+    assert payload["usage"]["prompt_tokens"] == 2
+    assert app["metrics_collector"].get_request_stats()["tokens_generated"] == 2
 
 
 def test_the_body_is_still_validated_on_the_in_process_path():

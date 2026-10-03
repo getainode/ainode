@@ -1999,6 +1999,139 @@ def _missing_form_model() -> web.Response:
     )
 
 
+def _token_count(value) -> Optional[int]:
+    """A non-negative integer token count, or None for an absent/bad value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or int(value) != value:
+        return None
+    return int(value)
+
+
+def response_output_tokens(payload) -> Optional[int]:
+    """Read generated-token usage from an OpenAI, Responses or Messages reply.
+
+    vLLM exposes more than one protocol through this proxy. OpenAI completion
+    replies call the figure ``completion_tokens``; the Responses and Anthropic
+    Messages APIs call it ``output_tokens``. A Responses streaming completion
+    nests the final usage block under ``response``.
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates = [payload]
+    response = payload.get("response")
+    if isinstance(response, dict):
+        candidates.append(response)
+    for candidate in candidates:
+        usage = candidate.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for key in ("completion_tokens", "output_tokens"):
+            count = _token_count(usage.get(key))
+            if count is not None:
+                return count
+    return None
+
+
+def response_body_output_tokens(body: bytes) -> int:
+    """Generated tokens reported by one non-streamed JSON response."""
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return 0
+    return response_output_tokens(payload) or 0
+
+
+def _sse_has_output_delta(payload) -> bool:
+    """Whether one SSE event represents generated output when usage is absent."""
+    if not isinstance(payload, dict):
+        return False
+    event_type = payload.get("type")
+    if isinstance(event_type, str) and event_type.endswith(".delta"):
+        return True
+    delta = payload.get("delta")
+    if isinstance(delta, dict):
+        return any(delta.get(key) not in (None, "", [], {}) for key in (
+            "content", "reasoning_content", "text", "thinking",
+            "partial_json", "tool_calls",
+        ))
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if isinstance(delta, dict) and any(
+            delta.get(key) not in (None, "", [], {})
+            for key in ("content", "reasoning_content", "tool_calls")
+        ):
+            return True
+        if choice.get("text") not in (None, ""):
+            return True
+    return False
+
+
+class SSETokenCounter:
+    """Incrementally count an SSE reply without changing the forwarded bytes.
+
+    A protocol-reported usage total wins. When a client did not request a final
+    usage block, each output delta is counted as one streamed token, matching
+    vLLM's token-at-a-time completion events. Framing is buffered because an
+    aiohttp chunk may split anywhere inside an SSE event.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._reported: Optional[int] = None
+        self._deltas = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer.extend(chunk)
+        while True:
+            raw = self._pop_event()
+            if raw is None:
+                return
+            self._consume(raw)
+
+    def finish(self) -> int:
+        if self._buffer:
+            self._consume(bytes(self._buffer))
+            self._buffer.clear()
+        return self._reported if self._reported is not None else self._deltas
+
+    def _pop_event(self) -> Optional[bytes]:
+        positions = [
+            (self._buffer.find(marker), marker)
+            for marker in (b"\n\n", b"\r\n\r\n")
+        ]
+        positions = [(position, marker) for position, marker in positions if position >= 0]
+        if not positions:
+            return None
+        position, marker = min(positions, key=lambda item: item[0])
+        raw = bytes(self._buffer[:position])
+        del self._buffer[:position + len(marker)]
+        return raw
+
+    def _consume(self, event: bytes) -> None:
+        data = []
+        for line in event.splitlines():
+            if line.startswith(b"data:"):
+                data.append(line[5:].lstrip())
+        raw = b"\n".join(data)
+        if not raw or raw == b"[DONE]":
+            return
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            return
+        reported = response_output_tokens(payload)
+        if reported is not None:
+            self._reported = reported
+        elif _sse_has_output_delta(payload):
+            self._deltas += 1
+
+
 async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
     """Forward the request to the node serving the requested model (F1 federation)."""
     config: NodeConfig = request.app["config"]
@@ -2137,6 +2270,7 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
             async with session.request(request.method, vllm_url, **kwargs) as upstream:
                 is_sse = "text/event-stream" in upstream.headers.get("Content-Type", "")
                 if is_sse:
+                    token_counter = SSETokenCounter()
                     resp = web.StreamResponse(
                         status=upstream.status,
                         headers={
@@ -2148,9 +2282,13 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                     )
                     await resp.prepare(request)
                     async for chunk in upstream.content.iter_any():
+                        token_counter.feed(chunk)
                         await resp.write(chunk)
                     await resp.write_eof()
-                    collector.record_request(model, (time.time() - start_time) * 1000, error=False)
+                    collector.record_request(
+                        model, (time.time() - start_time) * 1000,
+                        tokens_generated=token_counter.finish(), error=False,
+                    )
                     return resp
                 body = await upstream.read()
                 # A multimodal-limit 400 is a ROUTING miss, not a bad request:
@@ -2168,7 +2306,10 @@ async def proxy_to_vllm(request: web.Request) -> web.StreamResponse:
                         refused_labels.append(label)
                         last_err = f"{label} serves '{model}' without images"
                         continue
-                collector.record_request(model, (time.time() - start_time) * 1000, error=False)
+                collector.record_request(
+                    model, (time.time() - start_time) * 1000,
+                    tokens_generated=response_body_output_tokens(body), error=False,
+                )
                 return web.Response(
                     status=upstream.status, body=body,
                     headers={SERVED_BY_HEADER: served_by},
