@@ -316,6 +316,19 @@ body {
   text-shadow: 0 0 6px var(--nvidia-green-glow);
 }
 
+.mini-footer-agent {
+  white-space: nowrap;
+}
+
+.mini-footer-agent a {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.mini-footer-agent a:hover {
+  color: var(--nvidia-green);
+}
+
 .mini-footer-sep {
   color: var(--border-hover);
 }
@@ -4037,6 +4050,16 @@ select {
    RESPONSIVE
    ============================================================ */
 @media (max-width: 1200px) {
+  .mini-footer-left,
+  .mini-footer-right > .mini-footer-link,
+  .mini-footer-right > .mini-footer-sep {
+    display: none;
+  }
+
+  .mini-footer {
+    justify-content: center;
+  }
+
   .command-center {
     grid-template-columns: 1fr;
     grid-template-rows: 1fr 60px;
@@ -4060,6 +4083,15 @@ select {
 }
 
 @media (max-width: 768px) {
+  .mini-footer {
+    height: 48px;
+    padding: 4px 12px;
+  }
+  .mini-footer-agent {
+    line-height: 1.25;
+    text-align: center;
+    white-space: normal;
+  }
   .sidebar { display: none; }
   .main { margin-left: 0; padding: 16px; }
   .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
@@ -4072,6 +4104,7 @@ select {
   .top-bar-nav { display: none; }
 
   .command-center {
+    height: calc(100vh - 96px) !important;
     grid-template-columns: 1fr;
     grid-template-rows: 1fr 60px;
     grid-template-areas:
@@ -6678,6 +6711,19 @@ body.signin-mode { overflow: hidden; }
   color: var(--text-muted);
   display: flex;
   align-items: center;
+  flex-direction: column;
+  gap: 6px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.signin-footer a {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.signin-footer a:hover {
+  color: var(--nvidia-green);
 }
 
 /* -- the header chip: who is signed in, and the way out -------------------- */

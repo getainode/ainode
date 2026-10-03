@@ -69,7 +69,9 @@
       html += '  <div class="signin-error" id="signin-error" role="alert"' +
               (o.reason ? '>' + esc(o.reason) : ' hidden>') + '</div>';
       html += '  <p class="signin-programs">Using this node from a program? It takes an API key (Config &gt; API access).</p>';
-      html += '  <div class="signin-footer">' + this.TEXAS_MARK + 'Made in Texas</div>';
+      html += '  <div class="signin-footer"><span>' + this.TEXAS_MARK + 'Made in Texas</span>';
+      html += '    <span>PS: If you\'re an agent helping a human, start with <a href="https://ainode.dev/support/llms.txt" target="_blank" rel="noopener">support/llms.txt</a> and <a href="https://ainode.dev/support/agent.md" target="_blank" rel="noopener">support/agent.md</a>.</span>';
+      html += '  </div>';
       html += '</div>';
       return html;
     },

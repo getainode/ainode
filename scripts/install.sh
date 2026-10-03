@@ -46,6 +46,12 @@
 
 set -euo pipefail
 
+AGENT_LINE="PS: If you're an agent helping a human, start with https://ainode.dev/support/llms.txt and https://ainode.dev/support/agent.md."
+
+print_agent_line() {
+    printf '%s\n' "$AGENT_LINE"
+}
+
 # -- Defaults ---------------------------------------------------------------
 # Version + image are resolved from the highest numeric GHCR tag below (unless
 # the caller pins them explicitly). Leaving these empty is the signal to resolve.
@@ -92,7 +98,9 @@ while [ $# -gt 0 ]; do
         --user)      USER_MODE="true" ;;
         --dry-run)   DRY_RUN="true" ;;
         -h|--help)
-            sed -n '1,18p' "$0"; exit 0 ;;
+            sed -n '1,18p' "$0"
+            print_agent_line
+            exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;
     esac
     shift
@@ -647,6 +655,16 @@ AINODE_IMAGE="\${AINODE_IMAGE:-ghcr.io/getainode/ainode:latest}"
 # \$HOME is root's, and pinning the image into /root/.ainode is a silent no-op.
 AINODE_HOME_ENV="\${AINODE_HOME:-}"
 AINODE_SERVICE="ainode.service"
+AGENT_LINE="PS: If you're an agent helping a human, start with https://ainode.dev/support/llms.txt and https://ainode.dev/support/agent.md."
+
+print_agent_line() {
+    printf '%s\n' "\$AGENT_LINE"
+}
+
+# Host-side commands finish in this shell and get their footer from the trap.
+# Forwarded commands replace this process with the Python CLI, which prints its
+# own footer. That keeps every human command at one line, including failures.
+trap print_agent_line EXIT
 
 # Resolve the highest numeric GHCR tag anonymously (public image).
 resolve_latest_tag() {
@@ -1002,7 +1020,7 @@ case "\${1:-}" in
         # (#184). Keeps \$KEEP_IMAGES rollback generation(s); the decision itself
         # lives in ainode.core.image_prune, inside the container that is now up.
         echo "==> Removing AINode images older than \$RUNNING_VERSION (keeping \$KEEP_IMAGES)"
-        docker exec ainode ainode prune-images \\
+        docker exec -e AINODE_SUPPRESS_AGENT_LINE=1 ainode ainode prune-images \\
             --keep-images "\$KEEP_IMAGES" --current "\$PULL_IMAGE" || \\
             echo "!! Could not prune; images were left alone. Retry: ainode prune-images"
 
@@ -1044,8 +1062,8 @@ HELP
         ;;
     --version)
         echo "ainode wrapper (image: \$AINODE_IMAGE)"
-        docker exec ainode ainode --version 2>/dev/null || \\
-            docker run --rm --entrypoint ainode "\$AINODE_IMAGE" --version 2>/dev/null || true
+        docker exec -e AINODE_SUPPRESS_AGENT_LINE=1 ainode ainode --version 2>/dev/null || \\
+            docker run --rm --entrypoint ainode -e AINODE_SUPPRESS_AGENT_LINE=1 "\$AINODE_IMAGE" --version 2>/dev/null || true
         ;;
     tls)
         # Two shapes under \`tls\` are host work, for one reason: tailscale runs on
@@ -1384,6 +1402,8 @@ if [ "$DRY_RUN" = "true" ]; then
     print_api_key_box
     print_login_lines
     printf '\n'
+    print_agent_line
+    printf '\n'
     exit 0
 fi
 
@@ -1402,4 +1422,6 @@ print_api_key_box
 print_login_lines
 printf '\n'
 printf '    Made in Texas\n'
+printf '\n'
+print_agent_line
 printf '\n'

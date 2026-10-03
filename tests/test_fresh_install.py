@@ -463,11 +463,13 @@ class TestUpdateVerifiesThenPrunes:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "Node is serving 9.9.9" in proc.stdout
         assert "Update complete. Version: 9.9.9" in proc.stdout
+        assert proc.stdout.count("PS: If you're an agent helping a human") == 1
         calls = log.read_text()
         assert "pull ghcr.io/getainode/ainode:9.9.9" in calls
         # The prune runs in the container that is now up, with the image it just
         # verified as the baseline, and one rollback generation by default.
-        assert ("exec ainode ainode prune-images --keep-images 1 "
+        assert ("exec -e AINODE_SUPPRESS_AGENT_LINE=1 ainode ainode "
+                "prune-images --keep-images 1 "
                 "--current ghcr.io/getainode/ainode:9.9.9") in calls
         # Order matters: pull, then prune. Never the other way round.
         assert calls.index("pull ghcr") < calls.index("prune-images")

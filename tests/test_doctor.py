@@ -1092,6 +1092,8 @@ def test_the_command_prints_one_line_per_check(tmp_path, monkeypatch, capsys):
     assert "Spark-2-DGX" in out
     assert "config.discovery_port" in out
     assert "checks:" in out
+    from ainode.cli.agent_line import AGENT_LINE
+    assert out.count(AGENT_LINE) == 1
     # port.web is a FAIL with nothing listening, so the run is non-zero.
     assert exc.value.code == 1
 
