@@ -110,10 +110,25 @@ class _FakeEngine:
 
 
 @pytest.fixture(autouse=True)
-def _fast_bind_loop(monkeypatch):
-    """Shrink the wait's cadence so a whole bind wait runs in milliseconds."""
+def _isolated_fast_bind_loop(monkeypatch):
+    """Keep replay tests fast and on the fake side of the engine boundary.
+
+    Several tests in this module drive startup replay, whose real append path
+    builds a backend with ``get_backend`` and immediately starts it.  A test that
+    stops replacing ``append_solo_instance`` must still get a fake engine rather
+    than creating ``ainode-vllm-node-solo`` on the host running pytest (#221).
+    Tests for backend command construction instantiate their backend directly
+    and patch its subprocess seam, so this does not weaken those assertions.
+    """
+    def _fake_backend(config, on_ready=None, instance_id=""):
+        engine = _FakeEngine()
+        engine.config = config
+        engine.instance_id = instance_id
+        return engine
+
     monkeypatch.setattr(api_routes, "_BIND_POLL_SECONDS", 0.005)
     monkeypatch.setattr(api_routes, "_GPU_RELEASE_SECONDS", 0.0)
+    monkeypatch.setattr("ainode.engine.backends.get_backend", _fake_backend)
 
 
 def _wire_port(monkeypatch, engine):
@@ -129,6 +144,21 @@ def _app(silence, ceiling):
         engine_bind_log_silence_seconds = silence
         engine_bind_ceiling_seconds = ceiling
     return {"config": _Cfg()}
+
+
+def test_replay_fixture_keeps_append_off_the_real_engine_boundary():
+    """The module-wide seam covers a replay test that uses the real append core."""
+    from ainode.core.config import NodeConfig
+
+    config = NodeConfig(api_port=8000, model=None, node_id="test-node")
+    config.save = lambda: None
+    app = {"config": config, "engine": None, "instances": None}
+
+    result = api_routes.append_solo_instance(app, "test/model", persist=False)
+
+    assert result["ok"] is True
+    assert isinstance(app["engine"], _FakeEngine)
+    assert app["engine"].config.model == "test/model"
 
 
 @pytest.mark.asyncio
