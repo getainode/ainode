@@ -338,6 +338,34 @@ def test_a_score_is_the_expected_level_with_a_legend_by_position():
     assert math.isclose(sum(answer["probabilities"].values()), 1.0, abs_tol=1e-6)
 
 
+def test_a_score_legend_uses_the_labels_from_object_criteria():
+    item = translate_questions({
+        "frustration": {
+            "type": "score",
+            "instructions": "How frustrated is the customer?",
+            "criteria": {
+                "0": "Calm",
+                "1": "Mildly annoyed",
+                "2": "Frustrated",
+                "3": "Angry",
+            },
+        },
+    })["frustration"]
+    entry = _entry("2: Frustrated", {
+        "0: Calm": 0.0,
+        "1: Mildly annoyed": 0.0,
+        "2: Frustrated": 1.0,
+        "3: Angry": 0.0,
+    }, 1.0)
+
+    assert answer_from_decision(item, entry)["legend"] == {
+        "0": "Calm",
+        "1": "Mildly annoyed",
+        "2": "Frustrated",
+        "3": "Angry",
+    }
+
+
 def test_a_score_on_one_certain_level_is_that_level():
     entry = _entry("bad: money at risk", {"none: cosmetic": 0.0,
                                           "some: workaround": 0.0,
@@ -470,7 +498,8 @@ async def test_every_question_type_round_trips(client, engine_fake):
     assert needs_human["type"] == "noul" and needs_human["noul"] > 0.9
 
     severity = data["answers"]["severity"]
-    assert severity["legend"] == {"0": "none", "1": "some", "2": "bad"}
+    assert severity["legend"] == {"0": "cosmetic", "1": "a workaround exists",
+                                  "2": "money or data is at risk"}
     assert set(severity["probabilities"]) == {"0", "1", "2"}
     assert 0.0 <= severity["score"] < 0.1  # nearly all the mass on level 0
 

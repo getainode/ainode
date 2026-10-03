@@ -118,14 +118,16 @@ class Translated(NamedTuple):
     ``options`` is what the model reads, one line per option. ``names`` is what
     each of those options answers to on the wire, in the same order: a choice
     criteria key verbatim, ``true`` / ``false``, or a score level's position.
-    Keeping the pair here is what lets the answer name the caller's own key
-    rather than the letter the engine was constrained to.
+    ``legend`` keeps an object-form score's display labels separate from those
+    keys. Keeping these values here lets the answer preserve both parts of the
+    caller's rubric rather than trying to recover labels from prompt text.
     """
 
     kind: str
     question: str
     options: list[str]
     names: list[str]
+    legend: Optional[list[str]] = None
 
 
 # ----------------------------------------------------------------- translate in
@@ -212,7 +214,7 @@ def noul_options(key: str, criteria: Any) -> tuple[list[str], list[str]]:
             list(NOUL_OPTIONS))
 
 
-def score_options(key: str, criteria: Any) -> tuple[list[str], list[str]]:
+def score_options(key: str, criteria: Any) -> tuple[list[str], list[str], list[str]]:
     """A score's levels in rubric order: a list by position, an object by insertion.
 
     Both spellings are accepted because both are in the wild: the list form names
@@ -228,10 +230,13 @@ def score_options(key: str, criteria: Any) -> tuple[list[str], list[str]]:
                                   f"a non-empty string (got {level!r})")
             names.append(level.strip())
         options = list(names)
+        legend = list(names)
     elif isinstance(criteria, dict):
         pairs = criteria_pairs(key, criteria, "score")
         names = [name for name, _ in pairs]
         options = [option_text(name, desc) for name, desc in pairs]
+        legend = [desc if isinstance(desc, str) and desc.strip() else name
+                  for name, desc in pairs]
     else:
         raise DecideError(
             f"question '{key}': a score question needs 'criteria', either an ordered "
@@ -243,7 +248,7 @@ def score_options(key: str, criteria: Any) -> tuple[list[str], list[str]]:
     if len(set(names)) != len(names):
         raise DecideError(f"question '{key}': 'criteria' repeats a level name. Every "
                           "level must be distinct so a score names one of them")
-    return options, names
+    return options, names, legend
 
 
 def translate_one(key: str, spec: Any) -> Translated:
@@ -267,10 +272,11 @@ def translate_one(key: str, spec: Any) -> Translated:
     if kind == NOUL:
         options, names = noul_options(key, criteria)
     elif kind == SCORE:
-        options, names = score_options(key, criteria)
+        options, names, legend = score_options(key, criteria)
     else:
         options, names = choice_options(key, criteria)
-    return Translated(kind, instructions.strip(), options, names)
+    return Translated(kind, instructions.strip(), options, names,
+                      legend if kind == SCORE else None)
 
 
 def translate_questions(raw: Any) -> dict[str, Translated]:
@@ -377,7 +383,8 @@ def answer_from_decision(item: Translated, entry: dict) -> Optional[dict]:
                 "noul": by_name["true"] if dist else float(picked == "true")}
 
     if item.kind == SCORE:
-        legend = {str(index): name for index, name in enumerate(item.names)}
+        legend = {str(index): label for index, label in enumerate(
+            item.legend if item.legend is not None else item.names)}
         if not dist:
             return {"type": SCORE, "score": float(item.names.index(picked)),
                     "confidence": confidence, "legend": legend}
