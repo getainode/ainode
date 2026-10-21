@@ -1,0 +1,708 @@
+"""F2: cluster load/unload forwarder + member→solo reset on solo load."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+import ainode.api.server as server
+from ainode.core.config import NodeConfig
+from ainode.discovery.broadcast import NodeStatus
+from ainode.discovery.cluster import ClusterNode, ClusterState
+
+
+def _node(nid, fabric="", web_port=3000):
+    return ClusterNode(node_id=nid, node_name=nid, gpu_name="NVIDIA GB10", gpu_memory_gb=128.0,
+                       unified_memory=True, model="", status=NodeStatus.ONLINE, api_port=8000,
+                       web_port=web_port, last_seen=0.0, fabric_ip=fabric)
+
+
+class _Req:
+    """A stub request.
+
+    ``authenticated`` is the flag ``auth_middleware`` stamps on the real thing:
+    ``trust_remote_code`` on a model the catalog does not vouch for is only
+    accepted from a caller that presented an API key (#168), so a test that sets
+    it is standing in for an operator who did.
+    """
+
+    def __init__(self, app, body, authenticated=False):
+        self.app = app
+        self.remote = "127.0.0.1"
+        self._b = body
+        self._state = {"authenticated": authenticated}
+
+    def get(self, key, default=None):
+        return self._state.get(key, default)
+
+    async def json(self):
+        return self._b
+
+
+def _app(node_id, nodes):
+    c = ClusterState()
+    for n in nodes:
+        c.add_node(n)
+    return {"config": NodeConfig(node_id=node_id, api_port=8000), "cluster_state": c}
+
+
+def test_cluster_load_local_calls_local_handler(monkeypatch):
+    called = {}
+
+    async def fake_local(req):
+        called["body"] = await req.json()
+        from aiohttp import web
+        return web.json_response({"status": "launching"})
+
+    monkeypatch.setattr("ainode.models.api_routes.handle_model_load", fake_local)
+    app = _app("node-1", [_node("node-1", "198.51.100.3")])
+    # node_id == local → local handler, node_id stripped-through is fine
+    resp = asyncio.run(server.handle_cluster_load(_Req(app, {"node_id": "node-1", "model": "A"})))
+    assert json.loads(resp.body)["status"] == "launching"
+    assert called["body"]["model"] == "A"
+
+
+def test_cluster_load_remote_forwards_over_fabric(monkeypatch):
+    posted = {}
+
+    class _Up:
+        status = 200
+        headers = {"Content-Type": "application/json; charset=utf-8"}  # charset must be stripped
+        async def read(self):
+            return b'{"status":"launching"}'
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Sess:
+        def post(self, url, json=None, timeout=None, headers=None):
+            posted["url"] = url
+            posted["json"] = json
+            posted["headers"] = headers
+            return _Up()
+
+    app = _app("node-1", [_node("node-1", "198.51.100.3"), _node("node-3", "198.51.100.6")])
+    app["client_session"] = _Sess()
+    resp = asyncio.run(server.handle_cluster_load(_Req(app, {"node_id": "node-3", "model": "B"})))
+    assert resp.status == 200
+    assert posted["url"] == "http://198.51.100.6:3000/api/models/load"
+    assert posted["json"] == {"model": "B"}            # node_id stripped before forwarding
+
+
+def test_cluster_load_unknown_node_404():
+    app = _app("node-1", [_node("node-1", "198.51.100.3")])
+    resp = asyncio.run(server.handle_cluster_load(_Req(app, {"node_id": "ghost", "model": "B"})))
+    assert resp.status == 404
+
+
+def test_cluster_unload_remote_targets_unload_path(monkeypatch):
+    posted = {}
+
+    class _Up:
+        status = 200
+        headers = {"Content-Type": "application/json; charset=utf-8"}  # charset must be stripped
+        async def read(self):
+            return b"{}"
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Sess:
+        def post(self, url, json=None, timeout=None, headers=None):
+            posted["url"] = url
+            posted["headers"] = headers
+            return _Up()
+
+    app = _app("node-1", [_node("node-1", "198.51.100.3"), _node("node-3", "198.51.100.6")])
+    app["client_session"] = _Sess()
+    asyncio.run(server.handle_cluster_unload(_Req(app, {"node_id": "node-3", "model": "B"})))
+    assert posted["url"] == "http://198.51.100.6:3000/api/models/unload"
+
+
+class _FakeBackend:
+    """A backend stand-in: records its config + start, no container."""
+    def __init__(self, cfg, instance_id=""):
+        self.config = cfg
+        self.instance_id = instance_id
+        self.started = False
+        self.stopped = False
+    def is_running(self):
+        return self.started and not self.stopped
+    def start(self):
+        self.started = True
+        return True
+    def stop(self):
+        self.stopped = True
+
+
+def _patch_backend(monkeypatch, sink=None):
+    """Patch get_backend everywhere handle_model_load imports it; capture builds."""
+    import ainode.engine.backends as backends_mod
+    # These tests launch fake engines, so the host's live port 8000 is irrelevant.
+    from ainode.engine.instance_manager import InstanceManager
+    monkeypatch.setattr(InstanceManager, "_port_bindable", staticmethod(lambda port: True))
+    made = sink if sink is not None else {}
+    made.setdefault("backends", [])
+    def fake_get_backend(cfg, instance_id="", on_ready=None):
+        b = _FakeBackend(cfg, instance_id)
+        made["backends"].append(b)
+        return b
+    monkeypatch.setattr(backends_mod, "get_backend", fake_get_backend)
+    return made
+
+
+def test_lazy_engine_uses_get_backend(monkeypatch):
+    """A solo load builds the serving backend via get_backend (not the legacy
+    host-venv VLLMEngine, which would never launch a container) and starts it."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-3", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Q"})))
+    assert made["backends"] and made["backends"][0].started
+    # The primary is wired into app["engine"] for the back-compat proxy/status path.
+    assert app["engine"] is made["backends"][0]
+
+
+def test_solo_load_resets_member_mode(monkeypatch):
+    """A solo load on a node stuck in 'member' mode resets it to solo so it serves."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-3", api_port=8000)
+    cfg.distributed_mode = "member"
+    cfg.peer_ips = ["198.51.100.3"]
+    cfg.save = lambda: None
+    # no cluster workers → sharding_config stays None → solo path
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Q"})))
+    assert cfg.distributed_mode == "solo"
+    assert cfg.peer_ips == []
+
+
+def test_solo_load_appends_not_replaces(monkeypatch):
+    """A 2nd solo load on a busy node ADDS an instance (own port + container token),
+    leaving the first serving. Reloading the SAME model replaces only that one."""
+    import ainode.models.api_routes as mr
+    from ainode.discovery.instance import InstanceRecord  # noqa: F401 (sanity import)
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
+    # A stacked load must now name an explicit gpu_memory_utilization (D3).
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B", "gpu_memory_utilization": 0.3})))
+
+    mgr = app["instances"]
+    recs = {r.model: r for r in mgr.records()}
+    assert set(recs) == {"model-A", "model-B"}
+    # distinct ports: primary keeps 8000, the stacked one gets 8001
+    assert recs["model-A"].api_port == 8000
+    assert recs["model-B"].api_port == 8001
+    # both backends are alive (append did NOT stop the first)
+    assert all(b.started and not b.stopped for b in made["backends"])
+    # primary stays wired to app["engine"]; the 2nd is manager-only
+    assert app["engine"].config.model == "model-A"
+
+    # Reloading model-A replaces ONLY that instance (stops the old A backend).
+    n_before = len(made["backends"])
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
+    assert len(made["backends"]) == n_before + 1  # a fresh A backend
+    assert {r.model for r in mgr.records()} == {"model-A", "model-B"}
+    # B's port is now free's lowest → A reclaims 8000? No: B holds 8001, A re-gets 8000.
+    recs = {r.model: r for r in mgr.records()}
+    assert recs["model-A"].api_port == 8000
+    assert recs["model-B"].api_port == 8001
+
+
+def test_load_appends_when_boot_engine_already_seeded(monkeypatch):
+    """When the manager is pre-seeded with the boot engine (as run_server does),
+    a NEW-model load stacks on :8001 and never touches the boot's :8000  -  the
+    boot stays primary (app["engine"]) and on its own port/container."""
+    import ainode.models.api_routes as mr
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.model = "boot-model"
+    cfg.save = lambda: None
+    boot = _FakeBackend(cfg, "")
+    boot.started = True  # boot engine already serving on :8000
+    mgr = InstanceManager(base_port=8000)
+    mgr.add(InstanceRecord(instance_id="node-1:boot-model", model="boot-model",
+                           head_node_id="node-1", peer_ips=[], api_port=8000,
+                           tensor_parallel_size=1, status="serving"), boot)
+    app = {"engine": boot, "instances": mgr, "config": cfg,
+           "cluster_state": ClusterState(), "ray_autostart_state": None}
+
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "new-model", "gpu_memory_utilization": 0.3})))
+
+    recs = {r.model: r.api_port for r in mgr.records()}
+    assert recs == {"boot-model": 8000, "new-model": 8001}  # appended on 8001
+    assert app["engine"] is boot          # boot stays primary, untouched
+    assert boot.stopped is False          # boot container never killed
+    assert cfg.model == "boot-model"      # shared config still the primary's
+
+
+def test_instance_manifest_persist_and_replay(monkeypatch, tmp_path):
+    """Always-on: the loaded solo set is persisted, and on a simulated restart the
+    replay re-loads the STACKED extras (skipping the boot primary)  -  no duplicates."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load two solo models  -  both captured in the manifest with their gmu.
+    mr.append_solo_instance(app, "model-A", 0.3)
+    mr.append_solo_instance(app, "model-B", 0.25)
+    saved = mr.load_instance_manifest()
+    assert {e["model"] for e in saved} == {"model-A", "model-B"}
+    assert any(e["gpu_memory_utilization"] == 0.25 for e in saved)
+
+    # Simulate a restart: fresh app where the boot engine has claimed model-A as
+    # primary. Replay must bring back model-B only (A already loaded), no dupes.
+    cfg2 = NodeConfig(node_id="node-1", api_port=8000)
+    cfg2.save = lambda: None
+    app2 = {"engine": None, "config": cfg2, "cluster_state": ClusterState(),
+            "ray_autostart_state": None}
+    # Boot seeding loads the primary WITHOUT rewriting the manifest (persist=False),
+    # mirroring server startup  -  so the saved [A,B] set survives for replay.
+    mr.append_solo_instance(app2, "model-A", 0.3, persist=False)  # boot primary
+
+    async def _noop_sleep(*a, **k):
+        return None
+
+    async def _no_sweep():
+        return None
+
+    async def _no_adopt(app):
+        return []
+
+    async def _no_distributed(app):
+        return {"action": "none"}
+    monkeypatch.setattr(mr.asyncio, "sleep", _noop_sleep)
+    # The replay sweeps engine containers before it launches (#96), but not
+    # through this test's fake docker. Same for the reconcile step that asks
+    # docker what this node is already running (#179).
+    monkeypatch.setattr(mr, "ensure_startup_sweep", _no_sweep)
+    monkeypatch.setattr(mr, "adopt_running_engines", _no_adopt)
+    monkeypatch.setattr(mr, "replay_distributed_if_needed", _no_distributed)
+    asyncio.run(mr.replay_instances_on_startup(app2))
+
+    models = {i.record.model for i in app2["instances"].instances()}
+    assert models == {"model-A", "model-B"}
+
+
+def test_solo_load_persists_and_resets_primary_overrides(monkeypatch):
+    """A solo (primary) load persists EVERY per-load override onto the shared
+    NodeConfig  -  not just model + gmu  -  so the boot engine re-applies them after
+    a restart (the VLM-came-back-on-fp8 bug). Reloading the primary WITHOUT an
+    override resets that field to its NodeConfig default (no stale inheritance)."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load a VLM with the full set of per-load overrides. Authenticated, because
+    # trust_remote_code is in the set (see _Req).
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "gpu_memory_utilization": 0.6,
+        "max_model_len": 16384,
+        "kv_cache_dtype": "auto",
+        "served_model_name": "vl-alias",
+        "trust_remote_code": True,
+    }, authenticated=True)))
+    assert cfg.model == "Qwen/Qwen2.5-VL-7B-Instruct"
+    assert cfg.kv_cache_dtype == "auto"
+    assert cfg.max_model_len == 16384
+    assert cfg.served_model_name == ["vl-alias"]
+    assert cfg.trust_remote_code is True
+    assert cfg.gpu_memory_utilization == 0.6
+
+    # Reload the SAME primary with NO overrides → every field resets to default
+    # (kv back to fp8, ctx/alias cleared) rather than inheriting the prior load.
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "Qwen/Qwen2.5-VL-7B-Instruct"})))
+    defaults = NodeConfig()
+    assert cfg.kv_cache_dtype == defaults.kv_cache_dtype == "fp8"
+    assert cfg.max_model_len is None
+    assert cfg.served_model_name is None
+    assert cfg.trust_remote_code is False
+    assert cfg.gpu_memory_utilization == defaults.gpu_memory_utilization
+
+
+def test_next_model_launch_config_does_not_inherit_primary_overrides(monkeypatch):
+    """BLOCKER regression: loading model B after primary A must NOT leak A's
+    per-load overrides onto B's ACTUAL launch config. The shared app["config"]
+    still carries A's kv/quant/alias/trust after A's load, but a bare B load must
+    launch with clean NodeConfig defaults  -  else B (unquantized) gets A's
+    --quantization awq, unconsented --trust-remote-code, and A's alias."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Primary A with the full override set.
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "gpu_memory_utilization": 0.6,
+        "max_model_len": 32768,
+        "kv_cache_dtype": "auto",
+        "quantization": "awq",
+        "served_model_name": "vl-alias",
+        "trust_remote_code": True,
+    })))
+    # Stacked load of a DIFFERENT model B  -  only its own explicit gmu (D3), no
+    # other overrides supplied; none of A's overrides may leak onto B.
+    asyncio.run(mr.handle_model_load(
+        _Req(app, {"model": "meta-llama/Llama-3.2-3B-Instruct", "gpu_memory_utilization": 0.3})))
+
+    b_cfg = made["backends"][-1].config
+    defaults = NodeConfig()
+    assert b_cfg.model == "meta-llama/Llama-3.2-3B-Instruct"
+    assert b_cfg.kv_cache_dtype == defaults.kv_cache_dtype  # NOT "auto"
+    assert b_cfg.max_model_len is None                      # NOT 32768
+    assert b_cfg.quantization is None                       # NOT "awq"
+    assert b_cfg.trust_remote_code is False                 # NOT True
+    assert b_cfg.served_model_name is None                  # NOT ["vl-alias"]
+    assert b_cfg.gpu_memory_utilization == 0.3              # B's own, NOT A's 0.6
+
+
+def test_reload_same_primary_keeps_live_and_persisted_in_sync(monkeypatch):
+    """MAJOR regression: reloading the SAME primary without re-supplying an
+    override resets the live launch config AND the persisted NodeConfig to
+    defaults in lockstep  -  no live-vs-config.json divergence a later restart
+    would surface (the exact VLM-came-back-on-fp8 corruption)."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+
+    # Load VLM A with an explicit non-default kv.
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct", "kv_cache_dtype": "auto"})))
+    # Reload the SAME model, only bumping gmu (kv_cache_dtype NOT re-supplied).
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct", "gpu_memory_utilization": 0.7})))
+
+    live = made["backends"][-1].config
+    defaults = NodeConfig()
+    # Live backend and persisted shared config agree  -  both reset kv to default.
+    assert live.kv_cache_dtype == cfg.kv_cache_dtype == defaults.kv_cache_dtype
+    assert live.gpu_memory_utilization == cfg.gpu_memory_utilization == 0.7
+
+
+def test_explicit_kv_request_marks_provenance_on_launch_config(monkeypatch):
+    """Supplying kv_cache_dtype in the load body flags kv_cache_dtype_explicit on
+    BOTH the launch config and the persisted config, so nvidia.py's multimodal
+    fp8→auto downgrade is skipped for a user who explicitly asked for fp8 KV."""
+    import ainode.models.api_routes as mr
+
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct", "kv_cache_dtype": "fp8"})))
+
+    b = made["backends"][-1].config
+    assert b.kv_cache_dtype == "fp8"
+    assert b.kv_cache_dtype_explicit is True
+    assert cfg.kv_cache_dtype_explicit is True  # persisted for restart too
+
+
+def test_unload_one_stacked_instance_leaves_the_other(monkeypatch):
+    """Unloading one stacked model stops ONLY that instance; the co-resident one
+    keeps serving and stays in the manager."""
+    import ainode.models.api_routes as mr
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.save = lambda: None
+    app = {"engine": None, "config": cfg, "cluster_state": ClusterState(),
+           "ray_autostart_state": None}
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-A"})))
+    asyncio.run(mr.handle_model_load(_Req(app, {"model": "model-B", "gpu_memory_utilization": 0.3})))
+    mgr = app["instances"]
+    b_backend = mgr.by_model("model-B").backend
+
+    resp = asyncio.run(mr.handle_model_unload(_Req(app, {"model": "model-B"})))
+    body = json.loads(resp.body)
+    assert body["stopped"] is True
+    assert body["remaining"] == 1
+    assert b_backend.stopped is True
+    # A survives, untouched
+    a = mgr.by_model("model-A")
+    assert a is not None and a.backend.stopped is False
+    assert mgr.by_model("model-B") is None
+
+
+# ------------------------------- stacking beside a DISTRIBUTED head ---------
+#
+# A distributed head is persisted separately from solo instances, so its manager
+# can be empty after restart while the head is still serving. Loading beside it
+# must allocate a stacked port and preserve the head's model, mode and peers.
+
+
+def _head_app(monkeypatch, *, manager_empty=True, port_busy=True):
+    """A node heading a TP=2 launch on :8000, as it looks after a restart.
+
+    `port_busy` is the fake backend reporting the primary port held: the head's
+    engine container has it, and nothing in this process knows about that container.
+    """
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-2", api_port=8000)
+    cfg.model = "fraserprice/DeepSeek-V4-Flash-DSpark"
+    cfg.distributed_mode = "head"
+    cfg.peer_ips = ["198.51.100.5"]
+    cfg.distributed_executor = "mp"
+    cfg.save = lambda: None
+
+    mgr = InstanceManager(base_port=8000)
+    if not manager_empty:
+        # The same node BEFORE a restart: the head launch is in the manager too.
+        head = _FakeBackend(cfg, "")
+        head.started = True
+        mgr.add(InstanceRecord(instance_id="node-2:head", model=cfg.model,
+                               head_node_id="node-2", peer_ips=list(cfg.peer_ips),
+                               api_port=8000, tensor_parallel_size=2,
+                               status="serving", distributed_executor="mp"), head)
+
+    held = {8000} if port_busy else set()
+    monkeypatch.setattr(InstanceManager, "_port_bindable",
+                        staticmethod(lambda port, host="0.0.0.0": port not in held))
+
+    return {"engine": None, "instances": mgr, "config": cfg,
+            "cluster_state": ClusterState(), "ray_autostart_state": None}
+
+
+def test_a_load_beside_a_distributed_head_is_stacked_not_primary(monkeypatch, tmp_path):
+    """The whole bug in one test: the answer says stacked, and the head's config is
+    left exactly as it was."""
+    import ainode.models.api_routes as mr
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    app = _head_app(monkeypatch)
+    cfg = app["config"]
+
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06)
+
+    assert out["ok"] is True
+    assert (out["api_port"], out["stacked"]) == (8001, True)
+    # The head is untouched: still the primary model, still a head, still its peer.
+    assert cfg.model == "fraserprice/DeepSeek-V4-Flash-DSpark"
+    assert cfg.distributed_mode == "head"
+    assert cfg.peer_ips == ["198.51.100.5"]
+    assert app["engine"] is None      # never repointed at the stacked backend
+    # And the new model IS in the manifest, on its own port.
+    saved = mr.load_instance_manifest()
+    assert [e["model"] for e in saved] == ["Qwen/Qwen3-Embedding-0.6B"]
+    assert saved[0]["gpu_memory_utilization"] == 0.06
+    ports = {i.record.model: i.record.api_port for i in app["instances"].instances()}
+    assert ports == {"Qwen/Qwen3-Embedding-0.6B": 8001}
+
+
+def test_a_stacked_load_beside_a_head_still_has_to_state_its_gmu(monkeypatch):
+    """The admission gate now applies to this case, which it did not before: a second
+    engine inheriting the node default (0.5) beside a TP=2 head is how a GB10 gets
+    pushed past its unified memory and taken down."""
+    import ainode.models.api_routes as mr
+
+    out = mr.append_solo_instance(_head_app(monkeypatch),
+                                  "Qwen/Qwen3-Embedding-0.6B", None)
+    assert out["ok"] is False and out["status"] == 400
+    assert "gpu_memory_utilization" in out["error"]
+
+
+def test_a_failed_load_beside_a_head_does_not_clear_the_heads_model(monkeypatch):
+    """`_clear()` blanks config.model so the router stops advertising a ghost. It must
+    only ever blank the PRIMARY's, and the primary here is the head."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+
+    app = _head_app(monkeypatch)
+    cfg = app["config"]
+
+    def dead_backend(cfg_, instance_id="", on_ready=None):
+        backend = _FakeBackend(cfg_, instance_id)
+        backend.start = lambda: False
+        return backend
+
+    monkeypatch.setattr(backends_mod, "get_backend", dead_backend)
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06,
+                                  persist=False)
+    assert out["ok"] is False
+    assert cfg.model == "fraserprice/DeepSeek-V4-Flash-DSpark"
+    assert cfg.distributed_mode == "head"
+
+
+def test_a_launch_refused_over_a_missing_engine_image_says_which_image(monkeypatch):
+    """A recipe can pin an engine image a node has never had, and the answer used to
+    be "Failed to launch engine", which names nothing anyone can act on. The backend
+    puts the reason in ``launch_error`` (see backends/base.py) and the load route
+    reports it verbatim, the way the training preflight does."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+    from ainode.engine.backends.nvidia import engine_image_missing_message
+
+    image = "ghcr.io/getainode/ainode-whisper:0.17.0-t5"
+    app = _head_app(monkeypatch)
+
+    def image_less_backend(cfg_, instance_id="", on_ready=None):
+        backend = _FakeBackend(cfg_, instance_id)
+        backend.start = lambda: False
+        backend.launch_error = engine_image_missing_message(
+            image, detail="manifest unknown")
+        return backend
+
+    monkeypatch.setattr(backends_mod, "get_backend", image_less_backend)
+    out = mr.append_solo_instance(app, "openai/whisper-large-v3-turbo", 0.06,
+                                  persist=False)
+    assert out["ok"] is False and out["status"] == 500
+    assert image in out["error"]
+    assert "docker pull" in out["error"]
+    assert out["error"] != "Failed to launch engine"
+
+
+def test_a_launch_that_failed_for_another_reason_keeps_the_old_wording(monkeypatch):
+    """The generic sentence is still the answer when the backend has nothing to add:
+    only a backend that KNOWS the reason replaces it."""
+    import ainode.engine.backends as backends_mod
+    import ainode.models.api_routes as mr
+
+    app = _head_app(monkeypatch)
+
+    def dead_backend(cfg_, instance_id="", on_ready=None):
+        backend = _FakeBackend(cfg_, instance_id)
+        backend.start = lambda: False
+        return backend
+
+    monkeypatch.setattr(backends_mod, "get_backend", dead_backend)
+    out = mr.append_solo_instance(app, "openai/whisper-large-v3-turbo", 0.06,
+                                  persist=False)
+    assert out["ok"] is False
+    assert out["error"] == "Failed to launch engine"
+
+
+def test_the_same_node_before_a_restart_behaves_identically(monkeypatch, tmp_path):
+    """With the head IN the manager, `len(others)` already said stacked. The port rule
+    has to agree with it, or the fix would have swapped one wrong answer for another."""
+    import ainode.models.api_routes as mr
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    app = _head_app(monkeypatch, manager_empty=False)
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06)
+    assert (out["api_port"], out["stacked"]) == (8001, True)
+    assert app["config"].distributed_mode == "head"
+
+
+def test_a_free_primary_port_is_still_a_primary_load(monkeypatch, tmp_path):
+    """The other direction, so the fix cannot make every first load stacked: an empty
+    node with nothing on :8000 loads its primary exactly as before."""
+    import ainode.models.api_routes as mr
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    app = _head_app(monkeypatch, port_busy=False)
+    cfg = app["config"]
+    cfg.model = None
+    cfg.distributed_mode = "solo"
+    cfg.peer_ips = []
+
+    out = mr.append_solo_instance(app, "Qwen/Qwen3-Embedding-0.6B", 0.06)
+    assert (out["api_port"], out["stacked"]) == (8000, False)
+    assert cfg.model == "Qwen/Qwen3-Embedding-0.6B"
+    assert app["engine"] is not None
+
+
+def test_reloading_the_primary_stays_a_primary_load(monkeypatch, tmp_path):
+    """A reload of the instance that HOLDS the primary port is a primary load, even
+    though the port reads busy while its own engine is still up."""
+    import ainode.models.api_routes as mr
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    monkeypatch.setattr(mr, "_manifest_path", lambda: tmp_path / "instances.json")
+    _patch_backend(monkeypatch)
+    # The port is busy while the primary's engine is up and free once it is stopped,
+    # which is what a container releasing its port looks like.
+    held = {8000}
+    monkeypatch.setattr(InstanceManager, "_port_bindable",
+                        staticmethod(lambda port, host="0.0.0.0": port not in held))
+
+    cfg = NodeConfig(node_id="node-1", api_port=8000)
+    cfg.model = "model-A"
+    cfg.save = lambda: None
+    primary = _FakeBackend(cfg, "")
+    primary.started = True
+    primary.stop = lambda: held.discard(8000)
+    mgr = InstanceManager(base_port=8000)
+    mgr.add(InstanceRecord(instance_id="node-1:model-A", model="model-A",
+                           head_node_id="node-1", peer_ips=[], api_port=8000,
+                           tensor_parallel_size=1, status="serving"), primary)
+    app = {"engine": primary, "instances": mgr, "config": cfg,
+           "cluster_state": ClusterState(), "ray_autostart_state": None}
+
+    out = mr.append_solo_instance(app, "model-A", 0.4)
+    assert (out["api_port"], out["stacked"]) == (8000, False)
+    assert held == set()                    # the old container released the port
+    assert app["engine"] is not primary     # and app["engine"] follows the new one
+    assert cfg.model == "model-A"
+
+
+@pytest.mark.parametrize("unified,pin,status", [
+    (False, "1", 200), (False, None, 409), (True, "1", 409),
+])
+def test_load_route_admits_only_the_available_gpu(monkeypatch, unified, pin, status):
+    from ainode.core.gpu import GPUDevice, GPUSet
+    from ainode.models import api_routes as mr
+    from ainode.engine.instance_manager import InstanceManager
+
+    monkeypatch.setattr("ainode.core.gpu.detect_gpus", lambda: GPUSet(
+        devices=[GPUDevice(i, "V100") for i in range(3)], unified_memory=unified))
+    monkeypatch.setattr(InstanceManager, "_port_bindable", staticmethod(lambda port: True))
+    made = _patch_backend(monkeypatch)
+    cfg = NodeConfig(node_id="node-b", api_port=8000)
+    cfg.save = lambda: None
+    app = {"config": cfg, "engine": None, "cluster_state": ClusterState()}
+    primary = asyncio.run(mr.handle_model_load(_Req(app, {
+        "model": "test/primary", "gpu_memory_utilization": 0.9})))
+    assert primary.status == 200
+    body = {"model": "test/stacked", "gpu_memory_utilization": 0.85}
+    if pin:
+        body["extra_env"] = {"CUDA_VISIBLE_DEVICES": pin}
+    response = asyncio.run(mr.handle_model_load(_Req(app, body)))
+    assert response.status == status
+    assert len(made["backends"]) == (2 if status == 200 else 1)
+    assert not made["backends"][0].stopped
+    if status == 200:
+        assert made["backends"][1].config.extra_env == body["extra_env"]

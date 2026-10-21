@@ -1,0 +1,117 @@
+# syntax=docker/dockerfile:1.6
+#
+# AINode orchestrator image: slim Python container.
+#
+# Design (slice nvidia-vllm-engine, D5):
+#   AINode's OWN container is a lean Python-only orchestrator. It does NOT
+#   embed CUDA, vLLM, or NCCL. The inference engine runs in a SEPARATE
+#   container, one per loaded model, from the catalog recipe's `engine_image`
+#   or else NVIDIA_VLLM_IMAGE in ainode/engine/backends/nvidia.py. The eugr
+#   backend is opt-in and wants `ghcr.io/getainode/ainode-base`, built by
+#   scripts/build-base-image.sh; that image is NOT an input to this one, and
+#   nothing here declares an ARG for it.
+#
+# Build:
+#   docker build -f scripts/Dockerfile.ainode -t ainode:dev .
+#
+# Target image size: ~500-800 MB (python:3.12-slim is ~120 MB, + docker-cli
+# + iproute2 + Python deps). Measured at 364 MB for 0.5.x.
+#
+# Published at ghcr.io/getainode/ainode:<version>, and nowhere else. The Docker
+# Hub mirror this header used to name stopped at 0.4.7 (issue #200).
+
+FROM python:3.12-slim AS ainode
+
+LABEL org.opencontainers.image.source="https://github.com/getainode/ainode"
+LABEL org.opencontainers.image.description="AINode, a local AI platform orchestrator (slim Python container; spawns the vLLM engine in a separate container)."
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+ENV AINODE_HOME=/root/.ainode \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    AINODE_IN_CONTAINER=1 \
+    # All HF downloads from the orchestrator default to the Rust parallel
+    # downloader for parallel transfers.
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PATH=/usr/local/bin:/usr/bin:/bin
+
+# -- System deps -----------------------------------------------------------
+# docker-cli: AINode spawns the engine container on the local node via
+#             /var/run/docker.sock (mounted read-write by the host unit)
+#             and over SSH to peers.
+# openssh-client + sshpass: distributed launch SSHes to peers to run
+#             run_cluster.sh --worker. sshpass handles the first-time
+#             bootstrap before passwordless keys are distributed.
+# iproute2: `ip` + `ss` for preflight/doctor (fabric IP detection, port
+#             probes). iputils-ping: MTU + reachability probes.
+# curl, jq, ca-certificates, gnupg: preflight/doctor HTTP checks, token
+#             validation against registries, apt key trust for docker-ce.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         ca-certificates \
+         curl \
+         gnupg \
+         iproute2 \
+         iputils-ping \
+         jq \
+         openssh-client \
+         sshpass \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+         > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         docker-ce-cli \
+         docker-compose-plugin \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# -- Python deps -----------------------------------------------------------
+# Project + its runtime deps from pyproject.toml (aiohttp, pynvml, psutil,
+# rich, huggingface_hub). Plus:
+#   paramiko:    SSH library used by the future cluster-join flow.
+#   hf_transfer: Rust parallel downloader for HuggingFace models
+#                (2–5× faster than the Python default on fat pipes).
+# Install hf_transfer + paramiko BEFORE the project so they land in a
+# lower, cache-friendly layer.
+RUN pip install --no-cache-dir \
+      hf_transfer \
+      paramiko
+
+# Copy only the minimal set needed for `pip install .` so code edits
+# invalidate the smallest layer possible.
+COPY pyproject.toml README.md /src/
+COPY ainode /src/ainode
+RUN pip install --no-cache-dir /src \
+    && rm -rf /src /root/.cache/pip
+
+# -- Bundled scripts -------------------------------------------------------
+# run_cluster.sh is NVIDIA/vLLM upstream's canonical Ray-in-Docker launcher.
+# NvidiaBackend execs /opt/ainode/run_cluster.sh on the head and SSHes it to
+# peers. Shipped in-container for offline/reproducible installs (see D3).
+# Provenance: scripts/RUN_CLUSTER_SH.md.
+COPY scripts/run_cluster.sh /opt/ainode/run_cluster.sh
+RUN chmod 0755 /opt/ainode/run_cluster.sh
+
+# Host-key-rehoming + ssh_config-injection entrypoint. Required so the
+# container can `ssh <peer-ip>` as the host user after the host mounts
+# ~/.ssh at /host-ssh:ro. Same behavior as v0.4.x.
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+
+# -- Ports + volumes -------------------------------------------------------
+# 3000 = web UI, 8000 = OpenAI-compatible API, 5679/udp = discovery,
+# 3443 = the same app over TLS when `ainode tls enable` has been run (the pair
+# lives in the bind-mounted /root/.ainode/tls). Documentation only: the unit runs
+# this image with --network=host, so nothing here is published or mapped.
+EXPOSE 3000 3443 8000 5679/udp
+
+# Persist config / models metadata / logs on the host via bind mount.
+VOLUME ["/root/.ainode"]
+
+# ENTRYPOINT keeps docker-entrypoint.sh so SSH-key rehoming + peer ssh_config
+# injection continue to work; the script execs `ainode start --in-container`.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

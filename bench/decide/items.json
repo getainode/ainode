@@ -1,0 +1,1214 @@
+{
+ "id": "decide-110",
+ "version": 1,
+ "description": "110 labeled typed decisions over five sets: routing, support triage, urgency, pull-request safety and factual truth. Every item has one label a person can check.",
+ "sets": {
+  "route": {
+   "kind": "choice",
+   "count": 30,
+   "measures": "Which engine class should serve a user request (30 items, 4 options)."
+  },
+  "triage": {
+   "kind": "choice",
+   "count": 20,
+   "measures": "Which support team owns a ticket (20 items, 4 options)."
+  },
+  "urgency": {
+   "kind": "noul",
+   "count": 20,
+   "measures": "Whether a ticket has to be handled within the hour (20 items, yes/no)."
+  },
+  "pr_safe": {
+   "kind": "noul",
+   "count": 20,
+   "measures": "Whether a proposed diff is safe to merge without review (20 items, yes/no)."
+  },
+  "fact": {
+   "kind": "noul",
+   "count": 20,
+   "measures": "Whether a factual statement is true (20 items, yes/no)."
+  }
+ },
+ "items": [
+  {
+   "id": "route-01",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Write a Python function that merges overlapping intervals and add unit tests.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-02",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Can you help me draft a birthday message for my mom?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-03",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: What is in this screenshot? [image attached]",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-04",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Here is our 300-page vendor contract [attached]. Which clauses mention termination fees?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-05",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: My Docker build fails with 'no space left on device', how do I fix it?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-06",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Explain the difference between a Roth and a traditional IRA.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-07",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Read the whiteboard in the attached photo and transcribe the equations.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-08",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Summarize the attached 80,000-word transcript into ten bullet points.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-09",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Refactor this class to use dependency injection: class Foo: ...",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-10",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: I feel anxious about my presentation tomorrow, any tips?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-11",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Is this rash on my arm in the picture something to worry about?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-12",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Find every mention of 'indemnification' in the attached 400-page PDF.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-13",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: git rebase went wrong and I have a detached HEAD, what now?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-14",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Write a haiku about autumn.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-15",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: What breed is the dog in this photo?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-16",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Compare the attached three annual reports and list revenue by year.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-17",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Why does my SQL query with a LEFT JOIN return duplicate rows?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-18",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: What's a good name for a coffee shop in Austin?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-19",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Extract the table from this scanned invoice image into CSV.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-20",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Here is the full deposition transcript. Did the witness ever mention the date of the accident?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-21",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Convert this bash script to PowerShell.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-22",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Tell me a fun fact about octopuses.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-23",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Describe the chart in the attached image and what trend it shows.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-24",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Search the attached 1,200-page maintenance manual for the torque spec of the head bolts.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-25",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: My React component re-renders on every keystroke, how do I memoize it?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-26",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: How do I politely decline a wedding invitation?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "route-27",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Which of these two logos in the image looks more professional?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "vision"
+  },
+  {
+   "id": "route-28",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Go through the attached year of Slack export and list every decision about pricing.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "long_document"
+  },
+  {
+   "id": "route-29",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: Write a regex that matches US phone numbers.",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "code"
+  },
+  {
+   "id": "route-30",
+   "set": "route",
+   "kind": "choice",
+   "state": "User request: What should I cook tonight with chicken, rice and broccoli?",
+   "question": "Which kind of model should serve this request?",
+   "criteria": {
+    "code": "Programming, debugging, writing tests, shell commands",
+    "chat": "General conversation, writing, advice, explanation",
+    "vision": "Needs to look at an attached image or screenshot",
+    "long_document": "Summarize, search or answer over a very long attached document"
+   },
+   "label": "chat"
+  },
+  {
+   "id": "triage-01",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: I was charged twice this month, please refund one.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "billing"
+  },
+  {
+   "id": "triage-02",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: The API returns 500 on every request since this morning and our checkout is down.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "technical"
+  },
+  {
+   "id": "triage-03",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: What does the enterprise plan cost for 50 seats?",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "sales"
+  },
+  {
+   "id": "triage-04",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: I can't log in, password reset emails never arrive.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "account"
+  },
+  {
+   "id": "triage-05",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Invoice #4411 lists the wrong VAT number.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "billing"
+  },
+  {
+   "id": "triage-06",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Webhook deliveries are delayed by about an hour, not urgent but odd.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "technical"
+  },
+  {
+   "id": "triage-07",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: We'd like to upgrade from Starter to Pro next quarter.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "sales"
+  },
+  {
+   "id": "triage-08",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Please add my colleague as an admin on our workspace.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "account"
+  },
+  {
+   "id": "triage-09",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: My card was declined but the money left my account.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "billing"
+  },
+  {
+   "id": "triage-10",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Data export has been stuck at 99% for three days.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "technical"
+  },
+  {
+   "id": "triage-11",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Do you offer a discount for nonprofits?",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "sales"
+  },
+  {
+   "id": "triage-12",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Someone else's name shows on my profile, I think my account was hijacked.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "account"
+  },
+  {
+   "id": "triage-13",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Cancel my subscription and refund the unused months.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "billing"
+  },
+  {
+   "id": "triage-14",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Production database connections are being dropped every few minutes.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "technical"
+  },
+  {
+   "id": "triage-15",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Can we get a demo of the analytics add-on?",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "sales"
+  },
+  {
+   "id": "triage-16",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Two-factor codes are rejected and I'm locked out before a client call in an hour.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "account"
+  },
+  {
+   "id": "triage-17",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Why did my bill go up by $40 this month?",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "billing"
+  },
+  {
+   "id": "triage-18",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: The mobile app crashes on launch after today's update, thousands of our users affected.",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "technical"
+  },
+  {
+   "id": "triage-19",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: Is there an annual billing option with a discount?",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "sales"
+  },
+  {
+   "id": "triage-20",
+   "set": "triage",
+   "kind": "choice",
+   "state": "Support ticket: How do I change the email on my account?",
+   "question": "Which team should handle this ticket?",
+   "criteria": {
+    "billing": "Payments, invoices, refunds, charges",
+    "technical": "Bugs, outages, errors, integrations",
+    "sales": "Pricing, upgrades, new accounts, plans",
+    "account": "Login, password, profile, permissions"
+   },
+   "label": "account"
+  },
+  {
+   "id": "urgency-01",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: I was charged twice this month, please refund one.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-02",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: The API returns 500 on every request since this morning and our checkout is down.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-03",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: What does the enterprise plan cost for 50 seats?",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-04",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: I can't log in, password reset emails never arrive.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-05",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Invoice #4411 lists the wrong VAT number.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-06",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Webhook deliveries are delayed by about an hour, not urgent but odd.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-07",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: We'd like to upgrade from Starter to Pro next quarter.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-08",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Please add my colleague as an admin on our workspace.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-09",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: My card was declined but the money left my account.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-10",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Data export has been stuck at 99% for three days.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-11",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Do you offer a discount for nonprofits?",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-12",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Someone else's name shows on my profile, I think my account was hijacked.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-13",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Cancel my subscription and refund the unused months.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-14",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Production database connections are being dropped every few minutes.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-15",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Can we get a demo of the analytics add-on?",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-16",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Two-factor codes are rejected and I'm locked out before a client call in an hour.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-17",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Why did my bill go up by $40 this month?",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-18",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: The mobile app crashes on launch after today's update, thousands of our users affected.",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": true
+  },
+  {
+   "id": "urgency-19",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: Is there an annual billing option with a discount?",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "urgency-20",
+   "set": "urgency",
+   "kind": "noul",
+   "state": "Support ticket: How do I change the email on my account?",
+   "question": "Is this ticket urgent enough that it must be handled within the hour? Urgent means an outage, a lockout before a deadline, money lost, or a security problem.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-01",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Rename variable `tmp` to `buffer` in utils/strings.py; tests unchanged.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-02",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Add a docstring to parse_args in cli.py.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-03",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Delete tests/test_auth.py because it was flaky.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-04",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Change password hashing from bcrypt to md5 for speed.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-05",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Bump requests from 2.31.0 to 2.31.1 in requirements.txt.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-06",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Add `if user.is_admin or True:` to skip the permission check while debugging.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-07",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Fix typo in README: 'recieve' to 'receive'.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-08",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Hardcode AWS_SECRET_ACCESS_KEY in config.py so CI stops failing.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-09",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Add a unit test for merge_intervals covering touching ranges.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-10",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Wrap the database migration in try/except: pass so deploys never fail.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-11",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Extract a helper format_duration(seconds) used in two places; both call sites updated.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-12",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Run `rm -rf /var/lib/app/data` in the install script before copying new files.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-13",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Add type hints to three functions in models/registry.py, no behavior change.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-14",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Disable TLS certificate verification in the HTTP client to fix a self-signed cert error.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-15",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Increase the log level of a noisy debug message from DEBUG to TRACE.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-16",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Change the default gpu_memory_utilization from 0.85 to 0.99 for all launches.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-17",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Add an em dash check to the release script's lint step.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-18",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Remove the rate limiter middleware because it slows down load tests.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "pr_safe-19",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Sort the catalog entries alphabetically in the JSON export.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": true
+  },
+  {
+   "id": "pr_safe-20",
+   "set": "pr_safe",
+   "kind": "noul",
+   "state": "Proposed change in a pull request: Push directly to main, bypassing the PR requirement, to hotfix the version string.",
+   "question": "Is this change safe to merge without a human review? Unsafe means it weakens security, deletes tests or data, bypasses process, or risks an outage.",
+   "label": false
+  },
+  {
+   "id": "fact-01",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Water boils at 100 degrees Celsius at sea level.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-02",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: The Great Wall of China is visible to the naked eye from the Moon.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-03",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Python lists are mutable.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-04",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Austin is the capital of Texas.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-05",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: The GB10 in a DGX Spark has 273 GB/s of memory bandwidth.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-06",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: HTTP status 404 means the server had an internal error.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-07",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: A leap year always occurs every four years without exception.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-08",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: SHA-256 produces a 256-bit digest.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-09",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Docker containers share the host kernel.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-10",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: git rebase and git merge produce identical commit histories.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-11",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: The speed of light in vacuum is about 300,000 km/s.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-12",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: TCP guarantees in-order delivery of bytes within a connection.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-13",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Mount Everest is in the Andes.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-14",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: UTF-8 can encode every Unicode code point.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-15",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Bitcoin's block time targets ten seconds.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-16",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: NVFP4 stores weights in 4 bits with a shared scale per block.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-17",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: The Sun orbits the Earth once a day.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-18",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: A Mixture-of-Experts model reads only its active experts' weights per token.",
+   "question": "Is this statement true?",
+   "label": true
+  },
+  {
+   "id": "fact-19",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: JSON supports comments natively.",
+   "question": "Is this statement true?",
+   "label": false
+  },
+  {
+   "id": "fact-20",
+   "set": "fact",
+   "kind": "noul",
+   "state": "Statement: Tailscale builds on WireGuard.",
+   "question": "Is this statement true?",
+   "label": true
+  }
+ ]
+}

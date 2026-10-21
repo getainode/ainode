@@ -1,0 +1,26 @@
+{
+ "id": "exercism-python-10",
+ "name": "Exercism Python practice, 10 exercises",
+ "language": "python",
+ "count": 10,
+ "slugs": [
+  "binary-search",
+  "bob",
+  "hamming",
+  "isogram",
+  "matrix",
+  "raindrops",
+  "robot-name",
+  "run-length-encoding",
+  "two-fer",
+  "word-count"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/<slug>",
+  "license": "MIT",
+  "license_file": "LICENSE-exercism"
+ },
+ "note": "Vendored verbatim from the upstream commit above, restructured so the hidden tests live under tests/ and never reach the harness. Aider's polyglot benchmark draws on the same exercise set."
+}

@@ -1,0 +1,373 @@
+"""API routes for model sharding: launch a model across nodes, and report state.
+
+There is no plan/preview route. ``GET /api/sharding/plan`` used to render one from
+``ShardingPlanner``, whose size estimate is a name-keyed table plus params x 2
+bytes (an NVFP4 27B came out as 54 GB) and whose layer range is size_gb / 2, and
+the Models view drew a "sharding plan" from it that the launch it offered then
+ignored (#188). The real multi-node launch is POST /api/sharding/launch with the
+node_ids the right-panel launch picker sends.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+
+from aiohttp import web
+
+from ainode.auth.accounts import may_supply_launch_fields
+from ainode.auth.middleware import is_authenticated
+from ainode.core.config import DEFAULT_DISTRIBUTED_EXECUTOR
+from ainode.discovery.cluster import ClusterState
+from ainode.engine.ray_setup import get_ray_status
+
+logger = logging.getLogger(__name__)
+
+
+def register_sharding_routes(app: web.Application) -> None:
+    """Register sharding API endpoints on the aiohttp app."""
+    app.router.add_post("/api/sharding/launch", handle_sharding_launch)
+    app.router.add_get("/api/sharding/status", handle_sharding_status)
+
+
+async def handle_sharding_launch(request: web.Request) -> web.Response:
+    """POST /api/sharding/launch  -  launch a model distributed across the cluster.
+
+    JSON body:
+        model (required): HuggingFace model ID
+        strategy (optional): auto | tensor_parallel | pipeline_parallel
+        min_nodes (optional, default 1): nodes to span
+
+    When min_nodes > 1, this endpoint flips the local engine into head mode:
+    it discovers member nodes from the cluster state, takes their peer IPs
+    from UDP recvfrom, writes them into config, stops the current (solo)
+    engine, and starts the distributed engine via the configured backend
+    (eugr's launch-cluster.sh, or NvidiaBackend's run_cluster path).
+    When min_nodes == 1, it falls through to the existing single-node load
+    path (/api/models/load).
+
+    Recipe-aware: a curated model's catalog recipe (engine image, extra vLLM
+    flags, env, mounts, distributed shape, kv-cache dtype, context length,
+    trust-remote-code, recommended GPU fraction) is applied as DEFAULTS, and the
+    same per-launch keys the solo load accepts override it, plus
+    ``distributed_executor`` ("ray" | "mp") for the shape itself.
+    """
+    from ainode.core.config import NodeConfig
+    from ainode.engine.backends import get_backend
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    if not isinstance(body, dict):
+        return web.json_response({"error": "JSON object required"}, status=400)
+
+    from ainode.engine.maintenance import apply_maintenance, maintenance_refusal
+    refused = maintenance_refusal(request, body)
+    if refused is not None:
+        return refused
+
+    model = body.get("model")
+    if not model:
+        return web.json_response({"error": "model field required"}, status=400)
+
+    from ainode.models.api_routes import (  # lazy: avoid an import cycle
+        RECIPE_CONFIG_KEYS,
+        catalog_recipe,
+        parse_launch_overrides,
+    )
+
+    body_overrides, err = parse_launch_overrides(
+        body, distributed=True, authenticated=is_authenticated(request), model=model,
+        privileged=may_supply_launch_fields(request), config=request.app.get("config"))
+    if err:
+        return web.json_response({"error": err}, status=400)
+
+    try:
+        min_nodes = int(body.get("min_nodes", 1) or 1)
+    except (TypeError, ValueError):
+        min_nodes = 1
+
+    # Explicit node selection (preferred): the exact nodes to span, head = this
+    # node + the rest as peers. `tp_size` is the legacy count form. Either sets
+    # the effective node count so the min_nodes<=1 solo path still triggers.
+    node_ids = body.get("node_ids") or None
+    if node_ids:
+        min_nodes = len(node_ids)
+    elif body.get("tp_size"):
+        try:
+            min_nodes = int(body.get("tp_size"))
+        except (TypeError, ValueError):
+            pass
+
+    strategy_str = body.get("strategy", "tensor_parallel")
+    # We accept but don't gate on strategy here  -  vLLM picks TP vs PP via
+    # CLI args in the launch script; for now any min_nodes > 1 triggers TP.
+
+    cluster: ClusterState = request.app["cluster_state"]
+    config: NodeConfig = request.app["config"]
+
+    if min_nodes <= 1:
+        # Delegate to the single-node load path so behaviour stays
+        # consistent with what the UI called before.
+        request._rewritten_body = {"model": model}  # for observability
+        from ainode.models.api_routes import handle_model_load  # lazy import
+        # Re-inject body so handle_model_load can read it
+        class _ReqShim:
+            def __init__(self, orig, body):
+                self._o = orig
+                self._b = body
+            def __getattr__(self, k): return getattr(self._o, k)
+            async def json(self): return self._b
+        shim = _ReqShim(request, body)
+        return await handle_model_load(shim)
+
+    try:
+        apply_maintenance(body)
+    except (ValueError, OSError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    # Distributed path. Resolve the participating peers to their FABRIC IPs
+    # (BUG D: never the mgmt-LAN UDP peer_ip, which lands a Ray worker on a
+    # non-GPU address). Two selection modes:
+    #   node_ids   -  explicit set chosen in the UI; head = this node, peers = rest
+    #   min_nodes  -  legacy count: take the first (N-1) discovered members
+    members = [
+        n for n in cluster.members()
+        if getattr(n, "distributed_mode", "solo") == "member"
+        and (n.status.value if hasattr(n.status, "value") else str(n.status)) in ("online", "member-ready", "serving")
+    ]
+    def fabric_of(n):
+        return (getattr(n, "fabric_ip", "") or "").strip()
+    members_dump = [
+        {"node_id": n.node_id, "node_name": n.node_name, "fabric_ip": fabric_of(n),
+         "status": n.status.value if hasattr(n.status, "value") else str(n.status)}
+        for n in members
+    ]
+
+    if node_ids:
+        # Head is always this node; peers are the other selected nodes.
+        wanted = [nid for nid in node_ids if nid != config.node_id]
+        by_id = {n.node_id: n for n in members}
+        missing = [nid for nid in wanted if nid not in by_id]
+        if missing:
+            return web.json_response({
+                "error": f"Selected node(s) not available as members: {missing}",
+                "discovered_members": members_dump,
+            }, status=422)
+        chosen = [by_id[nid] for nid in wanted]
+    else:
+        want_peers = max(0, min_nodes - 1)
+        if len(members) < want_peers:
+            return web.json_response({
+                "error": (
+                    f"Requested {want_peers + 1} node(s) but only {len(members) + 1} "
+                    f"available (1 head + {len(members)} member(s))."
+                ),
+                "discovered_members": members_dump,
+            }, status=422)
+        chosen = members[:want_peers]
+
+    # Refuse to launch on a peer with no known fabric IP  -  that's exactly the
+    # BUG-D failure mode (would fall back to a mgmt address).
+    no_fabric = [n.node_id for n in chosen if not fabric_of(n)]
+    if no_fabric:
+        return web.json_response({
+            "error": f"No fabric IP known for node(s) {no_fabric}; cannot launch over the fabric.",
+            "hint": "Those nodes must broadcast a fabric_ip (cluster_interface configured).",
+            "discovered_members": members_dump,
+        }, status=422)
+
+    chosen_peers = [fabric_of(n) for n in chosen]
+
+    # P2-2: APPEND a new instance  -  do NOT tear down existing ones. Each instance
+    # gets its own port (8000, 8001, …), container-name token, and config SNAPSHOT
+    # (never the shared app["config"], which would cross-wire instances).
+    from dataclasses import replace
+
+    from ainode.discovery.instance import InstanceRecord
+    from ainode.engine.instance_manager import InstanceManager
+
+    manager = request.app.get("instances")
+    if manager is None:
+        manager = InstanceManager(base_port=config.api_port)
+        request.app["instances"] = manager
+
+    # Re-launching a model that's already up replaces THAT instance (stop it first).
+    existing = manager.by_model(model)
+    if existing is not None:
+        try:
+            existing.backend.stop()
+        except Exception:
+            logger.exception("stop() failed replacing instance for %s", model)
+        manager.remove(existing.record.instance_id)
+
+    is_primary = manager.is_empty()
+    port = manager.allocate_port()
+    name_token = "" if port == config.api_port else str(port)  # primary keeps legacy names
+    instance_id = f"{config.node_id or 'head'}:{model}"
+
+    # Honour a per-launch GPU memory fraction if the UI supplied one (the same
+    # #launch-gmu box the solo path uses). Without this the distributed backend
+    # always renders the shared NodeConfig default (0.5), silently dropping the
+    # value the user typed for a TP>1 launch. Ignore junk / out-of-range input.
+    overrides: dict = {}
+    gmu_raw = body.get("gpu_memory_utilization")
+    if gmu_raw is not None:
+        try:
+            gmu = float(gmu_raw)
+        except (TypeError, ValueError):
+            gmu = None
+        if gmu is not None and 0.0 < gmu <= 1.0:
+            overrides["gpu_memory_utilization"] = gmu
+
+    # A distributed launch is recipe-aware, exactly like the solo load: a curated
+    # model carries the engine image, flag set, env, mounts and DISTRIBUTED SHAPE
+    # it was proven with, and the launch is only one click if we apply them. The
+    # recipe fills gaps; anything the caller states in the body wins over it.
+    # Without this, a model whose image ships no `ray` was launched into the Ray
+    # shape on the fleet default image and died in the container (#84).
+    recipe = catalog_recipe(model)
+    for key in RECIPE_CONFIG_KEYS:
+        if key in recipe and key not in body_overrides:
+            overrides[key] = recipe[key]
+    if "gpu_memory_utilization" not in overrides and "gpu_memory_utilization" in recipe:
+        overrides["gpu_memory_utilization"] = recipe["gpu_memory_utilization"]
+    overrides.update(body_overrides)
+
+    inst_config = replace(config, model=model, distributed_mode="head",
+                          peer_ips=chosen_peers, api_port=port, **overrides)
+
+    # One engine launches at a time on this node (#96): vLLM sizes its KV cache
+    # from what is free when it profiles, so a launch that starts while another is
+    # still reserving memory under-provisions itself. The slot is held until this
+    # engine binds, handed to a background bind watch once the launch is away.
+    from ainode.models.api_routes import (  # lazy: avoid an import cycle
+        LaunchBusy,
+        acquire_launch_slot,
+        hold_launch_slot_until_bound,
+        launch_busy_error,
+        release_launch_slot,
+    )
+
+    slot_label = f"distributed launch {model}"
+    try:
+        await acquire_launch_slot(slot_label)
+    except LaunchBusy as busy:
+        refused = launch_busy_error(busy)
+        return web.json_response({"error": refused["error"]}, status=refused["status"])
+    handed_off = False
+    try:
+        backend = get_backend(inst_config, instance_id=name_token)
+        try:
+            started = backend.start_distributed()
+        except Exception as exc:
+            logger.exception("start_distributed raised")
+            return web.json_response({"error": f"Distributed launch failed: {exc}"},
+                                     status=500)
+        if not started:
+            return web.json_response({"error": "Distributed launch returned False"},
+                                     status=500)
+
+        executor = (getattr(inst_config, "distributed_executor", "")
+                    or DEFAULT_DISTRIBUTED_EXECUTOR)
+        manager.add(InstanceRecord(
+            instance_id=instance_id, model=model, head_node_id=config.node_id or "head",
+            peer_ips=chosen_peers, api_port=port,
+            tensor_parallel_size=1 + len(chosen_peers), status="starting",
+            distributed_executor=executor), backend)
+
+        # Write the shape down (#179). A distributed launch stays out of
+        # instances.json -- that manifest is replayed entry by entry as a SOLO
+        # load -- but a restart still has to know what this node was serving, so
+        # it goes in its own record that the reconciler reads on the next boot.
+        # Removed again by the unload path.
+        from ainode.engine.reconcile import (
+            head_container_name,
+            write_distributed_record,
+        )
+        write_distributed_record(
+            config, model=model, api_port=port, peer_ips=chosen_peers,
+            tensor_parallel_size=1 + len(chosen_peers),
+            distributed_executor=executor, instance_id=instance_id,
+            container=head_container_name(config, port), overrides=overrides)
+
+        if is_primary:
+            # Back-compat: the proxy/status path reads app["config"] + app["engine"].
+            config.model = model
+            config.distributed_mode = "head"
+            config.peer_ips = chosen_peers
+            # The primary boots from config.json after a restart, so the launch shape
+            # has to be persisted with it or the replay comes back on the fleet
+            # default image in the Ray shape, which is exactly what cannot serve an
+            # mp-only model.
+            for key, value in overrides.items():
+                setattr(config, key, value)
+            try:
+                config.save()
+            except Exception:
+                logger.exception("Failed to persist config.json before distributed launch")
+            request.app["engine"] = backend
+
+        asyncio.get_event_loop().create_task(hold_launch_slot_until_bound(
+            request.app, port, backend, slot_label))
+        handed_off = True
+        return web.json_response({
+            "status": "launching",
+            "instance_id": instance_id,
+            "model": model,
+            "distributed_mode": "head",
+            "peer_ips": chosen_peers,
+            "api_port": port,
+            "tensor_parallel_size": 1 + len(chosen_peers),
+            "strategy": strategy_str,
+            "distributed_executor": executor,
+        })
+    finally:
+        if not handed_off:
+            release_launch_slot()
+
+
+async def handle_sharding_status(request: web.Request) -> web.Response:
+    """GET /api/sharding/status  -  current sharding state and Ray cluster health."""
+    engine = request.app.get("engine")
+
+    engine_running = False
+    engine_ready = False
+    if engine is not None:
+        try:
+            engine_running = engine.is_running()
+        except Exception:
+            engine_running = False
+        engine_ready = getattr(engine, "ready", False)
+
+    # When a distributed head engine is up, derive ray health from the engine
+    # itself  -  the orchestrator container has no ray binary to probe.
+    engine_config = getattr(engine, "config", None) if engine is not None else None
+    distributed_mode = getattr(engine_config, "distributed_mode", "solo")
+    peer_ips = getattr(engine_config, "peer_ips", None) or []
+
+    if distributed_mode == "head" and peer_ips and engine_running:
+        probe = get_ray_status()
+        ray = {
+            "running": True,
+            "is_head": True,
+            "num_nodes": 1 + len(peer_ips),
+            "total_cpus": getattr(probe, "total_cpus", 0) or 0,
+            "total_gpus": getattr(probe, "total_gpus", 0) or 0,
+            "error": None,
+            "source": "engine",
+        }
+    else:
+        ray = get_ray_status().to_dict()
+        ray["source"] = "ray_probe"
+
+    result = {
+        "engine_running": engine_running,
+        "engine_ready": engine_ready,
+        "ray": ray,
+    }
+
+    return web.json_response(result)

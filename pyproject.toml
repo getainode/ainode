@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ainode"
+version = "0.5.33"
+description = "Turn any NVIDIA GPU into a local AI platform. Inference + fine-tuning in your browser."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Argentos AI", email = "hello@argentos.ai"},
+]
+keywords = ["nvidia", "gpu", "llm", "inference", "fine-tuning", "vllm", "local-ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pynvml>=11.5.0",
+    "psutil>=5.9.0",
+    "aiohttp>=3.9.0",
+    "rich>=13.0.0",
+    "huggingface_hub>=0.20.0",
+]
+
+[project.optional-dependencies]
+engine = [
+    "vllm>=0.6.0",
+]
+training = [
+    "torch>=2.0",
+    "transformers>=4.35",
+    "datasets>=2.14",
+    "peft>=0.6",
+]
+embeddings = [
+    "sentence-transformers>=2.7.0",
+]
+distributed = [
+    "ray[default]>=2.9",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-aiohttp>=1.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+ainode = "ainode.cli.main:main"
+
+[project.urls]
+Homepage = "https://ainode.dev"
+Documentation = "https://ainode.dev/docs"
+Repository = "https://github.com/getainode/ainode"
+"Bug Tracker" = "https://github.com/getainode/ainode/issues"
+"Powered By" = "https://argentos.ai"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ainode", "ainode.*"]
+exclude = ["tests*", "ops*", "scripts*"]
+
+[tool.setuptools.package-data]
+"ainode.web" = ["**/*"]
+
+[tool.pytest.ini_options]
+# The suite is tests/. bench/harness/tasks/*/tests/*_test.py are the harness bench's
+# HIDDEN tests: vendored Exercism tests that import a solution module which only ever
+# exists inside one run's working directory, so collecting them here fails by design.
+# CI runs `pytest tests/ -q` and never saw them; this makes a bare `pytest` agree.
+testpaths = ["tests"]
+norecursedirs = ["bench/harness/tasks", "*.egg", ".*", "_darcs", "build", "CVS",
+                 "dist", "graft", "node_modules", "venv", "{arch}"]
+# `gpu` marks a test that executes a real training/inference run on a CUDA device.
+# Every such test also carries its own skipif, so a bare `pytest tests/` on a Mac
+# or a CI runner collects them and skips them; on a GPU node they run.
+markers = ["gpu: needs a CUDA GPU (and torch/transformers/peft) to run"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+# bench/harness/tasks/ is vendored upstream (Exercism, MIT): stubs with empty bodies
+# and tests we do not own. It is kept verbatim so the benchmark stays comparable, so
+# it is not ours to reformat and a future rule widening must not make it look like it
+# needs a fix.
+extend-exclude = ["bench/harness/tasks"]
+
+[tool.ruff.lint]
+# Pin the rule set explicitly. The dev dependency is `ruff>=0.1.0` (unpinned), and
+# newer ruff releases can widen the default rule set unexpectedly. Selecting explicitly makes
+# lint deterministic across ruff upgrades. Widening this set is fine, but it should
+# be a deliberate cleanup commit rather than something a transitive upgrade does to
+# an unrelated PR.
+select = ["E4", "E7", "E9", "F"]

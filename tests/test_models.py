@@ -1,0 +1,782 @@
+"""Tests for the model registry, manager, and API routes.
+
+The catalog is now dynamic (fetched from HuggingFace Hub, Ollama, NVIDIA NIM
+with a 24h cache). Tests use the in-memory FALLBACK_CATALOG by mocking the
+aggregator so they are deterministic and don't hit the network.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+from ainode.models.registry import (
+    FALLBACK_CATALOG,
+    CURATED_CLUSTER_MODELS,
+    MODEL_CATALOG,
+    CatalogAggregator,
+    ModelInfo,
+    ModelManager,
+)
+
+# The catalog = fallback (offline) + always-merged curated cluster models.
+CATALOG_SIZE = len(FALLBACK_CATALOG) + len(CURATED_CLUSTER_MODELS)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tmp_models_dir(tmp_path: Path) -> Path:
+    """Provide a temporary models directory."""
+    d = tmp_path / "models"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture(autouse=True)
+def _force_fallback_catalog(tmp_path, monkeypatch):
+    """Default: all tests get the small deterministic fallback catalog.
+
+    This both avoids network calls and keeps legacy model-id assertions happy.
+    Tests that want to exercise the live aggregator can opt in.
+    """
+    # Redirect the cache file away from the user's home dir
+    monkeypatch.setattr(
+        CatalogAggregator, "CACHE_FILE", tmp_path / "catalog-cache.json"
+    )
+    # Force fetch() to return [] so ModelManager falls back.
+    monkeypatch.setattr(CatalogAggregator, "fetch", lambda self, force_refresh=False: [])
+
+
+@pytest.fixture
+def manager(tmp_models_dir: Path) -> ModelManager:
+    return ModelManager(models_dir=tmp_models_dir)
+
+
+def _fake_downloaded(manager: ModelManager, model_id: str) -> Path:
+    """Create a fake downloaded model directory with a dummy file."""
+    info = manager.get_catalog_map()[model_id]
+    dirname = ModelManager._repo_to_dirname(info.hf_repo)
+    model_dir = manager.models_dir / dirname
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "config.json").write_text('{"test": true}')
+    (model_dir / "model.safetensors").write_bytes(b"\x00" * 1024)
+    return model_dir
+
+
+# ---------------------------------------------------------------------------
+# Catalog tests
+# ---------------------------------------------------------------------------
+
+class TestCatalog:
+    def test_fallback_catalog_has_core_models(self):
+        expected = {
+            "llama-3.2-3b",
+            "qwen-2.5-7b",
+            "mistral-7b",
+            "phi-3-mini",
+            "gemma-2-9b",
+        }
+        assert expected.issubset(set(FALLBACK_CATALOG.keys()))
+
+    def test_model_catalog_alias(self):
+        # MODEL_CATALOG is kept as a backward-compat alias for FALLBACK_CATALOG.
+        assert MODEL_CATALOG is FALLBACK_CATALOG
+
+    def test_all_fallback_entries_are_model_info(self):
+        for model_id, info in FALLBACK_CATALOG.items():
+            assert isinstance(info, ModelInfo), f"{model_id} is not ModelInfo"
+            assert info.id == model_id
+            assert info.hf_repo
+            assert info.size_gb > 0
+            assert info.min_memory_gb > 0
+
+    def test_model_info_to_dict(self):
+        info = FALLBACK_CATALOG["llama-3.2-3b"]
+        d = info.to_dict()
+        assert d["id"] == "llama-3.2-3b"
+        assert "hf_repo" in d
+        assert "size_gb" in d
+
+    def test_curated_models_carry_proven_config(self, manager):
+        cat = manager.get_catalog_map()
+        big = cat["qwen3-235b-a22b-nvfp4"]
+        assert big.proven_tp == 4 and big.verified is True
+        # proven_tp says how many nodes to launch on and is independent of whether
+        # anybody has run it: the 70B needs two nodes and has no bench record, so it
+        # carries the node count and NOT the verified flag (#201).
+        seventyb = cat["llama-3.3-70b-nvfp4"]
+        assert seventyb.proven_tp == 2 and seventyb.verified is False
+        assert cat["qwen3.5-397b-a17b-nvfp4"].verified is False
+        # fields reach the dict the API serializes
+        d = big.to_dict()
+        assert d["proven_tp"] == 4 and d["verified"] is True
+
+
+# ---------------------------------------------------------------------------
+# Aggregator tests (unit level: mocked, no network)
+# ---------------------------------------------------------------------------
+
+class TestAggregator:
+    def test_estimate_size_from_id(self):
+        agg = CatalogAggregator()
+        m = MagicMock(id="meta-llama/Llama-3.1-8B-Instruct", safetensors=None)
+        assert agg._estimate_size_gb(m) == pytest.approx(16.0)
+
+    def test_estimate_size_awq(self):
+        agg = CatalogAggregator()
+        m = MagicMock(id="Some/Llama-70B-AWQ", safetensors=None)
+        # 70 * 0.6 = 42.0
+        assert agg._estimate_size_gb(m) == pytest.approx(42.0)
+
+    def test_detect_quantization(self):
+        agg = CatalogAggregator()
+        assert agg._detect_quantization("foo/model-AWQ") == "awq"
+        assert agg._detect_quantization("foo/model-gptq-int4") == "gptq"
+        assert agg._detect_quantization("foo/plain-model") is None
+
+    def test_is_recommended(self):
+        agg = CatalogAggregator()
+        assert agg._is_recommended("meta-llama/Llama-3.2-3B-Instruct", 1_000_000) is True
+        assert agg._is_recommended("random/base-model", 1_000_000) is False
+        # Known family, but base (non-instruct) → not recommended
+        assert agg._is_recommended("meta-llama/Llama-3.1-8B", 1_000_000) is False
+
+    def test_cache_roundtrip(self, tmp_path):
+        agg = CatalogAggregator()
+        agg.CACHE_FILE = tmp_path / "cache.json"
+        sample = [FALLBACK_CATALOG["llama-3.2-3b"]]
+        agg._save_cache(sample)
+        assert agg._cache_valid()
+        loaded = agg._load_cache()
+        assert len(loaded) == 1
+        assert loaded[0].id == "llama-3.2-3b"
+
+
+# ---------------------------------------------------------------------------
+# Manager: list / info tests
+# ---------------------------------------------------------------------------
+
+class TestManagerList:
+    def test_list_available_all_not_downloaded(self, manager: ModelManager):
+        models = manager.list_available()
+        assert len(models) == CATALOG_SIZE
+        for m in models:
+            assert m["downloaded"] is False
+
+    def test_list_available_with_downloaded(self, manager: ModelManager):
+        _fake_downloaded(manager, "llama-3.2-3b")
+        models = manager.list_available()
+        by_id = {m["id"]: m for m in models}
+        assert by_id["llama-3.2-3b"]["downloaded"] is True
+        assert by_id["mistral-7b"]["downloaded"] is False
+
+    def test_list_downloaded_empty(self, manager: ModelManager):
+        assert manager.list_downloaded() == []
+
+    def test_list_downloaded_with_model(self, manager: ModelManager):
+        _fake_downloaded(manager, "phi-3-mini")
+        downloaded = manager.list_downloaded()
+        assert len(downloaded) == 1
+        assert downloaded[0]["id"] == "phi-3-mini"
+        assert downloaded[0]["downloaded"] is True
+        assert downloaded[0]["local_size_gb"] >= 0
+
+    def test_list_downloaded_unknown_dir(self, manager: ModelManager):
+        """Directories not in catalog show as user-added."""
+        custom_dir = manager.models_dir / "some-org--custom-model"
+        custom_dir.mkdir()
+        (custom_dir / "weights.bin").write_bytes(b"\x00" * 512)
+        downloaded = manager.list_downloaded()
+        assert len(downloaded) == 1
+        assert downloaded[0]["id"] == "some-org/custom-model"
+        assert downloaded[0]["hf_repo"] == "some-org/custom-model"
+        assert downloaded[0]["downloaded"] is True
+
+    def test_hf_cache_nested_curated_model_downloaded(self, manager: ModelManager):
+        """A curated catalog model cached out-of-band at hf-cache/hub/ must read
+        as downloaded (via _find_model_dir), not just when surfaced as an extra."""
+        nested = manager.models_dir / "hf-cache" / "hub" / "models--nvidia--Qwen3-235B-A22B-NVFP4"
+        nested.mkdir(parents=True)
+        (nested / "config.json").write_text('{"test": true}')
+
+        by_repo = {m["hf_repo"]: m for m in manager.list_available()}
+        assert "nvidia/Qwen3-235B-A22B-NVFP4" in by_repo
+        assert by_repo["nvidia/Qwen3-235B-A22B-NVFP4"]["downloaded"] is True
+
+        dl = manager.list_downloaded()
+        assert any(d["hf_repo"] == "nvidia/Qwen3-235B-A22B-NVFP4" for d in dl)
+
+    def test_hf_cache_nested_noncatalog_model_surfaced(self, manager: ModelManager):
+        """A NON-catalog model at hf-cache/hub/ is surfaced as a user-downloaded extra."""
+        slug = "models--acme--Nested-Cache-7B"
+        nested = manager.models_dir / "hf-cache" / "hub" / slug
+        nested.mkdir(parents=True)
+        (nested / "config.json").write_text('{"test": true}')
+
+        avail = {m["id"]: m for m in manager.list_available()}
+        assert slug in avail
+        assert avail[slug]["downloaded"] is True
+        assert avail[slug]["hf_repo"] == "acme/Nested-Cache-7B"
+
+    def test_hf_cache_nested_dedupes_against_standard_path(self, manager: ModelManager):
+        """Same NON-catalog model in both hub/ and hf-cache/hub/ is surfaced once."""
+        slug = "models--acme--Dup-Test-7B"
+        for sub in (manager.models_dir / "hub", manager.models_dir / "hf-cache" / "hub"):
+            d = sub / slug
+            d.mkdir(parents=True)
+            (d / "config.json").write_text('{"test": true}')
+
+        avail_ids = [m["id"] for m in manager.list_available()]
+        assert avail_ids.count(slug) == 1
+
+        dl = manager.list_downloaded()
+        assert sum(1 for d in dl if d["hf_repo"] == "acme/Dup-Test-7B") == 1
+
+
+class TestManagerInfo:
+    def test_get_model_info_exists(self, manager: ModelManager):
+        info = manager.get_model_info("mistral-7b")
+        assert info is not None
+        assert info["id"] == "mistral-7b"
+        assert info["downloaded"] is False
+
+    def test_get_model_info_downloaded(self, manager: ModelManager):
+        _fake_downloaded(manager, "mistral-7b")
+        info = manager.get_model_info("mistral-7b")
+        assert info["downloaded"] is True
+        assert "local_size_gb" in info
+
+    def test_get_model_info_unknown(self, manager: ModelManager):
+        assert manager.get_model_info("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# Recommendations
+# ---------------------------------------------------------------------------
+
+class TestRecommendations:
+    def test_recommend_small_gpu(self, manager: ModelManager):
+        recs = manager.recommend_for_gpu(8)
+        ids = {r["id"] for r in recs}
+        assert "llama-3.2-3b" in ids
+        assert "phi-3-mini" in ids
+
+    def test_recommend_large_gpu(self, manager: ModelManager):
+        huge = max(info.min_memory_gb for info in FALLBACK_CATALOG.values()) + 1
+        recs = manager.recommend_for_gpu(huge)
+        # Every fallback model fits a huge GPU. The catalog also merges curated
+        # cluster models (some small quantized ones now fit too), so assert the
+        # fallback set is fully recommended rather than an exact count.
+        rec_ids = {r["id"] for r in recs}
+        assert {info.id for info in FALLBACK_CATALOG.values()} <= rec_ids
+
+    def test_recommend_tiny_gpu(self, manager: ModelManager):
+        recs = manager.recommend_for_gpu(1)
+        assert len(recs) == 0
+
+    def test_recommend_sorted_by_size_desc(self, manager: ModelManager):
+        huge = max(info.min_memory_gb for info in FALLBACK_CATALOG.values()) + 1
+        recs = manager.recommend_for_gpu(huge)
+        sizes = [r["size_gb"] for r in recs]
+        assert sizes == sorted(sizes, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Download (mocked)
+# ---------------------------------------------------------------------------
+
+class TestDownload:
+    def test_download_unknown_model_raises(self, manager: ModelManager):
+        with pytest.raises(ValueError, match="Unknown model"):
+            manager.download_model("nonexistent")
+
+    def test_download_missing_huggingface_hub(self, manager: ModelManager):
+        """If huggingface_hub is not installed, raise RuntimeError."""
+        import builtins
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                raise ImportError("no module")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=mock_import):
+            with pytest.raises(RuntimeError, match="huggingface_hub"):
+                manager.download_model("llama-3.2-3b")
+
+    @patch("ainode.models.registry.snapshot_download", create=True)
+    def test_download_calls_snapshot_download(self, mock_sd, manager: ModelManager):
+        """Verify download_model calls huggingface_hub.snapshot_download correctly."""
+        expected_dir = manager.models_dir / "meta-llama--Llama-3.2-3B-Instruct"
+        mock_sd.return_value = str(expected_dir)
+
+        with patch.dict("sys.modules", {"huggingface_hub": MagicMock(snapshot_download=mock_sd)}):
+            result = manager.download_model("llama-3.2-3b")
+
+        mock_sd.assert_called_once_with(
+            repo_id="meta-llama/Llama-3.2-3B-Instruct",
+            local_dir=str(expected_dir),
+            local_dir_use_symlinks=False,
+            max_workers=4,  # uplink-friendly parallel-connection cap
+        )
+        assert result == expected_dir
+
+
+# ---------------------------------------------------------------------------
+# Delete
+# ---------------------------------------------------------------------------
+
+class TestDelete:
+    def test_delete_downloaded_model(self, manager: ModelManager):
+        model_dir = _fake_downloaded(manager, "mistral-7b")
+        assert model_dir.exists()
+        assert manager.delete_model("mistral-7b") is True
+        assert not model_dir.exists()
+
+    def test_delete_not_downloaded(self, manager: ModelManager):
+        assert manager.delete_model("mistral-7b") is False
+
+    def test_delete_unknown_raises(self, manager: ModelManager):
+        with pytest.raises(ValueError, match="Unknown model"):
+            manager.delete_model("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# API routes (aiohttp test client)
+# ---------------------------------------------------------------------------
+
+pytest.importorskip("aiohttp")
+from aiohttp import web  # noqa: E402
+from ainode.models.api_routes import register_model_routes  # noqa: E402
+
+
+class TestModelAPI:
+    """Test API routes using aiohttp test client via pytest-aiohttp."""
+
+    @pytest.fixture
+    def app(self, manager: ModelManager) -> web.Application:
+        app = web.Application()
+        register_model_routes(app, manager=manager)
+        return app
+
+    @pytest.mark.asyncio
+    async def test_list_models(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.get("/api/models")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "models" in data
+        assert len(data["models"]) == CATALOG_SIZE
+        assert data["count"] == CATALOG_SIZE
+
+    @pytest.mark.asyncio
+    async def test_get_model(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.get("/api/models/llama-3.2-3b")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["id"] == "llama-3.2-3b"
+
+    @pytest.mark.asyncio
+    async def test_get_model_not_found(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.get("/api/models/nonexistent")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_download_model(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.post("/api/models/llama-3.2-3b/download")
+        assert resp.status == 202
+        data = await resp.json()
+        assert data["status"] == "downloading"
+        assert "job_id" in data
+
+    @pytest.mark.asyncio
+    async def test_download_unknown(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.post("/api/models/nonexistent/download")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_model_not_downloaded(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.delete("/api/models/llama-3.2-3b")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_model_downloaded(self, app, aiohttp_client, manager):
+        _fake_downloaded(manager, "llama-3.2-3b")
+        client = await aiohttp_client(app)
+        resp = await client.delete("/api/models/llama-3.2-3b")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "deleted"
+
+    @pytest.mark.asyncio
+    async def test_recommended_no_gpu(self, app, aiohttp_client):
+        with patch("ainode.models.api_routes.detect_gpu", return_value=None):
+            client = await aiohttp_client(app)
+            resp = await client.get("/api/models/recommended")
+            assert resp.status == 200
+            data = await resp.json()
+            assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_refresh_catalog(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.post("/api/models/refresh")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "refreshed"
+        assert "count" in data
+
+
+# ---------------------------------------------------------------------------
+# D3: stacked-load admission control (append_solo_instance)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from ainode.models.api_routes import append_solo_instance  # noqa: E402
+from ainode.engine.instance_manager import InstanceManager  # noqa: E402
+from ainode.discovery.instance import InstanceRecord  # noqa: E402
+from ainode.core.config import NodeConfig  # noqa: E402
+
+
+def _stacked_app(*insts):
+    """Build a minimal app dict with an InstanceManager pre-loaded with fake
+    instances. Each `insts` entry is (model, gmu, port)."""
+    config = NodeConfig(node_id="n1", api_port=8000, model=insts[0][0] if insts else None)
+    mgr = InstanceManager(base_port=8000)
+    for model, gmu, port in insts:
+        backend = MagicMock()
+        backend.config = SimpleNamespace(gpu_memory_utilization=gmu, distributed_mode="solo")
+        mgr.add(InstanceRecord(instance_id="n1:" + model, model=model, api_port=port), backend)
+    return {"config": config, "instances": mgr}
+
+
+class TestStackedLoadAdmission:
+    def test_stacked_load_missing_gmu_rejected_400(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        res = append_solo_instance(app, "B", None)
+        assert res["ok"] is False
+        assert res["status"] == 400
+        assert "gpu_memory_utilization" in res["error"]
+
+    def test_stacked_load_overcommit_rejected_409(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        res = append_solo_instance(app, "B", 0.5)
+        assert res["ok"] is False
+        assert res["status"] == 409
+        assert "0.50" in res["error"]   # current total
+        assert "1.00" in res["error"]   # projected total
+
+    def test_stacked_load_under_cap_admitted(self):
+        app = _stacked_app(("A", 0.5, 8000))
+        with patch("ainode.engine.backends.get_backend") as gb:
+            backend = MagicMock()
+            backend.start.return_value = True
+            gb.return_value = backend
+            res = append_solo_instance(app, "B", 0.4, persist=False)  # 0.5 + 0.4 = 0.9 ≤ cap
+        assert res["ok"] is True
+        assert res["stacked"] is True
+
+    def test_primary_load_unaffected_by_gmu_rule(self):
+        app = _stacked_app()  # empty manager → primary/solo load
+        with patch("ainode.engine.backends.get_backend") as gb:
+            backend = MagicMock()
+            backend.start.return_value = True
+            gb.return_value = backend
+            res = append_solo_instance(app, "A", None, persist=False)  # gmu None allowed for primary
+        assert res["ok"] is True
+        assert res["stacked"] is False
+
+    # -- reload of an ALREADY-stacked model: admission runs BEFORE teardown ----
+    #    A rejection must leave the live instance intact (not kill-then-reject).
+
+    def _reload_app(self):
+        """Primary A (0.5) + stacked B (0.3). Returns (app, B_backend)."""
+        app = _stacked_app(("A", 0.5, 8000), ("B", 0.3, 8001))
+        b_backend = app["instances"].by_model("B").backend
+        return app, b_backend
+
+    def test_reload_stacked_missing_gmu_400_does_not_stop_instance(self):
+        app, b_backend = self._reload_app()
+        res = append_solo_instance(app, "B", None)  # omit gmu
+        assert res["ok"] is False and res["status"] == 400
+        b_backend.stop.assert_not_called()                 # live model untouched
+        assert app["instances"].by_model("B") is not None  # still registered
+
+    def test_reload_stacked_overcommit_409_does_not_stop_instance(self):
+        app, b_backend = self._reload_app()
+        res = append_solo_instance(app, "B", 0.6)  # 0.5 (A) + 0.6 = 1.10 > cap
+        assert res["ok"] is False and res["status"] == 409
+        assert "0.50" in res["error"]                      # A's reservation only (B excluded)
+        b_backend.stop.assert_not_called()
+        assert app["instances"].by_model("B") is not None
+
+    def test_reload_stacked_under_cap_excludes_own_reservation(self):
+        # A(0.5)+B(0.3) live; reloading B at 0.4 must count only A (0.5)+0.4=0.9 ≤ cap,
+        # NOT 0.5+0.3+0.4. Old B is torn down; a fresh B backend replaces it.
+        app, b_backend = self._reload_app()
+        with patch("ainode.engine.backends.get_backend") as gb:
+            new_backend = MagicMock()
+            new_backend.start.return_value = True
+            gb.return_value = new_backend
+            res = append_solo_instance(app, "B", 0.4, persist=False)
+        assert res["ok"] is True and res["stacked"] is True
+        b_backend.stop.assert_called_once()                # old instance freed AFTER admission
+
+
+
+@pytest.mark.parametrize("unified,pin,accepted", [
+    (False, "1", True), (False, None, False),
+    (False, "0", False), (True, "1", False),
+])
+def test_stacked_gpu_pool_admission(monkeypatch, unified, pin, accepted):
+    from ainode.core.gpu import GPUDevice, GPUSet
+
+    monkeypatch.setattr("ainode.core.gpu.detect_gpus", lambda: GPUSet(
+        devices=[GPUDevice(i, "GB10" if unified else "V100") for i in range(3)],
+        unified_memory=unified))
+    app = _stacked_app(("A", 0.9, 8000))
+    overrides = {"extra_env": {"CUDA_VISIBLE_DEVICES": pin}} if pin else {}
+    with patch("ainode.engine.backends.get_backend") as gb:
+        gb.return_value.start.return_value = True
+        out = append_solo_instance(app, "B", 0.85, overrides=overrides, persist=False)
+    assert out["ok"] is accepted
+    if accepted:
+        assert gb.call_args.args[0].extra_env == overrides["extra_env"]
+        assert app["instances"].by_model("A") is not None
+    else:
+        assert out["status"] == 409
+        assert "1.75" in out["error"]
+        assert ("this node" if unified else "GPU 0") in out["error"]
+        gb.assert_not_called()
+
+
+@pytest.mark.parametrize("pin,accepted", [("1", False), ("2", True)])
+def test_multiple_instances_sum_only_on_target_gpu(monkeypatch, pin, accepted):
+    from ainode.core.gpu import GPUDevice, GPUSet
+
+    monkeypatch.setattr("ainode.core.gpu.detect_gpus", lambda: GPUSet(
+        devices=[GPUDevice(i, "V100") for i in range(3)]))
+    app = _stacked_app(("A", 0.9, 8000), ("B", 0.5, 8001), ("C", 0.3, 8002))
+    for model in ("B", "C"):
+        app["instances"].by_model(model).backend.config.extra_env = {
+            "CUDA_VISIBLE_DEVICES": "1"}
+    with patch("ainode.engine.backends.get_backend") as gb:
+        gb.return_value.start.return_value = True
+        out = append_solo_instance(app, "D", 0.2, overrides={
+            "extra_env": {"CUDA_VISIBLE_DEVICES": pin}}, persist=False)
+    assert out["ok"] is accepted
+    if not accepted:
+        assert "GPU 1" in out["error"]
+        assert "0.80" in out["error"]
+        assert "1.00" in out["error"]
+
+
+@pytest.mark.parametrize("visible,args,expected", [
+    (None, [], {0}), ("2,1", [], {2}),
+    (None, ["--tensor-parallel-size", "2"], {0, 1}),
+    (None, ["-tp=2"], {0, 1}),
+    ("2,1", ["--tensor-parallel-size=2"], {1, 2}),
+    ("1,2", ["-tp", "2"], {1, 2}),
+    ("GPU-unknown", [], {0, 1, 2}), ("7", [], {0, 1, 2}),
+    ("", [], {0, 1, 2}), (None, ["-tp"], {0, 1, 2}),
+    ("1", ["-tp", "2"], {0, 1, 2}),
+])
+def test_reservation_device_resolution(visible, args, expected):
+    from ainode.models.api_routes import _reservation_devices
+
+    config = SimpleNamespace(extra_env={} if visible is None else {
+        "CUDA_VISIBLE_DEVICES": visible}, extra_vllm_args=args)
+    assert _reservation_devices(config, [0, 1, 2]) == expected
+
+
+def test_stacked_tp_overlap_and_reload(monkeypatch):
+    from ainode.core.gpu import GPUDevice, GPUSet
+
+    monkeypatch.setattr("ainode.core.gpu.detect_gpus", lambda: GPUSet(
+        devices=[GPUDevice(i, "V100") for i in range(3)]))
+    app = _stacked_app(("A", 0.5, 8000), ("B", 0.3, 8001))
+    app["instances"].by_model("A").backend.config.extra_vllm_args = ["-tp", "2"]
+    old = app["instances"].by_model("B").backend
+    old.config.extra_env = {"CUDA_VISIBLE_DEVICES": "1"}
+    with patch("ainode.engine.backends.get_backend") as gb:
+        gb.return_value.start.return_value = True
+        refused = append_solo_instance(app, "B", 0.5, overrides={
+            "extra_env": {"CUDA_VISIBLE_DEVICES": "1"}}, persist=False)
+        assert refused["status"] == 409
+        assert "GPU 1" in refused["error"]
+        old.stop.assert_not_called()
+        out = append_solo_instance(app, "B", 0.4, overrides={
+            "extra_env": {"CUDA_VISIBLE_DEVICES": "1"}}, persist=False)
+    assert out["ok"] is True
+    old.stop.assert_called_once()
+
+# ---------------------------------------------------------------------------
+# M1: cancellable file-by-file repo download (_run_download_repo)
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio  # noqa: E402
+from types import SimpleNamespace as _SNS  # noqa: E402
+
+from ainode.models import api_routes as _api_routes  # noqa: E402
+
+
+class _FakeHfHub:
+    """Stand-in for the huggingface_hub module: file-by-file download that
+    writes real bytes into local_dir (same layout snapshot_download produces)
+    and can invoke a hook after each file (to simulate a mid-download cancel).
+
+    Mirrors the API _do_download actually uses: HfApi().repo_info() to resolve
+    the file list + a pinned commit sha ONCE, then per-file hf_hub_download with
+    a revision= kwarg. Records the revision passed to each fetch so tests can
+    assert every file came from the single pinned commit."""
+
+    def __init__(self, files: dict, after_file=None, sha="deadbeefcafe"):
+        # files: {relative_path: bytes}
+        self._files = files
+        self._after_file = after_file
+        self.sha = sha
+        self.downloaded = []
+        self.revisions = []
+        self._lock = threading.Lock()
+        hub = self
+
+        class _FakeHfApi:
+            def __init__(self, token=None):
+                pass
+
+            def repo_info(self, repo_id):
+                return _SNS(
+                    sha=hub.sha,
+                    siblings=[_SNS(rfilename=f) for f in hub._files],
+                )
+
+        self.HfApi = _FakeHfApi
+
+    def hf_hub_download(self, repo_id, filename, local_dir, revision=None, token=None):
+        dest = Path(local_dir) / filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self._files[filename])
+        with self._lock:  # workers run in parallel now, so guard the records
+            self.downloaded.append(filename)
+            self.revisions.append(revision)
+        if self._after_file is not None:
+            self._after_file(filename)
+        return str(dest)
+
+
+class TestCancellableRepoDownload:
+    def _run(self, tmp_path, fake, hf_repo, total_bytes):
+        # Patch download APIs only: keep the real Hub package and its validators
+        # importable even when hf_upload has not been imported yet.
+        manager = _SNS(models_dir=tmp_path)
+        jobs = {}
+        job_id = "job-1"
+        jobs[job_id] = {"model_id": hf_repo, "status": "downloading",
+                        "error": None, "finished_at": None}
+        with patch.multiple("huggingface_hub", HfApi=fake.HfApi,
+                            hf_hub_download=fake.hf_hub_download), \
+             patch.object(_api_routes, "_get_repo_total_bytes", return_value=total_bytes):
+            _asyncio.run(_api_routes._run_download_repo(manager, hf_repo, job_id, jobs))
+        return jobs[job_id], job_id
+
+    def test_completion_layout_identical_and_bytes_tracked(self, tmp_path):
+        files = {
+            "config.json": b'{"ok": true}',
+            "model.safetensors": b"\x00" * 2048,
+            "nested/tokenizer.json": b"abc",  # nested path must survive verbatim
+        }
+        total = sum(len(v) for v in files.values())
+        fake = _FakeHfHub(files)
+        hf_repo = "org/model-x"
+        job, _jid = self._run(tmp_path, fake, hf_repo, total)
+
+        assert job["status"] == "completed"
+        assert job["progress"] == 100.0
+        assert job["downloaded_bytes"] == total
+        assert job["total_bytes"] == total
+
+        # Layout: files land at target/<relative path>, IDENTICAL to what
+        # snapshot_download(local_dir=...) produces (load-bearing for on-disk-serve).
+        target = tmp_path / hf_repo.replace("/", "--")
+        for rel, data in files.items():
+            f = target / rel
+            assert f.is_file(), f"missing {rel}"
+            assert f.read_bytes() == data
+        # Every listed file was actually fetched.
+        assert set(fake.downloaded) == set(files.keys())
+        # Commit pinning: every file was fetched at the SINGLE sha resolved once
+        # from repo_info, not an unpinned per-file resolve of a moving `main`.
+        assert set(fake.revisions) == {fake.sha}
+
+    def test_cancel_between_files_sets_cancelled_and_removes_dir(self, tmp_path):
+        files = {"a.bin": b"1" * 512, "b.bin": b"2" * 512, "c.bin": b"3" * 512}
+        hf_repo = "org/model-y"
+        target = tmp_path / hf_repo.replace("/", "--")
+
+        # Simulate the user hitting Cancel right after the first file lands: the
+        # loop's between-files check must catch it before fetching the second.
+        state = {}
+
+        def _after(filename):
+            if filename == "a.bin":
+                state["jobs"][state["job_id"]]["_cancel"] = True
+
+        fake = _FakeHfHub(files, after_file=_after)
+
+        manager = _SNS(models_dir=tmp_path)
+        jobs = {}
+        job_id = "job-cancel"
+        jobs[job_id] = {"model_id": hf_repo, "status": "downloading",
+                        "error": None, "finished_at": None}
+        state["jobs"] = jobs
+        state["job_id"] = job_id
+
+        # Force serial (1 worker) so the between-files cancel check is deterministic:
+        # with the default parallel pool, files b/c could already be in flight past
+        # the cancel gate when the a.bin hook fires. Cancellation is best-effort per
+        # in-flight file; this pins the pool to 1 to assert the stop-before-next path.
+        with patch.multiple("huggingface_hub", HfApi=fake.HfApi,
+                            hf_hub_download=fake.hf_hub_download), \
+             patch.dict(os.environ, {"AINODE_DOWNLOAD_MAX_WORKERS": "1"}), \
+             patch.object(_api_routes, "_get_repo_total_bytes", return_value=1536):
+            _asyncio.run(_api_routes._run_download_repo(manager, hf_repo, job_id, jobs))
+
+        assert jobs[job_id]["status"] == "cancelled"
+        assert jobs[job_id]["finished_at"] is not None
+        # Only the first file was fetched; the loop stopped before the rest.
+        assert fake.downloaded == ["a.bin"]
+        # Partial dir is removed on cancel.
+        assert not target.exists()
+
+    def test_cancel_before_first_file(self, tmp_path):
+        # Cancel flag already set when the job starts → nothing downloads.
+        files = {"a.bin": b"x" * 256}
+        hf_repo = "org/model-z"
+        target = tmp_path / hf_repo.replace("/", "--")
+        fake = _FakeHfHub(files)
+
+        manager = _SNS(models_dir=tmp_path)
+        job_id = "job-pre"
+        jobs = {job_id: {"model_id": hf_repo, "status": "downloading",
+                         "error": None, "finished_at": None, "_cancel": True}}
+        with patch.multiple("huggingface_hub", HfApi=fake.HfApi,
+                            hf_hub_download=fake.hf_hub_download), \
+             patch.object(_api_routes, "_get_repo_total_bytes", return_value=256):
+            _asyncio.run(_api_routes._run_download_repo(manager, hf_repo, job_id, jobs))
+
+        assert jobs[job_id]["status"] == "cancelled"
+        assert fake.downloaded == []
+        assert not target.exists()

@@ -1,0 +1,22 @@
+{
+ "slug": "run-length-encoding",
+ "language": "python",
+ "entry": "run_length_encoding.py",
+ "instructions": "instructions.md",
+ "tests": [
+  "tests/run_length_encoding_test.py"
+ ],
+ "test_command": [
+  "python",
+  "-m",
+  "pytest",
+  "-q",
+  "run_length_encoding_test.py"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/run-length-encoding",
+  "license": "MIT"
+ }
+}

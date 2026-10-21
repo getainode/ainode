@@ -1,0 +1,15 @@
+# Build from the reviewed commit, then feed sanitized observations on stdin.
+# Run with --network none --read-only and no mounts, sockets or GPU devices.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    AINODE_HOME=/nonexistent
+
+COPY pyproject.toml README.md /src/
+COPY ainode /src/ainode
+RUN pip install --no-cache-dir /src && rm -rf /src /root/.cache/pip
+
+# No volumes, Docker/SSH tools or service entrypoint in this image.
+USER 65534:65534
+ENTRYPOINT ["python", "-B", "-m", "ainode.engine.adoption_check"]

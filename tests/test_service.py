@@ -1,0 +1,294 @@
+"""Tests for ainode.service.systemd  -  unit file generation and service management."""
+
+import subprocess
+from unittest.mock import MagicMock, patch
+
+
+from ainode.service import systemd
+
+
+class TestUnitFileGeneration:
+    """Test systemd unit file content generation."""
+
+    def test_generate_system_unit(self):
+        """System-level unit file uses multi-user.target and runs docker run."""
+        content = systemd.generate_unit_file(user_mode=False)
+        assert "WantedBy=multi-user.target" in content
+        assert "docker run" in content
+        assert "ghcr.io/getainode/ainode" in content
+        assert "NVIDIA_VISIBLE_DEVICES=all" in content
+        assert "After=network.target docker.service" in content
+        assert "Restart=always" in content
+
+    def test_generate_user_unit(self):
+        """User-level unit file uses default.target."""
+        content = systemd.generate_unit_file(user_mode=True)
+        assert "WantedBy=default.target" in content
+        assert "docker run" in content
+
+    def test_unit_has_gpu_env_vars(self):
+        content = systemd.generate_unit_file()
+        assert "NVIDIA_VISIBLE_DEVICES=all" in content
+        assert "CUDA_DEVICE_ORDER=PCI_BUS_ID" in content
+
+    def test_unit_mounts_docker_socket_and_ssh(self):
+        """Distributed mode needs docker.sock + ~/.ssh access."""
+        content = systemd.generate_unit_file()
+        assert "/var/run/docker.sock:/var/run/docker.sock" in content
+        assert ".ssh:/root/.ssh:ro" in content
+        # No host-venv hardening  -  docker handles isolation.
+        assert "ProtectSystem" not in content
+
+    def test_unit_has_restart_policy(self):
+        content = systemd.generate_unit_file()
+        # Restart=always so a deliberate self-stop during `ainode update` still
+        # relaunches on the new image.
+        assert "Restart=always" in content
+        assert "RestartSec=10" in content
+
+    def test_unit_has_description(self):
+        content = systemd.generate_unit_file()
+        assert "Description=AINode" in content
+        assert "Documentation=https://ainode.dev" in content
+
+    def test_unit_has_swappable_image_mechanism(self):
+        """Image is swappable without re-rendering: env default + optional file."""
+        content = systemd.generate_unit_file()
+        # ExecStart references the systemd variable, not a literal tag.
+        assert "${AINODE_IMAGE}" in content
+        # Pinned Environment default is a concrete image ref.
+        assert "Environment=AINODE_IMAGE=ghcr.io/getainode/ainode:" in content
+        # Optional (-prefixed) override file, rendered AFTER the Environment line.
+        assert "EnvironmentFile=-" in content
+        assert "image.env" in content
+        env_line = content.index("Environment=AINODE_IMAGE=")
+        file_line = content.index("EnvironmentFile=-")
+        assert file_line > env_line, "EnvironmentFile must come after Environment default"
+        # The container is stamped so the in-container update path knows a
+        # self-stop will image-swap (vs. drop/reboot the old image).
+        assert "AINODE_UNIT_SWAPPABLE=1" in content
+
+    def test_unit_bakes_dropin_extras(self):
+        """The retired 97-p5 drop-in's flags are now baked into the unit."""
+        content = systemd.generate_unit_file()
+        assert "--pid=host" in content
+        assert "AINODE_HOST_HOME=" in content
+        assert "HF_HUB_ENABLE_HF_TRANSFER=1" in content
+        assert "/.docker:/root/.docker:ro" in content
+
+
+class TestIsInstalled:
+    """Test is_installed checks."""
+
+    def test_not_installed(self, tmp_path):
+        with patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path):
+            assert systemd.is_installed(user_mode=False) is False
+
+    def test_installed(self, tmp_path):
+        unit_file = tmp_path / "ainode.service"
+        unit_file.write_text("[Unit]\nDescription=test\n")
+        with patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path):
+            assert systemd.is_installed(user_mode=False) is True
+
+    def test_user_mode_not_installed(self, tmp_path):
+        with patch.object(systemd, "USER_UNIT_DIR", tmp_path):
+            assert systemd.is_installed(user_mode=True) is False
+
+
+class TestInstallService:
+    """Test install_service writes unit file and reloads daemon."""
+
+    def test_install_writes_unit_file(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl") as mock_ctl,
+        ):
+            systemd.install_service(user_mode=False)
+
+            unit_path = tmp_path / "ainode.service"
+            assert unit_path.exists()
+            content = unit_path.read_text()
+            assert "docker run" in content
+            assert "ghcr.io/getainode/ainode" in content
+            mock_ctl.assert_called_once_with(["daemon-reload"], user_mode=False)
+
+    def test_install_seeds_image_env(self, tmp_path, monkeypatch):
+        """install_service pins the current image in <AINODE_HOME>/image.env."""
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl"),
+        ):
+            systemd.install_service(user_mode=False)
+
+            image_env = home / "image.env"
+            assert image_env.exists()
+            assert image_env.read_text().startswith("AINODE_IMAGE=ghcr.io/getainode/ainode:")
+
+    def test_install_no_overwrite_without_force(self, tmp_path, monkeypatch):
+        """An existing unit is left untouched unless force=True."""
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
+        unit_path = tmp_path / "ainode.service"
+        unit_path.write_text("STALE UNIT")
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl"),
+        ):
+            systemd.install_service(user_mode=False)
+            assert unit_path.read_text() == "STALE UNIT"
+
+            systemd.install_service(user_mode=False, force=True)
+            assert unit_path.read_text() != "STALE UNIT"
+            assert "docker run" in unit_path.read_text()
+
+    def test_install_user_mode(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("AINODE_HOME", str(home))
+        with (
+            patch.object(systemd, "USER_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl") as mock_ctl,
+        ):
+            systemd.install_service(user_mode=True)
+
+            unit_path = tmp_path / "ainode.service"
+            assert unit_path.exists()
+            content = unit_path.read_text()
+            assert "WantedBy=default.target" in content
+            mock_ctl.assert_called_once_with(["daemon-reload"], user_mode=True)
+
+
+class TestUninstallService:
+    """Test uninstall_service stops, disables, removes, and reloads."""
+
+    def test_uninstall_removes_unit(self, tmp_path):
+        unit_file = tmp_path / "ainode.service"
+        unit_file.write_text("[Unit]\nDescription=test\n")
+
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl") as mock_ctl,
+        ):
+            systemd.uninstall_service(user_mode=False)
+
+            assert not unit_file.exists()
+            # Should have called stop, disable, daemon-reload
+            calls = mock_ctl.call_args_list
+            assert any("stop" in str(c) for c in calls)
+            assert any("disable" in str(c) for c in calls)
+            assert any("daemon-reload" in str(c) for c in calls)
+
+    def test_uninstall_noop_if_not_installed(self, tmp_path):
+        with (
+            patch.object(systemd, "SYSTEM_UNIT_DIR", tmp_path),
+            patch.object(systemd, "_systemctl") as mock_ctl,
+        ):
+            systemd.uninstall_service(user_mode=False)
+            mock_ctl.assert_not_called()
+
+
+class TestServiceActions:
+    """Test enable, disable, start, stop, restart delegate to systemctl."""
+
+    @patch.object(systemd, "_systemctl")
+    def test_enable(self, mock_ctl):
+        systemd.enable_service(user_mode=False)
+        mock_ctl.assert_called_once_with(["enable", "ainode.service"], user_mode=False)
+
+    @patch.object(systemd, "_systemctl")
+    def test_disable(self, mock_ctl):
+        systemd.disable_service(user_mode=True)
+        mock_ctl.assert_called_once_with(["disable", "ainode.service"], user_mode=True)
+
+    @patch.object(systemd, "_systemctl")
+    def test_start(self, mock_ctl):
+        systemd.start_service()
+        mock_ctl.assert_called_once_with(["start", "ainode.service"], user_mode=False)
+
+    @patch.object(systemd, "_systemctl")
+    def test_stop(self, mock_ctl):
+        systemd.stop_service()
+        mock_ctl.assert_called_once_with(["stop", "ainode.service"], user_mode=False)
+
+    @patch.object(systemd, "_systemctl")
+    def test_restart(self, mock_ctl):
+        systemd.restart_service()
+        mock_ctl.assert_called_once_with(["restart", "ainode.service"], user_mode=False)
+
+
+class TestStatusService:
+    """Test status_service returns structured info."""
+
+    @patch.object(systemd, "get_journal_lines", return_value=["line1", "line2"])
+    @patch.object(systemd, "_systemctl")
+    def test_status_active(self, mock_ctl, mock_journal):
+        mock_ctl.side_effect = [
+            MagicMock(stdout="active\n"),   # is-active
+            MagicMock(stdout="enabled\n"),  # is-enabled
+        ]
+        info = systemd.status_service(user_mode=False)
+        assert info["state"] == "active"
+        assert info["enabled"] is True
+        assert info["journal_lines"] == ["line1", "line2"]
+
+    @patch.object(systemd, "get_journal_lines", return_value=[])
+    @patch.object(systemd, "_systemctl")
+    def test_status_inactive(self, mock_ctl, mock_journal):
+        mock_ctl.side_effect = [
+            MagicMock(stdout="inactive\n"),
+            MagicMock(stdout="disabled\n"),
+        ]
+        info = systemd.status_service()
+        assert info["state"] == "inactive"
+        assert info["enabled"] is False
+
+
+class TestGetJournalLines:
+    """Test journal line fetching."""
+
+    @patch("subprocess.run")
+    def test_returns_lines(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="line1\nline2\nline3\n")
+        lines = systemd.get_journal_lines(lines=3)
+        assert lines == ["line1", "line2", "line3"]
+
+    @patch("subprocess.run", side_effect=FileNotFoundError)
+    def test_returns_empty_on_missing_journalctl(self, mock_run):
+        lines = systemd.get_journal_lines()
+        assert lines == []
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("journalctl", 10))
+    def test_returns_empty_on_timeout(self, mock_run):
+        lines = systemd.get_journal_lines()
+        assert lines == []
+
+
+class TestSystemctlHelper:
+    """Test _systemctl builds the correct command."""
+
+    @patch("subprocess.run")
+    def test_system_mode(self, mock_run):
+        systemd._systemctl(["start", "ainode.service"], user_mode=False)
+        mock_run.assert_called_once_with(
+            ["systemctl", "start", "ainode.service"], check=True, timeout=30
+        )
+
+    @patch("subprocess.run")
+    def test_user_mode(self, mock_run):
+        systemd._systemctl(["start", "ainode.service"], user_mode=True)
+        mock_run.assert_called_once_with(
+            ["systemctl", "--user", "start", "ainode.service"], check=True, timeout=30
+        )
+
+    @patch("subprocess.run")
+    def test_capture_mode(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="active\n")
+        result = systemd._systemctl(["is-active", "ainode.service"], capture=True)
+        mock_run.assert_called_once_with(
+            ["systemctl", "is-active", "ainode.service"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.stdout == "active\n"

@@ -1,0 +1,1538 @@
+{
+  "schema": 1,
+  "stamp": "20260916-201023",
+  "label": "Qwen3.8-Flash-Next TP=2 node-2+node-3, four harnesses, 10 Exercism tasks",
+  "model": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "name": "Qwen3.8-Flash-Next",
+    "params_b": 125.0,
+    "quant": "NVFP4 (mixed, FP8 PLE)",
+    "context": 262144,
+    "license": "Apache 2.0",
+    "vision": false,
+    "arch": "moe",
+    "active_b": 6.0
+  },
+  "placement": {
+    "engine": "vllm",
+    "node": "node-1",
+    "gpu": "NVIDIA GB10",
+    "ainode": "0.5.18",
+    "tp": 2,
+    "gpus": 2,
+    "stacked_with": [
+      "unsloth/Qwen3.8-27B-NVFP4",
+      "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"
+    ],
+    "engine_image": "vllm/vllm-openai:v0.29.0",
+    "flags": [
+      "--quantization",
+      "modelopt",
+      "--enable-prefix-caching",
+      "--reasoning-parser",
+      "qwen3",
+      "--tool-call-parser",
+      "qwen3_coder",
+      "--enable-auto-tool-choice"
+    ],
+    "flags_source": "curated catalog recipe (/api/models); the live container command line was not readable"
+  },
+  "settings": {
+    "attempts": 2,
+    "timeout_s": 900.0,
+    "tasks_requested": null,
+    "harnesses": [
+      "dsh",
+      "pi",
+      "aider",
+      "claude"
+    ],
+    "context_window_declared": 262144,
+    "max_output_tokens_declared": 16384
+  },
+  "harness": {
+    "task_set": {
+      "id": "exercism-python-10",
+      "count": 10,
+      "available": 10,
+      "slugs": [
+        "binary-search",
+        "bob",
+        "hamming",
+        "isogram",
+        "matrix",
+        "raindrops",
+        "robot-name",
+        "run-length-encoding",
+        "two-fer",
+        "word-count"
+      ],
+      "language": "python",
+      "source": {
+        "repo": "https://github.com/exercism/python",
+        "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+        "path": "exercises/practice/<slug>",
+        "license": "MIT",
+        "license_file": "LICENSE-exercism"
+      }
+    },
+    "protocol": {
+      "attempts": 2,
+      "timeout_s": 900.0,
+      "second_attempt_sees": "the failing test output"
+    },
+    "runs": [
+      {
+        "harness": "dsh",
+        "version": "0.1.5-rc.1",
+        "scores": {
+          "tasks": 10,
+          "passed_at_1": 10,
+          "passed_at_2": 10,
+          "pass_at_1": 1.0,
+          "pass_at_2": 1.0,
+          "mean_wall_s": 96.2,
+          "crashes": 0,
+          "timeouts": 0
+        },
+        "tasks": [
+          {
+            "slug": "binary-search",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 55.25,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 55.25,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 2.4,
+                  "passed": true,
+                  "tests_passed": 11
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "bob",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 75.73,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 75.73,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 1.32,
+                  "passed": true,
+                  "tests_passed": 26
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "hamming",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 49.38,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 49.38,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 3.71,
+                  "passed": true,
+                  "tests_passed": 9
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "isogram",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 83.88,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 83.88,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.26,
+                  "passed": true,
+                  "tests_passed": 14
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "matrix",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 75.32,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 75.32,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.24,
+                  "passed": true,
+                  "tests_passed": 8
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "raindrops",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 32.93,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 32.93,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.25,
+                  "passed": true,
+                  "tests_passed": 18
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "robot-name",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 141.04,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 141.04,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.24,
+                  "passed": true,
+                  "tests_passed": 4
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "run-length-encoding",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 234.49,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 234.49,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.01,
+                  "passed": true,
+                  "tests_passed": 13
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "two-fer",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 39.53,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 39.53,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.12,
+                  "passed": true,
+                  "tests_passed": 3
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "word-count",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 173.96,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 173.96,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.49,
+                  "passed": true,
+                  "tests_passed": 17
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          }
+        ]
+      },
+      {
+        "harness": "pi",
+        "version": null,
+        "scores": {
+          "tasks": 10,
+          "passed_at_1": 10,
+          "passed_at_2": 10,
+          "pass_at_1": 1.0,
+          "pass_at_2": 1.0,
+          "mean_wall_s": 139.6,
+          "crashes": 0,
+          "timeouts": 0
+        },
+        "tasks": [
+          {
+            "slug": "binary-search",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 73.09,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 73.09,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.5,
+                  "passed": true,
+                  "tests_passed": 11
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "bob",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 88.06,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 88.06,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 3.91,
+                  "passed": true,
+                  "tests_passed": 26
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "hamming",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 45.15,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 45.15,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.4,
+                  "passed": true,
+                  "tests_passed": 9
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "isogram",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 76.85,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 76.85,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.82,
+                  "passed": true,
+                  "tests_passed": 14
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "matrix",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 48.93,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 48.93,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 1.64,
+                  "passed": true,
+                  "tests_passed": 8
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "raindrops",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 41.25,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 41.25,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.4,
+                  "passed": true,
+                  "tests_passed": 18
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "robot-name",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 818.2,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 818.2,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.27,
+                  "passed": true,
+                  "tests_passed": 4
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "run-length-encoding",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 65.15,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 65.15,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.07,
+                  "passed": true,
+                  "tests_passed": 13
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "two-fer",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 52.04,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 52.04,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.62,
+                  "passed": true,
+                  "tests_passed": 3
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "word-count",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 87.19,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 87.19,
+                  "timed_out": false,
+                  "crashed": false
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.06,
+                  "passed": true,
+                  "tests_passed": 17
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          }
+        ]
+      },
+      {
+        "harness": "aider",
+        "version": null,
+        "scores": {
+          "tasks": 10,
+          "passed_at_1": 9,
+          "passed_at_2": 10,
+          "pass_at_1": 0.9,
+          "pass_at_2": 1.0,
+          "mean_wall_s": 319.8,
+          "crashes": 0,
+          "timeouts": 1
+        },
+        "tasks": [
+          {
+            "slug": "binary-search",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 370.62,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 370.62,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 38000,
+                  "tokens_received": 100
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.82,
+                  "passed": true,
+                  "tests_passed": 11
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "bob",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 54.69,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 54.69,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 892,
+                  "tokens_received": 134
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.27,
+                  "passed": true,
+                  "tests_passed": 26
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "hamming",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 98.85,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 98.85,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 38000,
+                  "tokens_received": 61
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.26,
+                  "passed": true,
+                  "tests_passed": 9
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "isogram",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 23.92,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 23.92,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 797,
+                  "tokens_received": 52
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.24,
+                  "passed": true,
+                  "tests_passed": 14
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "matrix",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 151.29,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 151.29,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 35000,
+                  "tokens_received": 91
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 0.23,
+                  "passed": true,
+                  "tests_passed": 8
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "raindrops",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 201.79,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 201.79,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 113000,
+                  "tokens_received": 74
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.56,
+                  "passed": true,
+                  "tests_passed": 18
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "robot-name",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 516.72,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 516.72,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 841,
+                  "tokens_received": 158
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 1.94,
+                  "passed": true,
+                  "tests_passed": 4
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "run-length-encoding",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 62.3,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 62.3,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 931,
+                  "tokens_received": 174
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 4.35,
+                  "passed": true,
+                  "tests_passed": 13
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "two-fer",
+            "passed": true,
+            "passed_at_attempt": 1,
+            "harness_wall_s": 46.15,
+            "crashed": false,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 46.15,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 875,
+                  "tokens_received": 40
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 3.72,
+                  "passed": true,
+                  "tests_passed": 3
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "word-count",
+            "passed": true,
+            "passed_at_attempt": 2,
+            "harness_wall_s": 1671.37,
+            "crashed": false,
+            "timed_out": true,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": null,
+                  "wall_s": 900.09,
+                  "timed_out": true,
+                  "crashed": false,
+                  "error": "timed out after 900s"
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 2.17,
+                  "passed": false,
+                  "tests_failed": 17
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 0,
+                  "wall_s": 771.28,
+                  "timed_out": false,
+                  "crashed": false,
+                  "turns": 1,
+                  "tokens_sent": 2100,
+                  "tokens_received": 54
+                },
+                "tests": {
+                  "exit_code": 0,
+                  "wall_s": 3.61,
+                  "passed": true,
+                  "tests_passed": 17
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          }
+        ]
+      },
+      {
+        "harness": "claude",
+        "version": "2.1.272 (Claude Code)",
+        "scores": {
+          "tasks": 10,
+          "passed_at_1": 0,
+          "passed_at_2": 0,
+          "pass_at_1": 0.0,
+          "pass_at_2": 0.0,
+          "mean_wall_s": 2.9,
+          "crashes": 10,
+          "timeouts": 0
+        },
+        "tasks": [
+          {
+            "slug": "binary-search",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 24.21,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 22.76,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 3.49,
+                  "passed": false,
+                  "tests_failed": 11
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 1.45,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.44,
+                  "passed": false,
+                  "tests_failed": 11
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "bob",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.54,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.28,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.28,
+                  "passed": false,
+                  "tests_failed": 26
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.29,
+                  "passed": false,
+                  "tests_failed": 26
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "hamming",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.57,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.29,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 9
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.28,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 9
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "isogram",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.53,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.28,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 14
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 14
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "matrix",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.53,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "passed": false,
+                  "tests_failed": 8
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "passed": false,
+                  "tests_failed": 8
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "raindrops",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.52,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "passed": false,
+                  "tests_failed": 18
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "passed": false,
+                  "tests_failed": 18
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "robot-name",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.53,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "passed": false,
+                  "tests_failed": 4
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 4
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "run-length-encoding",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.55,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.3,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 13
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.26,
+                  "passed": false,
+                  "tests_failed": 13
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "two-fer",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.51,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "passed": false,
+                  "tests_failed": 3
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "passed": false,
+                  "tests_failed": 3
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          },
+          {
+            "slug": "word-count",
+            "passed": false,
+            "passed_at_attempt": null,
+            "harness_wall_s": 0.52,
+            "crashed": true,
+            "timed_out": false,
+            "attempts": [
+              {
+                "attempt": 1,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.27,
+                  "passed": false,
+                  "tests_failed": 17
+                }
+              },
+              {
+                "attempt": 2,
+                "harness": {
+                  "exit_code": 1,
+                  "wall_s": 0.25,
+                  "timed_out": false,
+                  "crashed": true,
+                  "turns": 1
+                },
+                "tests": {
+                  "exit_code": 1,
+                  "wall_s": 0.28,
+                  "passed": false,
+                  "tests_failed": 17
+                }
+              }
+            ],
+            "tokens": {
+              "requests": 0,
+              "tokens_generated": 0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "notes": [
+    "Measured by scripts/ainode-bench.py harness in 5762s; nothing loaded, unloaded or restarted.",
+    "The hidden tests are copied into the working directory only after the harness has exited, and removed again before the next attempt.",
+    "pass@2 is cumulative and the second attempt is given the failing test output, which is Aider's polyglot protocol.",
+    "A harness crash or timeout still gets its tests run against whatever it left on disk; crashes and timeouts are counted separately.",
+    "Token counts are AINode's /api/metrics counters differenced over each task's window: they are the node's totals, so any other traffic on the node during the run is inside them.",
+    "Version unknown for: pi, aider.",
+    "node-1 does not report serving nvidia/Qwen3.8-Flash-Next-NVFP4; placement and telemetry may describe the wrong node",
+    "The claude rows here are a configuration miss, not a model result: Claude Code's default reasoning effort 'high' is rejected by Flash-Next's chat template (400 'Unexpected reasoning effort high'); the rerun at effort medium is the separate record from 20:51 the same day (8/10 then 10/10, 46 s mean). Treat these claude scores as not measured."
+  ],
+  "source": "scripts/ainode-bench.py harness"
+}

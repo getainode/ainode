@@ -1,0 +1,22 @@
+{
+ "slug": "hamming",
+ "language": "python",
+ "entry": "hamming.py",
+ "instructions": "instructions.md",
+ "tests": [
+  "tests/hamming_test.py"
+ ],
+ "test_command": [
+  "python",
+  "-m",
+  "pytest",
+  "-q",
+  "hamming_test.py"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/hamming",
+  "license": "MIT"
+ }
+}

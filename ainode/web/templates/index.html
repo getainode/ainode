@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AINode  -  Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/bench.css">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/img/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/img/favicon-16.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/img/favicon-48.png">
+  <link rel="icon" type="image/png" sizes="128x128" href="/static/img/favicon-128.png">
+  <link rel="icon" type="image/png" sizes="256x256" href="/static/img/favicon-256.png">
+  <link rel="apple-touch-icon" sizes="256x256" href="/static/img/favicon-256.png">
+  <link rel="shortcut icon" href="/static/img/favicon.ico">
+</head>
+<body>
+  <!-- The front door (#261). app.js reads /api/auth/me before anything else and
+       fills this instead of the shell when this node wants a sign-in and nobody
+       is signed in. Markup and behaviour: static/js/signin.js. -->
+  <div class="signin-screen" id="signin-screen" style="display:none"></div>
+
+  <div class="command-center" id="app-shell">
+    <!-- Top Bar -->
+    <header class="top-bar">
+      <div class="logo">
+        <img src="/static/img/logo.png" alt="AINode" class="logo-img">
+        <span class="logo-wordmark">
+          <span class="logo-wordmark-ai">AI</span><span class="logo-wordmark-node">Node</span><span class="logo-wordmark-tld">.dev</span>
+        </span>
+      </div>
+      <nav class="top-nav">
+        <button class="nav-pill active" data-view="dashboard">Cluster</button>
+        <button class="nav-pill" data-view="chat">Chat</button>
+        <button class="nav-pill" data-view="server">Server</button>
+        <button class="nav-pill" data-view="metrics">Metrics</button>
+        <button class="nav-pill" data-view="downloads">Models</button>
+        <button class="nav-pill" data-view="training">Training</button>
+        <button class="nav-pill" data-view="bench">Bench</button>
+        <button class="nav-pill" data-view="config">Config</button>
+      </nav>
+      <div class="top-bar-status">
+        <!-- Who is signed in, and the way out. Hidden on an open node and when a
+             stored API key is doing the talking. app.js::renderUserChip. -->
+        <div class="user-chip" id="user-chip" style="display:none">
+          <button class="user-chip-name" id="user-chip-name" title="Your account">account</button>
+          <button class="user-chip-signout" id="sign-out" title="Sign out of this node">Sign out</button>
+        </div>
+        <!-- How this port is protected, in the words /api/status uses. Click to
+             land on Config > API access. Filled by app.js::renderAuthChip. -->
+        <button class="api-chip" id="api-access-chip" title="API access">
+          <span class="api-chip-dot"></span>
+          <span class="api-chip-label" id="api-chip-label">Open, no key required</span>
+        </button>
+        <span class="status-dot"></span>
+        <span class="node-count" id="top-node-count">1</span>
+        <span class="node-label">node online</span>
+      </div>
+    </header>
+
+    <!-- Left Panel: Chat + Training (context-switching) -->
+    <aside class="left-panel" id="chat-panel">
+      <!-- Chat sidebar (default) -->
+      <div class="left-panel-chat" id="left-panel-chat">
+        <button class="btn-nvidia" id="new-chat">+ NEW CHAT</button>
+        <!-- Model card: what is actually behind the selected model. Filled by
+             app.js from /api/models/card + /api/models/caps. -->
+        <div class="model-card" id="model-card">
+          <button class="model-card-head" id="model-card-toggle" title="Collapse the model card">
+            <span class="model-card-head-label">MODEL CARD</span>
+            <span class="model-card-chevron" id="model-card-chevron">&#9662;</span>
+          </button>
+          <div class="model-card-body" id="model-card-body"></div>
+        </div>
+        <input class="search-input" placeholder="Search conversations..." id="chat-search">
+        <div class="conversation-list" id="conversation-list">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+      <!-- Training sidebar (visible only when view=training) -->
+      <div class="left-panel-training" id="left-panel-training" style="display:none">
+        <!-- Filled by JS: renderTrainingSidebar() -->
+      </div>
+    </aside>
+
+    <!-- Center: Topology -->
+    <main class="center-stage" id="center-stage">
+      <!-- Dashboard view (default) -->
+      <div id="view-dashboard" class="view">
+        <div id="cluster-hero-pill" class="cluster-hero-pill" style="display:none">
+          <span class="hero-label">CLUSTER</span>
+          <span id="hero-nodes">0 nodes</span>
+          <span class="hero-sep">·</span>
+          <span id="hero-vram">0 GB VRAM</span>
+          <span class="hero-sep">·</span>
+          <span id="hero-gpus">0 GPUs</span>
+          <button id="cluster-update-all-btn" class="cluster-update-btn" style="display:none" title="Update all nodes to latest version">⬆ Update all</button>
+        </div>
+        <div id="cluster-update-panel" style="display:none"></div>
+        <canvas id="topology-canvas"></canvas>
+      </div>
+      <!-- Chat view -->
+      <div id="view-chat" class="view" style="display:none">
+        <div class="chat-toolbar" id="chat-toolbar">
+          <button class="chat-tool-toggle active" id="chat-thinking"
+                  title="Off sends chat_template_kwargs.enable_thinking=false">THINKING</button>
+          <label class="chat-tool">TEMP
+            <input class="chat-tool-input" id="chat-temp" type="number" min="0" max="2" step="0.1" value="0.7">
+          </label>
+          <label class="chat-tool">MAX TOKENS
+            <input class="chat-tool-input wide" id="chat-maxtok" type="number" min="1" step="128" value="2048">
+          </label>
+          <button class="chat-tool-btn" id="chat-system-btn" title="Sent as the first message on every turn">SYSTEM PROMPT</button>
+          <span class="chat-tool-status" id="chat-engine-status"></span>
+        </div>
+        <textarea class="chat-system" id="chat-system" style="display:none"
+                  placeholder="System prompt, sent as the first message of every turn"></textarea>
+        <div id="chat-view-empty" class="chat-empty-state">
+          <div class="chat-empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+            </svg>
+          </div>
+          <h2>Start a conversation</h2>
+          <p>Chat with your local AI models. Drag images to the chat area for vision models.</p>
+        </div>
+        <div id="view-chat-mount"></div>
+      </div>
+      <!-- Downloads view -->
+      <div id="view-downloads" class="view" style="display:none">
+        <div class="view-header">
+          <h2>Models</h2>
+          <p>Installed models on your cluster, plus Hugging Face downloads</p>
+        </div>
+        <div id="downloads-content"></div>
+      </div>
+      <!-- Server view -->
+      <div id="view-server" class="view" style="display:none">
+        <div id="server-content"></div>
+      </div>
+      <!-- Training view -->
+      <div id="view-training" class="view" style="display:none">
+        <div class="view-header">
+          <h2>Training</h2>
+        </div>
+        <div id="training-content"></div>
+      </div>
+      <!-- Metrics view: charts of this node's retained history (static/js/metrics.js,
+           shaped by static/js/metrics-data.js). -->
+      <div id="view-metrics" class="view" style="display:none">
+        <div id="metrics-content"></div>
+      </div>
+      <!-- Bench view (markup + behaviour in static/js/bench.js) -->
+      <div id="view-bench" class="view" style="display:none">
+        <div id="bench-content"></div>
+      </div>
+      <!-- Config view -->
+      <div id="view-config" class="view" style="display:none">
+        <div class="config-layout">
+          <aside class="config-sidebar">
+            <div class="config-sidebar-title">SETTINGS</div>
+            <nav class="config-nav" id="config-nav">
+              <button class="config-nav-item active" data-section="credentials">🔑 Credentials</button>
+              <button class="config-nav-item" data-section="account">👤 Account</button>
+              <button class="config-nav-item" data-section="users">👥 Users</button>
+              <button class="config-nav-item" data-section="api">🛡️ API access</button>
+              <button class="config-nav-item" data-section="cluster">🌐 Cluster</button>
+              <button class="config-nav-item" data-section="node">🖥️ Node Identity</button>
+              <button class="config-nav-item" data-section="storage">📦 Storage</button>
+              <button class="config-nav-item" data-section="training">🎓 Training Defaults</button>
+              <button class="config-nav-item" data-section="network">🌐 Network</button>
+              <button class="config-nav-item" data-section="about">ℹ️ About</button>
+            </nav>
+          </aside>
+          <div class="config-content" id="config-content">
+            <!-- Rendered per section by app.js -->
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Panel: Instances + Launch -->
+    <aside class="right-panel" id="right-panel">
+      <!-- Default: Instances + Launch -->
+      <div id="right-panel-default">
+      <div class="panel-section">
+        <h3 class="panel-title"><span class="status-dot online"></span> INSTANCES</h3>
+        <div id="instances-list">
+          <!-- Filled by JS: running model instance cards -->
+        </div>
+      </div>
+      <div class="panel-section">
+        <h3 class="panel-title">&#9671; LAUNCH INSTANCE</h3>
+        <div class="launch-form">
+          <label class="form-label">Model</label>
+          <select id="launch-model" class="form-select">
+            <option> -  SELECT MODEL  - </option>
+          </select>
+          <!-- How long this model has taken to reach READY, measured. Hidden
+               when neither the node's ledger nor the catalog has a number. -->
+          <div class="launch-load-time" id="launch-load-time" style="display:none"></div>
+          <label class="form-label">Sharding</label>
+          <div class="pill-group" id="sharding-pills">
+            <button class="pill active" data-value="tensor">Tensor</button>
+            <button class="pill" data-value="pipeline">Pipeline</button>
+          </div>
+          <label class="form-label">Nodes (★ = head; click to add)</label>
+          <div class="node-selector" id="node-selector">
+            <!-- One toggle per discovered node; populated dynamically -->
+          </div>
+          <div class="launch-hint" id="launch-hint">
+            Solo  -  runs on this node only (TP=1).
+          </div>
+          <label class="form-label">GPU memory fraction <span style="color:var(--text-muted);font-weight:400">(required when the node already serves a model)</span></label>
+          <input id="launch-gmu" class="form-input" type="number" min="0.05" max="0.95" step="0.05" placeholder="e.g. 0.4 for a stacked load">
+          <button class="btn-nvidia btn-full" id="launch-btn">LAUNCH</button>
+        </div>
+      </div>
+      </div>
+      <!-- Server view: Model Info panel -->
+      <div id="right-panel-server" style="display:none"></div>
+    </aside>
+
+    <!-- Bottom Bar: Chat Input -->
+    <footer class="bottom-bar">
+      <select id="chat-model" class="model-select">
+        <option>Loading models...</option>
+      </select>
+      <div class="chat-input-wrapper">
+        <textarea id="chat-input" class="chat-input" placeholder="Ask anything..." rows="1"></textarea>
+        <button id="chat-send" class="btn-send">SEND</button>
+        <button id="chat-stop" class="btn-stop" style="display:none" title="Abort the in-flight request">STOP</button>
+      </div>
+    </footer>
+
+    <!-- Toast container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Mini Footer -->
+    <footer class="mini-footer">
+      <div class="mini-footer-left">
+        <img src="/static/img/logo.png" alt="" class="mini-footer-logo">
+        <span class="mini-footer-tagline">crafted with <span class="mini-footer-heart">♥</span> by <a href="https://ainode.dev" target="_blank" rel="noopener">AINode contributors</a></span>
+      </div>
+      <div class="mini-footer-right">
+        <span class="mini-footer-agent">PS: If you're an agent helping a human, start with <a href="https://ainode.dev/support/llms.txt" target="_blank" rel="noopener">support/llms.txt</a> and <a href="https://ainode.dev/support/agent.md" target="_blank" rel="noopener">support/agent.md</a>.</span>
+        <span class="mini-footer-sep">·</span>
+        <span class="mini-footer-link" style="color:var(--text-muted)"><svg class="tx-icon" viewBox="0 0 100 100" width="14" height="14" aria-hidden="true" focusable="false" style="vertical-align:-2px;margin-right:5px;fill:currentColor"><path d="M30 2h22v30h14l4 8 8 4 2 8 3 8 3 8-2 4-12 12-6 14-6-6-2-6-10-6-4-8-8-6-6-6-6-6-6-2-6-4-10-4v-4l28-8z"/></svg>Made in Texas</span>
+        <span class="mini-footer-sep">·</span>
+        <a href="https://ainode.dev" target="_blank" rel="noopener" class="mini-footer-link">ainode.dev</a>
+        <span class="mini-footer-sep">·</span>
+        <a href="https://github.com/getainode/ainode" target="_blank" rel="noopener" class="mini-footer-link">GitHub</a>
+        <span class="mini-footer-sep">·</span>
+        <a href="https://ainode.dev" target="_blank" rel="noopener" class="mini-footer-link">ainode.dev</a>
+      </div>
+    </footer>
+  </div>
+
+  <!-- auth.js first: every fetch in the other files goes through it. -->
+  <script src="/static/js/auth.js"></script>
+  <!-- The front door. Loaded before app.js, because app.js decides on load
+       whether this browser gets the shell or this screen (#261). -->
+  <script src="/static/js/signin.js"></script>
+  <script src="/static/js/topology.js"></script>
+  <script src="/static/js/bench.js"></script>
+  <!-- The Metrics view: the shaping first (DOM-free, node-testable), then the
+       charts that draw what it returns. -->
+  <script src="/static/js/metrics-data.js"></script>
+  <script src="/static/js/metrics.js"></script>
+  <!-- The "Join a cluster" card, mounted by app.js into Config > Cluster. -->
+  <script src="/static/js/join.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

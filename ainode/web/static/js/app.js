@@ -1,0 +1,8049 @@
+/* AINode Command Center - Single Page Application */
+
+// config-save-outcome:start
+// What to tell the user after PATCH /api/config answered 200. The server applies
+// what it may and lists the rest in rejected (an auth-off node refuses identity,
+// network and storage fields from a remote browser), so "Saved" is only true when
+// nothing was rejected. Pure, so tests run it under node.
+function configSaveOutcome(body, restartHint) {
+  body = body || {};
+  var rejected = Array.isArray(body.rejected) ? body.rejected : [];
+  var applied = Object.keys(body.applied || {});
+  var reasons = body.rejected_reasons || {};
+  var why = rejected.map(function (k) { return reasons[k]; }).filter(Boolean)[0] || '';
+  if (rejected.length && !applied.length) {
+    return { type: 'error', message: ('Not saved: ' + rejected.join(', ') + '. ' + why).trim() };
+  }
+  if (rejected.length) {
+    return { type: 'warning', message: ('Saved ' + applied.join(', ') + '; not saved: ' + rejected.join(', ') + '. ' + why).trim() };
+  }
+  if (restartHint) return { type: 'info', message: 'Saved. Restart AINode for network changes to apply.' };
+  return { type: 'success', message: 'Saved' };
+}
+// config-save-outcome:end
+
+const AINode = {
+  state: {
+    status: null,
+    nodes: [],
+    metrics: null,
+    messages: [],
+    conversations: [],
+    currentConversation: null,
+    streaming: false,
+    streamMetrics: { ttft: 0, tps: 0, tokens: 0 },
+    topology: null,
+    trainingJobs: [],
+    trainingView: 'list',        // legacy - kept for detail/form routing
+    trainingTab: 'overview',     // new: overview | datasets | runs | templates | benchmarks
+    trainingDetailId: null,
+    trainingLossData: [],
+    trainingStats: null,
+    trainingTemplates: [],
+    datasets: [],
+    runsFilter: 'all',
+    expandedDatasetId: null,
+    wizardState: null,
+    pollInterval: null,
+    metricsInterval: null,
+    // The load bar advances between polls (see loadProgress), so it ticks once a
+    // second off the numbers the last poll brought. Not a second poll.
+    loadTickInterval: null,
+    abortController: null,
+    currentView: 'dashboard',
+    modelsFilter: 'catalog',
+    modelsSearch: '',
+    modelsSort: 'recommended',
+    configSection: 'credentials',
+    // /api/auth/status, polled on its own because it answers when the key is
+    // missing (#167). Who is signed in lives in AINodeAuth.me, from
+    // /api/auth/me: one home for the credential, same as the key (#261).
+    authStatus: null,
+    authBlocked: null,
+    // Config > Account and Config > Users, per render. null means "not read yet",
+    // so an empty list is never drawn as an answer nobody asked for.
+    authSessions: null,
+    authUsers: null,
+    configData: {
+      secrets: null,
+      cluster: null,
+      config: null,
+    },
+    configRevealed: {},
+    // --- Chat: fleet-true picker, model card, per-turn stats --------------
+    chatFleet: [],            // every instance the cluster is actually serving
+    chatFleetError: null,     // set when this node's own API cannot be reached
+    chatInstance: null,       // {model, node_id, node_name, port} being chatted to
+    chatPreferred: null,      // the user's last pick, re-applied after a refresh
+    chatCards: {},            // instance key -> /api/models/card payload
+    chatCaps: {},             // instance key -> /api/models/caps payload
+    chatStats: {},            // instance key -> [per-turn records]
+    chatReasoningSeen: {},    // instance key -> reasoning OBSERVED (never probed)
+    chatSettings: { system: '', temperature: 0.7, maxTokens: 2048, thinking: true },
+    chatCardCollapsed: false,
+    // repo/id -> {typical_ready_minutes, last_ready_minutes, last_ready_on} from
+    // /api/models, so the launch panel can say how long a model takes to come up.
+    launchLoadTimes: {},
+  },
+
+  // ========================================================================
+  //  INITIALIZATION
+  // ========================================================================
+
+  init() {
+    var self = this;
+    // The front door comes before everything else (#261). /api/auth/me is open,
+    // so it answers on a node that wants a sign-in, and a release older than the
+    // route answers nothing at all: bootDecision reads that as "carry on as
+    // before, on the API key". Until it resolves, nothing is fetched and nothing
+    // is rendered, because a shell of panels that all 401 is the bug this fixes.
+    AINodeAuth.loadMe().then(function (me) {
+      var decision = AINodeAuth.bootDecision(me);
+      if (decision.show === 'signin') {
+        AINodeSignIn.show({
+          state: decision.state,
+          onSignedIn: function () { self.start(); },
+        });
+        return;
+      }
+      self.start();
+    });
+  },
+
+  /**
+   * The dashboard itself: bindings, polling, first render. Called once per page
+   * load, after the front door has let this browser through, and again when a
+   * person signs back in after a session ended mid-visit (which only restarts
+   * the clocks, because the listeners and the panels are still there).
+   */
+  start() {
+    if (this._started) { this.resume(); return; }
+    this._started = true;
+    // A node that wants a key must be able to say so before any panel renders.
+    this.initAuth();
+    this.loadChatSettings();
+    this.loadConversations();
+    // Per-turn stats ride along with each conversation, so the per-instance
+    // averages survive a page reload.
+    this.rebuildChatStatsFromHistory();
+    this.bindNav();
+    this.bindChat();
+    this.bindLaunchForm();
+    this.initTopology();
+    this.initClusterUpdateBtn();
+    this.startPolling();
+    this.renderConversationList();
+    this.applyChatSettingsToUI();
+    this.refreshChatFleet(true);
+    // Restore any in-flight downloads from before page refresh
+    this.loadActiveDownloads();
+    // Also ask the server if there are active jobs we missed
+    setTimeout(() => this.reconcileActiveDownloads(), 500);
+  },
+
+  /** Back from the sign-in screen: restart the clocks, redraw what is on screen. */
+  resume() {
+    this.startPolling();
+    this.refreshAuthStatus();
+    this.renderUserChip();
+    if (this.state.currentView === 'config') this.renderConfigSection();
+  },
+
+  /** Every interval this page runs, stopped. The front door polls nothing. */
+  stopPolling() {
+    var self = this;
+    ['pollInterval', 'metricsInterval', 'loadTickInterval', 'versionInterval',
+     'authInterval'].forEach(function (key) {
+      if (self.state[key]) {
+        clearInterval(self.state[key]);
+        self.state[key] = null;
+      }
+    });
+    if (typeof this.stopServerLogPolling === 'function') this.stopServerLogPolling();
+  },
+
+  // ========================================================================
+  //  API KEY (see static/js/auth.js for the wrapper every fetch goes through)
+  // ========================================================================
+
+  initAuth() {
+    var self = this;
+    // One handler for the whole UI: any 401, from any panel, lands on the one
+    // screen that fixes it instead of leaving an empty shell behind.
+    AINodeAuth.onUnauthorized(function (info) { self.onUnauthorized(info); });
+    var chip = document.getElementById('api-access-chip');
+    if (chip) chip.addEventListener('click', function () { self.openApiAccess(); });
+    var who = document.getElementById('user-chip-name');
+    if (who) who.addEventListener('click', function () { self.openConfigSection('account'); });
+    var out = document.getElementById('sign-out');
+    if (out) out.addEventListener('click', function () { self.signOut(); });
+    this.refreshAuthStatus();
+    this.renderUserChip();
+  },
+
+  initTopology() {
+    var canvas = document.getElementById('topology-canvas');
+    if (canvas && typeof Topology !== 'undefined') {
+      this.state.topology = new Topology(canvas);
+    }
+  },
+
+  // ========================================================================
+  //  TOAST NOTIFICATION SYSTEM
+  // ========================================================================
+
+  toast(message, type) {
+    type = type || 'info';
+    var container = document.getElementById('toast-container');
+    if (!container) return;
+    var toast = document.createElement('div');
+    toast.className = 'toast toast-' + type;
+    toast.innerHTML = '<span class="toast-message">' + this.esc(message) + '</span><button class="toast-close">&times;</button>';
+    container.appendChild(toast);
+    requestAnimationFrame(function () { toast.classList.add('toast-visible'); });
+    var dismiss = function () {
+      toast.classList.remove('toast-visible');
+      toast.classList.add('toast-fade-out');
+      setTimeout(function () { toast.remove(); }, 300);
+    };
+    toast.querySelector('.toast-close').addEventListener('click', dismiss);
+    setTimeout(dismiss, 4000);
+  },
+
+  // ========================================================================
+  //  CONVERSATION HISTORY (localStorage-backed)
+  // ========================================================================
+
+  loadConversations() {
+    try {
+      this.state.conversations = JSON.parse(localStorage.getItem('ainode_conversations') || '[]');
+    } catch (e) {
+      this.state.conversations = [];
+    }
+    // Restore last active conversation
+    if (this.state.conversations.length > 0 && !this.state.currentConversation) {
+      // Don't auto-load; let user pick
+    }
+  },
+
+  // What actually goes to localStorage. Image attachments do NOT: they are data
+  // URLs up to 10 MB each and the quota is 5 to 10 MB per ORIGIN, so one image
+  // turn filled it, the QuotaExceededError escaped saveCurrentConversation, and
+  // nothing in that browser persisted again until the user deleted conversations
+  // by hand (#202). The stored turn keeps a COUNT; the live session keeps the
+  // bytes in memory, so the conversation on screen is unchanged and the images
+  // are still re-sent for the rest of this session.
+  storableConversations() {
+    return (this.state.conversations || []).map(function (c) {
+      var conv = Object.assign({}, c);
+      conv.messages = (c.messages || []).map(function (m) {
+        if (!m.images || !m.images.length) return m;
+        var msg = Object.assign({}, m);
+        delete msg.images;
+        msg.image_count = m.images.length;
+        return msg;
+      });
+      return conv;
+    });
+  },
+
+  // Never throws. A full or blocked localStorage is a normal condition, not a
+  // reason to lose the rest of the turn: evict the oldest conversation, retry,
+  // and say so once.
+  saveConversations() {
+    for (;;) {
+      var payload;
+      try {
+        payload = JSON.stringify(this.storableConversations());
+      } catch (e) {
+        this.warnStorage('Could not serialize the chat history, so it is not being saved.');
+        return false;
+      }
+      try {
+        localStorage.setItem('ainode_conversations', payload);
+        this._storageWarning = null;
+        return true;
+      } catch (e) {
+        if ((this.state.conversations || []).length > 1) {
+          // Newest first, so the oldest is the one at the end.
+          var dropped = this.state.conversations.pop();
+          this.warnStorage('Browser storage is full: dropped the oldest conversation ("' +
+            ((dropped && dropped.title) || 'untitled') + '") to keep saving this one.');
+          continue;
+        }
+        this.warnStorage('Browser storage is full or blocked, so this conversation is ' +
+          'not being saved. Chat still works; the history will not survive a reload.');
+        return false;
+      }
+    }
+  },
+
+  warnStorage(message) {
+    if (this._storageWarning === message) return;  // once per distinct reason
+    this._storageWarning = message;
+    this.toast(message, 'error');
+  },
+
+  getCurrentConversation() {
+    return this.state.conversations.find(function (c) { return c.id === AINode.state.currentConversation; }) || null;
+  },
+
+  newConversation() {
+    var id = 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    var sel = document.getElementById('chat-model');
+    var inst = this.state.chatInstance;
+    var conv = { id: id, title: 'New Chat', messages: [], created_at: Date.now(),
+                 model: inst ? inst.model : (sel ? sel.value : ''),
+                 instance: inst || null };
+    this.state.conversations.unshift(conv);
+    this.state.currentConversation = id;
+    this.state.messages = [];
+    this.saveConversations();
+    this.renderConversationList();
+    this.renderChatMessages();
+  },
+
+  loadConversation(id) {
+    var conv = this.state.conversations.find(function (c) { return c.id === id; });
+    if (!conv) return;
+    this.state.currentConversation = id;
+    this.state.messages = conv.messages.slice();
+    // Re-point at the exact instance this conversation was talking to when it
+    // is still serving; otherwise fall back to the same model elsewhere.
+    if (conv.instance || conv.model) {
+      this.selectChatInstance(conv.instance || { model: conv.model });
+    }
+    this.renderConversationList();
+    this.renderChatMessages();
+  },
+
+  deleteConversation(id) {
+    this.state.conversations = this.state.conversations.filter(function (c) { return c.id !== id; });
+    if (this.state.currentConversation === id) {
+      this.state.currentConversation = null;
+      this.state.messages = [];
+      this.renderChatMessages();
+    }
+    this.saveConversations();
+    this.renderConversationList();
+    this.toast('Conversation deleted', 'info');
+  },
+
+  saveCurrentConversation() {
+    var conv = this.getCurrentConversation();
+    if (!conv) return;
+    conv.messages = this.state.messages.slice();
+    var inst = this.state.chatInstance;
+    if (inst) { conv.model = inst.model; conv.instance = inst; }
+    var firstUser = conv.messages.find(function (m) { return m.role === 'user'; });
+    if (firstUser) conv.title = firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '');
+    this.saveConversations();
+    this.renderConversationList();
+  },
+
+  renderConversationList() {
+    var list = document.getElementById('conversation-list');
+    if (!list) return;
+    var self = this;
+    var searchInput = document.getElementById('chat-search');
+    var query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+    var filtered = this.state.conversations.filter(function (c) {
+      if (!query) return true;
+      return c.title.toLowerCase().indexOf(query) !== -1;
+    });
+
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="conv-empty">' + (query ? 'No matches' : 'No conversations yet') + '</div>';
+      return;
+    }
+
+    list.innerHTML = filtered.map(function (conv) {
+      var active = conv.id === self.state.currentConversation ? ' active' : '';
+      var dateStr = new Date(conv.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      return '<div class="conv-item' + active + '" data-conv-id="' + self.esc(conv.id) + '">' +
+        '<div class="conv-item-content">' +
+        '<div class="conv-item-title">' + self.esc(conv.title) + '</div>' +
+        '<div class="conv-item-date">' + dateStr + '</div>' +
+        '</div>' +
+        '<button class="conv-delete" data-delete-id="' + self.esc(conv.id) + '" title="Delete">&times;</button>' +
+        '</div>';
+    }).join('');
+
+    list.querySelectorAll('.conv-item').forEach(function (el) {
+      el.addEventListener('click', function (e) {
+        if (e.target.closest('.conv-delete')) return;
+        self.loadConversation(el.dataset.convId);
+      });
+    });
+    list.querySelectorAll('.conv-delete').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        self.deleteConversation(btn.dataset.deleteId);
+      });
+    });
+  },
+
+  // ========================================================================
+  //  NAVIGATION
+  // ========================================================================
+
+  bindNav() {
+    var self = this;
+    // Top nav pills: Dashboard, Downloads
+    document.querySelectorAll('.nav-pill').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var view = el.dataset.view;
+        if (view) self.navigate(view);
+      });
+    });
+  },
+
+  navigate(view) {
+    var prevView = this.state.currentView;
+    this.state.currentView = view;
+    // Reset downloads-view init flag when leaving the view, so we do a full render next time
+    if (prevView === 'downloads' && view !== 'downloads') {
+      this._downloadsViewInitialized = false;
+    }
+    if (view === 'downloads' && prevView !== 'downloads') {
+      this._downloadsViewInitialized = false;  // force full render on entry
+    }
+    if (view === 'training' && prevView !== 'training') {
+      this._autodataViewInitialized = false;   // force full render of the AutoData panel on entry
+    }
+    // Update nav pill active state
+    document.querySelectorAll('.nav-pill').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.view === view);
+    });
+    // Show/hide views in center-stage
+    document.querySelectorAll('#center-stage > .view').forEach(function (el) {
+      el.style.display = 'none';
+    });
+    var target = document.getElementById('view-' + view);
+    if (target) target.style.display = '';
+    // Context-switch left panel: training shows training sidebar, else chat sidebar.
+    this.updateLeftPanelContext(view);
+    // Context-switch right panel: server view swaps to Model Info
+    this.updateRightPanelContext(view);
+    // Start/stop Server log polling
+    if (view === 'server') {
+      this.startServerLogPolling();
+    } else {
+      this.stopServerLogPolling();
+    }
+    this.refresh();
+  },
+
+  updateRightPanelContext(view) {
+    var def = document.getElementById('right-panel-default');
+    var srv = document.getElementById('right-panel-server');
+    if (!def || !srv) return;
+    if (view === 'server') {
+      def.style.display = 'none';
+      srv.style.display = '';
+    } else {
+      def.style.display = '';
+      srv.style.display = 'none';
+    }
+  },
+
+  updateLeftPanelContext(view) {
+    var chatSide = document.getElementById('left-panel-chat');
+    var trainSide = document.getElementById('left-panel-training');
+    if (!chatSide || !trainSide) return;
+    if (view === 'training') {
+      chatSide.style.display = 'none';
+      trainSide.style.display = '';
+      this.renderTrainingSidebar();
+    } else {
+      trainSide.style.display = 'none';
+      chatSide.style.display = '';
+      // The model card describes the instance the chat is routing to; it has no
+      // meaning on the cluster, server, models or bench views, so it only shows
+      // on chat. The conversation list stays, as it always has.
+      var card = document.getElementById('model-card');
+      if (card) card.style.display = (view === 'chat') ? '' : 'none';
+    }
+  },
+
+  // ========================================================================
+  //  DATA FETCHING
+  // ========================================================================
+
+  async fetchJSON(url) {
+    try {
+      var resp = await AINodeAuth.fetch(url);
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch (e) {
+      return null;
+    }
+  },
+
+  async refresh() {
+    // /api/sharding/status used to be polled here as well. Its one reader was the
+    // INSTANCES branch on active_sharding, a field the server never assigned, so
+    // this was a request every three seconds for a value nothing looked at (#210).
+    var results = await Promise.all([
+      this.fetchJSON('/api/status'),
+      this.fetchJSON('/api/nodes'),
+      this.fetchJSON('/api/cluster/resources'),
+      this.fetchJSON('/v1/models'),   // federated fleet union (F1) - every node's model
+    ]);
+    // When these numbers landed. loadProgress adds the time since, so a load is
+    // timed on the SERVER's clock and the browser only fills the gap between
+    // polls (the two clocks are not the same, and a peer's is a third one).
+    var receivedAt = Date.now();
+    this.state.status = results[0];
+    if (this.state.status) this.state.status._receivedAtMs = receivedAt;
+    this.state.nodes = results[1]?.nodes || [];
+    this.state.nodes.forEach(function (n) { n._receivedAtMs = receivedAt; });
+    this.state.clusterResources = results[2];
+    // Fleet-wide loaded models: ids from the federated /v1/models union, so the
+    // chat dropdown + INSTANCES panel see models on ALL nodes, not just local.
+    this.state.fleetModels = ((results[3] && results[3].data) || []).map(function (m) { return m.id; });
+
+    this.updateTopBar();
+    this.updateClusterHero();
+    this.updateChatModelSelect();
+
+    // Don't rebuild the view + right panel out from under an active interaction
+    // (dragging a node pill, selecting text to copy, a mid-click)  -  that 5s flicker
+    // was wiping clicks/selection. State is already updated above, so the next idle
+    // tick renders fresh.
+    if (this._userBusy()) return;
+
+    // Preserve scroll position of the main content area across periodic
+    // re-renders  -  the 5s poll was rebuilding innerHTML and bouncing the
+    // user back to the top of long lists.
+    var mainEl = document.querySelector('.main-content') || document.querySelector('#main') || document.scrollingElement;
+    var savedScroll = mainEl ? mainEl.scrollTop : 0;
+
+    switch (this.state.currentView) {
+      case 'dashboard':
+        this.renderDashboard();
+        break;
+      case 'downloads':
+        // Don't rebuild the downloads view during periodic refresh  -  just update the queue
+        // in place. Only do a full render when the user lands on the view.
+        if (this._downloadsViewInitialized) {
+          this.renderDownloadsQueue();
+          this.updateNavDownloadBadge();
+        } else {
+          this._downloadsViewInitialized = true;
+          this.renderDownloads();
+        }
+        break;
+      case 'training':
+        this.renderTraining();
+        break;
+      case 'bench':
+        // The Bench view owns its own markup, polling and cancel (bench.js); this
+        // arm just hands it the poll tick so it can keep the fleet picker and the
+        // results table current.
+        if (window.AINodeBench) window.AINodeBench.render(this);
+        break;
+      case 'metrics':
+        // Same deal for the Metrics view (metrics.js): it owns its charts, its
+        // range picker and its own refetch cadence, and reads the poll tick only
+        // to keep the node picker current. A 7 day chart has nothing to gain from
+        // a request every five seconds, so it throttles itself rather than being
+        // driven from here.
+        if (window.AINodeMetrics) window.AINodeMetrics.render(this);
+        break;
+      case 'config':
+        this.renderConfig();
+        break;
+      case 'server':
+        this.renderServer();
+        break;
+    }
+
+    // Always update right panel
+    this.renderInstances();
+    this.populateLaunchModels();
+    // Keep the distributed/solo hint in sync with the latest cluster state.
+    if (typeof this._renderNodeDots === 'function') {
+      try { this._renderNodeDots(); } catch (_) {}
+    }
+    if (typeof this._launchHintUpdater === 'function') {
+      try { this._launchHintUpdater(); } catch (_) {}
+    }
+
+    // Restore scroll
+    if (mainEl && savedScroll) {
+      try { mainEl.scrollTop = savedScroll; } catch (_) {}
+    }
+  },
+
+  // True while the user is actively interacting, so the periodic poll doesn't
+  // rebuild the DOM mid-action (drag / text-selection / just-clicked).
+  _userBusy() {
+    if (this._pointerDown) return true;
+    if (this._lastInteract && (Date.now() - this._lastInteract) < 1200) return true;
+    try { if (String(window.getSelection())) return true; } catch (_) {}
+    return false;
+  },
+
+  startPolling() {
+    var self = this;
+    // Track active interaction so the poll won't rebuild the DOM out from under it.
+    if (!this._interactionWired) {
+      this._interactionWired = true;
+      document.addEventListener('pointerdown', function () { self._pointerDown = true; self._lastInteract = Date.now(); }, true);
+      document.addEventListener('pointerup', function () { self._pointerDown = false; self._lastInteract = Date.now(); }, true);
+    }
+    // Status + nodes every 5s
+    this.state.pollInterval = setInterval(function () { self.refresh(); }, 5000);
+    // Metrics every 3s. One reader: the GPU block, which the topology graphic
+    // draws as the local node's ring. The request block and the history live in
+    // the Metrics view now, which reads /api/metrics/history itself (metrics.js).
+    this.state.metricsInterval = setInterval(function () { self.pollMetrics(); }, 3000);
+    // Live load progress every 1s, locally: no request, just the clock moving on
+    // the last payload. Every poll reconciles it with the server.
+    this.state.loadTickInterval = setInterval(function () { self.tickLoadProgress(); }, 1000);
+    // Version check every 30 minutes
+    this.checkVersion();
+    this.state.versionInterval = setInterval(function () { self.checkVersion(); }, 30 * 60 * 1000);
+    // How this port is protected, on its own cadence: /api/auth/status answers
+    // when nothing else does (#167), and the chips read it.
+    this.state.authInterval = setInterval(function () { self.refreshAuthStatus(); }, 15000);
+    // Initial fetch
+    this.refresh();
+  },
+
+  checkVersion() {
+    var self = this;
+    AINodeAuth.fetch('/api/version/check')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        self.state.versionInfo = data;
+        self.renderVersionBadge();
+        self.renderVersionSplitBanner();
+      })
+      .catch(function () {});
+  },
+
+  initClusterUpdateBtn() {
+    var self = this;
+    var btn = document.getElementById('cluster-update-all-btn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var nodeCount = (self.state.nodes || []).length || 1;
+      if (!confirm('Update all ' + nodeCount + ' node(s) to the latest AINode image?\n\nEach node will docker pull + restart. The master updates last.')) return;
+      self.runClusterUpdate();
+    });
+  },
+
+  runClusterUpdate() {
+    var self = this;
+    var btn = document.getElementById('cluster-update-all-btn');
+    var panel = document.getElementById('cluster-update-panel');
+    if (btn) { btn.disabled = true; btn.textContent = 'Updating...'; }
+    if (panel) { panel.style.display = ''; panel.innerHTML = '<div class="cluster-update-row"><span class="cu-spinner">⟳</span> Starting update...</div>'; }
+
+    AINodeAuth.fetch('/api/cluster/update-all', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) {
+          self.toast('Update failed: ' + data.error, 'error');
+          if (btn) { btn.disabled = false; btn.textContent = '⬆ Update all'; }
+          return;
+        }
+        var updateId = data.update_id;
+        self._pollClusterUpdate(updateId);
+      })
+      .catch(function () {
+        self.toast('Update request failed', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '⬆ Update all'; }
+      });
+  },
+
+  _pollClusterUpdate(updateId) {
+    var self = this;
+    var panel = document.getElementById('cluster-update-panel');
+    var btn = document.getElementById('cluster-update-all-btn');
+
+    AINodeAuth.fetch('/api/cluster/update-status?id=' + updateId)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!panel) return;
+
+        // Render per-node status
+        var rows = Object.entries(data.nodes || {}).map(function (entry) {
+          var nid = entry[0], n = entry[1];
+          var icon = n.status === 'done' ? '✅' :
+                     n.status === 'failed' ? '❌' :
+                     n.status === 'updating' ? '<span class="cu-spinner">⟳</span>' : '⏳';
+          return '<div class="cluster-update-row">' + icon + ' <b>' + self.esc(n.node_name || nid) + '</b> - ' + self.esc(n.status) +
+                 (n.log ? ' <span class="cu-log">' + self.esc(n.log.slice(0, 80)) + '</span>' : '') + '</div>';
+        }).join('');
+
+        panel.innerHTML = rows;
+
+        if (data.status === 'complete') {
+          var allOk = Object.values(data.nodes).every(function (n) { return n.status === 'done'; });
+          if (btn) { btn.disabled = false; btn.textContent = '⬆ Update all'; }
+          self.toast(allOk ? 'All nodes updated ✅' : 'Update complete - some nodes failed', allOk ? 'success' : 'error');
+          // Clear panel after 10s
+          setTimeout(function () {
+            if (panel) panel.style.display = 'none';
+            self.checkVersion(); // refresh version badge
+          }, 10000);
+        } else {
+          // Still running  -  poll again in 3s
+          setTimeout(function () { self._pollClusterUpdate(updateId); }, 3000);
+        }
+      })
+      .catch(function () {
+        setTimeout(function () { self._pollClusterUpdate(updateId); }, 5000);
+      });
+  },
+
+  // Report release differences in the header using the per-node versions from /api/version/check.
+  renderVersionSplitBanner() {
+    var info = this.state.versionInfo;
+    var existing = document.getElementById('version-split-banner');
+    if (existing) existing.remove();
+    if (!info || !info.cluster_split) return;
+
+    var nodes = info.nodes || [];
+    var byVersion = {};
+    nodes.forEach(function (n) {
+      var v = n.ainode_version || 'unknown';
+      (byVersion[v] = byVersion[v] || []).push(n.node_name || n.node_id);
+    });
+    var parts = Object.keys(byVersion).sort().map(function (v) {
+      return v + ' (' + byVersion[v].join(', ') + ')';
+    });
+
+    var topBar = document.querySelector('.top-bar') || document.querySelector('nav');
+    if (!topBar) return;
+    var banner = document.createElement('span');
+    banner.id = 'version-split-banner';
+    banner.className = 'version-split-banner';
+    banner.textContent = 'Fleet split across ' + (info.versions || []).length +
+      ' releases: ' + parts.join('  ');
+    banner.title = 'These nodes are not running the same AINode release. The ' +
+      'discovery announcement is the cross-version contract, so a split fleet ' +
+      'can exchange subtly different data. Update all to converge.';
+    topBar.appendChild(banner);
+  },
+
+  renderVersionBadge() {
+    var info = this.state.versionInfo;
+    var self = this;
+
+    // Show/hide the cluster "Update all" button based on update availability
+    var clusterBtn = document.getElementById('cluster-update-all-btn');
+    if (clusterBtn) {
+      if (info && info.update_available) {
+        clusterBtn.style.display = '';
+        clusterBtn.title = 'Update all nodes to v' + info.latest;
+        clusterBtn.textContent = '⬆ Update all  v' + info.latest;
+      } else {
+        clusterBtn.style.display = 'none';
+      }
+    }
+
+    // Remove existing top-bar badge
+    var existing = document.getElementById('update-badge');
+    if (existing) existing.remove();
+
+    if (!info || !info.update_available) return;
+
+    // Inject update badge into top bar
+    var topBar = document.querySelector('.top-bar') || document.querySelector('nav');
+    if (!topBar) return;
+
+    var badge = document.createElement('button');
+    badge.id = 'update-badge';
+    badge.className = 'update-badge';
+    badge.innerHTML = '⬆ Update available: v' + info.latest;
+    badge.title = 'Click to update to v' + info.latest;
+    badge.addEventListener('click', function () {
+      // Fleet-wide update: POST /api/cluster/update-all (resolves one target tag
+      // and threads it to every peer, master last) instead of the head-only
+      // /api/engine/update. F4.
+      var nodeCount = (self.state.nodes || []).length || 1;
+      var nodeWord = nodeCount === 1 ? 'node' : 'nodes';
+      if (!confirm('Update all ' + nodeCount + ' ' + nodeWord + ' to v' + info.latest + '? Services restart one by one.')) return;
+      badge.textContent = 'Updating...';
+      badge.disabled = true;
+      AINodeAuth.fetch('/api/cluster/update-all', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data && data.error) {
+            badge.textContent = '⬆ Update available: v' + info.latest;
+            badge.disabled = false;
+            self.toast('Update failed: ' + data.error, 'error');
+            return;
+          }
+          self.toast('Fleet update started - nodes restart one by one', 'success');
+          badge.textContent = 'Updating fleet...';
+          // Surface live per-node progress in the cluster panel if it's mounted.
+          if (data && data.update_id) self._pollClusterUpdate(data.update_id);
+          // Re-check version in 90 seconds (bumped from 60s  -  a rolling fleet
+          // restart takes longer than a single-node one).
+          setTimeout(function () { self.checkVersion(); }, 90000);
+        })
+        .catch(function () {
+          badge.textContent = '⬆ Update available: v' + info.latest;
+          badge.disabled = false;
+          self.toast('Update failed - try ainode update from terminal', 'error');
+        });
+    });
+    topBar.appendChild(badge);
+  },
+
+  // A shape this node knows it should be serving and cannot (#179). The record
+  // says which model, how wide, and which peer did not answer, so the banner says
+  // all three. A degraded distributed instance used to be completely silent: the
+  // engine container was gone, nothing replayed it, and no surface mentioned it.
+  // Sits next to the update badge in the top bar and is rebuilt from
+  // /api/status on every poll, so it clears itself once the shape is back.
+  renderDegradedBanner() {
+    var existing = document.getElementById('degraded-banner');
+    if (existing) existing.remove();
+    var list = (this.state.status && this.state.status.degraded_instances) || [];
+    if (!list.length) return;
+    var topBar = document.querySelector('.top-bar') || document.querySelector('nav');
+    if (!topBar) return;
+    var d = list[0];
+    var peers = (d.peers_unreachable || []).map(function (p) { return p.peer_ip; }).join(', ');
+    var banner = document.createElement('div');
+    banner.id = 'degraded-banner';
+    banner.className = 'degraded-banner';
+    banner.textContent = '⚠ ' + d.model + ' TP=' + (d.tensor_parallel_size || 1) +
+      ' is not running here' + (peers ? ', peer(s) unreachable: ' + peers : '') +
+      (list.length > 1 ? ' (+' + (list.length - 1) + ' more)' : '');
+    banner.title = d.reason || '';
+    topBar.appendChild(banner);
+  },
+
+  // One snapshot, one reader: the topology graphic's local node ring
+  // (renderDashboard). The request block rides along in the same response and is
+  // NOT read here. The Metrics view draws requests, latency and tokens from
+  // /api/metrics/history, which is the copy that survives a restart (#234).
+  //
+  // The 400 point ring buffer that used to be appended here has gone with it. It
+  // was seeded from that same history route and nothing ever drew it (#210), and
+  // a buffer plus a store is two sources for one line: the range picker asks for
+  // windows a 20 minute buffer cannot answer, and the store already holds 48
+  // hours of raw samples and 30 days of roll-ups.
+  async pollMetrics() {
+    var data = await this.fetchJSON('/api/metrics');
+    if (data) this.state.metrics = data;
+  },
+
+  // ========================================================================
+  //  TOP BAR STATUS
+  // ========================================================================
+
+  updateTopBar() {
+    var nodes = this.state.nodes;
+    var s = this.state.status;
+    this.renderDegradedBanner();
+    var onlineCount = 0;
+    if (s && s.engine_ready) onlineCount = 1;
+    onlineCount = Math.max(onlineCount, nodes.filter(function (n) {
+      return n.status === 'online' || n.status === 'serving' || n.engine_ready;
+    }).length);
+
+    var pill = document.querySelector('.top-bar-status');
+    var countEl = document.getElementById('top-node-count');
+    var labelEl = document.querySelector('.top-bar-status .node-label');
+
+    if (!pill) return;
+
+    if (onlineCount > 0) {
+      pill.classList.remove('offline');
+      pill.classList.add('online');
+      if (countEl) countEl.textContent = onlineCount;
+      if (labelEl) labelEl.textContent = onlineCount === 1 ? 'node online' : 'nodes online';
+    } else {
+      pill.classList.remove('online');
+      pill.classList.add('offline');
+      if (countEl) countEl.textContent = '0';
+      if (labelEl) labelEl.textContent = 'offline';
+    }
+  },
+
+  // ========================================================================
+  //  CLUSTER HERO PILL (aggregated VRAM/GPUs)
+  // ========================================================================
+
+  updateClusterHero() {
+    var r = this.state.clusterResources;
+    var pill = document.getElementById('cluster-hero-pill');
+    if (!pill) return;
+    if (!r || !r.total_nodes) { pill.style.display = 'none'; return; }
+    pill.style.display = '';
+    var nodesEl = document.getElementById('hero-nodes');
+    var vramEl = document.getElementById('hero-vram');
+    var gpusEl = document.getElementById('hero-gpus');
+    if (nodesEl) nodesEl.textContent = r.total_nodes + (r.total_nodes === 1 ? ' node' : ' nodes');
+    if (vramEl) vramEl.textContent = Math.round(r.total_vram_gb) + ' GB VRAM';
+    if (gpusEl) gpusEl.textContent = r.total_gpus + (r.total_gpus === 1 ? ' GPU' : ' GPUs');
+
+    // Also surface on the Server view top bar (if the element exists).
+    var srvEl = document.getElementById('server-cluster-summary');
+    if (srvEl) {
+      srvEl.textContent = 'Cluster: ' + r.total_nodes + ' nodes · '
+        + Math.round(r.total_vram_gb) + ' GB VRAM · ' + r.total_gpus + ' GPUs';
+    }
+  },
+
+  // ========================================================================
+  //  DASHBOARD (center = topology canvas)
+  // ========================================================================
+
+  renderDashboard() {
+    var nodes = this.state.nodes;
+    var s = this.state.status;
+    if (!s) return;
+
+    // Update topology
+    if (this.state.topology) {
+      var topoNodes = nodes.length > 0 ? nodes : [{
+        node_id: s.node_id || 'local',
+        node_name: s.node_name || 'This Node',
+        gpu_name: s.gpu?.name || 'GPU',
+        gpu_memory_gb: s.gpu?.memory_total_mb ? (s.gpu.memory_total_mb / 1024).toFixed(1) : 0,
+        model: s.model || '',
+        status: s.engine_ready ? 'online' : (s.model ? 'starting' : 'online'),
+        version: s.version || '',
+        api_port: s.api_port || 8000,
+        engine_ready: s.engine_ready,
+      }];
+
+      // MEMBERSHIP  -  stamp model + TP=N onto participating nodes from the
+      // authoritative distributed_instance (cluster/resources). Keep any
+      // distinct per-node model; never overwrite it. Solo mode (di null) no-op.
+      var di = this.state.clusterResources && this.state.clusterResources.distributed_instance;
+      if (di && di.model) {
+        // Members are EXACTLY the head + this instance's peers (resolved to
+        // node_ids server-side). Don't mark every 'member'-mode node  -  that
+        // over-counts idle members not in this instance.
+        var memberIds = di.peer_node_ids || di.peer_ips || [];
+        topoNodes = topoNodes.map(function (n) {
+          var participates =
+            n.node_id === di.head_node_id ||
+            memberIds.indexOf(n.node_id) !== -1;
+          if (participates) {
+            n.model = n.model || di.model;
+            n.tp_size = di.tensor_parallel_size;
+          }
+          return n;
+        });
+      }
+
+      // VRAM  -  merge this node's live GPU metrics so the ring shows real %.
+      // Only mutates the local node; remote nodes keep their static totals.
+      // Every figure here can be null (a driver that does not expose GPU
+      // utilisation, a unified-memory node with no engine reservation to report),
+      // and null must survive the merge: coerced to 0 it becomes an idle, empty
+      // node on the graphic (#175, #176).
+      var gm = this.state.metrics && this.state.metrics.gpu;
+      if (gm && !gm.error && gm.memory_total_mb > 0) {
+        var localId = s.node_id;
+        var usedPct = gm.memory_used_mb === null || gm.memory_used_mb === undefined
+          ? null : Math.round((gm.memory_used_mb / gm.memory_total_mb) * 100);
+        topoNodes.forEach(function (n) {
+          if (n.node_id === localId || topoNodes.length === 1) {
+            n.gpu_memory_used_pct = usedPct;
+            n.gpu_utilization = gm.utilization_percent === undefined
+              ? null : gm.utilization_percent;
+            n.gpu_temp = gm.temperature_c === undefined ? null : gm.temperature_c;
+            if (gm.gpu_count) n.gpu_count = gm.gpu_count;
+            if (gm.memory_kind) n.memory_kind = gm.memory_kind;
+          }
+        });
+      }
+      // DISK: only this node's, because /api/status is only ever about this
+      // node. A peer's filesystem is not in its announcement, so its tooltip
+      // simply has no Disk line rather than borrowing ours.
+      if (s.disk && s.disk.models) {
+        var localDiskId = s.node_id;
+        topoNodes.forEach(function (n) {
+          if (n.node_id === localDiskId || topoNodes.length === 1) {
+            n.disk_models = s.disk.models;
+          }
+        });
+      }
+
+      // Pass engine_ready so the topology can drive the loading → real transition.
+      // If no model is configured, the server is ready (no engine to wait for).
+      var engineReady = !!(s && (s.engine_ready || !s.model));
+      this.state.topology.update(topoNodes, engineReady);
+    }
+  },
+
+  // ========================================================================
+  //  LOAD PROGRESS: one place for the math, three surfaces read it
+  // ========================================================================
+  //
+  // Model initialization can take long enough that a fixed phase percentage looks stalled. Show server-reported elapsed and expected time, and advance locally between polls.
+
+  // Coarse phase -> [label, floor percent]. The floor is what the phase alone is
+  // worth: a bar must not sit at nothing while weights are moving, and must not
+  // walk backwards when a load beats its expected time.
+  LOAD_PHASES: {
+    idle: ['starting', 8], starting: ['starting', 12],
+    loading_weights: ['loading weights', 40],
+    distributed_init: ['connecting nodes', 62],
+    profiling: ['profiling', 84], ready: ['ready', 100],
+  },
+
+  // The pure one. In: a status-shaped payload (this node's /api/status, or one
+  // /api/nodes row, local or peer) and a clock. Out: everything the three
+  // surfaces draw.
+  //
+  // Elapsed is the SERVER's load_elapsed_seconds plus the time since that
+  // payload arrived, never a remote start stamp subtracted from the browser's
+  // clock: the browser, the head and a peer do not share one, and skew would be
+  // drawn as progress. load_started_at is the fallback, and it is what makes a
+  // page opened mid-load show the right elapsed time on its first paint.
+  loadProgress(status, nowMs) {
+    var phase = (status && status.load_phase) || 'idle';
+    var info = this.LOAD_PHASES[phase] || ['starting', 10];
+    var out = { phase: phase, label: info[0], percent: info[1], slow: false,
+                loading: false, elapsedSeconds: null, expectedSeconds: null };
+    if (!status) return out;
+    var now = (typeof nowMs === 'number') ? nowMs : Date.now();
+    var served = status.load_elapsed_seconds;
+    var started = status.load_started_at;
+    var elapsed = null;
+    if (typeof served === 'number') {
+      var at = status._receivedAtMs;
+      elapsed = served + ((typeof at === 'number') ? Math.max(0, (now - at) / 1000) : 0);
+    } else if (typeof started === 'number') {
+      elapsed = Math.max(0, now / 1000 - started);
+    }
+    // No start stamp is the server saying nothing is loading, which is not the
+    // same claim as zero seconds in.
+    if (elapsed === null || typeof started !== 'number' || phase === 'ready') return out;
+    out.loading = true;
+    out.elapsedSeconds = elapsed;
+    var expected = status.expected_ready_minutes;
+    if (typeof expected === 'number' && expected > 0) {
+      out.expectedSeconds = expected * 60;
+      // Capped at 95: the last few percent belong to the engine answering, not
+      // to an estimate running out.
+      out.percent = Math.max(info[1],
+        Math.min(95, Math.round(100 * elapsed / out.expectedSeconds)));
+      out.slow = elapsed > 1.5 * out.expectedSeconds;
+    }
+    return out;
+  },
+
+  // m:ss, and h:mm:ss once a load has been going an hour (a 405B does).
+  clockText(seconds) {
+    var s = Math.max(0, Math.round(seconds || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var pad = function (v) { return v < 10 ? '0' + v : String(v); };
+    return h > 0 ? h + ':' + pad(m) + ':' + pad(sec) : m + ':' + pad(sec);
+  },
+
+  aboutMinutes(seconds) {
+    return 'about ' + this.roundMinutes(seconds / 60) + ' min';
+  },
+
+  // The instance chip: "loading weights · 3:12 of about 12 min". Falls back to
+  // the phase and its floor percent when the server has no timing for this one
+  // (a peer running an older build).
+  chipLoadLabel(prog) {
+    if (!prog.loading) return prog.label.toUpperCase() + ' · ' + prog.percent + '%';
+    var txt = prog.label + ' · ' + this.clockText(prog.elapsedSeconds);
+    txt += prog.expectedSeconds ? ' of ' + this.aboutMinutes(prog.expectedSeconds) : ' elapsed';
+    if (prog.slow) txt += ' · taking longer than usual';
+    return txt;
+  },
+
+  // The card and panel line: "Loading… 3:12 elapsed · typically about 12 min".
+  loadingLine(prog) {
+    if (!prog || !prog.loading) return '';
+    var txt = 'Loading… ' + this.clockText(prog.elapsedSeconds) + ' elapsed';
+    if (prog.expectedSeconds) txt += ' · typically ' + this.aboutMinutes(prog.expectedSeconds);
+    if (prog.slow) txt += ' · taking longer than usual';
+    return txt;
+  },
+
+  // Every live element carries the key of the thing it is timing, so the
+  // one-second tick can re-read the same source the render used:
+  // 'local' = this node's /api/status · 'node:<id>' = one /api/nodes row ·
+  // 'model:<repo>' = whichever node is loading that model.
+  loadBarHtml(key, prog, cls) {
+    return '<div class="load-progress' + (prog.slow ? ' slow' : '') +
+      (cls ? ' ' + cls : '') + '" data-load-key="' + this.esc(key) +
+      '" data-load-style="bar">' +
+      '<span class="load-progress-fill" style="width:' + prog.percent + '%"></span></div>';
+  },
+
+  loadTextHtml(key, prog, style, cls) {
+    var text = (style === 'chip') ? this.chipLoadLabel(prog) : this.loadingLine(prog);
+    return '<span class="' + (cls || 'load-progress-text') + (prog.slow ? ' slow' : '') +
+      '" data-load-key="' + this.esc(key) + '" data-load-style="' + style + '">' +
+      this.esc(text) + '</span>';
+  },
+
+  loadSourceFor(key) {
+    if (!key) return null;
+    if (key === 'local') return this.state.status;
+    if (key.indexOf('node:') === 0) {
+      var id = key.slice(5);
+      var hit = (this.state.nodes || []).filter(function (n) { return n.node_id === id; })[0];
+      return hit || this.state.status;
+    }
+    if (key.indexOf('model:') === 0) {
+      return this.loadingSources()[key.slice(6).toLowerCase()] || null;
+    }
+    return null;
+  },
+
+  // model id (lowercased) -> the node payload loading it. This node's status
+  // first, then every node row, so a model loading on a PEER is found too and
+  // the catalog card says so on the master's screen.
+  loadingSources() {
+    var out = {};
+    var self = this;
+    var now = Date.now();
+    var add = function (model, src) {
+      if (!model || !src) return;
+      var k = String(model).toLowerCase();
+      if (out[k]) return;
+      if (self.loadProgress(src, now).loading) out[k] = src;
+    };
+    add(this.state.status && this.state.status.model, this.state.status);
+    (this.state.nodes || []).forEach(function (n) { add(n.model, n); });
+    return out;
+  },
+
+  // The instance chip's own read. A chip is only drawn for an instance that is
+  // NOT ready, and a node whose PRIMARY engine is up reports phase 'ready' while
+  // a stacked instance on it is still coming up: echoing that back as READY 100%
+  // would be a claim about the wrong engine, so it falls back to the starting
+  // floor. Used by the render and by the tick, so both say the same thing.
+  chipProgress(key, nowMs) {
+    var prog = this.loadProgress(this.loadSourceFor(key), nowMs);
+    if (!prog.loading && prog.phase === 'ready') {
+      return { phase: 'starting', label: this.LOAD_PHASES.starting[0],
+               percent: this.LOAD_PHASES.starting[1], slow: false, loading: false,
+               elapsedSeconds: null, expectedSeconds: null };
+    }
+    return prog;
+  },
+
+  // Will this checkpoint fit on THIS node, and say so on the card (#184 point 4).
+  // The size is the catalog entry's (or the on-disk figure once it is here) and
+  // the free space is /api/status's disk block for the models directory, which is
+  // the filesystem a download actually lands on.
+  //
+  // Unknown stays unknown in both directions: a 0 size is "nobody told us", not
+  // "fits in nothing", and a null free_gb is a path the node could not stat, not
+  // an empty disk. The server refuses a download that cannot land; this is the
+  // line that lets somebody see it coming.
+  modelFitNote(m) {
+    var size = (m && (m.local_size_gb || m.size_gb)) || 0;
+    var disk = (this.state.status && this.state.status.disk) || null;
+    var models = disk && disk.models;
+    var free = (models && typeof models.free_gb === 'number') ? models.free_gb : null;
+    if (!size) return { text: 'size unknown', cls: '' };
+    var sizeStr = '~' + Math.round(size) + ' GB';
+    if (free === null) return { text: sizeStr + ', free space unknown', cls: '' };
+    var freeStr = Math.round(free) + ' GB free';
+    if (m && (m.downloaded || m.local_size_gb)) {
+      return { text: sizeStr + ' on disk, ' + freeStr, cls: '' };
+    }
+    if (size <= free) return { text: sizeStr + ' to fetch, ' + freeStr, cls: '' };
+    return { text: sizeStr + ' to fetch, only ' + freeStr, cls: 'md-fit-no' };
+  },
+
+  // Live progress for one model id or repo. Not loading anywhere: a non-loading
+  // answer, which every caller renders as nothing.
+  modelLoadProgress(model, nowMs) {
+    var src = model ? this.loadingSources()[String(model).toLowerCase()] : null;
+    return this.loadProgress(src, nowMs);
+  },
+
+  // One tick a second over whatever live elements are on the page. No extra
+  // polling: the numbers come from the last poll and advance locally between
+  // them, and every poll reconciles them.
+  tickLoadProgress() {
+    var els = document.querySelectorAll('[data-load-key]');
+    if (!els.length) return;
+    var self = this;
+    var now = Date.now();
+    var cache = {};
+    els.forEach(function (el) {
+      var key = el.getAttribute('data-load-key');
+      // An instance chip (its label, and the bar under it) reads through
+      // chipProgress; every other surface reads the payload as it stands.
+      var chip = el.getAttribute('data-load-style') === 'chip' ||
+        el.classList.contains('instance-progress');
+      var ck = key + (chip ? '#chip' : '');
+      if (!(ck in cache)) {
+        cache[ck] = chip ? self.chipProgress(key, now)
+          : self.loadProgress(self.loadSourceFor(key), now);
+      }
+      var prog = cache[ck];
+      el.classList.toggle('slow', !!prog.slow);
+      if (el.getAttribute('data-load-style') === 'bar') {
+        var fill = el.querySelector('.load-progress-fill');
+        if (fill) fill.style.width = prog.percent + '%';
+      } else if (el.getAttribute('data-load-style') === 'chip') {
+        el.textContent = self.chipLoadLabel(prog);
+      } else {
+        el.textContent = self.loadingLine(prog);
+      }
+    });
+  },
+
+  // ========================================================================
+  //  RIGHT PANEL  -  INSTANCES
+  // ========================================================================
+
+  renderInstances() {
+    var container = document.getElementById('instances-list');
+    if (!container) return;
+    var self = this;
+    var s = this.state.status;
+    var live = !!(s && s.engine_ready);
+    var now = Date.now();
+    var instances = [];
+
+    // Distributed instance (authoritative from /api/cluster/resources)  -
+    // when the head broadcasts one, render it before anything else and
+    // skip adding its model as a "single" duplicate.
+    var cr = this.state.clusterResources;
+    var distModel = null;
+    if (cr && cr.distributed_instance && cr.distributed_instance.model) {
+      var di = cr.distributed_instance;
+      distModel = di.model;
+      instances.push({
+        model: di.model,
+        strategy: 'distributed',
+        // Which payload times this one: the head is us.
+        loadKey: 'local',
+        node_id: di.head_node_id || (s && s.node_id) || '',
+        api_port: di.api_port || null,
+        tp_size: di.tensor_parallel_size,
+        nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
+        status: live ? 'READY' : 'STARTING',
+        // A single-node serve is SOLO even when the head advertises a
+        // distributed_instance (it's configured with peers)  -  only badge
+        // DISTRIBUTED when there's real cross-node tensor parallelism.
+        badge: (di.tensor_parallel_size > 1) ? ('DISTRIBUTED · TP=' + di.tensor_parallel_size) : 'SOLO · TP=1',
+      });
+    }
+
+    // Fleet-wide: one card per node serving a solo model, across ALL nodes
+    // (not just local)  -  sourced from cluster /api/nodes so the panel matches
+    // the federated /v1/models the chat dropdown uses. Skip the distributed one.
+    var seen = {};
+    (this.state.nodes || []).forEach(function (n) {
+      // Show the friendly node name rather than the raw node-id hex.
+      // node_name is the id→name mapping carried on every /api/nodes entry;
+      // fall back to hostname, then the id, when the name is unknown (F1).
+      var host = n.node_name || n.hostname || n.node_id;
+      var modelName = n.model;
+      if (modelName && !(distModel && modelName === distModel)) {
+        var key = modelName + '@' + (n.node_id || n.hostname);
+        if (!seen[key]) {
+          seen[key] = true;
+          instances.push({
+            model: modelName,
+            strategy: 'single',
+            // Timed by the node it runs on, so an instance coming up on a PEER
+            // shows that peer's elapsed time here and not this node's.
+            loadKey: 'node:' + (n.node_id || ''),
+            // The node and port this card IS: UNLOAD stops this copy and no
+            // other (#207).
+            node_id: n.node_id || '',
+            api_port: n.api_port || null,
+            nodes: [host],
+            status: n.engine_ready ? 'READY' : 'STARTING',
+            badge: 'SINGLE',
+          });
+        }
+      }
+      // Stacked instances (2nd+ model on this node, ports 8001+)  -  invisible
+      // before D5. Render a card per stacked instance (model, port, status).
+      (n.instances || []).forEach(function (inst) {
+        var im = inst.model;
+        if (!im || (distModel && im === distModel)) return;
+        // Skip the primary (already shown above): same model on the node's main port.
+        if (im === n.model && (inst.api_port == null || inst.api_port === n.api_port)) return;
+        var skey = im + '@' + (n.node_id || n.hostname) + ':' + (inst.api_port || '');
+        if (seen[skey]) return;
+        seen[skey] = true;
+        instances.push({
+          model: im,
+          strategy: 'stacked',
+          // Node-level timing: the node publishes one load phase, for whichever
+          // engine it is bringing up.
+          loadKey: 'node:' + (n.node_id || ''),
+          node_id: n.node_id || '',
+          api_port: inst.api_port || null,
+          nodes: [host + (inst.api_port ? ':' + inst.api_port : '')],
+          // Use the stacked instance's OWN status, not the node's primary
+          // readiness. n.engine_ready reflects the PRIMARY engine (and for the
+          // local node is hardcoded online → always true), so OR-ing it in made
+          // a still-loading or dead stacked model read READY the moment the
+          // primary was up. inst.status is the per-instance truth (the head
+          // only advertises live instances, flipped to `serving`).
+          status: inst.status === 'serving' ? 'READY' : 'STARTING',
+          badge: 'STACKED' + (inst.api_port ? ' · :' + inst.api_port : ''),
+        });
+      });
+    });
+
+    // There was a third source here: /api/sharding/status.active_sharding. That
+    // field was declared and read and never once assigned, so the branch behind
+    // it never ran; it is gone from the API too (#188). A distributed instance
+    // comes from /api/cluster/resources above.
+
+    // Launching card (3c): a model is configured and the engine is spinning up
+    // but hasn't registered as an instance yet  -  show its load phase so the
+    // multi-minute launch doesn't read as "nothing running".
+    if (instances.length === 0 && s && s.model && !live) {
+      instances.push({
+        model: s.model,
+        strategy: 'launching',
+        loadKey: 'local',
+        node_id: s.node_id || '',
+        api_port: s.api_port || null,
+        nodes: [s.node_id || 'local'],
+        status: 'STARTING',
+        badge: 'LAUNCHING',
+      });
+    }
+
+    if (instances.length === 0) {
+      container.innerHTML = '<div class="instances-empty">No running instances</div>';
+      return;
+    }
+
+    container.innerHTML = instances.map(function (inst, idx) {
+      var nodeList = inst.nodes.map(function (n) { return self.esc(n); }).join(', ');
+      var badgeClass = inst.strategy === 'distributed' ? 'distributed' : 'single';
+      // Show elapsed against expected time so a long phase does not look stalled.
+      var prog = (inst.status === 'READY') ? null : self.chipProgress(inst.loadKey, now);
+      var statusHtml = (inst.status === 'READY')
+        ? '<span class="instance-status ready">READY</span>'
+        : self.loadTextHtml(inst.loadKey, prog, 'chip',
+            'instance-status starting' + (prog.loading ? ' loading-live' : ''));
+      var barHtml = prog ? self.loadBarHtml(inst.loadKey, prog, 'instance-progress') : '';
+      return '<div class="instance-card" data-idx="' + idx + '">' +
+        '<div class="instance-model">' + self.esc(inst.model) + '</div>' +
+        '<div class="instance-meta">' +
+        '<span class="instance-strategy ' + badgeClass + '">' + self.esc(inst.badge || inst.strategy) + '</span>' +
+        '<span class="instance-nodes">' + nodeList + '</span>' +
+        '</div>' +
+        '<div class="instance-footer">' + statusHtml +
+        '<button class="instance-delete" data-model="' + self.esc(inst.model) + '"' +
+        ' data-node-id="' + self.esc(inst.node_id || '') + '"' +
+        ' data-api-port="' + (inst.api_port || '') + '">UNLOAD</button>' +
+        '</div>' + barHtml +
+        '</div>';
+    }).join('');
+
+    container.querySelectorAll('.instance-delete').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        self.deleteInstance(btn.dataset.model, btn.dataset.nodeId,
+          btn.dataset.apiPort ? parseInt(btn.dataset.apiPort, 10) : null);
+      });
+    });
+  },
+
+  // Stop the ONE instance this card belongs to. The card knows its node and its
+  // port (it renders the node pill from them), so the unload names them: a bare
+  // {model} posted to /api/models/unload used to fan out to every peer serving
+  // that id, so unloading one card took down every copy in the fleet (#207).
+  async deleteInstance(model, nodeId, apiPort) {
+    var body = { model: model };
+    if (nodeId) body.node_id = nodeId;
+    if (apiPort) body.api_port = apiPort;
+    try {
+      var resp = await AINodeAuth.fetch('/api/cluster/unload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json().catch(function () { return {}; });
+      if (resp.ok && data.stopped !== false) {
+        this.toast('Instance stopped: ' + model, 'success');
+        this.refresh();
+      } else {
+        this.toast(data.error || ('Nothing was serving ' + model + ' there'), 'error');
+        this.refresh();
+      }
+    } catch (err) {
+      this.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  // ========================================================================
+  //  RIGHT PANEL  -  LAUNCH INSTANCE
+  // ========================================================================
+
+  _launchModelsPopulated: false,
+
+  bindLaunchForm() {
+    var self = this;
+
+    // Sharding pills
+    var pillGroup = document.getElementById('sharding-pills');
+    if (pillGroup) {
+      pillGroup.querySelectorAll('.pill').forEach(function (pill) {
+        pill.addEventListener('click', function () {
+          pillGroup.querySelectorAll('.pill').forEach(function (p) { p.classList.remove('active'); });
+          pill.classList.add('active');
+        });
+      });
+    }
+
+    // Node selector dots  -  populated dynamically based on cluster size
+    var nodeSelector = document.getElementById('node-selector');
+    var launchHint = document.getElementById('launch-hint');
+    var self = this;
+
+    // One toggle per real node. The head (this node) is pinned-selected; the
+    // others default OFF (so a fresh launch is solo TP=1  -  the common case).
+    // Click a node to add it; TP size = number of selected nodes. The launch
+    // POSTs the selected node_ids (resolved to fabric IPs server-side).
+    this._renderNodeDots = function () {
+      if (!nodeSelector) return;
+      var headId = self.state.status && self.state.status.node_id;
+      var nodes = (self.state.nodes || []).slice();
+      if (!nodes.length && headId) nodes = [{ node_id: headId, node_name: 'this node' }];
+      var key = nodes.map(function (n) { return n.node_id; }).join(',');
+      if (nodeSelector.dataset.nodekey === key) return; // node set unchanged
+      nodeSelector.dataset.nodekey = key;
+      nodeSelector.innerHTML = nodes.map(function (n) {
+        var isHead = headId && n.node_id === headId;
+        var label = (n.node_name || n.node_id || '').replace(/-DGX|-GX10/i, '');
+        return '<button class="node-dot' + (isHead ? ' active head' : '') + '"'
+          + ' data-node-id="' + self.esc(n.node_id) + '"'
+          + (isHead ? ' data-head="1"' : '')
+          + ' title="' + self.esc(n.node_name || n.node_id) + (isHead ? ' (head)' : '') + '">'
+          + self.esc(label) + (isHead ? ' ★' : '') + '</button>';
+      }).join('');
+      nodeSelector.querySelectorAll('.node-dot').forEach(function (dot) {
+        dot.addEventListener('click', function () {
+          // A single active node = solo load on THAT node (head or peer); 2+ =
+          // distributed. Keep at least one selected so a load always has a target.
+          if (dot.classList.contains('active') &&
+              nodeSelector.querySelectorAll('.node-dot.active').length <= 1) return;
+          dot.classList.toggle('active');
+          // The user hand-picked nodes for this pending launch  -  auto-recommend
+          // (fired on model-select onchange) must NOT clobber that choice.
+          self._launchNodesUserPicked = true;
+          updateLaunchHint();
+        });
+      });
+      updateLaunchHint();
+    };
+    this._renderNodeDots();
+
+    // Pre-select head + (tp-1) peers  -  used when a model's proven TP is chosen.
+    this._selectNodes = function (tp) {
+      var sel = document.getElementById('node-selector'); if (!sel) return;
+      var peersWanted = Math.max(0, tp - 1), peerN = 0;
+      sel.querySelectorAll('.node-dot').forEach(function (d) {
+        if (d.dataset.head) { d.classList.add('active'); return; }
+        if (peerN < peersWanted) { d.classList.add('active'); peerN++; }
+        else { d.classList.remove('active'); }
+      });
+      updateLaunchHint();
+    };
+
+    // Activate a specific set of node ids (head always stays on).
+    this._selectNodeIds = function (ids) {
+      var sel = document.getElementById('node-selector'); if (!sel) return;
+      var want = {}; (ids || []).forEach(function (id) { want[id] = true; });
+      sel.querySelectorAll('.node-dot').forEach(function (d) {
+        if (d.dataset.head) { d.classList.add('active'); return; }
+        d.classList.toggle('active', !!want[d.dataset.nodeId]);
+      });
+    };
+
+    // Fit-aware hint, recomputed on every refresh + node/strategy change so it
+    // survives polling. Reads the selected model's size and each node's free mem.
+    function updateLaunchHint() {
+      if (!launchHint) return;
+      var active = nodeSelector ? nodeSelector.querySelectorAll('.node-dot.active') : [];
+      var n = active.length || 1;
+      var names = Array.prototype.map.call(active, function (d) { return d.textContent.replace('★', '').trim(); }).join(' + ');
+      var strategyPill = document.querySelector('#sharding-pills .pill.active');
+      var strat = strategyPill ? strategyPill.dataset.value : 'tensor';
+      var stratLabel = strat.charAt(0).toUpperCase() + strat.slice(1);
+      launchHint.className = 'launch-hint';
+
+      var msel = document.getElementById('launch-model');
+      var opt = msel && msel.selectedIndex >= 0 ? msel.options[msel.selectedIndex] : null;
+      var size = opt ? parseFloat(opt.getAttribute('data-size-gb') || '0') : 0;
+      var minMem = opt ? parseFloat(opt.getAttribute('data-min-mem') || '0') : 0;
+      var req = (minMem && minMem > size) ? minMem : size * 1.2;
+      if (!opt || !opt.value || !req) {  // no model picked yet → plain text
+        launchHint.textContent = n <= 1 ? 'Solo - runs on this node only (TP=1).'
+          : stratLabel + ' · TP=' + n + ' across ' + names + '.';
+        return;
+      }
+
+      var byId = {};
+      (self.state.nodes || []).forEach(function (nd) { byId[nd.node_id] = nd; });
+      var perShard = req / n;
+      // A node that does not report its memory use has an UNKNOWN amount free,
+      // which is neither "empty" nor "full": treating the missing figure as 0
+      // percent used claimed the whole node was free (#174, #175). Say so
+      // instead of sizing the launch against a number nobody measured.
+      var frees = [];
+      var unknownNodes = [];
+      Array.prototype.forEach.call(active, function (d) {
+        var nd = byId[d.dataset.nodeId];
+        var pct = nd ? nd.gpu_memory_used_pct : null;
+        if (!nd || pct === null || pct === undefined) {
+          unknownNodes.push(d.textContent.replace('★', '').trim());
+          return;
+        }
+        frees.push(Math.max(0, (nd.gpu_memory_gb || 0) * (1 - pct / 100)));
+      });
+      var minFree = frees.length ? Math.min.apply(null, frees) : null;
+      if (unknownNodes.length) {
+        launchHint.className = 'launch-hint warn';
+        launchHint.textContent = 'Needs ~' + Math.round(perShard) + ' GB/node. ' +
+          unknownNodes.join(', ') + ' does not report memory use, so free space there is unknown.';
+      } else if (minFree !== null && minFree < perShard) {
+        launchHint.className = 'launch-hint warn';
+        launchHint.textContent = '⚠ Needs ~' + Math.round(perShard) + ' GB/node but a selected node has only ~' +
+          Math.round(minFree) + ' GB free - unload a model to free space.';
+      } else if (n <= 1) {
+        launchHint.textContent = '✓ Runs solo on ' + (names || 'this node') + ' (TP=1) - ~' + Math.round(req) + ' GB.';
+      } else {
+        launchHint.textContent = '✓ ' + stratLabel + ' · TP=' + n + ' across ' + names + ' (~' + Math.round(perShard) + ' GB/node).';
+      }
+    }
+    // (dot click handlers bound inside _renderNodeDots)
+    // Update hint when strategy pill changes too
+    document.querySelectorAll('#sharding-pills .pill').forEach(function (pill) {
+      pill.addEventListener('click', updateLaunchHint);
+    });
+    // And on every refresh (cluster state may change)
+    this._launchHintUpdater = updateLaunchHint;
+    updateLaunchHint();
+
+    // Launch button
+    var launchBtn = document.getElementById('launch-btn');
+    if (launchBtn) {
+      launchBtn.addEventListener('click', function () { self.launchInstance(); });
+    }
+  },
+
+  // Auto-pick sharding + nodes for the selected model, aware of free memory on
+  // each node (a node already serving a model has ~85% reserved by vLLM, so it
+  // reads as nearly full). m: {proven_tp, size_gb, min_mem}.
+  recommendLaunch(m) {
+    var nodes = (this.state.nodes || []).filter(function (n) { return n.status !== 'offline'; });
+    var size = m.size_gb || 0;
+    if (!nodes.length || (!size && !m.min_mem)) return;
+    // Unknown memory use is not free memory: a node that cannot report it is
+    // ranked last rather than as the emptiest node in the fleet (#174, #175).
+    var freeOf = function (n) {
+      var pct = n.gpu_memory_used_pct;
+      if (pct === null || pct === undefined) return 0;
+      return Math.max(0, (n.gpu_memory_gb || 0) * (1 - pct / 100));
+    };
+    var headId = this.state.status && this.state.status.node_id;
+    var head = nodes.find(function (n) { return n.node_id === headId; }) || nodes[0];
+    var peers = nodes.filter(function (n) { return n !== head; }).sort(function (a, b) {
+      var am = a.model ? 1 : 0, bm = b.model ? 1 : 0;
+      if (am !== bm) return am - bm;          // prefer idle nodes over busy ones
+      return freeOf(b) - freeOf(a);           // then the most free
+    });
+    var N = nodes.length;
+    var req = (m.min_mem && m.min_mem > size) ? m.min_mem : size * 1.2;
+
+    // Tensor is the proven strategy on this hardware.
+    var pills = document.getElementById('sharding-pills');
+    if (pills) pills.querySelectorAll('.pill').forEach(function (p) { p.classList.toggle('active', p.dataset.value === 'tensor'); });
+
+    // Smallest TP (>= proven_tp) where head + (tp-1) peers each hold req/tp.
+    var rec = null;
+    [1, 2, 4, 8].forEach(function (tp) {
+      if (rec || tp > N) return;
+      if (m.proven_tp && tp < m.proven_tp) return;
+      var perShard = req / tp;
+      if (freeOf(head) < perShard) return;
+      var okPeers = peers.filter(function (n) { return freeOf(n) >= perShard; });
+      if (okPeers.length >= tp - 1) rec = { tp: tp, peers: okPeers.slice(0, tp - 1) };
+    });
+
+    // Set node selection; the fit-aware updater renders the hint (and survives polling).
+    // But if the user already hand-picked nodes for this launch, DON'T clobber their
+    // dots  -  a "pick node, then model" flow was landing the load on the head. We still
+    // recompute the hint text below so the recommendation is reflected.
+    var ids = rec ? [head.node_id].concat(rec.peers.map(function (n) { return n.node_id; })) : [head.node_id];
+    if (!this._launchNodesUserPicked && this._selectNodeIds) this._selectNodeIds(ids);
+    if (this._launchHintUpdater) this._launchHintUpdater();
+  },
+
+  populateLaunchModels() {
+    var select = document.getElementById('launch-model');
+    if (!select) return;
+    var self = this;
+    var s = this.state.status;
+    var loaded = (s && s.models_loaded) || [];
+    var onDisk = this.state.downloadedModels || {};
+
+    // Fetch both catalog and downloaded list, merge them
+    Promise.all([
+      this.fetchJSON('/api/models'),
+      this.fetchJSON('/api/models/downloaded'),
+    ]).then(function (results) {
+      var data = results[0];
+      var dlData = results[1];
+      if (!data) return;
+
+      // Build set of repos known to be on disk
+      var diskSet = Object.assign({}, onDisk);
+      ((dlData && dlData.models) || []).forEach(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (repo) diskSet[repo] = true;
+      });
+
+      var all = data.models || [];
+      // Only show models that are on disk or currently loaded.
+      var ready = all.filter(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (m.downloaded || diskSet[repo]) return true;
+        if (loaded.indexOf(repo) !== -1) return true;
+        return false;
+      });
+
+      // Also add disk models not in catalog
+      ((dlData && dlData.models) || []).forEach(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (!ready.some(function (r) { return (r.hf_repo || r.id) === repo; })) {
+          ready.push(m);
+        }
+      });
+
+      // Load times, keyed the way the option values are, so picking a model can
+      // say how long it has taken to come up here. Both halves can be absent.
+      self.state.launchLoadTimes = {};
+      ready.forEach(function (m) {
+        var repo = m.hf_repo || m.id;
+        if (!repo) return;
+        self.state.launchLoadTimes[repo] = {
+          typical_ready_minutes: m.typical_ready_minutes,
+          last_ready_minutes: m.last_ready_minutes,
+          last_ready_on: m.last_ready_on,
+        };
+      });
+
+      var cv = select.value;
+      if (ready.length === 0) {
+        select.innerHTML = '<option value="">-- No models downloaded --</option>';
+        self.renderLaunchLoadTime();
+        return;
+      }
+      select.innerHTML = '<option value="">-- SELECT MODEL --</option>' +
+        ready.map(function (m) {
+          var repo = m.hf_repo || m.id;
+          var label = m.name || repo;
+          var sizeNote = m.size_gb ? ' (' + Math.round(m.size_gb) + ' GB)' : '';
+          var isLoaded = ((self.state.status && self.state.status.models_loaded) || []).indexOf(repo) !== -1;
+          var onDiskNow = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[repo]) || !!diskSet[repo];
+          var glyph = isLoaded ? '● ' : (onDiskNow ? '○ ' : '');
+          var verifiedMark = m.verified ? ' ✓' : '';
+          var pt = m.proven_tp || 0;
+          return '<option value="' + self.esc(repo) + '" data-proven-tp="' + pt + '"'
+            + ' data-size-gb="' + (m.size_gb || 0) + '" data-min-mem="' + (m.min_memory_gb || 0) + '">'
+            + glyph + self.esc(label) + sizeNote + verifiedMark + '</option>';
+        }).join('');
+      if (cv) select.value = cv;
+      self.renderLaunchLoadTime();
+      // Picking a model auto-recommends sharding + nodes from its size and the
+      // free memory on each node.
+      select.onchange = function () {
+        var opt = select.options[select.selectedIndex];
+        self.renderLaunchLoadTime();
+        if (!opt || !opt.value) return;
+        self.recommendLaunch({
+          proven_tp: parseInt(opt.getAttribute('data-proven-tp') || '0', 10),
+          size_gb: parseFloat(opt.getAttribute('data-size-gb') || '0'),
+          min_mem: parseFloat(opt.getAttribute('data-min-mem') || '0'),
+        });
+      };
+    });
+  },
+
+  // Prefer this node's measured launch ledger over the catalog seed. Return an empty string when neither source has a measurement; do not guess from weight size.
+  loadTimeLine(m, progress) {
+    // While it is loading, the live line replaces the typical one on every
+    // surface: the question stops being "how long does this take" and becomes
+    // "how much longer". Checked before the entry, because a model with nothing
+    // measured and no seed still has an elapsed time worth showing.
+    if (progress && progress.loading) return this.loadingLine(progress);
+    if (!m) return '';
+    var last = m.last_ready_minutes;
+    if (typeof last === 'number' && last > 0) {
+      var on = m.last_ready_on || {};
+      var txt = 'Typical load: about ' + this.roundMinutes(last) + ' min';
+      if (on.node_name) txt += (on.stacked ? ' stacked on ' : ' on ') + on.node_name;
+      if (on.date) txt += ', measured ' + on.date;
+      return txt;
+    }
+    var typical = m.typical_ready_minutes;
+    if (typeof typical === 'number' && typical > 0) {
+      return 'Typical load: about ' + this.roundMinutes(typical) + ' min';
+    }
+    return '';
+  },
+
+  // Whole minutes past 10, one decimal below it: "about 12 min", "about 7.5 min".
+  roundMinutes(v) {
+    return v >= 10 ? String(Math.round(v)) : String(Math.round(v * 10) / 10);
+  },
+
+  renderLaunchLoadTime() {
+    var el = document.getElementById('launch-load-time');
+    if (!el) return;
+    var select = document.getElementById('launch-model');
+    var repo = select ? select.value : '';
+    // Right after LAUNCH is clicked, this is the same model the server starts
+    // reporting a load for, so the typical line turns into the live one on the
+    // next poll and back again when the engine is up.
+    var prog = this.modelLoadProgress(repo);
+    var line = this.loadTimeLine((this.state.launchLoadTimes || {})[repo], prog);
+    if (!line) {
+      el.innerHTML = '';
+      el.style.display = 'none';
+      return;
+    }
+    var key = 'model:' + repo;
+    el.innerHTML = prog.loading
+      ? this.loadTextHtml(key, prog, 'line') + this.loadBarHtml(key, prog, 'launch-progress')
+      : this.esc(line);
+    el.style.display = '';
+  },
+
+  // The ONE launch call every button in the product goes through: the right-panel
+  // LAUNCH, and the model-detail modal's Launch Model. One node stacks through
+  // /api/cluster/load (node_id == this node dispatches locally); two or more go
+  // distributed through /api/sharding/launch. Both are InstanceManager-aware.
+  // The detail modal used to post /api/engine/set-model instead, which stops
+  // whatever app["engine"] is serving, or launches nothing when there is no
+  // engine object, and reported success either way (#189).
+  async loadModelOnNodes(model, nodeIds, strategy, gmu) {
+    var endpoint, body;
+    if ((nodeIds || []).length > 1) {
+      endpoint = '/api/sharding/launch';
+      body = { model: model, strategy: strategy || 'tensor', node_ids: nodeIds };
+    } else {
+      endpoint = '/api/cluster/load';
+      var target = (nodeIds || [])[0] || (this.state.status && this.state.status.node_id);
+      body = { model: model, node_id: target };
+    }
+    if (gmu != null) body.gpu_memory_utilization = gmu;
+    var resp = await AINodeAuth.fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var data = await resp.json().catch(function () { return {}; });
+    return { ok: resp.ok && !data.error, endpoint: endpoint, body: body, data: data };
+  },
+
+  async launchInstance() {
+    var select = document.getElementById('launch-model');
+    var model = select ? select.value : '';
+    if (!model) { this.toast('Select a model first', 'error'); return; }
+
+    var pillGroup = document.getElementById('sharding-pills');
+    var strategy = 'tensor';
+    if (pillGroup) {
+      var activePill = pillGroup.querySelector('.pill.active');
+      if (activePill) strategy = activePill.dataset.value;
+    }
+
+    var nodeSelector = document.getElementById('node-selector');
+    var nodeIds = [];
+    if (nodeSelector) {
+      nodeSelector.querySelectorAll('.node-dot.active').forEach(function (d) {
+        if (d.dataset.nodeId) nodeIds.push(d.dataset.nodeId);
+      });
+    }
+
+    var gmuInput = document.getElementById('launch-gmu');
+    var gmu = gmuInput && gmuInput.value !== '' ? parseFloat(gmuInput.value) : null;
+    if (gmu != null && isNaN(gmu)) gmu = null;
+
+    var launchBtn = document.getElementById('launch-btn');
+    if (launchBtn) { launchBtn.disabled = true; launchBtn.textContent = 'LAUNCHING...'; }
+
+    try {
+      var res = await this.loadModelOnNodes(model, nodeIds, strategy, gmu);
+      if (!res.ok) {
+        this.toast(res.data.error || 'Launch failed', 'error');
+      } else {
+        this.toast('Launched: ' + model, 'success');
+        // Launch submitted  -  the hand-picked-nodes intent is consumed, so the next
+        // model pick auto-recommends again.
+        this._launchNodesUserPicked = false;
+        this.refresh();
+      }
+    } catch (err) {
+      this.toast('Error: ' + err.message, 'error');
+    }
+
+    if (launchBtn) { launchBtn.disabled = false; launchBtn.textContent = 'LAUNCH'; }
+  },
+
+  // ========================================================================
+  //  CHAT  -  BINDING (Left Panel + Bottom Bar)
+  // ========================================================================
+
+  bindChat() {
+    var self = this;
+    var input = document.getElementById('chat-input');
+    var send = document.getElementById('chat-send');
+
+    if (send) {
+      send.addEventListener('click', function () { self.handleSendClick(); });
+    }
+    if (input) {
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); self.handleSendClick(); }
+      });
+      input.addEventListener('input', function () {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+      });
+    }
+
+    // New Chat button
+    var newChatBtn = document.getElementById('new-chat');
+    if (newChatBtn) {
+      newChatBtn.addEventListener('click', function () { self.newConversation(); });
+    }
+
+    // Search conversations
+    var searchInput = document.getElementById('chat-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', function () { self.renderConversationList(); });
+    }
+
+    // Drag-and-drop image support on the center-stage area
+    var stage = document.getElementById('center-stage');
+    if (stage) {
+      stage.addEventListener('dragover', function (e) {
+        if (e.dataTransfer && Array.from(e.dataTransfer.items || []).some(function (i) { return i.kind === 'file'; })) {
+          e.preventDefault();
+          stage.classList.add('drag-over');
+        }
+      });
+      stage.addEventListener('dragleave', function (e) {
+        // Remove overlay when leaving the stage OR any child boundary
+        if (!stage.contains(e.relatedTarget)) stage.classList.remove('drag-over');
+      });
+      stage.addEventListener('drop', function (e) {
+        e.preventDefault();
+        stage.classList.remove('drag-over');
+        var files = Array.from(e.dataTransfer.files || []).filter(function (f) {
+          return f.type.startsWith('image/');
+        });
+        if (files.length > 0) self.attachImages(files);
+        else self.toast('Only image files are supported', 'warning');
+      });
+      // Escape key dismisses the drop overlay
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') stage.classList.remove('drag-over');
+      });
+      // Click outside the drop zone also dismisses it
+      stage.addEventListener('click', function () {
+        stage.classList.remove('drag-over');
+      });
+    }
+
+    // Also support paste of images
+    if (input) {
+      input.addEventListener('paste', function (e) {
+        var items = Array.from((e.clipboardData || {}).items || []);
+        var imgs = items.filter(function (i) { return i.type.startsWith('image/'); }).map(function (i) { return i.getAsFile(); }).filter(Boolean);
+        if (imgs.length > 0) {
+          e.preventDefault();
+          self.attachImages(imgs);
+        }
+      });
+    }
+
+    // Fleet-true model picker: the selection is an INSTANCE (model + node +
+    // port), and the value stays the model id the proxy routes on.
+    var modelSelect = document.getElementById('chat-model');
+    if (modelSelect) {
+      modelSelect.addEventListener('change', function () { self.syncChatInstance(); });
+    }
+
+    var stopBtn = document.getElementById('chat-stop');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', function () { self.stopGeneration(); });
+    }
+
+    // Thinking toggle. Both states are sent explicitly, under both switch names
+    // the chat templates use (Qwen/Nemotron: enable_thinking; DeepSeek V4:
+    // thinking), so the toggle wins over an engine's --default-chat-template-kwargs.
+    // A template ignores the name it does not read.
+    var thinkBtn = document.getElementById('chat-thinking');
+    if (thinkBtn) {
+      thinkBtn.addEventListener('click', function () {
+        self.state.chatSettings.thinking = !self.state.chatSettings.thinking;
+        thinkBtn.classList.toggle('active', self.state.chatSettings.thinking);
+        self.saveChatSettings();
+      });
+    }
+
+    var tempInput = document.getElementById('chat-temp');
+    if (tempInput) {
+      tempInput.addEventListener('change', function () {
+        var v = parseFloat(tempInput.value);
+        if (isNaN(v) || v < 0) v = 0;
+        if (v > 2) v = 2;
+        tempInput.value = v;
+        self.state.chatSettings.temperature = v;
+        self.saveChatSettings();
+      });
+    }
+
+    var maxTokInput = document.getElementById('chat-maxtok');
+    if (maxTokInput) {
+      maxTokInput.addEventListener('change', function () {
+        var v = parseInt(maxTokInput.value, 10);
+        if (isNaN(v) || v < 1) v = 1;
+        maxTokInput.value = v;
+        self.state.chatSettings.maxTokens = v;
+        self.saveChatSettings();
+      });
+    }
+
+    var sysBtn = document.getElementById('chat-system-btn');
+    var sysBox = document.getElementById('chat-system');
+    if (sysBtn && sysBox) {
+      sysBtn.addEventListener('click', function () {
+        var open = sysBox.style.display === 'none' || !sysBox.style.display;
+        sysBox.style.display = open ? 'block' : 'none';
+        sysBtn.classList.toggle('active', open);
+        if (open) sysBox.focus();
+      });
+      sysBox.addEventListener('input', function () {
+        self.state.chatSettings.system = sysBox.value;
+        self.saveChatSettings();
+      });
+    }
+
+    var cardToggle = document.getElementById('model-card-toggle');
+    if (cardToggle) {
+      cardToggle.addEventListener('click', function () {
+        self.state.chatCardCollapsed = !self.state.chatCardCollapsed;
+        try {
+          localStorage.setItem('ainode_chat_card_collapsed',
+            self.state.chatCardCollapsed ? '1' : '0');
+        } catch (e) { /* storage blocked: collapse is per-page only */ }
+        var chev = document.getElementById('model-card-chevron');
+        if (chev) chev.innerHTML = self.state.chatCardCollapsed ? '&#9656;' : '&#9662;';
+        self.renderModelCard();
+      });
+    }
+  },
+
+  attachImages(files) {
+    var self = this;
+    if (!this.state.pendingAttachments) this.state.pendingAttachments = [];
+    files.forEach(function (file) {
+      if (file.size > 10 * 1024 * 1024) {
+        self.toast(file.name + ' is too large (max 10 MB)', 'error');
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        self.state.pendingAttachments.push({
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          dataUrl: e.target.result,
+        });
+        self.renderAttachmentPreview();
+      };
+      reader.readAsDataURL(file);
+    });
+    self.toast(files.length + ' image' + (files.length > 1 ? 's' : '') + ' attached', 'success');
+  },
+
+  renderAttachmentPreview() {
+    var wrapper = document.querySelector('.chat-input-wrapper');
+    if (!wrapper) return;
+    var existing = document.getElementById('chat-attachments');
+    var attachments = this.state.pendingAttachments || [];
+    if (attachments.length === 0) {
+      if (existing) existing.remove();
+      return;
+    }
+    var self = this;
+    var html = attachments.map(function (att, i) {
+      return '<div class="chat-attachment">' +
+        '<img src="' + att.dataUrl + '" alt="' + self.esc(att.name) + '">' +
+        '<button class="chat-attachment-remove" data-idx="' + i + '" title="Remove">×</button>' +
+        '</div>';
+    }).join('');
+    if (existing) {
+      existing.innerHTML = html;
+    } else {
+      var div = document.createElement('div');
+      div.id = 'chat-attachments';
+      div.className = 'chat-attachments';
+      div.innerHTML = html;
+      wrapper.insertBefore(div, wrapper.firstChild);
+    }
+    document.querySelectorAll('.chat-attachment-remove').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.state.pendingAttachments.splice(parseInt(btn.dataset.idx), 1);
+        self.renderAttachmentPreview();
+      });
+    });
+  },
+
+  handleSendClick() {
+    // While a turn is in flight the explicit Stop button is the way out, so
+    // Enter cannot accidentally kill a generation mid-sentence.
+    if (this.state.streaming) return;
+    this.sendMessage();
+  },
+
+  stopGeneration() {
+    if (this.state.abortController) {
+      this.state.abortController.abort();
+      this.state.abortController = null;
+    }
+    this.setChatBusy(false);
+    this.toast('Generation stopped', 'info');
+  },
+
+  // ========================================================================
+  //  CHAT: FLEET-TRUE MODEL PICKER
+  // ========================================================================
+
+  // One instance = one (model, node, port). The same model id can be serving on
+  // two nodes at once, and their numbers must never be averaged together, so
+  // every per-model thing below is keyed on this, not on the model id.
+  chatInstKey(inst) {
+    if (!inst || !inst.model) return '';
+    return inst.model + '@' + (inst.node_id || '?') + ':' + (inst.port || '?');
+  },
+
+  // /api/server/status is what the cluster is ACTUALLY serving: the same source
+  // the Server view reads. Polling it (rather than listing catalog models) is
+  // what stops the picker offering something the proxy cannot route to.
+  async refreshChatFleet(force) {
+    var now = Date.now();
+    if (!force && this._chatFleetAt && now - this._chatFleetAt < 7000) return;
+    this._chatFleetAt = now;
+    var data = await this.fetchJSON('/api/server/status');
+    if (!data) {
+      this.state.chatFleetError = 'cluster status unavailable';
+      this.state.chatFleet = [];
+    } else {
+      this.state.chatFleetError = null;
+      this.state.chatFleet = (data.loaded_models || [])
+        // Chat-capable instances only. An embedding or speech instance answers
+        // its own path and 400s a chat completion, so offering it in the chat
+        // picker offers a conversation the engine cannot have. A row with no type
+        // at all is a chat engine (serving_kind's own default).
+        .filter(function (m) { return m.id && (m.type || 'llm') === 'llm'; })
+        .map(function (m) {
+          return {
+            model: m.id,
+            node_id: m.node_id || '',
+            node_name: m.node_hostname || m.node_id || 'unknown node',
+            port: m.port,
+            ready: m.ready !== false,
+          };
+        });
+    }
+    this.renderChatModelOptions();
+    this.updateChatEngineStatus();
+  },
+
+  // Kept as the name the 5s refresh already calls.
+  updateChatModelSelect() {
+    this.refreshChatFleet(false);
+  },
+
+  renderChatModelOptions() {
+    var select = document.getElementById('chat-model');
+    if (!select) return;
+    var self = this;
+    var fleet = this.state.chatFleet || [];
+    // Only rebuild when the fleet actually changed: a 5s innerHTML rewrite
+    // closes an open dropdown under the user's cursor.
+    var sig = JSON.stringify(fleet.map(function (i) {
+      return [i.model, i.node_id, i.port, i.ready];
+    })) + '|' + (this.state.chatFleetError || '');
+    if (sig === this._chatFleetSig) return;
+    this._chatFleetSig = sig;
+
+    if (!fleet.length) {
+      // Honest empty state: say which of the two it is.
+      select.innerHTML = '<option value="">' +
+        (this.state.chatFleetError ? 'Cluster status unavailable' : 'No model loaded on any node') +
+        '</option>';
+      select.disabled = true;
+      this.state.chatInstance = null;
+      this.renderModelCard();
+      return;
+    }
+    select.disabled = false;
+
+    var byNode = {}, order = [];
+    fleet.forEach(function (i) {
+      if (!byNode[i.node_name]) { byNode[i.node_name] = []; order.push(i.node_name); }
+      byNode[i.node_name].push(i);
+    });
+    select.innerHTML = order.map(function (node) {
+      var opts = byNode[node].sort(function (a, b) { return (a.port || 0) - (b.port || 0); })
+        .map(function (i) {
+          var label = i.model.split('/').pop() + ' @ ' + node + ' :' + i.port +
+            (i.ready ? '' : ' (not ready)');
+          return '<option value="' + self.esc(i.model) + '"' +
+            ' data-node-id="' + self.esc(i.node_id) + '"' +
+            ' data-node-name="' + self.esc(node) + '"' +
+            ' data-port="' + self.esc(String(i.port)) + '"' +
+            (i.ready ? '' : ' disabled') + '>' + self.esc(label) + '</option>';
+        }).join('');
+      return '<optgroup label="' + self.esc(node) + '">' + opts + '</optgroup>';
+    }).join('');
+
+    this.selectChatInstance(this.state.chatInstance || this.state.chatPreferred);
+  },
+
+  // Re-pick after a rebuild: same model on the same node+port if it is still
+  // there, else the same model anywhere, else the first instance that is ready.
+  selectChatInstance(want) {
+    var select = document.getElementById('chat-model');
+    if (!select) return null;
+    var opts = Array.prototype.slice.call(select.options);
+    var hit = null;
+    if (want && want.model) {
+      hit = opts.filter(function (o) {
+        return o.value === want.model && !o.disabled &&
+          o.dataset.nodeId === (want.node_id || '') &&
+          String(o.dataset.port) === String(want.port);
+      })[0] || opts.filter(function (o) {
+        return o.value === want.model && !o.disabled;
+      })[0];
+    }
+    if (!hit) hit = opts.filter(function (o) { return o.value && !o.disabled; })[0];
+    if (hit) select.selectedIndex = hit.index;
+    return this.syncChatInstance();
+  },
+
+  selectedChatInstance() {
+    var select = document.getElementById('chat-model');
+    var opt = select && select.selectedOptions ? select.selectedOptions[0] : null;
+    if (!opt || !opt.value) return null;
+    return {
+      model: opt.value,
+      node_id: opt.dataset.nodeId || '',
+      node_name: opt.dataset.nodeName || '',
+      port: opt.dataset.port ? parseInt(opt.dataset.port, 10) : null,
+    };
+  },
+
+  syncChatInstance() {
+    var inst = this.selectedChatInstance();
+    var prevKey = this.chatInstKey(this.state.chatInstance);
+    this.state.chatInstance = inst;
+    if (inst) this.state.chatPreferred = inst;
+    this.updateChatEngineStatus();
+    if (this.chatInstKey(inst) !== prevKey) {
+      this.renderModelCard();
+      if (inst) {
+        this.loadModelCard(inst);
+        this.loadModelCaps(inst, false);
+      }
+    }
+    return inst;
+  },
+
+  updateChatEngineStatus() {
+    var el = document.getElementById('chat-engine-status');
+    if (!el) return;
+    var inst = this.state.chatInstance;
+    if (!inst) {
+      el.textContent = this.state.chatFleetError
+        ? 'cluster status unavailable'
+        : 'no engine serving';
+      el.className = 'chat-tool-status warn';
+      return;
+    }
+    var n = (this.state.chatFleet || []).length;
+    // True as written: the request carries this instance as a pin and the proxy
+    // forwards there or fails, rather than re-deciding on the model id (#197).
+    el.textContent = n + (n === 1 ? ' instance' : ' instances') + ' serving · routing to ' +
+      inst.node_name + ':' + inst.port;
+    el.className = 'chat-tool-status';
+  },
+
+  // ========================================================================
+  //  CHAT: MODEL CARD (left rail)
+  // ========================================================================
+
+  async loadModelCard(inst) {
+    var key = this.chatInstKey(inst);
+    var data = await this.fetchJSON('/api/models/card' + this.chatInstQuery(inst));
+    this.state.chatCards[key] = data || { unavailable: true };
+    if (this.chatInstKey(this.state.chatInstance) === key) this.renderModelCard();
+  },
+
+  async loadModelCaps(inst, fresh) {
+    var key = this.chatInstKey(inst);
+    if (!fresh && this.state.chatCaps[key]) return;
+    this.state.chatCaps[key] = { probing: true };
+    this.renderModelCard();
+    var data = await this.fetchJSON('/api/models/caps' + this.chatInstQuery(inst) +
+      (fresh ? '&fresh=1' : ''));
+    this.state.chatCaps[key] = data || { unavailable: true };
+    if (this.chatInstKey(this.state.chatInstance) === key) this.renderModelCard();
+  },
+
+  chatInstQuery(inst) {
+    return '?model=' + encodeURIComponent(inst.model) +
+      '&node_id=' + encodeURIComponent(inst.node_id || '') +
+      '&port=' + encodeURIComponent(inst.port || '');
+  },
+
+  renderModelCard() {
+    var body = document.getElementById('model-card-body');
+    var wrap = document.getElementById('model-card');
+    if (!body || !wrap) return;
+    var self = this;
+    wrap.classList.toggle('collapsed', !!this.state.chatCardCollapsed);
+
+    var inst = this.state.chatInstance;
+    if (!inst) {
+      body.innerHTML = '<div class="mc-empty">' +
+        (this.state.chatFleetError
+          ? 'Cannot reach the node API, so the fleet is unknown.'
+          : 'No engine is serving on this cluster. Launch a model to chat.') +
+        '</div>';
+      return;
+    }
+    var key = this.chatInstKey(inst);
+    var card = this.state.chatCards[key];
+    if (!card) {
+      body.innerHTML = '<div class="mc-model">' + this.esc(inst.model) + '</div>' +
+        '<div class="mc-empty">reading the instance…</div>';
+      return;
+    }
+    if (card.unavailable || card.error) {
+      body.innerHTML = '<div class="mc-model">' + this.esc(inst.model) + '</div>' +
+        '<div class="mc-empty">' + this.esc((card.error && card.error.message) ||
+          'Card unavailable for this instance.') + '</div>';
+      return;
+    }
+
+    var hw = card.hardware || {}, sv = card.serving || {}, ci = card.instance || {};
+    var cat = card.catalog;
+    var lt = card.load_time || {};
+
+    var rows = function (pairs) {
+      var out = pairs.filter(function (p) {
+        return p[1] !== null && p[1] !== undefined && p[1] !== '';
+      }).map(function (p) {
+        var note = p[2] ? ' <span class="mc-src">' + self.esc(p[2]) + '</span>' : '';
+        return '<dt>' + self.esc(p[0]) + '</dt><dd>' + p[1] + note + '</dd>';
+      }).join('');
+      return out ? '<dl class="mc-dl">' + out + '</dl>' : '';
+    };
+    var num = function (v, d) {
+      return (typeof v === 'number') ? v.toFixed(d) : null;
+    };
+
+    var nodeLabel = (ci.nodes && ci.nodes.length > 1)
+      ? ci.nodes.length + ' nodes: ' + this.esc(ci.nodes.join(', '))
+      : this.esc(ci.node_name || inst.node_name || 'unknown');
+    var where = rows([
+      ['Node', nodeLabel],
+      ['GPU', hw.gpu_name ? ((hw.gpu_count && hw.gpu_count > 1 ? hw.gpu_count + ' x ' : '') +
+        this.esc(hw.gpu_name)) : null],
+      ['VRAM', hw.gpu_memory_gb ? num(hw.gpu_memory_gb, 1) + ' GB' +
+        (hw.unified_memory ? ' unified' : '') + (hw.gpu_count > 1 ? ' ea' : '') : null],
+      ['Port', ci.port],
+    ]);
+
+    var ctx = sv.max_model_len
+      ? '<b>' + sv.max_model_len.toLocaleString() + '</b> tok'
+      : null;
+    var served = rows([
+      ['Context', ctx, sv.max_model_len ? 'engine' : null],
+      ['Tensor par.', sv.tensor_parallel_size ? 'TP ' + sv.tensor_parallel_size : null],
+      ['Quantization', sv.quantization ? this.esc(sv.quantization) : null,
+        sv.quantization_source === 'model_id' ? 'from id' :
+          (sv.quantization_source === 'catalog' ? 'catalog' : null)],
+      ['KV cache', sv.kv_cache_dtype ? this.esc(sv.kv_cache_dtype) : null],
+      ['GPU mem frac', num(sv.gpu_memory_utilization, 2)],
+      ['Engine image', sv.engine_image
+        ? '<span class="mc-mono">' + this.esc(sv.engine_image) + '</span>' : null],
+      ['Speculative', this.specLabel(sv)],
+      // Measured, never the catalog seed: this row is what THIS node's ledger
+      // recorded the last time it brought the model up, so it is absent on a node
+      // that has not (a peer's instance, a fresh install).
+      ['Loaded in', (typeof lt.last_ready_minutes === 'number')
+        ? this.roundMinutes(lt.last_ready_minutes) + ' min' : null,
+        (lt.last_ready_on && lt.last_ready_on.date) || 'measured'],
+    ]);
+    // Engine flags come from a per-instance config snapshot. A peer that does
+    // not publish one leaves them unknown, and unknown is shown as absent here
+    // rather than filled in from the catalog recipe (which is what a launch
+    // WOULD use, not what this engine IS running).
+    var flagNote = sv.config_source ? '' :
+      '<div class="mc-note">Engine flags are not published by this node, so the ' +
+      'image and flag rows are omitted rather than guessed.</div>';
+
+    var html = '<div class="mc-model" title="' + this.esc(inst.model) + '">' +
+      this.esc(inst.model) + '</div>' +
+      '<div class="mc-badges">' +
+      '<span class="mc-tag' + (ci.local ? ' local' : '') + '">' +
+      this.esc(ci.node_name || inst.node_name) + '</span>' +
+      (cat && cat.verified
+        ? '<span class="mc-tag ok" title="' + this.esc(cat.verified_on
+          ? 'Tested on AINode ' + cat.verified_on + ', see bench record'
+          : 'Marked verified before the bench existed') +
+        '">catalog verified</span>' : '') +
+      '</div>';
+    if (card.hf_url) {
+      html += '<a class="mc-hf" href="' + this.esc(card.hf_url) + '" target="_blank" rel="noopener">' +
+        '&#8599; ' + this.esc(card.hf_repo) + '</a>';
+    }
+    if (where) html += '<div class="mc-grp"><div class="mc-lbl">Where it runs</div>' + where + '</div>';
+    // Probed badges and this instance's own numbers come before the launch
+    // flags: they are what a chat user acts on, and the rail is short.
+    html += '<div class="mc-grp"><div class="mc-lbl">Capabilities</div>' +
+      this.renderCapBadges(key) + '</div>';
+    html += this.renderCardStats(key);
+    if (served || flagNote) {
+      html += '<div class="mc-grp"><div class="mc-lbl">How it is served</div>' +
+        served + flagNote + '</div>';
+    }
+    if (cat && cat.description) {
+      html += '<div class="mc-grp"><div class="mc-lbl">Catalog</div>' +
+        '<div class="mc-desc">' + this.esc(cat.description) + '</div></div>';
+    }
+    body.innerHTML = html;
+
+    var reprobe = document.getElementById('mc-reprobe');
+    if (reprobe) {
+      reprobe.addEventListener('click', function () {
+        self.loadModelCaps(self.state.chatInstance, true);
+      });
+    }
+  },
+
+  // Speculative decoding reads as a wall of flags in a 250px rail, so show the
+  // draft model and the token count and keep the exact flags in the tooltip.
+  specLabel(sv) {
+    if (!sv.speculative) return null;
+    var args = sv.extra_vllm_args || [];
+    var draft = null, ntok = null;
+    for (var i = 0; i < args.length; i++) {
+      var a = String(args[i]);
+      var val = a.indexOf('=') > -1 ? a.split('=').slice(1).join('=') : args[i + 1];
+      if (/speculative[_-]?(config\.)?model/i.test(a) && val) draft = String(val);
+      if (/num[_-]speculative[_-]tokens/i.test(a) && val) ntok = String(val);
+    }
+    var label = draft ? draft.split('/').pop() : 'on';
+    if (ntok) label += ' · ' + ntok + ' tok';
+    return '<span class="mc-mono" title="' + this.esc(sv.speculative) + '">' +
+      this.esc(label) + '</span>';
+  },
+
+  // Probed, never guessed. vision/tools come from the server sending the engine
+  // a real image and a real tools array; reasoning is marked only from turns
+  // that actually carried reasoning, because a model choosing not to think on
+  // one prompt is not a model that cannot think.
+  renderCapBadges(key) {
+    var caps = this.state.chatCaps[key];
+    var reasoned = !!this.state.chatReasoningSeen[key];
+    var reasonBadge = reasoned
+      ? '<span class="mc-cap on" title="observed in a reply on this instance">reasoning</span>'
+      : '<span class="mc-cap wait" title="marked from turns actually observed, never probed">reasoning?</span>';
+    if (!caps || caps.probing) {
+      return '<div class="mc-caps"><span class="mc-cap wait">probing…</span>' +
+        reasonBadge + '</div>';
+    }
+    if (caps.unavailable) {
+      return '<div class="mc-caps"><span class="mc-cap wait">probe unavailable</span>' +
+        reasonBadge + '</div>';
+    }
+    var one = function (onLabel, offLabel, val, why) {
+      if (val === true) return '<span class="mc-cap on">' + onLabel + '</span>';
+      if (val === false) {
+        return '<span class="mc-cap off" title="' + AINode.esc(why || 'refused by the engine') +
+          '">' + offLabel + '</span>';
+      }
+      return '<span class="mc-cap wait" title="' + AINode.esc(why || 'engine did not answer') +
+        '">' + onLabel + '?</span>';
+    };
+    var out = '<div class="mc-caps">' +
+      one('vision', 'text only', caps.vision, caps.vision_error) +
+      one('tools', 'no tools', caps.tools, caps.tools_error) +
+      reasonBadge +
+      '<span class="mc-reprobe" id="mc-reprobe" title="Probe this engine again">re-probe</span>' +
+      '</div>';
+    var why = caps.vision === false ? caps.vision_error : null;
+    if (why) out += '<div class="mc-note">' + this.esc(why) + '</div>';
+    return out;
+  },
+
+  // ========================================================================
+  //  CHAT: PER-TURN STATS (kept per instance, never averaged across nodes)
+  // ========================================================================
+
+  chatStatsFor(key) {
+    return (this.state.chatStats[key] || []).filter(function (r) { return !r.error; });
+  },
+
+  recordChatTurn(key, rec) {
+    if (!this.state.chatStats[key]) this.state.chatStats[key] = [];
+    this.state.chatStats[key].push(rec);
+  },
+
+  // Averages survive a page reload because the stats ride along with the
+  // conversation in localStorage.
+  rebuildChatStatsFromHistory() {
+    var self = this;
+    this.state.chatStats = {};
+    this.state.chatReasoningSeen = {};
+    (this.state.conversations || []).forEach(function (conv) {
+      (conv.messages || []).forEach(function (msg) {
+        if (!msg || !msg.stats || !msg.instance) return;
+        var key = self.chatInstKey(msg.instance);
+        if (!key) return;
+        self.recordChatTurn(key, msg.stats);
+        if (msg.stats.reasoning_chars > 0) self.state.chatReasoningSeen[key] = true;
+      });
+    });
+  },
+
+  renderCardStats(key) {
+    var runs = this.chatStatsFor(key);
+    if (!runs.length) return '';
+    var n = runs.length;
+    var last = runs[n - 1];
+    var mean = function (field) {
+      var vals = runs.map(function (r) { return r[field]; })
+        .filter(function (v) { return typeof v === 'number'; });
+      if (!vals.length) return null;
+      return vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+    };
+    var fmt = function (v, d) { return (typeof v === 'number') ? v.toFixed(d) : 'n/a'; };
+    var row = function (label, field, d, suffix) {
+      return '<tr><td>' + label + '</td>' +
+        '<td class="now">' + fmt(last[field], d) + suffix + '</td>' +
+        '<td>' + (n > 1 ? fmt(mean(field), d) + suffix : '') + '</td></tr>';
+    };
+    return '<div class="mc-grp mc-stats"><div class="mc-lbl">This instance</div>' +
+      '<table class="mc-st"><tr><th></th><th>last</th><th>' +
+      (n > 1 ? 'avg ' + n : '') + '</th></tr>' +
+      row('Decode', 'decode_tps', 1, ' t/s') +
+      row('TTFT', 'ttft_s', 2, 's') +
+      row('Total', 'total_s', 1, 's') +
+      row('In', 'prompt_tokens', 0, '') +
+      row('Out', 'completion_tokens', 0, '') +
+      '</table>' +
+      (n === 1 ? '<div class="mc-note">Averages appear from the second turn.</div>' : '') +
+      '</div>';
+  },
+
+  // ========================================================================
+  //  CHAT: CONTROLS (system prompt, temperature, max tokens, thinking)
+  // ========================================================================
+
+  loadChatSettings() {
+    var defaults = { system: '', temperature: 0.7, maxTokens: 2048, thinking: true };
+    try {
+      var saved = JSON.parse(localStorage.getItem('ainode_chat_settings') || '{}');
+      this.state.chatSettings = Object.assign(defaults, saved || {});
+    } catch (e) {
+      this.state.chatSettings = defaults;
+    }
+    try {
+      this.state.chatCardCollapsed = localStorage.getItem('ainode_chat_card_collapsed') === '1';
+    } catch (e) { /* private mode: default to expanded */ }
+  },
+
+  saveChatSettings() {
+    try {
+      localStorage.setItem('ainode_chat_settings', JSON.stringify(this.state.chatSettings));
+    } catch (e) { /* storage full or blocked: settings stay for this page only */ }
+  },
+
+  applyChatSettingsToUI() {
+    var s = this.state.chatSettings;
+    var temp = document.getElementById('chat-temp');
+    var maxtok = document.getElementById('chat-maxtok');
+    var think = document.getElementById('chat-thinking');
+    var sys = document.getElementById('chat-system');
+    if (temp) temp.value = s.temperature;
+    if (maxtok) maxtok.value = s.maxTokens;
+    if (think) think.classList.toggle('active', !!s.thinking);
+    if (sys) {
+      sys.value = s.system || '';
+      sys.style.display = s.system ? 'block' : 'none';
+    }
+    var sysBtn = document.getElementById('chat-system-btn');
+    if (sysBtn) sysBtn.classList.toggle('active', !!s.system);
+  },
+
+  // ========================================================================
+  //  CHAT  -  SEND / STREAM
+  // ========================================================================
+
+  setChatBusy(busy) {
+    this.state.streaming = busy;
+    var send = document.getElementById('chat-send');
+    var stop = document.getElementById('chat-stop');
+    if (send) {
+      send.disabled = busy;
+      send.textContent = busy ? 'SENDING' : 'SEND';
+    }
+    if (stop) stop.style.display = busy ? '' : 'none';
+  },
+
+  // The wire form of the conversation. Attachments are stored as data URLs on
+  // the message and turned into image parts here, so localStorage keeps a plain
+  // string content (which is what the titles and search read).
+  chatApiMessages() {
+    return this.state.messages.filter(function (m) {
+      return m.content || (m.images && m.images.length);
+    }).map(function (m) {
+      if (m.role === 'user' && m.images && m.images.length) {
+        var parts = m.images.map(function (url) {
+          return { type: 'image_url', image_url: { url: url } };
+        });
+        if (m.content) parts.push({ type: 'text', text: m.content });
+        return { role: 'user', content: parts };
+      }
+      return { role: m.role, content: m.content };
+    });
+  },
+
+  // The pin the proxy honours: node id and engine port of the instance the user
+  // picked. Sent on every forwarded request the UI makes (chat here, the bench
+  // sends the same pair in its run body). See ainode/api/server.py::pinned_target
+  // and the README's "Pinning a request to one instance".
+  targetHeaders(inst, headers) {
+    var h = headers || {};
+    if (inst && inst.node_id) h['X-AINode-Node'] = inst.node_id;
+    if (inst && inst.port) h['X-AINode-Port'] = String(inst.port);
+    return h;
+  },
+
+  async sendMessage() {
+    var input = document.getElementById('chat-input');
+    var text = input ? input.value.trim() : '';
+    var atts = (this.state.pendingAttachments || []).slice();
+    if ((!text && !atts.length) || this.state.streaming) return;
+
+    var inst = this.state.chatInstance || this.selectedChatInstance();
+    if (!inst || !inst.model) {
+      this.toast('No model is loaded on any node', 'error');
+      return;
+    }
+    var key = this.chatInstKey(inst);
+
+    if (input) { input.value = ''; input.style.height = 'auto'; }
+    this.state.pendingAttachments = [];
+    this.renderAttachmentPreview();
+
+    if (!this.state.currentConversation) this.newConversation();
+
+    var userMsg = { role: 'user', content: text };
+    if (atts.length) {
+      userMsg.images = atts.map(function (a) { return a.dataUrl; });
+    }
+    this.state.messages.push(userMsg);
+
+    this.navigate('chat');
+    this.renderChatMessages();
+    this.showChatOverlay();
+
+    var settings = this.state.chatSettings;
+    var wire = this.chatApiMessages();
+    if (settings.system) wire.unshift({ role: 'system', content: settings.system });
+
+    var body = {
+      model: inst.model,
+      messages: wire,
+      stream: true,
+      // Token counts must come from the server. Under speculative decoding one
+      // SSE chunk can carry several accepted tokens, so counting chunks
+      // understates the rate. Usage is the only honest source.
+      stream_options: { include_usage: true },
+      temperature: settings.temperature,
+      max_tokens: settings.maxTokens,
+    };
+    // Send both thinking-switch spellings explicitly so ON overrides a recipe whose default is OFF.
+    body.chat_template_kwargs = {
+      enable_thinking: !!settings.thinking,
+      thinking: !!settings.thinking,
+    };
+
+    var assistantMsg = { role: 'assistant', content: '', reasoning: '', instance: inst };
+    this.state.messages.push(assistantMsg);
+    this.renderChatMessages();
+
+    this.setChatBusy(true);
+    this.state.abortController = new AbortController();
+    this.state.streamMetrics = { ttft: null, tps: 0, tokens: 0, startTime: performance.now(), firstTokenTime: 0 };
+    this.updateStreamMetrics();
+
+    var t = { send: performance.now(), firstAny: null, firstContent: null, firstThink: null, last: null };
+    var chunks = 0, usage = null, finish = null, err = null, aborted = false;
+
+    var servedBy = null;
+    try {
+      var resp = await AINodeAuth.fetch('/v1/chat/completions', {
+        method: 'POST',
+        // The picked instance, carried on the request. Without it the proxy routes
+        // on the model id and takes the local hop first, so with the same model on
+        // two nodes the answer came from an engine the user did not pick and the
+        // per-turn stats were filed against the wrong one (#197).
+        headers: this.targetHeaders(inst, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+        signal: this.state.abortController.signal,
+      });
+      // Where it actually went, from the proxy rather than inferred from the pick.
+      servedBy = resp.headers.get('X-AINode-Served-By');
+      if (!resp.ok) {
+        var detail = '';
+        try { detail = (await resp.text()).slice(0, 300); } catch (e) { detail = ''; }
+        throw new Error('HTTP ' + resp.status + (detail ? ' ' + detail : ''));
+      }
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (var li = 0; li < lines.length; li++) {
+          var line = lines[li].trim();
+          // Anything that is not a data: line is an SSE comment (the proxy
+          // trickles them during a long prefill), skip it.
+          if (!line.startsWith('data:')) continue;
+          var data = line.slice(5).trim();
+          if (data === '[DONE]') continue;
+          var json;
+          try { json = JSON.parse(data); } catch (e) { continue; }
+          // vLLM sends a final chunk with choices: [] carrying usage, which is
+          // why this cannot assume choices[0].
+          if (json.usage) usage = json.usage;
+          var choice = (json.choices || [])[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finish = choice.finish_reason;
+          var delta = choice.delta || {};
+          var now = performance.now();
+          var think = delta.reasoning != null ? delta.reasoning : delta.reasoning_content;
+          if (think) {
+            if (t.firstAny === null) t.firstAny = now;
+            if (t.firstThink === null) t.firstThink = now;
+            t.last = now; chunks++;
+            assistantMsg.reasoning += think;
+          }
+          if (delta.content) {
+            if (t.firstAny === null) t.firstAny = now;
+            if (t.firstContent === null) {
+              t.firstContent = now;
+              this.state.streamMetrics.firstTokenTime = now;
+              this.state.streamMetrics.ttft = Math.round(now - t.send);
+            }
+            t.last = now; chunks++;
+            assistantMsg.content += delta.content;
+          }
+          if (think || delta.content) {
+            this.state.streamMetrics.tokens = chunks;
+            var elapsed = (now - (this.state.streamMetrics.firstTokenTime || t.firstAny)) / 1000;
+            if (elapsed > 0) this.state.streamMetrics.tps = chunks / elapsed;
+            this.updateStreamingMessage(assistantMsg);
+            this.updateStreamMetrics();
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        aborted = true;
+        err = 'stopped';
+      } else {
+        err = e.message;
+        this.toast('Engine not responding: ' + e.message, 'error');
+      }
+    }
+
+    this.state.abortController = null;
+    this.setChatBusy(false);
+
+    // ---- per-turn stats ---------------------------------------------------
+    var end = performance.now();
+    // TTFT is time to the first CONTENT delta. A reasoning model's first
+    // reasoning delta is reported separately so a thinking turn does not read
+    // as a fast one.
+    var ttft = t.firstContent != null ? (t.firstContent - t.send) / 1000 : null;
+    var ttfr = t.firstThink != null ? (t.firstThink - t.send) / 1000 : null;
+    var genDur = (t.firstAny != null && t.last != null) ? (t.last - t.firstAny) / 1000 : null;
+    var ctok = usage && typeof usage.completion_tokens === 'number' ? usage.completion_tokens : null;
+    var decodeSource = null, decodeTps = null;
+    if (ctok != null && ctok > 1 && genDur > 0) {
+      decodeTps = (ctok - 1) / genDur;
+      decodeSource = 'usage';
+    } else if (chunks > 1 && genDur > 0) {
+      // No usage block from this engine: chunk-counted, which undercounts under
+      // speculative decoding. Labelled so the number is never read as exact.
+      decodeTps = (chunks - 1) / genDur;
+      decodeSource = 'chunks';
+    }
+    var details = (usage && usage.completion_tokens_details) || null;
+    var stats = {
+      ts: new Date().toISOString(),
+      model: inst.model, node_id: inst.node_id, node_name: inst.node_name, port: inst.port,
+      thinking: !!settings.thinking,
+      temperature: settings.temperature,
+      max_tokens: settings.maxTokens,
+      ttft_s: ttft != null ? +ttft.toFixed(3) : null,
+      ttfr_s: ttfr != null ? +ttfr.toFixed(3) : null,
+      total_s: +((end - t.send) / 1000).toFixed(3),
+      decode_tps: decodeTps != null ? +decodeTps.toFixed(2) : null,
+      decode_source: decodeSource,
+      prompt_tokens: usage ? (usage.prompt_tokens != null ? usage.prompt_tokens : null) : null,
+      completion_tokens: ctok,
+      reasoning_tokens: details && details.reasoning_tokens != null ? details.reasoning_tokens : null,
+      reasoning_chars: assistantMsg.reasoning.length,
+      chunks: chunks,
+      finish_reason: finish,
+      images: (userMsg.images || []).length,
+      // The instance that answered, as the proxy reported it. Kept next to the
+      // pick so a turn whose answer came from elsewhere is visible rather than
+      // silently mis-attributed.
+      served_by: servedBy,
+      error: err,
+    };
+    assistantMsg.stats = stats;
+    this.recordChatTurn(key, stats);
+    if (stats.reasoning_chars > 0 && !this.state.chatReasoningSeen[key]) {
+      this.state.chatReasoningSeen[key] = true;
+    }
+
+    if (err && !assistantMsg.content && !assistantMsg.reasoning) {
+      // Nothing arrived: drop the empty assistant turn so a retry is clean.
+      this.state.messages.pop();
+      if (!aborted) {
+        this.state.messages.push({
+          role: 'assistant', content: 'Error: ' + err, instance: inst, stats: stats,
+        });
+      }
+    }
+    this.renderModelCard();
+    this.renderChatMessages();
+    this.saveCurrentConversation();
+  },
+
+  // ========================================================================
+  //  CHAT  -  MESSAGE RENDERING (center-stage overlay)
+  // ========================================================================
+
+  showChatOverlay() {
+    var mount = document.getElementById('view-chat-mount');
+    if (!mount) return;
+    var overlay = document.getElementById('chat-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'chat-overlay';
+      overlay.className = 'chat-overlay';
+      overlay.innerHTML = '<div class="chat-metrics-bar" id="chat-metrics-bar">' +
+        '<span id="chat-metric-ttft">TTFT: --</span>' +
+        '<span id="chat-metric-tps">-- deltas/s</span>' +
+        '<span id="chat-metric-tokens">0 deltas</span>' +
+        '</div>' +
+        '<div class="chat-messages" id="chat-messages"></div>';
+      mount.appendChild(overlay);
+    }
+    var empty = document.getElementById('chat-view-empty');
+    if (empty) empty.style.display = this.state.messages.length > 0 ? 'none' : '';
+    overlay.style.display = this.state.messages.length > 0 ? '' : 'none';
+  },
+
+  hideChatOverlay() {
+    var overlay = document.getElementById('chat-overlay');
+    if (overlay) overlay.style.display = 'none';
+    var empty = document.getElementById('chat-view-empty');
+    if (empty) empty.style.display = '';
+  },
+
+  updateStreamMetrics() {
+    var m = this.state.streamMetrics;
+    var t1 = document.getElementById('chat-metric-ttft');
+    var t2 = document.getElementById('chat-metric-tps');
+    var t3 = document.getElementById('chat-metric-tokens');
+    if (t1) t1.textContent = m.ttft != null ? 'TTFT: ' + m.ttft + 'ms' : 'TTFT: --';
+    if (t2) t2.textContent = m.tps > 0 ? m.tps.toFixed(1) + ' deltas/s' : '-- deltas/s';
+    if (t3) t3.textContent = m.tokens + ' deltas';
+  },
+
+  // Targeted update for streaming  -  only rewrites the current assistant message
+  updateStreamingMessage(assistantMsg) {
+    var container = document.getElementById('chat-messages');
+    if (!container) { this.renderChatMessages(); return; }
+    var last = container.lastElementChild;
+    if (!last || !last.classList.contains('assistant')) {
+      this.renderChatMessages();
+      return;
+    }
+    var contentEl = last.querySelector('.chat-msg-content');
+    if (!contentEl) { this.renderChatMessages(); return; }
+    var thinkEl = last.querySelector('.chat-think-body');
+    if (assistantMsg.reasoning) {
+      if (!thinkEl) {
+        this.renderChatMessages();
+        return;
+      }
+      thinkEl.textContent = assistantMsg.reasoning;
+      var head = last.querySelector('.chat-think-head');
+      if (head) head.textContent = 'THINKING · ' + assistantMsg.reasoning.length + ' chars';
+    }
+    contentEl.innerHTML = this.formatMarkdown(assistantMsg.content);
+    var atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+    if (atBottom) container.scrollTop = container.scrollHeight;
+  },
+
+  chatStatChips(stats) {
+    if (!stats) return '';
+    var chip = function (label, value, cls, title) {
+      return '<span class="chat-chip ' + (cls || '') + '"' +
+        (title ? ' title="' + AINode.esc(title) + '"' : '') + '>' +
+        label + ' <b>' + value + '</b></span>';
+    };
+    var fmt = function (v, d, suffix) {
+      return (typeof v === 'number') ? v.toFixed(d) + (suffix || '') : 'n/a';
+    };
+    var out = '';
+    if (stats.error) out += chip('ERROR', this.esc(String(stats.error).slice(0, 80)), 'err');
+    out += chip('TTFT', fmt(stats.ttft_s, 2, 's'), 'hot', 'time to the first content delta');
+    if (stats.ttfr_s != null && stats.reasoning_chars > 0) {
+      out += chip('first think', fmt(stats.ttfr_s, 2, 's'), 'think',
+        'time to the first reasoning delta');
+    }
+    out += chip('decode',
+      (stats.decode_tps != null ? fmt(stats.decode_tps, 1, '') : 'n/a') + ' t/s',
+      'hot',
+      stats.decode_source === 'usage'
+        ? 'server-reported usage tokens over generation time'
+        : (stats.decode_source === 'chunks'
+          ? 'no usage block from this engine: counted from SSE deltas, which undercounts under speculative decoding'
+          : 'not measurable for this turn'));
+    if (stats.decode_source === 'chunks') {
+      out += chip('source', 'chunks', 'warn',
+        'the engine sent no usage block, so this rate is chunk-counted');
+    }
+    out += chip('total', fmt(stats.total_s, 1, 's'), '');
+    out += chip('in', stats.prompt_tokens != null ? stats.prompt_tokens : 'n/a', '',
+      'prompt tokens, server-reported');
+    out += chip('out', stats.completion_tokens != null ? stats.completion_tokens : 'n/a', '',
+      'completion tokens, server-reported');
+    if (stats.reasoning_tokens != null) {
+      out += chip('reasoning', stats.reasoning_tokens, 'think', 'server-reported reasoning tokens');
+    } else if (stats.reasoning_chars > 0) {
+      out += chip('reasoning', stats.reasoning_chars + ' ch', 'think',
+        'this engine reports no reasoning token count, so this is characters received');
+    }
+    if (stats.node_name) {
+      out += chip('on', this.esc(stats.node_name) + ':' + stats.port, '',
+        'the instance that served this turn');
+    }
+    if (stats.finish_reason) out += chip('stop', this.esc(stats.finish_reason), '');
+    return '<div class="chat-chips">' + out + '</div>';
+  },
+
+  renderChatMessages() {
+    this.showChatOverlay();
+    var container = document.getElementById('chat-messages');
+    if (!container) return;
+    var self = this;
+
+    if (this.state.messages.length === 0) {
+      this.hideChatOverlay();
+      return;
+    }
+
+    container.innerHTML = this.state.messages.map(function (msg, i) {
+      var cls = msg.role === 'user' ? 'chat-msg user' : 'chat-msg assistant';
+      var html = '<div class="' + cls + '">';
+      var inner = '';
+      if (msg.role === 'user' && msg.images && msg.images.length) {
+        inner += '<div class="chat-msg-images">' + msg.images.map(function (url) {
+          return '<img src="' + url + '" alt="attached image">';
+        }).join('') + '</div>';
+      } else if (msg.role === 'user' && msg.image_count) {
+        // A turn reloaded from history: the bytes were never stored (#202).
+        inner += '<div class="chat-msg-images-note">' + msg.image_count + ' image' +
+          (msg.image_count === 1 ? '' : 's') + ' sent, not kept in browser history</div>';
+      }
+      if (msg.role === 'assistant' && msg.reasoning) {
+        inner += '<div class="chat-think" data-think-index="' + i + '">' +
+          '<div class="chat-think-head">THINKING · ' + msg.reasoning.length + ' chars</div>' +
+          '<div class="chat-think-body">' + self.esc(msg.reasoning) + '</div></div>';
+      }
+      // A reasoning-only reply (the token budget ran out while thinking) has no
+      // content: render no empty bubble for it. The in-flight turn always keeps
+      // its bubble so the streaming updater has somewhere to write.
+      var live = self.state.streaming && i === self.state.messages.length - 1;
+      if (msg.content || !msg.reasoning || live) {
+        inner += '<div class="chat-msg-content">' + self.formatMarkdown(msg.content) + '</div>';
+      }
+      if (msg.role === 'assistant' && msg.stats) {
+        inner += self.chatStatChips(msg.stats);
+      }
+      html += '<div class="chat-msg-stack">' + inner + '</div>';
+      if (msg.role === 'assistant' && msg.content) {
+        html += '<button class="chat-copy-btn" data-msg-index="' + i + '" title="Copy">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">' +
+          '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
+          '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>' +
+          '</svg></button>';
+      }
+      html += '</div>';
+      return html;
+    }).join('');
+
+    container.scrollTop = container.scrollHeight;
+
+    container.querySelectorAll('.chat-think-head').forEach(function (head) {
+      head.addEventListener('click', function () {
+        var block = head.closest('.chat-think');
+        if (block) block.classList.toggle('folded');
+      });
+    });
+
+    container.querySelectorAll('.chat-copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var msg = self.state.messages[parseInt(btn.dataset.msgIndex)];
+        if (msg) {
+          navigator.clipboard.writeText(msg.content).then(function () {
+            self.toast('Copied to clipboard', 'success');
+          }).catch(function () {
+            self.toast('Failed to copy', 'error');
+          });
+        }
+      });
+    });
+
+    // Code block copy buttons
+    container.querySelectorAll('.code-copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var codeEl = document.getElementById(btn.dataset.codeId);
+        if (!codeEl) return;
+        var code = codeEl.textContent;
+        navigator.clipboard.writeText(code).then(function () {
+          var label = btn.querySelector('span');
+          if (label) {
+            var orig = label.textContent;
+            label.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(function () {
+              label.textContent = orig;
+              btn.classList.remove('copied');
+            }, 1500);
+          }
+          self.toast('Code copied', 'success');
+        }).catch(function () { self.toast('Failed to copy', 'error'); });
+      });
+    });
+
+    // Live metrics bar is only meaningful while a turn is in flight; the
+    // per-turn chips carry the numbers afterwards.
+    var metricsBar = document.getElementById('chat-metrics-bar');
+    if (metricsBar) metricsBar.style.display = this.state.streaming ? '' : 'none';
+  },
+
+  // ========================================================================
+  //  DOWNLOADS VIEW (center-stage)
+  // ========================================================================
+
+  // renderLiveCatalog lived here: a full second catalog view over
+  // /api/models/trending|openrouter|latest that nothing could reach, because
+  // nothing ever set modelsFilter to those values and liveCatalogBuffer was never
+  // populated (#210). The three endpoints are still registered and still work; a
+  // future discovery view should call them from a filter pill that exists.
+
+  bindRepoDownloadButtons(container) {
+    var self = this;
+    container.querySelectorAll('.downloads-download-btn').forEach(function (btn) {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var hfRepo = btn.dataset.modelId;
+        if (!hfRepo || hfRepo.indexOf('/') === -1) {
+          self.toast('Invalid model repo', 'error');
+          return;
+        }
+        self.startRepoDownload(hfRepo);
+      });
+    });
+
+    // Details button + capability badges open the detail modal
+    container.querySelectorAll('[data-info-repo]').forEach(function (el) {
+      if (el.dataset.infoBound) return;
+      el.dataset.infoBound = '1';
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var repo = el.dataset.infoRepo;
+        if (repo) self.showModelDetail(repo);
+      });
+    });
+
+    // Delete buttons
+    container.querySelectorAll('.downloads-delete-btn').forEach(function (btn) {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var repo = btn.dataset.modelId;
+        self.confirmDeleteModel(repo);
+      });
+    });
+  },
+
+  confirmDeleteModel(hfRepo) {
+    var self = this;
+    var existing = document.getElementById('confirm-delete-modal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'confirm-delete-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal" style="max-width:480px">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon" style="color:var(--red);border-color:rgba(255,51,51,0.4)">⚠</div>' +
+            '<div class="md-title">Delete Model</div>' +
+          '</div>' +
+          '<button class="md-close">×</button>' +
+        '</div>' +
+        '<div class="md-description">' +
+          'Permanently remove <strong>' + self.esc(hfRepo) + '</strong> from disk?' +
+          '<br><span style="color:var(--text-muted);font-size:13px">This frees the disk space immediately. You can re-download anytime.</span>' +
+        '</div>' +
+        '<div class="md-footer">' +
+          '<button class="btn-sm" id="cd-cancel" style="background:transparent;color:var(--text-secondary);border:1px solid var(--border-hover)">Cancel</button>' +
+          '<button class="btn-sm" id="cd-confirm" style="background:var(--red);color:#fff;border:1px solid var(--red);font-weight:700;letter-spacing:0.5px;padding:10px 22px">DELETE</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.querySelector('#cd-cancel').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+    modal.querySelector('#cd-confirm').addEventListener('click', function () {
+      var btn = modal.querySelector('#cd-confirm');
+      btn.disabled = true;
+      btn.textContent = 'Deleting...';
+      AINodeAuth.fetch('/api/models/delete-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hf_repo: hfRepo }),
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (data.error) {
+          self.toast('Delete failed: ' + data.error, 'error');
+          btn.disabled = false;
+          btn.textContent = 'DELETE';
+          return;
+        }
+        self.toast('Deleted ' + hfRepo + ' (freed ' + (data.freed_gb || '?') + ' GB)', 'success');
+        close();
+        self.state.catalog = null;  // force catalog refresh
+        self.refresh();
+        self._downloadsViewInitialized = false;
+        self.renderDownloads();
+      }).catch(function (err) {
+        self.toast('Delete failed: ' + err.message, 'error');
+        btn.disabled = false;
+        btn.textContent = 'DELETE';
+      });
+    });
+  },
+
+  // Persist active downloads to localStorage so page refresh doesn't lose them
+  saveActiveDownloads() {
+    try {
+      var toSave = {};
+      Object.keys(this.state.activeDownloads || {}).forEach(function (repo) {
+        var dl = this.state.activeDownloads[repo];
+        toSave[repo] = {
+          jobId: dl.jobId,
+          hfRepo: dl.hfRepo,
+          startedAt: dl.startedAt,
+          status: dl.status,
+          totalBytes: dl.totalBytes || 0,
+          downloadedBytes: dl.downloadedBytes || 0,
+          progress: dl.progress,
+        };
+      }, this);
+      localStorage.setItem('ainode_active_downloads', JSON.stringify(toSave));
+    } catch (e) { /* quota or disabled */ }
+  },
+
+  loadActiveDownloads() {
+    try {
+      var raw = localStorage.getItem('ainode_active_downloads');
+      if (!raw) return;
+      var saved = JSON.parse(raw) || {};
+      this.state.activeDownloads = this.state.activeDownloads || {};
+      var self = this;
+      Object.keys(saved).forEach(function (repo) {
+        var dl = saved[repo];
+        if (!dl || !dl.jobId) return;
+        // Discard entries older than 12 hours  -  stale
+        if (dl.startedAt && Date.now() - dl.startedAt > 12 * 3600 * 1000) return;
+        if (dl.status === 'completed' || dl.status === 'failed') return;
+        self.state.activeDownloads[repo] = Object.assign({ elapsed: 0 }, dl);
+        self.resumeDownloadPolling(repo);
+      });
+    } catch (e) { /* ignore */ }
+  },
+
+  resumeDownloadPolling(hfRepo) {
+    var self = this;
+    var dl = self.state.activeDownloads[hfRepo];
+    if (!dl || !dl.jobId) return;
+    if (dl._pollId) return;  // already polling
+
+    dl._pollId = setInterval(function () {
+      self.pollDownloadOnce(hfRepo);
+    }, 2000);
+
+    dl._tickId = setInterval(function () {
+      var d = self.state.activeDownloads[hfRepo];
+      if (!d || d.status !== 'downloading') return;
+      d.elapsed = Math.floor((Date.now() - d.startedAt) / 1000);
+      self.renderQueueItemInPlace(hfRepo);
+    }, 1000);
+  },
+
+  pollDownloadOnce(hfRepo) {
+    var self = this;
+    var dl = self.state.activeDownloads && self.state.activeDownloads[hfRepo];
+    if (!dl) return;
+
+    AINodeAuth.fetch('/api/models/download/status?job_id=' + encodeURIComponent(dl.jobId))
+      .then(function (r) { return r.json(); })
+      .then(function (st) {
+        if (st.error || st.status === 'unknown') {
+          // Job vanished  -  treat as probably completed if the model is downloaded
+          self.stopDownloadPolling(hfRepo);
+          self.checkIfDownloaded(hfRepo);
+          return;
+        }
+        dl.status = st.status;
+        dl.elapsed = Math.floor((Date.now() - dl.startedAt) / 1000);
+        dl.totalBytes = st.total_bytes || dl.totalBytes || 0;
+        // Monotonic  -  only go up, never down
+        var newBytes = st.downloaded_bytes || 0;
+        if (newBytes >= (dl.downloadedBytes || 0)) dl.downloadedBytes = newBytes;
+        if (st.progress != null && (dl.progress == null || st.progress >= dl.progress)) {
+          dl.progress = st.progress;
+        }
+
+        self.saveActiveDownloads();
+        self.renderQueueItemInPlace(hfRepo);
+        self.updateNavDownloadBadge();
+
+        if (st.status === 'completed') {
+          self.stopDownloadPolling(hfRepo);
+          self.toast('Downloaded: ' + hfRepo, 'success');
+          self.state.catalog = null;  // refresh catalog next time
+          // Keep in queue 8s so user sees completion, then remove
+          dl.status = 'completed';
+          dl.progress = 100;
+          dl.downloadedBytes = dl.totalBytes || dl.downloadedBytes;
+          self.renderQueueItemInPlace(hfRepo);
+          setTimeout(function () {
+            delete self.state.activeDownloads[hfRepo];
+            self.saveActiveDownloads();
+            self.renderDownloadsQueue();
+            self.updateNavDownloadBadge();
+          }, 6000);
+        } else if (st.status === 'failed') {
+          self.stopDownloadPolling(hfRepo);
+          self.toast('Download failed: ' + (st.error || 'unknown'), 'error');
+          dl.error = st.error;
+          self.renderQueueItemInPlace(hfRepo);
+          setTimeout(function () {
+            delete self.state.activeDownloads[hfRepo];
+            self.saveActiveDownloads();
+            self.renderDownloadsQueue();
+            self.updateNavDownloadBadge();
+          }, 10000);
+        }
+      })
+      .catch(function () { /* keep polling on transient errors */ });
+  },
+
+  stopDownloadPolling(hfRepo) {
+    var dl = this.state.activeDownloads && this.state.activeDownloads[hfRepo];
+    if (!dl) return;
+    if (dl._pollId) { clearInterval(dl._pollId); dl._pollId = null; }
+    if (dl._tickId) { clearInterval(dl._tickId); dl._tickId = null; }
+  },
+
+  checkIfDownloaded(hfRepo) {
+    var self = this;
+    var slug = hfRepo.replace(/\//g, '--').toLowerCase();
+    AINodeAuth.fetch('/api/models/' + encodeURIComponent(slug)).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (info) {
+      var dl = self.state.activeDownloads && self.state.activeDownloads[hfRepo];
+      if (!dl) return;
+      if (info && info.downloaded) {
+        dl.status = 'completed';
+        dl.progress = 100;
+        self.toast('Downloaded: ' + hfRepo, 'success');
+      } else {
+        dl.status = 'failed';
+        dl.error = 'Job expired';
+      }
+      self.renderQueueItemInPlace(hfRepo);
+      self.saveActiveDownloads();
+      setTimeout(function () {
+        delete self.state.activeDownloads[hfRepo];
+        self.saveActiveDownloads();
+        self.renderDownloadsQueue();
+        self.updateNavDownloadBadge();
+      }, 6000);
+    }).catch(function () { /* ignore */ });
+  },
+
+  // Update just one queue item's DOM in place  -  no re-rendering
+  renderQueueItemInPlace(hfRepo) {
+    var dl = this.state.activeDownloads && this.state.activeDownloads[hfRepo];
+    if (!dl) return;
+    var queue = document.getElementById('downloads-queue');
+    if (!queue) return;
+    if (queue.style.display === 'none' || !queue.children.length) {
+      this.renderDownloadsQueue();
+      return;
+    }
+    var existing = queue.querySelector('[data-queue-repo="' + CSS.escape(hfRepo) + '"]');
+    if (!existing) {
+      this.renderDownloadsQueue();
+      return;
+    }
+    existing.outerHTML = this.renderQueueItem(dl);
+  },
+
+  // Reconcile on startup  -  ask server for active jobs that might be ours
+  reconcileActiveDownloads() {
+    var self = this;
+    AINodeAuth.fetch('/api/models/downloads/active')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var jobs = (data.jobs || []).filter(function (j) {
+          return j.status === 'downloading';
+        });
+        jobs.forEach(function (job) {
+          var repo = job.model_id;
+          if (!repo || !repo.includes('/')) return;
+          if (self.state.activeDownloads && self.state.activeDownloads[repo]) return;
+          self.state.activeDownloads = self.state.activeDownloads || {};
+          self.state.activeDownloads[repo] = {
+            jobId: job.job_id,
+            hfRepo: repo,
+            status: 'downloading',
+            startedAt: Date.now() - 1000,
+            elapsed: 0,
+            totalBytes: job.total_bytes || 0,
+            downloadedBytes: job.downloaded_bytes || 0,
+            progress: job.progress,
+          };
+          self.resumeDownloadPolling(repo);
+          self.toast('Resumed tracking: ' + repo, 'info');
+        });
+        self.saveActiveDownloads();
+        self.renderDownloadsQueue();
+        self.updateNavDownloadBadge();
+      }).catch(function () { /* ignore */ });
+  },
+
+  startRepoDownload(hfRepo) {
+    var self = this;
+    if (!self.state.activeDownloads) self.state.activeDownloads = {};
+
+    if (self.state.activeDownloads[hfRepo] &&
+        self.state.activeDownloads[hfRepo].status === 'downloading') {
+      self.toast('Already downloading ' + hfRepo, 'info');
+      self.navigate('downloads');
+      return;
+    }
+
+    // Guard: already on disk  -  offer to launch instead of re-downloading
+    if (self.state.downloadedModels && self.state.downloadedModels[hfRepo]) {
+      self.toast(hfRepo + ' is already downloaded. Use Launch to load it.', 'info');
+      return;
+    }
+
+    AINodeAuth.fetch('/api/models/download-repo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hf_repo: hfRepo }),
+    }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t.slice(0, 80)); });
+      return resp.json();
+    }).then(function (data) {
+      if (data.error) { self.toast(data.error, 'error'); return; }
+
+      self.state.activeDownloads[hfRepo] = {
+        jobId: data.job_id,
+        status: 'downloading',
+        startedAt: Date.now(),
+        elapsed: 0,
+        hfRepo: hfRepo,
+        totalBytes: 0,
+        downloadedBytes: 0,
+        progress: null,
+      };
+      self.saveActiveDownloads();
+
+      self.navigate('downloads');
+      self.renderDownloadsQueue();
+      self.toast('Downloading ' + hfRepo, 'info');
+      self.resumeDownloadPolling(hfRepo);
+      self.updateNavDownloadBadge();
+    }).catch(function (err) {
+      self.toast('Download failed: ' + err.message, 'error');
+    });
+  },
+
+  renderDownloadsQueue() {
+    var container = document.getElementById('downloads-queue');
+    if (!container) return;
+    var self = this;
+    var active = Object.values(this.state.activeDownloads || {});
+    if (active.length === 0) {
+      container.innerHTML = '';
+      container.style.display = 'none';
+      return;
+    }
+    container.style.display = '';
+    container.innerHTML =
+      '<div class="queue-header">' +
+        '<span class="queue-title">⬇ Downloads Queue</span>' +
+        '<span class="queue-count">' + active.length + ' active</span>' +
+      '</div>' +
+      '<div class="queue-list">' +
+        active.map(function (dl) {
+          return self.renderQueueItem(dl);
+        }).join('') +
+      '</div>';
+
+    // Wire cancel buttons via TRUE event delegation on the stable container.
+    // Rows redrawn in place (renderQueueItemInPlace → existing.outerHTML) mint
+    // brand-new button nodes; a per-button listener would not survive that
+    // (e.g. cancelDownload's revert() redraws an enabled, listener-less button
+    // that would then be a silent no-op). Bind once to the container  -  which
+    // innerHTML/outerHTML on its children never replaces  -  and match on click.
+    if (!container._cancelDelegated) {
+      container._cancelDelegated = true;
+      container.addEventListener('click', function (e) {
+        var btn = e.target.closest && e.target.closest('.queue-item-cancel');
+        if (!btn || !container.contains(btn)) return;
+        e.stopPropagation();
+        var jobId = btn.getAttribute('data-job-id');
+        if (!jobId) return;
+        btn.disabled = true;
+        btn.textContent = '…';
+        self.cancelDownload(jobId);
+      });
+    }
+  },
+
+  cancelDownload(jobId) {
+    var self = this;
+    // Revert any rows for this job back to 'downloading' so the poll resumes
+    // and the cancel button (currently disabled/…) is redrawn fresh.
+    var revert = function () {
+      Object.keys(self.state.activeDownloads || {}).forEach(function (repo) {
+        var dl = self.state.activeDownloads[repo];
+        if (dl.jobId === jobId) {
+          dl.status = 'downloading';
+          self.renderQueueItemInPlace(repo);
+        }
+      });
+    };
+    AINodeAuth.fetch('/api/models/download-cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: jobId }),
+    })
+    .then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (!r.ok) {
+          throw new Error((data.error && data.error.message) || data.error || ('HTTP ' + r.status));
+        }
+        return data;
+      });
+    })
+    .then(function (data) {
+      if (data.status === 'cancelling') {
+        // Mark the local state so the UI updates immediately
+        Object.keys(self.state.activeDownloads || {}).forEach(function (repo) {
+          var dl = self.state.activeDownloads[repo];
+          if (dl.jobId === jobId) {
+            dl.status = 'cancelling';
+            self.renderQueueItemInPlace(repo);
+          }
+        });
+      } else {
+        // Unexpected response shape  -  don't leave the row stuck.
+        revert();
+      }
+    })
+    .catch(function (err) {
+      self.toast('Cancel failed: ' + err.message, 'error');
+      revert();
+    });
+  },
+
+  renderQueueItem(dl) {
+    var mins = Math.floor(dl.elapsed / 60);
+    var secs = dl.elapsed % 60;
+    var elapsedStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+
+    var statusClass = dl.status === 'completed' ? 'done' :
+                      dl.status === 'failed' ? 'failed' :
+                      'active';
+
+    var pct = dl.progress;
+    var hasPct = pct != null && !isNaN(pct);
+    var pctStr = hasPct ? pct.toFixed(1) + '%' : '';
+
+    var total = dl.totalBytes || 0;
+    var got = dl.downloadedBytes || 0;
+    var sizeStr = '';
+    if (total > 0) {
+      sizeStr = this.formatBytes(got) + ' / ' + this.formatBytes(total);
+    } else if (got > 0) {
+      sizeStr = this.formatBytes(got) + ' downloaded';
+    }
+
+    // Throughput + ETA
+    var rate = dl.elapsed > 0 ? got / dl.elapsed : 0;
+    var rateStr = rate > 0 ? this.formatBytes(rate) + '/s' : '';
+    var etaStr = '';
+    if (rate > 0 && total > 0 && got < total) {
+      var remaining = (total - got) / rate;
+      etaStr = 'ETA ' + this.formatDuration(remaining);
+    }
+
+    var statusLabel;
+    var barHtml = '';
+    var cancelBtn = '';
+    if (dl.status === 'completed') {
+      statusLabel = '✓ Complete · ' + (total > 0 ? this.formatBytes(total) : elapsedStr);
+    } else if (dl.status === 'failed') {
+      statusLabel = '⚠ Failed' + (dl.error ? ' - ' + this.esc(dl.error) : '');
+    } else if (dl.status === 'cancelled') {
+      statusLabel = '✕ Cancelled';
+    } else if (dl.status === 'cancelling') {
+      statusLabel = 'Cancelling...';
+    } else if (hasPct) {
+      statusLabel = pctStr + ' · ' + sizeStr + (rateStr ? ' · ' + rateStr : '') + (etaStr ? ' · ' + etaStr : '');
+      barHtml =
+        '<div class="queue-item-bar">' +
+          '<div class="queue-item-bar-progress" style="width:' + pct.toFixed(2) + '%"></div>' +
+        '</div>';
+      cancelBtn = '<button class="queue-item-cancel" data-job-id="' + this.esc(dl.jobId) + '" title="Cancel download">✕</button>';
+    } else {
+      // No total yet  -  show indeterminate shimmer
+      statusLabel = 'Starting... ' + elapsedStr + (sizeStr ? ' · ' + sizeStr : '');
+      barHtml =
+        '<div class="queue-item-bar">' +
+          '<div class="queue-item-bar-fill"></div>' +
+        '</div>';
+      cancelBtn = '<button class="queue-item-cancel" data-job-id="' + this.esc(dl.jobId) + '" title="Cancel download">✕</button>';
+    }
+
+    return '<div class="queue-item ' + statusClass + '" data-queue-repo="' + this.esc(dl.hfRepo) + '">' +
+      '<div class="queue-item-info">' +
+        '<div class="queue-item-repo">' + this.esc(dl.hfRepo) + (cancelBtn ? ' ' + cancelBtn : '') + '</div>' +
+        '<div class="queue-item-status">' + statusLabel + '</div>' +
+      '</div>' +
+      barHtml +
+    '</div>';
+  },
+
+  formatBytes(bytes) {
+    if (!bytes || bytes < 0) return '0 B';
+    if (bytes < 1024) return bytes.toFixed(0) + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes < 1024 * 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    return (bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2) + ' TB';
+  },
+
+  formatDuration(seconds) {
+    if (!seconds || seconds < 0 || !isFinite(seconds)) return '-';
+    seconds = Math.round(seconds);
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    return h + 'h ' + m + 'm';
+  },
+
+  updateNavDownloadBadge() {
+    var navPill = document.querySelector('.nav-pill[data-view="downloads"]');
+    if (!navPill) return;
+    var active = Object.values(this.state.activeDownloads || {}).filter(function (dl) {
+      return dl.status === 'downloading';
+    });
+    var existingBadge = navPill.querySelector('.nav-pill-badge');
+    if (active.length === 0) {
+      if (existingBadge) existingBadge.remove();
+      return;
+    }
+    if (existingBadge) {
+      existingBadge.textContent = active.length;
+    } else {
+      var badge = document.createElement('span');
+      badge.className = 'nav-pill-badge';
+      badge.textContent = active.length;
+      navPill.appendChild(badge);
+    }
+  },
+
+  renderCapabilityBadges(model) {
+    var caps = model.capabilities || [];
+    var defs = {
+      vision:       { label: 'Vision',       icon: '👁',  cls: 'cap-vision' },
+      tool_use:     { label: 'Tool Use',     icon: '🔧', cls: 'cap-tool' },
+      reasoning:    { label: 'Reasoning',    icon: '🧠', cls: 'cap-reasoning' },
+      code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
+      multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
+      // Not a feature layered on chat but the whole of what the model does: an
+      // entry carrying it is served by vLLM's pooling runner and answers
+      // /v1/embeddings only, which is why the card hides the chat controls for
+      // one and the chat picker never lists it.
+      embedding:    { label: 'Embedding',    icon: '≣',  cls: 'cap-embedding' },
+      // The same, for a speech-to-text model: it answers /v1/audio/transcriptions
+      // and /v1/audio/translations, and no chat path.
+      speech:       { label: 'Speech',       icon: '🎙', cls: 'cap-speech' },
+    };
+    var self = this;
+    var repo = model.hf_repo || model.id;
+    return caps.map(function (c) {
+      var d = defs[c];
+      if (!d) return '';
+      return '<span class="cap-badge ' + d.cls + '" data-info-repo="' + self.esc(repo) + '" title="Click for details">' +
+        '<span class="cap-badge-icon">' + d.icon + '</span>' + self.esc(d.label) +
+      '</span>';
+    }).join('');
+  },
+
+  showModelDetail(repoOrId) {
+    var self = this;
+    // Look up the model in the catalog; an unknown repo falls back to HF search
+    // below. (A second pool was concatenated here from state.liveCatalogBuffer,
+    // which nothing ever filled.)
+    var pool = (this.state.catalog || []).slice();
+    var model = pool.find(function (m) {
+      return m.hf_repo === repoOrId || m.id === repoOrId;
+    });
+    if (!model) {
+      // Fetch details from HF search as a fallback
+      AINodeAuth.fetch('/api/models/search?q=' + encodeURIComponent(repoOrId.split('/').pop() || repoOrId) + '&limit=5')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var hit = (data.models || []).find(function (m) { return m.hf_repo === repoOrId; });
+          if (hit) self.renderModelDetailModal(hit);
+          else self.toast('Model details unavailable', 'error');
+        }).catch(function () { self.toast('Failed to fetch details', 'error'); });
+      return;
+    }
+    this.renderModelDetailModal(model);
+  },
+
+  renderModelDetailModal(m) {
+    var self = this;
+    var existing = document.getElementById('model-detail-modal');
+    if (existing) existing.remove();
+
+    var repo = m.hf_repo || m.id;
+    var name = m.name || repo;
+    var isLoaded = ((this.state.status && this.state.status.models_loaded) || []).includes(repo);
+    var isDownloaded = isLoaded || !!(this.state.downloadedModels && this.state.downloadedModels[repo]);
+    var capDefs = {
+      vision:       { label: 'Vision',       icon: '👁',  cls: 'cap-vision' },
+      tool_use:     { label: 'Tool Use',     icon: '🔧', cls: 'cap-tool' },
+      reasoning:    { label: 'Reasoning',    icon: '🧠', cls: 'cap-reasoning' },
+      code:         { label: 'Code',         icon: '❮❯', cls: 'cap-code' },
+      multilingual: { label: 'Multilingual', icon: '🌐', cls: 'cap-multilingual' },
+      embedding:    { label: 'Embedding',    icon: '≣',  cls: 'cap-embedding' },
+      speech:       { label: 'Speech',       icon: '🎙', cls: 'cap-speech' },
+    };
+    var caps = (m.capabilities || []).map(function (c) {
+      var d = capDefs[c]; if (!d) return '';
+      return '<span class="cap-badge large ' + d.cls + '"><span class="cap-badge-icon">' + d.icon + '</span>' + d.label + '</span>';
+    }).join('');
+    // An embedding model answers /v1/embeddings and nothing else, so "Use in New
+    // Chat" would open a chat against an engine that 400s every message. The card
+    // says where the vectors are instead. A speech model is the same story on the
+    // two audio paths.
+    var isEmbedding = (m.capabilities || []).indexOf('embedding') !== -1;
+    var isSpeech = (m.capabilities || []).indexOf('speech') !== -1;
+
+    var sizeStr = m.size_gb ? '~' + Math.round(m.size_gb) + ' GB' : (m.size || 'size unknown');
+    var downloadsStr = m.downloads ? self.formatNumber(m.downloads) : '-';
+    var likesStr = m.likes ? self.formatNumber(m.likes) : '-';
+    var ageStr = m.created_at ? self.relativeTime(m.created_at).replace('released ', '') : '-';
+    var license = m.license || '-';
+    var arch = (m.architecture || m.family || '-');
+    var fmt = m.format || (m.quantization ? m.quantization.toUpperCase() : 'SafeTensors');
+    var paramsStr = m.params_b ? m.params_b + 'B' : (m.params || '-');
+    var ctxStr = m.context_length ? self.formatNumber(m.context_length) + ' tokens' : '-';
+
+    var fit = this.modelFitNote(m);
+    var metaRow =
+      '<div class="md-meta-row">' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Disk</span>' +
+          '<span class="md-meta-value ' + fit.cls + '">' + self.esc(fit.text) +
+          '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Params</span><span class="md-meta-value">' + self.esc(paramsStr) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Arch</span><span class="md-meta-value">' + self.esc(arch) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Format</span><span class="md-meta-value md-format">' + self.esc(fmt) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">Context</span><span class="md-meta-value">' + self.esc(ctxStr) + '</span></div>' +
+        '<div class="md-meta-pair"><span class="md-meta-label">License</span><span class="md-meta-value">' + self.esc(license) + '</span></div>' +
+      '</div>';
+
+    // Loading right now, here or on a peer: Launch is the one control that must
+    // not be clickable (a second launch of the same model is refused by the node
+    // anyway, with a 409 nobody can read), and the live line says why.
+    var prog = this.modelLoadProgress(repo);
+    var loadKey = 'model:' + repo;
+    // Which node the launch lands on. The button goes through the same call the
+    // right-hand LAUNCH panel uses, so it needs the same thing that panel needs:
+    // a node. Defaults to this one; every member is offered, so a launch from the
+    // modal can stack on a peer instead of only ever on the head.
+    var launchNodes = (this.state.nodes || []).filter(function (n) { return n.node_id; });
+    var localNodeId = (this.state.status && this.state.status.node_id) || '';
+    var showLaunch = !prog.loading && !isLoaded && isDownloaded;
+    var nodePicker = (showLaunch && launchNodes.length > 1)
+      ? '<select class="form-select md-node-select" id="md-launch-node">' +
+        launchNodes.map(function (n) {
+          var label = n.node_name || n.hostname || n.node_id;
+          return '<option value="' + self.esc(n.node_id) + '"' +
+            (n.node_id === localNodeId ? ' selected' : '') + '>' + self.esc(label) + '</option>';
+        }).join('') + '</select>'
+      : '';
+
+    var primaryCta = prog.loading
+      ? '<button class="btn-nvidia md-cta" id="md-launch" disabled>Loading…</button>'
+      : isLoaded
+        ? (isEmbedding
+            ? '<span class="md-cta-note">Serving POST /v1/embeddings</span>'
+            : isSpeech
+              ? '<span class="md-cta-note">Serving POST /v1/audio/transcriptions</span>'
+              : '<button class="btn-nvidia md-cta" id="md-use-chat">▶ Use in New Chat</button>')
+        : isDownloaded
+          ? '<button class="btn-nvidia md-cta" id="md-launch" data-hf-repo="' + self.esc(repo) + '">▶ Launch Model</button>'
+          : '<button class="btn-nvidia md-cta" id="md-download" data-hf-repo="' + self.esc(repo) + '">▼ Download (' + sizeStr + ')</button>';
+
+    var modal = document.createElement('div');
+    modal.id = 'model-detail-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon">⬡</div>' +
+            '<div class="md-title">' + self.esc(repo) + '</div>' +
+            '<button class="md-copy" data-copy="' + self.esc(repo) + '" title="Copy repo">⧉</button>' +
+          '</div>' +
+          '<button class="md-close" title="Close">×</button>' +
+        '</div>' +
+        '<div class="md-stats-row">' +
+          '<div class="md-stat"><span class="md-stat-icon">⬇</span>' + downloadsStr + '</div>' +
+          '<div class="md-stat"><span class="md-stat-icon">★</span>' + likesStr + '</div>' +
+          '<div class="md-stat md-stat-age">Last updated: ' + self.esc(ageStr) + '</div>' +
+          (m.recommended ? '<div class="md-staff-pick">✨ Recommended</div>' : '') +
+        '</div>' +
+        (m.description || m.desc ? '<div class="md-description">' + self.esc(m.description || m.desc) + '</div>' : '') +
+        metaRow +
+        (caps ? '<div class="md-capabilities"><span class="md-section-label">Capabilities</span><div class="md-cap-list">' + caps + '</div></div>' : '') +
+        (prog.loading
+          ? '<div class="md-loading">' +
+            self.loadTextHtml(loadKey, prog, 'line', 'md-loading-text') +
+            self.loadBarHtml(loadKey, prog, 'md-progress') + '</div>'
+          : '') +
+        '<div class="md-footer">' +
+          '<div class="md-footer-status">' + (prog.loading ? '◐ Coming up now' : isLoaded ? '● Model loaded and ready' : isDownloaded ? '◉ Downloaded, click Launch to run' : '○ Not yet downloaded') + '</div>' +
+          nodePicker +
+          primaryCta +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(modal);
+
+    // Close handlers
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+    document.addEventListener('keydown', function escHandler(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', escHandler); }
+    });
+
+    // Copy repo
+    modal.querySelector('.md-copy').addEventListener('click', function (e) {
+      navigator.clipboard.writeText(e.currentTarget.dataset.copy);
+      self.toast('Repo copied', 'success');
+    });
+
+    // Download
+    var dlBtn = modal.querySelector('#md-download');
+    if (dlBtn) {
+      dlBtn.addEventListener('click', function () {
+        self.startRepoDownload(dlBtn.dataset.hfRepo);
+        close();
+      });
+    }
+
+    // Launch the downloaded model: the same one-call path as the right-hand
+    // LAUNCH panel, on the picked node, stacking instead of replacing. This used
+    // to post /api/engine/set-model, which stopped whatever the node was serving
+    // (including stacked instances it knew nothing about) or launched nothing at
+    // all, and toasted "engine restarting" either way (#189).
+    var launchBtn = modal.querySelector('#md-launch');
+    if (launchBtn && !launchBtn.disabled) {
+      launchBtn.addEventListener('click', async function () {
+        var nodeSel = modal.querySelector('#md-launch-node');
+        var nodeId = (nodeSel && nodeSel.value) || localNodeId || '';
+        var nodeLabel = nodeSel
+          ? nodeSel.options[nodeSel.selectedIndex].textContent
+          : ((self.state.status && (self.state.status.node_name || self.state.status.node_id)) || 'this node');
+        launchBtn.disabled = true;
+        launchBtn.textContent = 'Launching...';
+        try {
+          var res = await self.loadModelOnNodes(repo, nodeId ? [nodeId] : [], 'tensor', null);
+          if (!res.ok) {
+            self.toast(res.data.error || 'Failed to launch model', 'error');
+            launchBtn.disabled = false;
+            launchBtn.textContent = '▶ Launch Model';
+            return;
+          }
+          // Say what the handler actually did, not what we hoped it did.
+          var port = res.data.api_port ? ' :' + res.data.api_port : '';
+          self.toast('Loading ' + repo + ' on ' + nodeLabel + port, 'success');
+          close();
+          self.refresh();
+        } catch (err) {
+          self.toast('Error: ' + err.message, 'error');
+          launchBtn.disabled = false;
+          launchBtn.textContent = '▶ Launch Model';
+        }
+      });
+    }
+
+    // Use in chat
+    var chatBtn = modal.querySelector('#md-use-chat');
+    if (chatBtn) {
+      chatBtn.addEventListener('click', function () {
+        self.state.messages = [];
+        self.state.currentConversation = null;
+        self.navigate('chat');
+        self.selectChatInstance({ model: repo });
+        close();
+      });
+    }
+  },
+
+  relativeTime(isoString) {
+    if (!isoString) return '';
+    try {
+      var then = new Date(isoString);
+      var now = new Date();
+      var diffMs = now - then;
+      if (isNaN(diffMs) || diffMs < 0) return '';
+      var seconds = Math.floor(diffMs / 1000);
+      var minutes = Math.floor(seconds / 60);
+      var hours = Math.floor(minutes / 60);
+      var days = Math.floor(hours / 24);
+      var months = Math.floor(days / 30);
+      var years = Math.floor(days / 365);
+      if (years > 0) return 'released ' + years + 'y ago';
+      if (months > 0) return 'released ' + months + 'mo ago';
+      if (days > 0) return 'released ' + days + 'd ago';
+      if (hours > 0) return 'released ' + hours + 'h ago';
+      if (minutes > 0) return 'released ' + minutes + 'm ago';
+      return 'just now';
+    } catch (e) {
+      return '';
+    }
+  },
+
+  renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, filterPills, totalCount) {
+    var self = this;
+    var query = this.state.hfSearchQuery || '';
+    // Always rebuild if we're entering HF mode from catalog mode
+    var hfInput = container.querySelector('#hf-search-input');
+    if (!hfInput) {
+      var toolbarHtml = '<div class="downloads-header">' +
+        '<h2 class="view-title">🤗 Hugging Face Hub</h2>' +
+        '<div class="downloads-count" id="hf-count">Search millions of models</div>' +
+        '</div>' +
+        '<div id="downloads-queue" class="downloads-queue"></div>' +
+        '<div class="downloads-toolbar">' +
+        '<input type="text" id="hf-search-input" class="search-input" placeholder="Search HuggingFace (e.g. llama, qwen, mistral, phi)..." value="' + this.esc(query) + '" autofocus>' +
+        '<button id="hf-back-btn" class="btn-sm hf-back-btn">← Back to Catalog</button>' +
+        '</div>' +
+        '<div id="downloads-results"></div>';
+      container.innerHTML = toolbarHtml;
+    }
+
+    var resultsContainer = container.querySelector('#downloads-results');
+    var countEl = container.querySelector('#hf-count');
+
+    // Back to the two-list catalog.
+    var backBtn = container.querySelector('#hf-back-btn');
+    if (backBtn && !backBtn.dataset.bound) {
+      backBtn.dataset.bound = '1';
+      backBtn.addEventListener('click', function () {
+        self.state.modelsSearch = '';
+        self.state.modelsFilter = 'catalog';
+        self.renderDownloads();
+      });
+    }
+
+    // Bind search input (debounced)
+    var input = container.querySelector('#hf-search-input');
+    if (input && !input.dataset.bound) {
+      input.dataset.bound = '1';
+      input.addEventListener('input', function () {
+        self.state.hfSearchQuery = input.value;
+        clearTimeout(self._hfSearchTimer);
+        self._hfSearchTimer = setTimeout(function () {
+          self.performHuggingFaceSearch(input.value, resultsContainer, countEl, loaded, gpuMem);
+        }, 400);
+      });
+    }
+
+    // Initial: if we have a query, rerun search; else show hint
+    if (query) {
+      this.performHuggingFaceSearch(query, resultsContainer, countEl, loaded, gpuMem);
+    } else if (resultsContainer && !resultsContainer.innerHTML) {
+      resultsContainer.innerHTML = '<div class="downloads-empty">Type a search query to find models on HuggingFace Hub.</div>';
+    }
+  },
+
+  performHuggingFaceSearch(query, resultsContainer, countEl, loaded, gpuMem) {
+    var self = this;
+    if (!query || query.length < 2) {
+      if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Type at least 2 characters to search.</div>';
+      if (countEl) countEl.textContent = 'Search for any text-generation model';
+      return;
+    }
+
+    if (resultsContainer) resultsContainer.innerHTML = '<div class="downloads-empty">Searching HuggingFace...</div>';
+
+    AINodeAuth.fetch('/api/models/search?q=' + encodeURIComponent(query) + '&limit=50')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        self._hfResults = data.models || [];
+        self._hfQuery = query;
+        self.state.hfShowAll = false;  // reset the reveal on each new search
+        self.renderHfResults();
+      })
+      .catch(function (err) {
+        var rc = document.getElementById('downloads-results');
+        if (rc) rc.innerHTML = '<div class="downloads-empty">Search failed: ' + err.message + '</div>';
+      });
+  },
+
+  // Render cached HF results, hiding models that can't run here (incompatible
+  // engine or too large) unless "Show all" is toggled (then shown dimmed).
+  renderHfResults() {
+    var self = this;
+    var models = this._hfResults || [];
+    var query = this._hfQuery || '';
+    var loaded = (this.state.status && this.state.status.models_loaded) || [];
+    var resultsContainer = document.getElementById('downloads-results');
+    var countEl = document.getElementById('hf-count');
+    if (!resultsContainer) return;
+
+    var runnable = models.filter(function (m) { return self.hfRunnable(m); });
+    var hiddenCount = models.length - runnable.length;
+    var showAll = !!this.state.hfShowAll;
+    var shown = showAll ? models : runnable;
+
+    if (countEl) {
+      countEl.textContent = runnable.length + ' runnable for "' + query + '"' +
+        (hiddenCount ? ' · ' + hiddenCount + ' hidden' : '');
+    }
+
+    function card(m) {
+      var isLoaded = loaded.includes(m.hf_repo);
+      var isOnDisk = isLoaded || !!(self.state.downloadedModels && self.state.downloadedModels[m.hf_repo]);
+      var dimmed = !self.hfRunnable(m);
+      var sizeStr = m.size_gb > 0 ? '~' + Math.round(m.size_gb) + ' GB' : 'size unknown';
+      var fitBadge = self.placementBadge(m);
+      var catalogBadge = m.in_catalog ? '<span class="fit-badge rec">✓ Recommended</span>' : '';
+      var quantBadge = m.quant ? '<span class="fit-badge ' + (/MLX|GGUF/.test(m.quant) ? 'untested' : 'quant') + '">' + self.esc(m.quant) + '</span>' : '';
+      var statusBadge = isLoaded ? '<span class="model-badge loaded">Loaded</span>'
+        : isOnDisk ? '<span class="model-badge loaded">Downloaded</span>'
+        : '<span class="model-badge available">Available</span>';
+      var downloadsStr = m.downloads ? self.formatNumber(m.downloads) + ' downloads' : '';
+      var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(m.hf_repo) + '">Details</button>';
+      var downloadBtn = isOnDisk ? '' : '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(m.hf_repo) + '">Download</button>';
+      return '<div class="download-card' + (dimmed ? ' dimmed' : '') + '" data-model-id="' + self.esc(m.hf_repo) + '">' +
+        '<div class="download-card-main">' +
+        '<div class="download-card-info">' +
+        '<div class="download-card-header">' +
+        '<div class="download-card-name">' + self.esc(m.name) + '</div>' +
+        '<div class="download-card-badges">' + catalogBadge + quantBadge + fitBadge + statusBadge + '</div>' +
+        '</div>' +
+        '<div class="download-card-repo">' + self.esc(m.hf_repo) + '</div>' +
+        '<div class="download-card-desc">' + sizeStr + (downloadsStr ? ' &middot; ' + downloadsStr : '') + '</div>' +
+        '</div>' +
+        '<div class="download-card-actions">' + detailsBtn + downloadBtn + '</div>' +
+        '</div>' +
+        '</div>';
+    }
+
+    var body = shown.length
+      ? '<div class="downloads-grid">' + shown.map(card).join('') + '</div>'
+      : '<div class="downloads-empty">No models here can run on this cluster.</div>';
+    var toggle = hiddenCount ? '<div class="hf-toggle-row"><button id="hf-show-all" class="btn-sm">' +
+      (showAll ? 'Hide incompatible / too-large' : 'Show ' + hiddenCount + ' hidden (incompatible or too large)') +
+      '</button></div>' : '';
+    resultsContainer.innerHTML = body + toggle;
+    self.bindRepoDownloadButtons(resultsContainer);
+    var tbtn = document.getElementById('hf-show-all');
+    if (tbtn) tbtn.addEventListener('click', function () {
+      self.state.hfShowAll = !self.state.hfShowAll;
+      self.renderHfResults();
+    });
+  },
+
+  formatNumber(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  },
+
+  // Placement of a model on THIS cluster. Returns {known, tooLarge, tp, label, cls}.
+  // Accepts catalog-shaped (sizeGb/minMem/proven_tp) or HF-shaped (size_gb) models.
+  placementInfo(model) {
+    var nodes = this.state.nodes || [];
+    var nodeCount = nodes.length || 1;
+    var st = this.state.status;
+    var perNode = (st && st.gpu && st.gpu.memory_total_mb) ? st.gpu.memory_total_mb / 1024
+      : ((nodes[0] && nodes[0].gpu_memory_gb) || 0);
+    var size = model.sizeGb || model.size_gb || 0;
+    if (!size || !perNode) return { known: false };  // unknown size → make no claim
+    // ponytail: weights × 1.2 for KV/activation headroom; minMem wins if curated.
+    var req = (model.minMem && model.minMem > size) ? model.minMem : size * 1.2;
+    var needed = Math.ceil(req / perNode);
+    var neededTp = needed <= 1 ? 1 : needed <= 2 ? 2 : needed <= 4 ? 4 : 8;
+    // Honor the proven launch config when it's at least what memory requires.
+    var tp = (model.proven_tp && model.proven_tp >= neededTp) ? model.proven_tp : neededTp;
+    if (needed > nodeCount || tp > nodeCount) {
+      return { known: true, tooLarge: true, label: 'Too large for cluster', cls: 'no-fit' };
+    }
+    if (tp === 1) return { known: true, tooLarge: false, tp: 1, label: 'Runs on 1 node', cls: 'fits' };
+    return { known: true, tooLarge: false, tp: tp, label: 'Good for TP=' + tp + ' · ' + tp + ' nodes', cls: 'cluster' };
+  },
+
+  placementBadge(model) {
+    var p = this.placementInfo(model);
+    return p.known ? '<span class="fit-badge ' + p.cls + '">' + p.label + '</span>' : '';
+  },
+
+  // Can AINode's vLLM engine serve this repo? MLX is Apple-only, GGUF is llama.cpp.
+  hfRunnable(m) {
+    var repo = (m.hf_repo || '').toLowerCase();
+    var vllmOk = m.vllm_ok !== false && !/mlx|gguf|ggml/.test(repo);
+    var info = this.placementInfo(m);
+    // Unknown size (GGUF etc.) can't be placed  -  treat as not-runnable-here.
+    return vllmOk && info.known && !info.tooLarge;
+  },
+
+  renderDownloads() {
+    var container = document.getElementById('downloads-content');
+    if (!container) return;
+    var s = this.state.status;
+    var loaded = s?.models_loaded || [];
+    var self = this;
+    var nodes = this.state.nodes;
+    var gpuMem = s?.gpu?.memory_total_mb ? s.gpu.memory_total_mb / 1024 : 0;
+    var totalClusterMem = nodes.reduce(function (sum, n) { return sum + (n.gpu_memory_gb || 0); }, 0);
+    var clusterNodeCount = nodes.length;
+
+    // Fetch downloaded models from disk  -  lazy load, refresh periodically
+    if (!this.state.downloadedModels) {
+      this.state.downloadedModels = {};
+      AINodeAuth.fetch('/api/models/downloaded').then(function (r) { return r.json(); }).then(function (data) {
+        var map = {};
+        (data.models || data || []).forEach(function (m) {
+          var repo = m.hf_repo || m.id || '';
+          if (repo) map[repo] = true;
+        });
+        self.state.downloadedModels = map;
+        self.state.downloadedList = (data.models || data || []);
+        self.renderDownloads();
+      }).catch(function () {});
+    }
+
+    // Fetch catalog from API (42+ models)  -  lazy load once
+    if (!this.state.catalog) {
+      this.state.catalog = [];
+      AINodeAuth.fetch('/api/models').then(function (r) { return r.json(); }).then(function (data) {
+        self.state.catalog = (data.models || []).map(function (m) {
+          return {
+            id: m.hf_repo || m.id,
+            slug: m.id,
+            name: m.name,
+            size: '~' + Math.round(m.size_gb) + ' GB',
+            sizeGb: m.size_gb,
+            desc: m.description,
+            family: m.family || '',
+            params: m.params_b ? m.params_b + 'B' : '',
+            quantization: m.quantization,
+            minMem: m.min_memory_gb || m.size_gb,
+            recommended: m.recommended || false,
+            created_at: m.created_at || '',
+            downloads: m.downloads || 0,
+            likes: m.likes || 0,
+            capabilities: m.capabilities || [],
+            architecture: m.architecture || '',
+            format: m.format || '',
+            hf_repo: m.hf_repo || '',
+            context_length: m.context_length || 0,
+            license: m.license || '',
+            verified: m.verified === true,
+            curated: m.curated === true,
+            proven_tp: m.proven_tp || 1,
+            downloaded: m.downloaded === true,
+          };
+        });
+        self.renderDownloads();
+      }).catch(function () { self.state.catalog = []; });
+      container.innerHTML = '<div class="downloads-empty">Loading catalog...</div>';
+      return;
+    }
+
+    var catalog = this.state.catalog;
+    var query = (this.state.modelsSearch || '').toLowerCase();
+    var dlMap = this.state.downloadedModels || {};
+
+    // Browse HuggingFace  -  the single escape hatch for grabbing anything not
+    // in our known-good catalog.
+    if (this.state.modelsFilter === 'huggingface') {
+      return this.renderHuggingFaceSearch(container, loaded, gpuMem, clusterNodeCount, totalClusterMem, '', catalog.length);
+    }
+
+    function matchesQuery(m) {
+      if (!query) return true;
+      return (m.id || '').toLowerCase().indexOf(query) !== -1 ||
+             (m.name || '').toLowerCase().indexOf(query) !== -1 ||
+             (m.desc || '').toLowerCase().indexOf(query) !== -1 ||
+             (m.family || '').toLowerCase().indexOf(query) !== -1;
+    }
+    function isOnDisk(m) {
+      return m.downloaded === true || !!dlMap[m.hf_repo] || !!dlMap[m.id] ||
+             loaded.includes(m.slug) || loaded.includes(m.id);
+    }
+
+    // Two lists, period: what you HAVE (on disk) and the curated CATALOG you can
+    // grab (our known-good picks, verified ones badged). Anything else: Browse HF.
+    var installed = catalog.filter(function (m) { return isOnDisk(m) && matchesQuery(m); });
+    var knownGood = catalog.filter(function (m) { return m.curated === true && !isOnDisk(m) && matchesQuery(m); });
+    // Add disk models NOT in the catalog (a plain HF repo you downloaded, e.g. Ornith)  -  else
+    // they vanish from this page despite being on disk + launchable. Mirrors the launch dropdown.
+    var inInstalled = {};
+    installed.forEach(function (m) { if (m.hf_repo) inInstalled[m.hf_repo] = true; if (m.id) inInstalled[m.id] = true; });
+    (self.state.downloadedList || []).forEach(function (m) {
+      var repo = m.hf_repo || m.id;
+      if (!repo || inInstalled[repo]) return;
+      var sz = m.size_gb || m.local_size_gb || 0;
+      var entry = { id: repo, slug: m.id || repo, name: m.name || repo.split('/').pop(),
+        size: '~' + Math.round(sz) + ' GB', sizeGb: sz, desc: m.description || 'Downloaded model',
+        quantization: m.quantization || null, minMem: m.min_memory_gb || sz, hf_repo: repo, downloaded: true };
+      if (matchesQuery(entry)) installed.push(entry);
+    });
+    var bySize = function (a, b) { return (a.sizeGb || 0) - (b.sizeGb || 0); };
+    installed.sort(bySize);
+    knownGood.sort(bySize);
+
+    var nowMs = Date.now();
+
+    function cardHtml(model) {
+      var isLoaded = loaded.includes(model.slug) || loaded.includes(model.id);
+      var onDisk = isOnDisk(model);
+      // This model coming up right now, on this node or a peer: the card says so
+      // with the same line and bar the chip and the launch panel draw, and the
+      // controls that would start a second launch of it are disabled while it is
+      // in flight.
+      var repoKey = model.hf_repo || model.id;
+      var prog = self.modelLoadProgress(repoKey, nowMs);
+      var loadKey = 'model:' + repoKey;
+      var loadingRow = prog.loading
+        ? '<div class="download-card-loading">' +
+          self.loadTextHtml(loadKey, prog, 'line', 'download-card-loading-text') +
+          self.loadBarHtml(loadKey, prog, 'download-card-progress') + '</div>'
+        : '';
+      var fits = gpuMem >= (model.minMem || model.sizeGb);
+      var fitBadge = self.placementBadge(model);
+      var statusBadge = isLoaded ?
+        '<span class="model-badge loaded">Loaded</span>' :
+        (onDisk ? '<span class="model-badge loaded">On disk</span>' :
+          '<span class="model-badge available">Available</span>');
+      var verBadge = model.verified ? '<span class="fit-badge rec">✓ Verified on GB10</span>'
+        : (model.curated ? '<span class="fit-badge untested">Curated · untested</span>' : '');
+      var quantBadge = model.quantization ? '<span class="fit-badge quant">' + self.esc(model.quantization.toUpperCase()) + '</span>' : '';
+      var paramsText = model.params ? model.params + ' params' : '';
+      var descParts = [paramsText, model.size].filter(Boolean);
+      var capabilityBadges = self.renderCapabilityBadges(model);
+      var actionBtn = onDisk
+        ? '<button class="btn-sm downloads-delete-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Delete</button>'
+        : '<button class="btn-sm downloads-download-btn" data-model-id="' + self.esc(model.hf_repo || model.id) + '">Download</button>';
+      // A model that needs more than one node is pointed at the ONE launch path
+      // that can do it: the right-hand LAUNCH INSTANCE panel, which posts the
+      // picked node_ids and genuinely launches TP = node count. This card used to
+      // offer "Shard Across Cluster" / "Launch Sharded", which drew a fabricated
+      // plan and then performed a plain solo load on this node (#188).
+      var needsCluster = !fits || (model.proven_tp || 1) > 1;
+      var clusterHint = (needsCluster && clusterNodeCount > 1 && totalClusterMem >= model.sizeGb)
+        ? '<br><span class="download-card-tagline">Needs more than one node: download it, then launch it from LAUNCH INSTANCE with two or more nodes picked.</span>'
+        : '';
+      var detailsBtn = '<button class="btn-sm download-details-btn" data-info-repo="' + self.esc(model.hf_repo || model.id) + '">Details</button>';
+      return '<div class="download-card" data-model-id="' + self.esc(model.hf_repo || model.id) + '">' +
+        '<div class="download-card-main">' +
+        '<div class="download-card-info">' +
+        '<div class="download-card-header">' +
+        '<div class="download-card-name">' + self.esc(model.name || model.id) + '</div>' +
+        '<div class="download-card-badges">' + verBadge + quantBadge + capabilityBadges + fitBadge + statusBadge + '</div>' +
+        '</div>' +
+        '<div class="download-card-repo">' + self.esc(model.hf_repo || model.id) + '</div>' +
+        '<div class="download-card-desc">' + descParts.join(' &middot; ') + (model.desc ? '<br><span class="download-card-tagline">' + self.esc(model.desc) + '</span>' : '') + clusterHint + '</div>' +
+        loadingRow +
+        '</div>' +
+        '<div class="download-card-actions">' + detailsBtn + actionBtn + '</div>' +
+        '</div>' +
+        '</div>';
+    }
+
+    function sectionHtml(title, sub, items, emptyMsg) {
+      var body = items.length
+        ? '<div class="downloads-grid">' + items.map(cardHtml).join('') + '</div>'
+        : '<div class="downloads-empty">' + emptyMsg + '</div>';
+      return '<section class="downloads-section">' +
+        '<div class="downloads-section-title">' + title +
+        ' <span class="downloads-section-count">' + items.length + '</span>' +
+        ' <span class="downloads-section-sub">' + sub + '</span></div>' +
+        body + '</section>';
+    }
+
+    // Toolbar once; only #downloads-results re-renders on search (keeps focus).
+    var needsToolbar = !container.querySelector('#downloads-search');
+    if (needsToolbar) {
+      container.innerHTML =
+        '<div class="downloads-header downloads-actions-row">' +
+        '<button id="browse-hf-btn" class="btn-sm">🤗 Browse Hugging Face</button>' +
+        '</div>' +
+        '<div id="downloads-queue" class="downloads-queue"></div>' +
+        '<div class="downloads-toolbar">' +
+        '<input type="text" id="downloads-search" class="search-input" placeholder="Filter your models and catalog..." value="' + this.esc(this.state.modelsSearch) + '">' +
+        '</div>' +
+        '<div id="downloads-results"></div>';
+    }
+
+    var catalogEmpty = query ? 'No catalog models match.'
+      : 'You already have every curated model. Use 🤗 Browse Hugging Face to grab anything else.';
+
+    var resultsContainer = container.querySelector('#downloads-results');
+    if (resultsContainer) {
+      resultsContainer.innerHTML =
+        sectionHtml('Installed', 'on your nodes - what you have', installed,
+          query ? 'No installed models match.' : 'Nothing downloaded yet. Grab one from the catalog below.') +
+        sectionHtml('Catalog', 'curated known-good picks - ready to download', knownGood, catalogEmpty);
+    }
+
+    // Bind search once.
+    var searchInput = document.getElementById('downloads-search');
+    if (searchInput && !searchInput.dataset.bound) {
+      searchInput.dataset.bound = '1';
+      searchInput.addEventListener('input', function () {
+        self.state.modelsSearch = searchInput.value;
+        self.renderDownloads();
+      });
+    }
+
+    // Bind Browse HuggingFace.
+    var hfBtn = document.getElementById('browse-hf-btn');
+    if (hfBtn && !hfBtn.dataset.bound) {
+      hfBtn.dataset.bound = '1';
+      hfBtn.addEventListener('click', function () {
+        self.state.modelsFilter = 'huggingface';
+        self.renderDownloads();
+      });
+    }
+
+    // Bind download/delete/details + queue.
+    self.bindRepoDownloadButtons(container);
+    self.renderDownloadsQueue();
+  },
+
+  // ========================================================================
+  //  TRAINING VIEW  (overview / autodata / datasets / runs / templates)
+  // ========================================================================
+
+  // ---- Sidebar ------------------------------------------------------------
+  async renderTrainingSidebar() {
+    var mount = document.getElementById('left-panel-training');
+    if (!mount) return;
+    var self = this;
+
+    var jobs = this.state.trainingJobs || [];
+    // Pull fresh jobs if we don't have them yet
+    if (!jobs.length) {
+      var data = await this.fetchJSON('/api/training/jobs');
+      this.state.trainingJobs = (data && data.jobs) || [];
+      jobs = this.state.trainingJobs;
+    }
+
+    var tab = this.state.trainingTab || 'overview';
+    var items = [
+      { id: 'overview',   label: 'Overview',   icon: '&#9711;' },
+      { id: 'autodata',   label: 'AutoData',   icon: '&#9883;' },
+      { id: 'datasets',   label: 'Datasets',   icon: '&#8864;' },
+      { id: 'runs',       label: 'Runs',       icon: '&#9873;' },
+      { id: 'templates',  label: 'Templates',  icon: '&#9641;' },
+    ];
+    // No "Distributed Training" guide: multi-node DDP has no launch path yet, so
+    // the page only ever taught users to reach for a run that fails.
+    var guides = [
+      { id: 'beginners',    label: "Beginner's Guide" },
+      { id: 'pipeline',     label: 'Training Pipeline' },
+      { id: 'standalone',   label: 'Standalone Training' },
+    ];
+
+    var recent = jobs.slice().sort(function (a, b) {
+      return (b.start_time || 0) - (a.start_time || 0);
+    }).slice(0, 5);
+
+    var subnavHtml = items.map(function (it) {
+      var active = it.id === tab ? ' active' : '';
+      return '<button class="training-subnav-item' + active + '" data-tab="' + it.id + '">' +
+        '<span class="sub-icon">' + it.icon + '</span>' + self.esc(it.label) + '</button>';
+    }).join('');
+
+    var recentHtml = recent.length
+      ? recent.map(function (j) {
+          var s = self._statusInfo(j.status);
+          var model = (j.config && j.config.base_model ? j.config.base_model.split('/').pop() : '-');
+          var name = (j.config && j.config.run_name) || model;
+          return '<div class="training-recent-item" data-job-id="' + self.esc(j.job_id) + '">' +
+            '<div class="training-recent-top">' +
+              '<span class="training-recent-name">' + self.esc(name) + '</span>' +
+              '<span class="job-status-badge ' + s.cls + '">' + s.label + '</span>' +
+            '</div>' +
+            '<div class="training-recent-meta">' + self.esc(j.job_id) + '</div>' +
+            '</div>';
+        }).join('')
+      : '<div class="conv-empty" style="padding:10px 14px;font-size:12px;color:var(--text-muted)">No runs yet</div>';
+
+    var guidesHtml = guides.map(function (g) {
+      return '<a class="training-guide-link" data-guide="' + g.id + '">&#9733; ' + self.esc(g.label) + '</a>';
+    }).join('');
+
+    mount.innerHTML =
+      '<button class="btn-nvidia" id="training-new-run-btn">+ NEW RUN</button>' +
+      '<div class="training-sidebar-title">Training</div>' +
+      '<div class="training-sidebar-section training-subnav">' + subnavHtml + '</div>' +
+      '<div class="training-sidebar-section">' +
+        '<div class="training-sidebar-title" style="padding:0 8px 8px">Recent Runs</div>' +
+        recentHtml +
+      '</div>' +
+      '<div class="training-sidebar-section">' +
+        '<div class="training-sidebar-title" style="padding:0 8px 8px">Guides</div>' +
+        guidesHtml +
+      '</div>';
+
+    // Bindings
+    var newBtn = document.getElementById('training-new-run-btn');
+    if (newBtn) newBtn.addEventListener('click', function () { self.showNewRunWizard(); });
+
+    mount.querySelectorAll('.training-subnav-item').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.state.trainingTab = btn.dataset.tab;
+        self.state.trainingView = 'list';
+        self.state.trainingDetailId = null;
+        self._autodataViewInitialized = false;  // full-render the AutoData panel on (re)entry
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      });
+    });
+    mount.querySelectorAll('.training-recent-item').forEach(function (el) {
+      el.addEventListener('click', function () {
+        self.state.trainingTab = 'runs';
+        self.state.trainingView = 'detail';
+        self.state.trainingDetailId = el.dataset.jobId;
+        self.state.trainingLossData = [];
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      });
+    });
+    mount.querySelectorAll('.training-guide-link').forEach(function (el) {
+      el.addEventListener('click', function () {
+        self.showGuideModal(el.dataset.guide);
+      });
+    });
+  },
+
+  _statusInfo(status) {
+    var m = {
+      pending:   { cls: 'status-pending',   label: 'Pending' },
+      running:   { cls: 'status-running',   label: 'Running' },
+      completed: { cls: 'status-completed', label: 'Completed' },
+      failed:    { cls: 'status-failed',    label: 'Failed' },
+      cancelled: { cls: 'status-cancelled', label: 'Cancelled' },
+    };
+    return m[status] || { cls: '', label: status || '-' };
+  },
+
+  async renderTraining() {
+    var container = document.getElementById('training-content');
+    if (!container) return;
+
+    // If we're drilling into a specific job detail, handle that first
+    if (this.state.trainingView === 'detail' && this.state.trainingDetailId) {
+      var data = await this.fetchJSON('/api/training/jobs');
+      this.state.trainingJobs = (data && data.jobs) || [];
+      await this.renderTrainingDetail(container);
+      return;
+    }
+
+    var tab = this.state.trainingTab || 'overview';
+    // Fetch jobs + datasets + stats in parallel
+    var results = await Promise.all([
+      this.fetchJSON('/api/training/jobs'),
+      this.fetchJSON('/api/training/stats'),
+      this.fetchJSON('/api/datasets'),
+      this.fetchJSON('/api/training/templates'),
+    ]);
+    this.state.trainingJobs = (results[0] && results[0].jobs) || [];
+    this.state.trainingStats = results[1] || null;
+    this.state.datasets = (results[2] && results[2].datasets) || [];
+    this.state.trainingTemplates = (results[3] && results[3].templates) || [];
+
+    // Refresh sidebar so Recent Runs shows latest
+    this.renderTrainingSidebar();
+
+    switch (tab) {
+      case 'overview':   this.renderTrainingOverview(container); break;
+      case 'autodata':
+        // Mirror the downloads-view guard: full render on entry, then the 5s poll
+        // leaves the panel alone (the run has its own poller) so the form never flickers.
+        if (this._autodataViewInitialized) { /* in place - _pollAutoData owns #autodata-status */ }
+        else { this._autodataViewInitialized = true; this.renderTrainingAutoData(container); }
+        break;
+      case 'datasets':   this.renderTrainingDatasets(container); break;
+      case 'runs':       this.renderTrainingRuns(container); break;
+      case 'templates':  this.renderTrainingTemplates(container); break;
+      default:           this.renderTrainingOverview(container);
+    }
+  },
+
+  // ---- Overview ----------------------------------------------------------
+  renderTrainingOverview(container) {
+    var self = this;
+    var stats = this.state.trainingStats || {};
+    var jobs = this.state.trainingJobs || [];
+    var recent = jobs.slice().sort(function (a, b) {
+      return (b.start_time || 0) - (a.start_time || 0);
+    }).slice(0, 4);
+
+    var tilesHtml =
+      '<div class="training-stat-tile accent"><div class="stat-label">Active Runs</div><div class="stat-value">' + (stats.running || 0) + '</div></div>' +
+      '<div class="training-stat-tile"><div class="stat-label">Completed Today</div><div class="stat-value">' + (stats.completed_today || 0) + '</div></div>' +
+      '<div class="training-stat-tile"><div class="stat-label">Total Runs</div><div class="stat-value">' + (stats.total || jobs.length) + '</div></div>' +
+      '<div class="training-stat-tile"><div class="stat-label">GPU Hours</div><div class="stat-value">' + (stats.total_gpu_hours != null ? stats.total_gpu_hours.toFixed(1) : '0.0') + '</div></div>';
+
+    var quickstart = [
+      { id: 'lora', icon: 'L', title: 'Fine-tune with LoRA', desc: 'Small adapter weights. Recommended for most users - trains fast, stays memory-efficient.' },
+      { id: 'qlora', icon: 'Q', title: 'Fine-tune with QLoRA', desc: '4-bit base + adapters. Same run as LoRA on a smaller memory budget, for the biggest models.' },
+      { id: 'full', icon: 'F', title: 'Full Fine-tune', desc: 'Updates all weights. Highest quality, needs the most memory - use for single large-memory nodes.' },
+    ].map(function (q) {
+      return '<div class="quickstart-tile" data-qs="' + q.id + '">' +
+        '<div class="quickstart-icon">' + q.icon + '</div>' +
+        '<h4>' + self.esc(q.title) + '</h4>' +
+        '<p>' + self.esc(q.desc) + '</p>' +
+        '<button class="btn-nvidia" data-qs-btn="' + q.id + '">Start &rsaquo;</button>' +
+        '</div>';
+    }).join('');
+
+    var recentHtml = recent.length
+      ? recent.map(function (j) { return self.renderJobCard(j); }).join('')
+      : '<div class="training-empty"><h3>No runs yet</h3><p>Kick off your first fine-tune from the quick-start tiles above.</p></div>';
+
+    container.innerHTML =
+      '<div class="training-overview">' +
+        '<div class="training-stat-tiles">' + tilesHtml + '</div>' +
+        '<div>' +
+          '<div class="training-section-head"><h3>Quick Start</h3><span class="muted">Jump straight in</span></div>' +
+          '<div class="quickstart-grid">' + quickstart + '</div>' +
+        '</div>' +
+        '<div>' +
+          '<div class="training-section-head"><h3>Quantize a Model</h3><span class="muted">Shrink to AWQ / NVFP4 - runs on a free node, lands in Installed</span></div>' +
+          '<div class="quantize-panel">' +
+            '<div class="form-grid">' +
+              '<div class="form-group"><label class="form-label">Base model (HF repo or installed)</label><input type="text" id="q-base" class="form-input" placeholder="Qwen/Qwen3.5-4B"></div>' +
+              '<div class="form-group"><label class="form-label">Scheme</label><select id="q-scheme" class="form-input"><option value="awq">AWQ (W4A16 - proven on GB10)</option><option value="nvfp4">NVFP4 (Blackwell-native)</option></select></div>' +
+              '<div class="form-group"><label class="form-label">Calibration samples</label><input type="number" id="q-calib" class="form-input" value="256" min="16" max="1024"></div>' +
+            '</div>' +
+            '<label class="form-label" style="display:block;margin-top:8px"><input type="checkbox" id="q-push"> Push result to Hugging Face</label>' +
+            '<input type="text" id="q-repo" class="form-input" placeholder="HF repo name (optional; namespace from your write token)" style="margin-top:6px">' +
+            '<div class="form-hint">Target node must be idle - quantization needs the full GPU memory (unload models first).</div>' +
+            '<button class="btn-nvidia" id="q-submit" style="margin-top:10px">Quantize &rsaquo;</button>' +
+          '</div>' +
+        '</div>' +
+        '<div>' +
+          '<div class="training-section-head"><h3>Recent Activity</h3><span class="muted">' + recent.length + ' run' + (recent.length === 1 ? '' : 's') + '</span></div>' +
+          '<div class="recent-activity-list">' + recentHtml + '</div>' +
+        '</div>' +
+      '</div>';
+
+    container.querySelectorAll('[data-qs-btn]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var picked = btn.dataset.qsBtn;
+        self.showNewRunWizard({ method: (picked === 'full' || picked === 'qlora') ? picked : 'lora' });
+      });
+    });
+
+    var qBtn = container.querySelector('#q-submit');
+    if (qBtn) qBtn.addEventListener('click', async function () {
+      var base = (container.querySelector('#q-base').value || '').trim();
+      if (!base) { self.toast('Enter a base model to quantize', 'error'); return; }
+      var payload = {
+        method: 'quantize',
+        base_model: base,
+        scheme: container.querySelector('#q-scheme').value,
+        calib_samples: parseInt(container.querySelector('#q-calib').value, 10) || 256,
+        push_to_hf: container.querySelector('#q-push').checked,
+      };
+      var repo = (container.querySelector('#q-repo').value || '').trim();
+      if (repo) payload.hf_repo = repo;
+      qBtn.disabled = true; qBtn.textContent = 'Submitting…';
+      try {
+        var resp = await AINodeAuth.fetch('/api/training/jobs', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        var result = await resp.json();
+        if (!resp.ok) {
+          self.toast('Error: ' + (result.error || 'Failed to start quantize job'), 'error');
+          qBtn.disabled = false; qBtn.textContent = 'Quantize ›'; return;
+        }
+        self.toast('Quantize job started', 'success');
+        self.state.trainingTab = 'runs';
+        if (self.renderTrainingSidebar) self.renderTrainingSidebar();
+        self.renderTraining();
+      } catch (e) {
+        self.toast('Network error: ' + e.message, 'error');
+        qBtn.disabled = false; qBtn.textContent = 'Quantize ›';
+      }
+    });
+    container.querySelectorAll('.training-job-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        self.state.trainingTab = 'runs';
+        self.state.trainingView = 'detail';
+        self.state.trainingDetailId = card.dataset.jobId;
+        self.state.trainingLossData = [];
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      });
+    });
+  },
+
+  // ---- AutoData ----------------------------------------------------------
+  // Δ-filtered synthetic-data generation over four AInode-served models. The run
+  // executes server-side and calls back into the federated /v1 proxy, so every
+  // role endpoint is this server's own loopback + the picked served-model-name.
+  renderTrainingAutoData(container) {
+    var self = this;
+    var models = this.state.fleetModels || [];
+    var opts = models.map(function (m) {
+      return '<option value="' + self.esc(m) + '">' + self.esc(m) + '</option>';
+    }).join('');
+    var role = function (key, label, hint) {
+      return '<div class="form-group"><label class="form-label">' + label + '</label>' +
+        '<select id="ad-' + key + '" class="form-input">' + opts + '</select>' +
+        (hint ? '<div class="form-hint">' + hint + '</div>' : '') + '</div>';
+    };
+
+    container.innerHTML =
+      '<div class="training-overview">' +
+        '<div class="dataset-toolbar"><div>' +
+          '<h2 style="font-size:18px;font-weight:700">AutoData</h2>' +
+          '<p style="font-size:12.5px;color:var(--text-muted);margin-top:4px">Generate synthetic training data from your loaded models. The Challenger writes tasks, a weak and a strong solver answer them, and the Judge keeps only what the strong model gets right and the weak one misses - the result lands in Datasets, ready to train on.</p>' +
+        '</div></div>' +
+        (models.length ? '' : '<div class="form-hint" style="margin-bottom:10px">No models loaded - load at least one model (Models tab) so the four roles have an endpoint to call.</div>') +
+        '<div class="quantize-panel">' +
+          '<div class="form-grid">' +
+            role('challenger', 'Challenger (writes tasks)', 'A strong, creative model') +
+            role('weak', 'Weak solver', 'Smaller/faster - should miss the hard ones') +
+            role('strong', 'Strong solver', 'The teacher - its answers become the data') +
+            role('judge', 'Judge (grades answers)', '') +
+          '</div>' +
+          '<div class="form-group" style="margin-top:8px"><label class="form-label">Task spec</label>' +
+            '<textarea id="ad-task-spec" class="form-input" rows="2" placeholder="e.g. Challenging grade-school math word problems with a single numeric answer."></textarea></div>' +
+          '<div class="form-group"><label class="form-label">Generator prompt (Challenger system prompt)</label>' +
+            '<textarea id="ad-gen-prompt" class="form-input" rows="2" placeholder="e.g. You are an expert problem author. Write diverse, unambiguous tasks."></textarea></div>' +
+          '<div class="form-grid">' +
+            '<div class="form-group"><label class="form-label"># Tasks</label><input type="number" id="ad-n-tasks" class="form-input" value="20" min="1" max="500"></div>' +
+            '<div class="form-group"><label class="form-label">Judge mode</label><select id="ad-judge-mode" class="form-input">' +
+              '<option value="rubric">Rubric (LLM grades)</option>' +
+              '<option value="verify">Verify (math/numeric, rubric fallback)</option>' +
+              '<option value="exact">Exact (substring match)</option>' +
+            '</select></div>' +
+            '<div class="form-group"><label class="form-label">Dataset name</label><input type="text" id="ad-name" class="form-input" placeholder="optional"></div>' +
+          '</div>' +
+          '<label class="form-label" style="display:block;margin-top:8px"><input type="checkbox" id="ad-meta"> Meta-optimize - rewrite the generator prompt over several rounds to lift yield</label>' +
+          '<button class="btn-nvidia" id="ad-run" style="margin-top:10px"' + (models.length ? '' : ' disabled') + '>Run AutoData &rsaquo;</button>' +
+        '</div>' +
+        '<div id="autodata-status" style="margin-top:14px"></div>' +
+      '</div>';
+
+    this._renderAutoDataStatus();  // restore an in-flight/last run if we re-entered the tab
+
+    var runBtn = container.querySelector('#ad-run');
+    if (runBtn) runBtn.addEventListener('click', function () { self._startAutoDataRun(container); });
+  },
+
+  async _startAutoDataRun(container) {
+    var self = this;
+    var val = function (sel) { var el = container.querySelector(sel); return el ? el.value.trim() : ''; };
+    var pick = function (sel) { var el = container.querySelector(sel); return el ? el.value : ''; };
+    var taskSpec = val('#ad-task-spec'), genPrompt = val('#ad-gen-prompt');
+    if (!taskSpec || !genPrompt) { self.toast('Task spec and generator prompt are required', 'error'); return; }
+    if (!pick('#ad-challenger')) { self.toast('Load at least one model first', 'error'); return; }
+    // ponytail: the federated /v1 proxy is this same server; loopback + the served-model-name
+    // routes to whichever node serves it. Assumes the default api_port when the port is blank.
+    var base = 'http://localhost:' + (window.location.port || '8000') + '/v1';
+    var ep = function (sel) { return { url: base, model: pick(sel) }; };
+    var body = {
+      config: {
+        task_spec: taskSpec, gen_prompt: genPrompt,
+        challenger: ep('#ad-challenger'), weak: ep('#ad-weak'),
+        strong: ep('#ad-strong'), judge: ep('#ad-judge'),
+        n_tasks: parseInt(val('#ad-n-tasks'), 10) || 20,
+        judge_mode: pick('#ad-judge-mode'),
+      },
+      meta: container.querySelector('#ad-meta').checked,
+    };
+    var name = val('#ad-name');
+    if (name) body.name = name;
+
+    var runBtn = container.querySelector('#ad-run');
+    runBtn.disabled = true; runBtn.textContent = 'Starting…';
+    try {
+      var resp = await AINodeAuth.fetch('/api/training/autodata', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (!resp.ok) {
+        self.toast('Error: ' + (data.error || 'Failed to start AutoData'), 'error');
+        runBtn.disabled = false; runBtn.textContent = 'Run AutoData ›'; return;
+      }
+      self.state.autodataRun = { run_id: data.run_id, status: 'running', meta: body.meta };
+      self.toast('AutoData run started', 'success');
+      self._renderAutoDataStatus();
+      self._pollAutoData();
+    } catch (e) {
+      self.toast('Network error: ' + e.message, 'error');
+      runBtn.disabled = false; runBtn.textContent = 'Run AutoData ›';
+    }
+  },
+
+  _pollAutoData() {
+    var self = this;
+    if (this._autodataPollTimer) clearTimeout(this._autodataPollTimer);
+    var tick = async function () {
+      var cur = self.state.autodataRun;
+      if (!cur || !cur.run_id) return;
+      var data = await self.fetchJSON('/api/training/autodata/' + encodeURIComponent(cur.run_id));
+      if (data) {
+        self.state.autodataRun = data;
+        self._renderAutoDataStatus();
+        if (data.status === 'completed' || data.status === 'failed') {
+          var btn = document.getElementById('ad-run');
+          if (btn) { btn.disabled = false; btn.textContent = 'Run AutoData ›'; }
+          if (data.status === 'completed' && data.dataset_id) {
+            // pull the new dataset into state so it shows up the moment they open Datasets
+            var ds = await self.fetchJSON('/api/datasets');
+            if (ds && ds.datasets) self.state.datasets = ds.datasets;
+            self._renderAutoDataStatus();
+          }
+          return;  // terminal - stop polling
+        }
+      }
+      self._autodataPollTimer = setTimeout(tick, 3000);
+    };
+    tick();
+  },
+
+  _renderAutoDataStatus() {
+    var el = document.getElementById('autodata-status');
+    if (!el) return;
+    var self = this;
+    var run = this.state.autodataRun;
+    if (!run) { el.innerHTML = ''; return; }
+    var card = function (inner) {
+      return '<div style="padding:14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;font-size:13px;line-height:1.6">' + inner + '</div>';
+    };
+    if (run.status === 'running') {
+      el.innerHTML = card('<span class="job-status-badge status-running">Running</span> Generating &amp; Δ-filtering tasks…' + (run.meta ? ' (meta-optimizing the generator prompt)' : ''));
+      return;
+    }
+    if (run.status === 'failed') {
+      el.innerHTML = card('<span class="job-status-badge status-failed">Failed</span> ' + self.esc(run.error || 'Unknown error'));
+      return;
+    }
+    if (run.status === 'completed') {
+      var r = run.report || {};
+      var stats = run.meta
+        ? 'Kept <strong>' + (r.kept != null ? r.kept : '-') + '</strong> &middot; best yield <strong>' +
+            (r.best_yield != null ? r.best_yield + '%' : '-') + '</strong> &middot; <strong>' + (r.rounds != null ? r.rounds : '-') + '</strong> rounds'
+        : 'Kept <strong>' + (r.kept != null ? r.kept : '-') + '</strong> of <strong>' + (r.total != null ? r.total : '-') +
+            '</strong> &middot; yield <strong>' + (r.yield_pct != null ? r.yield_pct + '%' : '-') + '</strong> ' +
+            '<span class="muted">(too-easy ' + (r.too_easy || 0) + ' &middot; too-hard ' + (r.too_hard || 0) + ' &middot; errors ' + (r.errors || 0) + ')</span>';
+      var tail = run.dataset_id
+        ? '<div style="margin-top:10px"><button class="btn-nvidia" id="ad-goto-dataset">Open in Datasets &rsaquo;</button></div>'
+        : '<div style="margin-top:10px" class="muted">No rows kept - nothing to save. Try more tasks, or pick a wider weak/strong gap.</div>';
+      el.innerHTML = card('<span class="job-status-badge status-completed">Completed</span> ' + stats + tail);
+      var goto = document.getElementById('ad-goto-dataset');
+      if (goto) goto.addEventListener('click', function () {
+        self.state.trainingTab = 'datasets';
+        self._autodataViewInitialized = false;
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      });
+    }
+  },
+
+  // ---- Datasets ----------------------------------------------------------
+  renderTrainingDatasets(container) {
+    var self = this;
+    var datasets = this.state.datasets || [];
+    var list = datasets.length
+      ? '<div class="dataset-grid">' + datasets.map(function (d) { return self.renderDatasetCard(d); }).join('') + '</div>'
+      : '<div class="training-empty"><h3>No datasets yet</h3><p>Upload a file, reference a HuggingFace dataset, or point at a local path to get started.</p></div>';
+
+    container.innerHTML =
+      '<div class="training-overview">' +
+        '<div class="dataset-toolbar">' +
+          '<div><h2 style="font-size:18px;font-weight:700">Datasets</h2>' +
+          '<p style="font-size:12.5px;color:var(--text-muted);margin-top:4px">Training data you can attach to any run.</p></div>' +
+          '<button class="btn-nvidia" id="dataset-add-btn">+ Add Dataset</button>' +
+        '</div>' +
+        list +
+      '</div>';
+
+    var addBtn = document.getElementById('dataset-add-btn');
+    if (addBtn) addBtn.addEventListener('click', function () { self.showDatasetAddModal(); });
+
+    container.querySelectorAll('[data-ds-delete]').forEach(function (b) {
+      b.addEventListener('click', async function (e) {
+        e.stopPropagation();
+        if (!confirm('Delete this dataset?')) return;
+        var resp = await AINodeAuth.fetch('/api/datasets/' + encodeURIComponent(b.dataset.dsDelete), { method: 'DELETE' });
+        if (resp.ok) { self.toast('Dataset deleted', 'success'); self.renderTraining(); }
+        else { self.toast('Failed to delete dataset', 'error'); }
+      });
+    });
+    container.querySelectorAll('[data-ds-use]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        self.showNewRunWizard({ dataset_id: b.dataset.dsUse });
+      });
+    });
+    container.querySelectorAll('[data-ds-preview]').forEach(function (b) {
+      b.addEventListener('click', async function (e) {
+        e.stopPropagation();
+        var id = b.dataset.dsPreview;
+        var target = document.getElementById('ds-preview-' + id);
+        if (!target) return;
+        if (target.style.display !== 'none' && target.dataset.loaded === '1') {
+          target.style.display = 'none';
+          target.dataset.loaded = '0';
+          return;
+        }
+        target.style.display = '';
+        target.textContent = 'Loading preview…';
+        var data = await self.fetchJSON('/api/datasets/' + encodeURIComponent(id) + '/preview');
+        if (!data) { target.textContent = 'Preview unavailable.'; return; }
+        target.textContent = JSON.stringify(data.samples, null, 2);
+        target.dataset.loaded = '1';
+      });
+    });
+  },
+
+  renderDatasetCard(d) {
+    var name = this.esc(d.name || d.id);
+    var badge = '<span class="dataset-badge src-' + this.esc(d.source) + '">' + this.esc(d.source) + '</span>';
+    var fmt = d.format ? '<span class="dataset-badge">' + this.esc(d.format) + '</span>' : '';
+    var sz = this.formatBytes(d.size_bytes || 0);
+    var samples = (d.samples || 0).toLocaleString();
+    var created = d.created_at ? new Date(d.created_at * 1000).toLocaleDateString() : '-';
+
+    return '<div class="dataset-card">' +
+      '<div class="dataset-card-top">' +
+        '<div><div class="dataset-card-name">' + name + '</div>' +
+        '<div class="dataset-card-id">' + this.esc(d.id) + '</div></div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">' + badge + fmt + '</div>' +
+      '</div>' +
+      '<div class="dataset-card-stats">' +
+        '<span>' + samples + ' samples</span>' +
+        '<span>' + sz + '</span>' +
+        '<span>' + this.esc(created) + '</span>' +
+      '</div>' +
+      '<div class="dataset-card-path" title="' + this.esc(d.path || '') + '">' + this.esc(d.path || '') + '</div>' +
+      '<div class="dataset-card-actions">' +
+        '<button class="btn-nvidia btn-sm" data-ds-use="' + this.esc(d.id) + '">Use in Run</button>' +
+        '<button class="btn-ghost btn-sm" data-ds-preview="' + this.esc(d.id) + '">Preview</button>' +
+        '<button class="btn-danger btn-sm" data-ds-delete="' + this.esc(d.id) + '">Delete</button>' +
+      '</div>' +
+      '<div class="dataset-preview-samples" id="ds-preview-' + this.esc(d.id) + '" style="display:none" data-loaded="0"></div>' +
+    '</div>';
+  },
+
+  // ---- Runs --------------------------------------------------------------
+  renderTrainingRuns(container) {
+    var self = this;
+    var jobs = this.state.trainingJobs || [];
+    var filter = this.state.runsFilter || 'all';
+    if (filter !== 'all') jobs = jobs.filter(function (j) { return j.status === filter; });
+    jobs = jobs.slice().sort(function (a, b) { return (b.start_time || 0) - (a.start_time || 0); });
+
+    var filters = ['all', 'running', 'completed', 'failed'];
+    var filterBar = '<div class="runs-filter-bar">' + filters.map(function (f) {
+      var a = f === self.state.runsFilter ? ' active' : '';
+      return '<button class="pill' + a + '" data-filter="' + f + '">' + f.charAt(0).toUpperCase() + f.slice(1) + '</button>';
+    }).join('') + '</div>';
+
+    var body;
+    if (jobs.length === 0) {
+      body = '<div class="training-empty"><h3>No runs found</h3><p>Try a different filter or start a new run from the sidebar.</p></div>';
+    } else {
+      var rows = jobs.map(function (j) {
+        var s = self._statusInfo(j.status);
+        var cfg = j.config || {};
+        var modelShort = (cfg.base_model || '').split('/').pop() || '-';
+        var runName = cfg.run_name || modelShort;
+        var started = j.start_time ? new Date(j.start_time * 1000).toLocaleString() : '-';
+        var elapsed = j.elapsed_seconds ? self.formatUptime(Math.round(j.elapsed_seconds)) : '-';
+        var method = (cfg.method || 'lora').toUpperCase();
+        return '<tr class="run-row" data-job-id="' + self.esc(j.job_id) + '">' +
+          '<td><strong>' + self.esc(runName) + '</strong><div class="mono" style="color:var(--text-muted);font-size:10.5px">' + self.esc(j.job_id) + '</div></td>' +
+          '<td class="mono">' + self.esc(modelShort) + '</td>' +
+          '<td>' + method + '</td>' +
+          '<td><span class="job-status-badge ' + s.cls + '">' + s.label + '</span></td>' +
+          '<td>' + self.esc(started) + '</td>' +
+          '<td class="mono">' + self.esc(elapsed) + '</td>' +
+          '<td class="mono">' + (j.current_loss != null ? j.current_loss.toFixed(4) : '-') + '</td>' +
+          '</tr>';
+      }).join('');
+
+      body = '<table class="runs-table">' +
+        '<thead><tr><th>Run</th><th>Model</th><th>Method</th><th>Status</th><th>Started</th><th>Duration</th><th>Loss</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>';
+    }
+
+    container.innerHTML = '<div class="training-overview">' +
+      '<div class="training-section-head"><h3>Runs</h3><span class="muted">' + (this.state.trainingJobs || []).length + ' total</span></div>' +
+      filterBar + body +
+    '</div>';
+
+    container.querySelectorAll('[data-filter]').forEach(function (p) {
+      p.addEventListener('click', function () {
+        self.state.runsFilter = p.dataset.filter;
+        self.renderTrainingRuns(container);
+      });
+    });
+    container.querySelectorAll('.run-row').forEach(function (row) {
+      row.addEventListener('click', function () {
+        self.state.trainingView = 'detail';
+        self.state.trainingDetailId = row.dataset.jobId;
+        self.state.trainingLossData = [];
+        self.renderTraining();
+      });
+    });
+  },
+
+  // ---- Templates ---------------------------------------------------------
+  renderTrainingTemplates(container) {
+    var self = this;
+    var templates = this.state.trainingTemplates || [];
+    var cards = templates.length ? templates.map(function (t) {
+      var shape = typeof t.sample_shape === 'object'
+        ? JSON.stringify(t.sample_shape, null, 2)
+        : String(t.sample_shape || '');
+      return '<div class="template-card" data-template-id="' + self.esc(t.id) + '">' +
+        '<h4>' + self.esc(t.name) + '</h4>' +
+        '<p>' + self.esc(t.description || '') + '</p>' +
+        '<div class="template-shape">' + self.esc(shape) + '</div>' +
+        '<div class="template-meta-row">' +
+          '<span>&#9830; ' + self.esc((t.method || 'lora').toUpperCase()) + '</span>' +
+          '<span>&#9200; ' + self.esc(t.estimated_time || '-') + '</span>' +
+          (t.distributed ? '<span>&#9733; Distributed</span>' : '') +
+        '</div>' +
+        '<button class="btn-nvidia btn-sm" data-use-template="' + self.esc(t.id) + '">Use this template</button>' +
+      '</div>';
+    }).join('') : '<div class="training-empty"><h3>No templates available</h3></div>';
+
+    container.innerHTML = '<div class="training-overview">' +
+      '<div class="training-section-head"><h3>Templates</h3><span class="muted">Starter recipes</span></div>' +
+      '<div class="templates-gallery">' + cards + '</div>' +
+    '</div>';
+
+    container.querySelectorAll('[data-use-template]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var tpl = (self.state.trainingTemplates || []).find(function (t) { return t.id === b.dataset.useTemplate; });
+        if (!tpl) return;
+        self.showNewRunWizard({
+          template_id: tpl.id,
+          method: tpl.method || 'lora',
+          distributed: !!tpl.distributed,
+          num_epochs: tpl.recommended_epochs,
+          batch_size: tpl.recommended_batch_size,
+          learning_rate: tpl.recommended_lr,
+        });
+      });
+    });
+  },
+
+  renderJobCard(job) {
+    var statusMap = {
+      pending: { cls: 'status-pending', label: 'Pending' },
+      running: { cls: 'status-running', label: 'Running' },
+      completed: { cls: 'status-completed', label: 'Completed' },
+      failed: { cls: 'status-failed', label: 'Failed' },
+      cancelled: { cls: 'status-cancelled', label: 'Cancelled' },
+    };
+    var s = statusMap[job.status] || { cls: '', label: job.status };
+    var modelShort = job.config?.base_model?.split('/').pop() || 'Unknown';
+    var methodLabel = (job.config?.method || 'lora').toUpperCase();
+    var started = job.start_time ? new Date(job.start_time * 1000).toLocaleString() : 'Not started';
+    var elapsed = job.elapsed_seconds ? this.formatUptime(Math.round(job.elapsed_seconds)) : '--';
+
+    var html = '<div class="training-job-card" data-job-id="' + this.esc(job.job_id) + '">' +
+      '<div class="job-card-top">' +
+      '<div><div class="job-card-model">' + this.esc(modelShort) + '</div>' +
+      '<div class="job-card-meta"><span class="job-method-badge">' + methodLabel + '</span> ' + this.esc(job.job_id) + '</div></div>' +
+      '<span class="job-status-badge ' + s.cls + '">' + s.label + '</span>' +
+      '</div>';
+
+    if (job.status === 'running') {
+      html += '<div class="job-card-progress">' +
+        '<div class="progress-bar"><div class="progress-fill" style="width:' + (job.progress || 0) + '%"></div></div>' +
+        '<div class="job-progress-text">' + (job.progress || 0).toFixed(1) + '% &middot; Epoch ' + (job.current_epoch || 0) + '/' + (job.config?.num_epochs || '?') +
+        (job.current_loss != null ? ' &middot; Loss: ' + job.current_loss.toFixed(4) : '') + '</div></div>';
+    }
+
+    html += '<div class="job-card-footer"><span>Started: ' + started + '</span><span>Duration: ' + elapsed + '</span></div></div>';
+    return html;
+  },
+
+  // =======================================================================
+  //  NEW RUN WIZARD (modal, multi-step)
+  // =======================================================================
+
+  async showNewRunWizard(prefill) {
+    var self = this;
+    // Gather fresh data
+    var dsets = this.state.datasets.length
+      ? this.state.datasets
+      : (((await this.fetchJSON('/api/datasets')) || {}).datasets || []);
+    this.state.datasets = dsets;
+
+    // Only offer models that are actually on disk  -  a run against a
+    // not-downloaded model would fail. When none are downloaded we leave the
+    // list empty and show an empty-state hint (the free-text HF-id input in
+    // step 1 still works). The backend only ever sets `downloaded`.
+    var modelsResp = await this.fetchJSON('/api/models');
+    var modelList = [];
+    if (modelsResp && Array.isArray(modelsResp.models)) {
+      modelList = modelsResp.models
+        .filter(function (m) { return m.downloaded; })
+        // base_model = the canonical HF repo id (cards know it), NOT the on-disk
+        // slug  -  the containerized runner hands base_model to
+        // AutoTokenizer.from_pretrained, which rejects a '--' slug (HFValidationError).
+        .map(function (m) {
+          var repo = m.hf_repo || m.id || m.name || m.repo_id;
+          return { id: repo, name: m.name || repo, size: m.size || m.size_gb || '' };
+        });
+    }
+
+    // Seed from Config > Training Defaults. Those four fields saved to config.json
+    // and nothing read them, while the wizard opened on hardcoded lora / 3 / 4 /
+    // 2e-4 regardless of what the operator had set (#204).
+    var tcfg = this.state.configData.config
+      || (await this.fetchJSON('/api/config'))
+      || {};
+    this.state.configData.config = tcfg;
+
+    var initial = Object.assign({
+      base_model: modelList[0] ? modelList[0].id : '',
+      dataset_id: '',
+      method: tcfg.training_default_method || 'lora',
+      num_epochs: tcfg.training_default_epochs || 3,
+      batch_size: tcfg.training_default_batch_size || 4,
+      learning_rate: tcfg.training_default_learning_rate || 2e-4,
+      max_seq_length: 2048,
+      lora_rank: 16,
+      lora_alpha: 32,
+      gradient_accumulation_steps: 1,
+      warmup_steps: 0,
+      weight_decay: 0.0,
+      use_gradient_checkpointing: false,
+      distributed: false,
+      num_nodes: 1,
+      run_name: '',
+      template_id: null,
+      step: 1,
+      models: modelList,
+      datasets: dsets,
+    }, prefill || {});
+    this.state.wizardState = initial;
+
+    // Build overlay
+    var existing = document.querySelector('.model-detail-modal-overlay.wizard-overlay');
+    if (existing) existing.remove();
+
+    var overlay = document.createElement('div');
+    overlay.className = 'model-detail-modal-overlay wizard-overlay';
+    overlay.innerHTML =
+      '<div class="model-detail-modal wizard-modal">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left"><div class="md-icon">&#9881;</div><div><div style="font-weight:700;font-size:15px">New Training Run</div><div style="font-size:11.5px;color:var(--text-muted)">Configure and launch a fine-tune</div></div></div>' +
+          '<button class="btn-ghost btn-sm" id="wizard-close">Close</button>' +
+        '</div>' +
+        '<div class="wizard-body">' +
+          '<div class="wizard-steps" id="wizard-steps"></div>' +
+          '<div class="wizard-panel" id="wizard-panel"></div>' +
+        '</div>' +
+        '<div class="wizard-footer">' +
+          '<button class="btn-ghost" id="wizard-prev">&larr; Back</button>' +
+          '<span class="estimate-pill" id="wizard-estimate"></span>' +
+          '<div class="spacer"></div>' +
+          '<button class="btn-nvidia" id="wizard-next">Next &rarr;</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) self.closeWizard(); });
+    document.getElementById('wizard-close').addEventListener('click', function () { self.closeWizard(); });
+    document.getElementById('wizard-prev').addEventListener('click', function () { self.wizardGo(-1); });
+    document.getElementById('wizard-next').addEventListener('click', function () { self.wizardGo(+1); });
+
+    this.renderWizardStep();
+  },
+
+  closeWizard() {
+    var o = document.querySelector('.wizard-overlay');
+    if (o) o.remove();
+    this.state.wizardState = null;
+  },
+
+  wizardGo(delta) {
+    var s = this.state.wizardState;
+    if (!s) return;
+    var next = s.step + delta;
+    if (next < 1) return;
+    if (next > 5) { this.submitWizard(); return; }
+    // Validate current step before moving forward
+    if (delta > 0 && !this.validateWizardStep()) return;
+    s.step = next;
+    this.renderWizardStep();
+  },
+
+  validateWizardStep() {
+    var s = this.state.wizardState;
+    if (s.step === 1 && !s.base_model) { this.toast('Pick a base model to continue', 'error'); return false; }
+    if (s.step === 2 && !s.dataset_id && !s.dataset_path_inline) { this.toast('Select or add a dataset', 'error'); return false; }
+    return true;
+  },
+
+  renderWizardStep() {
+    var s = this.state.wizardState;
+    if (!s) return;
+    var self = this;
+    var stepDefs = [
+      { n: 1, label: 'Base Model' },
+      { n: 2, label: 'Dataset' },
+      { n: 3, label: 'Method' },
+      { n: 4, label: 'Run Name' },
+      { n: 5, label: 'Review' },
+    ];
+
+    document.getElementById('wizard-steps').innerHTML = stepDefs.map(function (d) {
+      var cls = d.n === s.step ? ' active' : (d.n < s.step ? ' done' : '');
+      return '<div class="wizard-step-nav' + cls + '"><span class="step-num">' + d.n + '</span>' + d.label + '</div>';
+    }).join('');
+
+    var panel = document.getElementById('wizard-panel');
+    var nextBtn = document.getElementById('wizard-next');
+    if (s.step === 5) nextBtn.textContent = 'Launch Training Run';
+    else nextBtn.textContent = 'Next →';
+    document.getElementById('wizard-prev').style.visibility = s.step === 1 ? 'hidden' : '';
+
+    switch (s.step) {
+      case 1: panel.innerHTML = this._renderWizardStep1(); break;
+      case 2: panel.innerHTML = this._renderWizardStep2(); break;
+      case 3: panel.innerHTML = this._renderWizardStep3(); break;
+      case 4: panel.innerHTML = this._renderWizardStep4(); break;
+      case 5: panel.innerHTML = this._renderWizardStep5(); break;
+    }
+    this._bindWizardStep();
+    this._updateEstimate();
+  },
+
+  _renderWizardStep1() {
+    var s = this.state.wizardState;
+    var models = s.models || [];
+    var grid;
+    if (models.length) {
+      grid = '<div class="wizard-option-grid">' + models.map(function (m) {
+        var active = m.id === s.base_model ? ' active' : '';
+        return '<div class="wizard-option' + active + '" data-model="' + AINode.esc(m.id) + '">' +
+          '<div class="wizard-option-title">' + AINode.esc(m.name || m.id) + '</div>' +
+          '<div class="wizard-option-sub">' + AINode.esc(m.id) + (m.size ? ' · ' + AINode.esc(m.size) : '') + '</div>' +
+          '</div>';
+      }).join('') + '</div>';
+    } else {
+      grid = '<div class="wizard-empty" style="padding:16px;color:var(--text-muted);font-size:13px">' +
+        'No downloaded models - download one from the Models page, or enter an HF id below.</div>';
+    }
+    return '<h3>Choose a Base Model</h3>' +
+      '<p class="panel-sub">Downloaded models are shown. Your fine-tune will build on top of this one.</p>' +
+      grid +
+      '<div class="form-group" style="margin-top:16px"><label class="form-label">Or enter a HuggingFace model ID</label>' +
+      '<input type="text" id="wz-custom-model" class="form-input" placeholder="org/model" value="' + AINode.esc(s.custom_model || '') + '"></div>';
+  },
+
+  _renderWizardStep2() {
+    var s = this.state.wizardState;
+    var datasets = s.datasets || [];
+    var options = datasets.map(function (d) {
+      var active = d.id === s.dataset_id ? ' active' : '';
+      return '<div class="wizard-option' + active + '" data-dataset="' + AINode.esc(d.id) + '">' +
+        '<div class="wizard-option-title">' + AINode.esc(d.name) + '</div>' +
+        '<div class="wizard-option-sub">' + (d.samples || 0).toLocaleString() + ' samples · ' + AINode.esc(d.source) + ' · ' + AINode.esc(d.format || '') + '</div>' +
+        '</div>';
+    }).join('');
+    var body = datasets.length
+      ? '<div class="wizard-option-grid">' + options + '</div>'
+      : '<div class="training-empty" style="padding:24px"><h3>No datasets yet</h3><p>Add one below or via the Datasets tab.</p></div>';
+
+    return '<h3>Select Training Dataset</h3>' +
+      '<p class="panel-sub">Reference a saved dataset, or paste a path / HuggingFace ID inline.</p>' +
+      body +
+      '<div class="form-group" style="margin-top:16px">' +
+        '<label class="form-label">Or inline dataset path</label>' +
+        '<input type="text" id="wz-inline-ds" class="form-input" placeholder="~/.ainode/datasets/file.jsonl or alpaca.jsonl" value="' + AINode.esc(s.dataset_path_inline || '') + '">' +
+        '<div class="form-hint">Fields accepted: <code>text</code>, or <code>instruction</code>+<code>output</code>, or <code>prompt</code>+<code>completion</code>.</div>' +
+      '</div>';
+  },
+
+  _renderWizardStep3() {
+    var s = this.state.wizardState;
+    var methods = [
+      { id: 'lora',  title: 'LoRA',      sub: 'Train small adapter weights. Fast, low memory.' },
+      { id: 'qlora', title: 'QLoRA',     sub: '4-bit quantized LoRA. Fits huge models in limited memory.' },
+      { id: 'full',  title: 'Full',      sub: 'Update all weights. Highest quality, highest memory.' },
+    ];
+    var methodCards = methods.map(function (m) {
+      var active = m.id === s.method ? ' active' : '';
+      return '<div class="wizard-option' + active + '" data-method="' + m.id + '">' +
+        '<div class="wizard-option-title">' + m.title + '</div>' +
+        '<div class="wizard-option-sub">' + m.sub + '</div>' +
+        '</div>';
+    }).join('');
+
+    var loraBlock = (s.method === 'lora' || s.method === 'qlora') ?
+      '<div class="form-grid">' +
+        '<div class="form-group"><label class="form-label">LoRA Rank</label><input type="number" id="wz-lora-rank" class="form-input" min="1" max="256"></div>' +
+        '<div class="form-group"><label class="form-label">LoRA Alpha</label><input type="number" id="wz-lora-alpha" class="form-input" min="1" max="512"></div>' +
+      '</div>' : '';
+
+    return '<h3>Training Method</h3>' +
+      '<p class="panel-sub">LoRA is recommended. Full fine-tune needs significant GPU memory.</p>' +
+      '<div class="wizard-option-grid">' + methodCards + '</div>' +
+      '<div style="margin-top:20px">' +
+        '<div class="form-grid">' +
+          '<div class="form-group"><label class="form-label">Epochs</label><input type="number" id="wz-epochs" class="form-input" min="1" max="100"></div>' +
+          '<div class="form-group"><label class="form-label">Batch Size</label><input type="number" id="wz-batch" class="form-input" min="1" max="128"></div>' +
+          '<div class="form-group"><label class="form-label">Learning Rate</label><input type="text" id="wz-lr" class="form-input"></div>' +
+          '<div class="form-group"><label class="form-label">Max Seq Length</label><input type="number" id="wz-seq" class="form-input" min="128" step="128"></div>' +
+          '<div class="form-group"><label class="form-label">Grad Accumulation</label><input type="number" id="wz-ga" class="form-input" min="1"></div>' +
+          '<div class="form-group"><label class="form-label">Warmup Steps</label><input type="number" id="wz-warmup" class="form-input" min="0"></div>' +
+        '</div>' +
+        loraBlock +
+        '<div style="margin-top:12px"><button type="button" class="btn-ghost btn-sm" id="wz-smart">&#9733; Smart Defaults</button></div>' +
+      '</div>';
+  },
+
+  // Was "Distribution", with a multi-node DDP toggle. Multi-node training has no
+  // launch path (the container-spawn build refuses it, the host torchrun path has
+  // no rendezvous), so the toggle only ever produced a failed run. The step keeps
+  // the run name; put distribution back together with a working launch path.
+  _renderWizardStep4() {
+    var s = this.state.wizardState;
+    return '<h3>Run Name</h3>' +
+      '<p class="panel-sub">Runs execute on this node\'s GPU. Name this one so you can find it in the Runs list.</p>' +
+      '<div class="form-group"><label class="form-label">Run name (optional)</label><input type="text" id="wz-run-name" class="form-input" placeholder="alpaca-3b-epoch3" value="' + AINode.esc(s.run_name || '') + '"></div>';
+  },
+
+  _renderWizardStep5() {
+    var s = this.state.wizardState;
+    var self = this;
+    var summaryRow = function (k, v) { return '<div class="k">' + k + '</div><div class="v">' + AINode.esc(String(v == null ? '-' : v)) + '</div>'; };
+    var dsname = '-';
+    if (s.dataset_id) {
+      var match = (s.datasets || []).find(function (d) { return d.id === s.dataset_id; });
+      if (match) dsname = match.name + ' (' + match.id + ')';
+    } else if (s.dataset_path_inline) {
+      dsname = s.dataset_path_inline;
+    }
+    return '<h3>Review & Launch</h3>' +
+      '<p class="panel-sub">Double-check the config, then launch. You can cancel any time from the run detail view.</p>' +
+      '<div class="wizard-summary">' +
+        summaryRow('Run name', s.run_name || 'auto') +
+        summaryRow('Base model', s.base_model) +
+        summaryRow('Dataset', dsname) +
+        summaryRow('Method', (s.method || 'lora').toUpperCase()) +
+        summaryRow('Epochs', s.num_epochs) +
+        summaryRow('Batch size', s.batch_size) +
+        summaryRow('Learning rate', s.learning_rate) +
+        summaryRow('Max seq len', s.max_seq_length) +
+        summaryRow('Grad accum', s.gradient_accumulation_steps) +
+      '</div>' +
+      '<div class="form-group" style="margin-top:16px"><label style="display:flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:12.5px"><input type="checkbox" id="wz-save-template"> Save as a custom template</label></div>';
+  },
+
+  _bindWizardStep() {
+    var self = this;
+    var s = this.state.wizardState;
+    // Step 1
+    document.querySelectorAll('.wizard-option[data-model]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        s.base_model = el.dataset.model;
+        s.custom_model = '';
+        self.renderWizardStep();
+      });
+    });
+    var custom = document.getElementById('wz-custom-model');
+    if (custom) custom.addEventListener('change', function () {
+      s.custom_model = custom.value.trim();
+      if (s.custom_model) s.base_model = s.custom_model;
+    });
+
+    // Step 2
+    document.querySelectorAll('.wizard-option[data-dataset]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        s.dataset_id = el.dataset.dataset;
+        s.dataset_path_inline = '';
+        self.renderWizardStep();
+      });
+    });
+    var inlineDs = document.getElementById('wz-inline-ds');
+    if (inlineDs) inlineDs.addEventListener('change', function () {
+      s.dataset_path_inline = inlineDs.value.trim();
+      if (s.dataset_path_inline) s.dataset_id = '';
+    });
+
+    // Step 3
+    document.querySelectorAll('.wizard-option[data-method]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        s.method = el.dataset.method;
+        self.renderWizardStep();
+      });
+    });
+    var hook = function (id, key, parser) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      // Defaults and template values are data, never HTML attributes.
+      el.value = s[key];
+      el.addEventListener('change', function () {
+        var v = parser ? parser(el.value) : el.value;
+        if (!isNaN(v) || typeof v === 'string') s[key] = v;
+        self._updateEstimate();
+      });
+    };
+    hook('wz-epochs', 'num_epochs', parseInt);
+    hook('wz-batch', 'batch_size', parseInt);
+    hook('wz-lr', 'learning_rate', parseFloat);
+    hook('wz-seq', 'max_seq_length', parseInt);
+    hook('wz-ga', 'gradient_accumulation_steps', parseInt);
+    hook('wz-warmup', 'warmup_steps', parseInt);
+    hook('wz-lora-rank', 'lora_rank', parseInt);
+    hook('wz-lora-alpha', 'lora_alpha', parseInt);
+
+    var smart = document.getElementById('wz-smart');
+    if (smart) smart.addEventListener('click', function () {
+      var model = (s.base_model || '').toLowerCase();
+      var big = /70b|72b|405b/.test(model);
+      s.batch_size = big ? 1 : 4;
+      s.gradient_accumulation_steps = big ? 8 : 2;
+      s.learning_rate = s.method === 'full' ? 5e-5 : 2e-4;
+      s.warmup_steps = 50;
+      s.max_seq_length = 2048;
+      self.toast('Smart defaults applied', 'success');
+      self.renderWizardStep();
+    });
+
+    // Step 4
+    var runName = document.getElementById('wz-run-name');
+    if (runName) runName.addEventListener('input', function () { s.run_name = runName.value; });
+  },
+
+  async _updateEstimate() {
+    var s = this.state.wizardState;
+    if (!s) return;
+    var pill = document.getElementById('wizard-estimate');
+    if (!pill) return;
+    try {
+      var sampleCount = 0;
+      if (s.dataset_id) {
+        var match = (s.datasets || []).find(function (d) { return d.id === s.dataset_id; });
+        if (match) sampleCount = match.samples || 0;
+      }
+      var resp = await AINodeAuth.fetch('/api/training/estimate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_model: s.base_model,
+          dataset_path: s.dataset_path_inline || 'placeholder',
+          dataset_id: s.dataset_id,
+          method: s.method,
+          num_epochs: s.num_epochs,
+          batch_size: s.batch_size,
+          max_seq_length: s.max_seq_length,
+          gradient_accumulation_steps: s.gradient_accumulation_steps,
+          distributed: s.distributed,
+          num_nodes: s.num_nodes,
+          sample_count: sampleCount,
+        }),
+      });
+      if (!resp.ok) { pill.textContent = ''; return; }
+      var data = await resp.json();
+      var parts = [];
+      if (data.memory_gb_per_node) parts.push('&#9881; ~' + data.memory_gb_per_node.toFixed(0) + ' GB/node');
+      if (data.estimated_seconds) parts.push('&#9201; ~' + this.formatUptime(Math.round(data.estimated_seconds)));
+      if (data.samples_per_sec) parts.push('&rarr; ' + data.samples_per_sec.toFixed(1) + ' samp/s');
+      pill.innerHTML = parts.join(' · ');
+    } catch (e) {
+      pill.textContent = '';
+    }
+  },
+
+  async submitWizard() {
+    var s = this.state.wizardState;
+    if (!s) return;
+    var payload = {
+      base_model: s.base_model,
+      method: s.method,
+      num_epochs: s.num_epochs,
+      batch_size: s.batch_size,
+      learning_rate: parseFloat(s.learning_rate),
+      max_seq_length: s.max_seq_length,
+      gradient_accumulation_steps: s.gradient_accumulation_steps,
+      warmup_steps: s.warmup_steps,
+      weight_decay: s.weight_decay,
+      distributed: s.distributed,
+      num_nodes: s.num_nodes,
+    };
+    if (s.run_name) payload.run_name = s.run_name;
+    if (s.template_id) payload.template_id = s.template_id;
+    if (s.method === 'lora' || s.method === 'qlora') {
+      payload.lora_rank = s.lora_rank;
+      payload.lora_alpha = s.lora_alpha;
+    }
+    if (s.dataset_id) {
+      payload.dataset_id = s.dataset_id;
+      payload.dataset_path = 'pending';  // backend will overwrite via dataset_id resolution
+    } else {
+      payload.dataset_path = s.dataset_path_inline;
+    }
+
+    try {
+      var resp = await AINodeAuth.fetch('/api/training/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      var result = await resp.json();
+      if (!resp.ok) {
+        this.toast('Error: ' + (result.error || 'Failed to create job'), 'error');
+        return;
+      }
+      this.toast('Training run launched', 'success');
+      this.closeWizard();
+      this.state.trainingTab = 'runs';
+      this.state.trainingView = 'detail';
+      this.state.trainingDetailId = result.job_id;
+      this.state.trainingLossData = [];
+      this.renderTrainingSidebar();
+      this.renderTraining();
+    } catch (err) {
+      this.toast('Network error: ' + err.message, 'error');
+    }
+  },
+
+  // =======================================================================
+  //  DATASET ADD MODAL (Upload / HF / Local / URL)
+  // =======================================================================
+
+  showDatasetAddModal() {
+    var self = this;
+    var existing = document.querySelector('.model-detail-modal-overlay.dataset-overlay');
+    if (existing) existing.remove();
+    var overlay = document.createElement('div');
+    overlay.className = 'model-detail-modal-overlay dataset-overlay';
+    overlay.innerHTML =
+      '<div class="model-detail-modal" style="width:min(640px,94vw)">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left"><div class="md-icon">&#8864;</div><div><div style="font-weight:700;font-size:15px">Add Dataset</div></div></div>' +
+          '<button class="btn-ghost btn-sm" id="dsm-close">Close</button>' +
+        '</div>' +
+        '<div style="padding:20px 24px">' +
+          '<div class="pill-group">' +
+            '<button class="pill active" data-src="upload">Upload</button>' +
+            '<button class="pill" data-src="huggingface">HuggingFace</button>' +
+            '<button class="pill" data-src="local">Local Path</button>' +
+            '<button class="pill" data-src="url">URL</button>' +
+          '</div>' +
+          '<div id="dsm-panel"></div>' +
+        '</div>' +
+        '<div class="wizard-footer"><div class="spacer"></div><button class="btn-nvidia" id="dsm-submit">Add Dataset</button></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById('dsm-close').addEventListener('click', function () { overlay.remove(); });
+
+    var currentSrc = 'upload';
+    var renderPanel = function () {
+      var p = document.getElementById('dsm-panel');
+      var nameField = '<div class="form-group"><label class="form-label">Name (optional)</label><input type="text" id="dsm-name" class="form-input" placeholder="my-dataset"></div>';
+      if (currentSrc === 'upload') {
+        p.innerHTML = nameField +
+          '<div class="form-group"><label class="form-label">File</label>' +
+          '<div class="upload-drop-zone" id="dsm-drop"><strong>Drop file here</strong> or click to select<br><small style="color:var(--text-muted)">JSONL · JSON · CSV · TSV · Parquet · TXT - up to 2 GB</small></div>' +
+          '<input type="file" id="dsm-file" accept=".json,.jsonl,.csv,.tsv,.parquet,.txt" style="display:none"></div>' +
+          '<div id="dsm-file-name" style="font-family:var(--font-mono);font-size:11.5px;color:var(--nvidia-green);margin-top:-8px"></div>';
+        var drop = document.getElementById('dsm-drop');
+        var fileIn = document.getElementById('dsm-file');
+        drop.addEventListener('click', function () { fileIn.click(); });
+        fileIn.addEventListener('change', function () {
+          if (fileIn.files[0]) document.getElementById('dsm-file-name').textContent = fileIn.files[0].name + ' · ' + self.formatBytes(fileIn.files[0].size);
+        });
+        drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.classList.add('drag-over'); });
+        drop.addEventListener('dragleave', function () { drop.classList.remove('drag-over'); });
+        drop.addEventListener('drop', function (e) {
+          e.preventDefault();
+          drop.classList.remove('drag-over');
+          if (e.dataTransfer.files[0]) {
+            fileIn.files = e.dataTransfer.files;
+            document.getElementById('dsm-file-name').textContent = e.dataTransfer.files[0].name + ' · ' + self.formatBytes(e.dataTransfer.files[0].size);
+          }
+        });
+      } else if (currentSrc === 'huggingface') {
+        p.innerHTML = nameField +
+          '<div class="form-group"><label class="form-label">HuggingFace Repo ID</label><input type="text" id="dsm-path" class="form-input" placeholder="tatsu-lab/alpaca"></div>' +
+          '<div class="form-grid">' +
+            '<div class="form-group"><label class="form-label">Config (optional)</label><input type="text" id="dsm-config" class="form-input" placeholder="default"></div>' +
+            '<div class="form-group"><label class="form-label">Split (optional)</label><input type="text" id="dsm-split" class="form-input" placeholder="train"></div>' +
+          '</div>';
+      } else if (currentSrc === 'local') {
+        p.innerHTML = nameField +
+          '<div class="form-group"><label class="form-label">Absolute path</label><input type="text" id="dsm-path" class="form-input" placeholder="/home/user/data/train.jsonl"></div>' +
+          '<div class="form-hint">The file must already exist and be readable. We will not copy it - just reference it.</div>';
+      } else if (currentSrc === 'url') {
+        p.innerHTML = nameField +
+          '<div class="form-group"><label class="form-label">URL</label><input type="text" id="dsm-path" class="form-input" placeholder="https://example.com/data.jsonl"></div>' +
+          '<div class="form-hint">The file will be downloaded to <code>~/.ainode/datasets/</code>.</div>';
+      }
+    };
+    renderPanel();
+
+    overlay.querySelectorAll('.pill[data-src]').forEach(function (p) {
+      p.addEventListener('click', function () {
+        overlay.querySelectorAll('.pill[data-src]').forEach(function (x) { x.classList.remove('active'); });
+        p.classList.add('active');
+        currentSrc = p.dataset.src;
+        renderPanel();
+      });
+    });
+
+    document.getElementById('dsm-submit').addEventListener('click', async function () {
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Adding…';
+      var name = (document.getElementById('dsm-name') || {}).value || '';
+      try {
+        var resp;
+        if (currentSrc === 'upload') {
+          var fileIn = document.getElementById('dsm-file');
+          if (!fileIn.files[0]) { self.toast('Please choose a file', 'error'); btn.disabled = false; btn.textContent = 'Add Dataset'; return; }
+          var fd = new FormData();
+          fd.append('file', fileIn.files[0]);
+          if (name) fd.append('name', name);
+          resp = await AINodeAuth.fetch('/api/datasets/upload', { method: 'POST', body: fd });
+        } else {
+          var body = { source: currentSrc, name: name };
+          var pathEl = document.getElementById('dsm-path');
+          var pathVal = pathEl ? pathEl.value.trim() : '';
+          if (currentSrc === 'huggingface') {
+            body.repo_id = pathVal;
+            body.config = (document.getElementById('dsm-config') || {}).value || null;
+            body.split = (document.getElementById('dsm-split') || {}).value || null;
+          } else if (currentSrc === 'url') {
+            body.url = pathVal;
+          } else {
+            body.path = pathVal;
+          }
+          resp = await AINodeAuth.fetch('/api/datasets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        }
+        var data = await resp.json();
+        if (!resp.ok) { self.toast('Error: ' + (data.error || 'Failed'), 'error'); btn.disabled = false; btn.textContent = 'Add Dataset'; return; }
+        self.toast('Dataset added', 'success');
+        overlay.remove();
+        self.renderTraining();
+      } catch (err) {
+        self.toast('Network error: ' + err.message, 'error');
+        btn.disabled = false; btn.textContent = 'Add Dataset';
+      }
+    });
+  },
+
+  // =======================================================================
+  //  GUIDE MODAL (markdown explainers)
+  // =======================================================================
+
+  showGuideModal(id) {
+    var guides = this.guideContent || {};
+    var g = guides[id] || { title: 'Guide', html: '<p>Guide coming soon.</p>' };
+    var existing = document.querySelector('.model-detail-modal-overlay.guide-overlay');
+    if (existing) existing.remove();
+    var overlay = document.createElement('div');
+    overlay.className = 'model-detail-modal-overlay guide-overlay';
+    overlay.innerHTML =
+      '<div class="model-detail-modal guide-modal">' +
+        '<div class="md-header"><div class="md-header-left"><div class="md-icon">&#9733;</div><div style="font-weight:700">' + this.esc(g.title) + '</div></div>' +
+          '<button class="btn-ghost btn-sm" id="guide-close">Close</button></div>' +
+        '<div style="padding:22px 28px">' + g.html + '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById('guide-close').addEventListener('click', function () { overlay.remove(); });
+  },
+
+  guideContent: {
+    beginners: {
+      title: "Beginner's Guide to Training",
+      html: '<h2>What is training?</h2><p>Training - more precisely <strong>fine-tuning</strong> - takes a base model and teaches it your specific domain. You show it hundreds or thousands of examples and it learns the patterns.</p>' +
+        '<h3>What you need</h3><ul><li>A base model (start small: 3B params)</li><li>Training data (JSONL, JSON, CSV - a few hundred examples minimum)</li><li>An NVIDIA GPU (you have one!)</li></ul>' +
+        '<h3>Recommended first run</h3><ol><li>Pick <code>Llama 3.2 3B Instruct</code> as base model</li><li>Upload an Alpaca-style JSONL (<code>instruction</code> / <code>output</code>)</li><li>Method: <strong>LoRA</strong></li><li>Epochs: 3, batch size: 4</li><li>Click Launch - monitor from the Runs tab</li></ol>' +
+        '<h3>Why LoRA?</h3><p>Full fine-tuning updates every weight in the model - huge memory cost. LoRA trains small adapter matrices on top of the frozen base, giving 95%+ of the quality at a fraction of the memory.</p>',
+    },
+    pipeline: {
+      title: 'Training Pipeline',
+      html: '<h2>End-to-end pipeline</h2>' +
+        '<ol><li><strong>Data prep</strong> - convert your source data to JSONL with the expected fields</li>' +
+        '<li><strong>Train</strong> - pick a base model, dataset, method; launch the run</li>' +
+        '<li><strong>Merge</strong> - if LoRA, merge adapter into base model for deployment</li>' +
+        '<li><strong>Evaluate</strong> - test on a held-out set before deploy</li>' +
+        '<li><strong>Deploy</strong> - load the merged model as a vLLM instance</li></ol>' +
+        '<h3>Checkpointing</h3><p>Long runs save checkpoints every N steps to <code>~/.ainode/training/jobs/&lt;id&gt;/output/</code>. You can resume from a checkpoint if training is interrupted.</p>',
+    },
+    standalone: {
+      title: 'Standalone Training',
+      html: '<h2>Single-node fine-tuning</h2>' +
+        '<p>For most users, a single DGX Spark with 128 GB unified memory is plenty. You can train up to ~8B models with full fine-tuning, or up to 70B+ with LoRA / QLoRA.</p>' +
+        '<h3>Tips</h3><ul>' +
+        '<li>Use <code>QLoRA</code> for huge models - 4-bit quantized weights leave room for gradients</li>' +
+        '<li>Enable gradient checkpointing if you run out of memory (trades compute for memory)</li>' +
+        '<li>Keep <code>max_seq_length</code> as small as your data allows - memory scales quadratically with seq length</li>' +
+        '<li>Watch the loss chart - if it plateaus early, try a higher learning rate; if it diverges, lower it</li>' +
+        '</ul>',
+    },
+  },
+
+  async renderTrainingDetail(container) {
+    var jobId = this.state.trainingDetailId;
+    if (!jobId) { this.state.trainingView = 'list'; this.renderTraining(); return; }
+
+    var jobData = await this.fetchJSON('/api/training/jobs/' + jobId);
+    if (!jobData) { container.innerHTML = '<div class="training-empty"><h3>Job not found</h3></div>'; return; }
+
+    var extra = await Promise.all([
+      this.fetchJSON('/api/training/jobs/' + jobId + '/logs?tail=200'),
+      this.fetchJSON('/api/training/jobs/' + jobId + '/output'),
+    ]);
+    var logsData = extra[0];
+    var logs = logsData?.logs || [];
+    var outputFiles = extra[1]?.files || [];
+
+    // Collect loss data
+    if (jobData.current_loss != null && jobData.progress > 0) {
+      var lp = this.state.trainingLossData[this.state.trainingLossData.length - 1];
+      if (!lp || lp.progress !== jobData.progress) {
+        this.state.trainingLossData.push({ progress: jobData.progress, loss: jobData.current_loss, epoch: jobData.current_epoch });
+      }
+    }
+    if (this.state.trainingLossData.length === 0) {
+      for (var i = 0; i < logs.length; i++) {
+        var marker = 'AINODE_PROGRESS:';
+        var idx = logs[i].indexOf(marker);
+        if (idx !== -1) {
+          try {
+            var p = JSON.parse(logs[i].slice(idx + marker.length));
+            if (p.loss != null && p.progress != null) {
+              this.state.trainingLossData.push({ progress: p.progress, loss: p.loss, epoch: p.epoch || 0 });
+            }
+          } catch (e) { /* skip */ }
+        }
+      }
+    }
+
+    var statusMap = {
+      pending: { cls: 'status-pending', label: 'Pending' },
+      running: { cls: 'status-running', label: 'Running' },
+      completed: { cls: 'status-completed', label: 'Completed' },
+      failed: { cls: 'status-failed', label: 'Failed' },
+      cancelled: { cls: 'status-cancelled', label: 'Cancelled' },
+    };
+    var s = statusMap[jobData.status] || { cls: '', label: jobData.status };
+    var cfg = jobData.config || {};
+    var modelShort = cfg.base_model?.split('/').pop() || 'Unknown';
+    var started = jobData.start_time ? new Date(jobData.start_time * 1000).toLocaleString() : 'Not started';
+    var ended = jobData.end_time ? new Date(jobData.end_time * 1000).toLocaleString() : '--';
+    var elapsed = jobData.elapsed_seconds ? this.formatUptime(Math.round(jobData.elapsed_seconds)) : '--';
+    var isActive = jobData.status === 'running' || jobData.status === 'pending';
+    var canMerge = jobData.status === 'completed' && (cfg.method === 'lora' || cfg.method === 'qlora');
+    var canResume = jobData.status === 'failed' || jobData.status === 'cancelled';
+
+    var html = '<div class="training-detail">' +
+      '<div class="training-form-header">' +
+      '<button class="btn-ghost" id="training-back-btn">&larr; Back to Jobs</button>' +
+      '<div class="training-detail-title"><h2>' + this.esc(modelShort) + '</h2><span class="job-status-badge ' + s.cls + '">' + s.label + '</span></div>' +
+      '</div>';
+
+    if (jobData.status === 'running') {
+      html += '<div class="training-detail-progress">' +
+        '<div class="progress-header"><span>' + (jobData.progress || 0).toFixed(1) + '%</span><span>Epoch ' + (jobData.current_epoch || 0) + ' / ' + (cfg.num_epochs || '?') + '</span></div>' +
+        '<div class="progress-bar progress-lg"><div class="progress-fill" style="width:' + (jobData.progress || 0) + '%"></div></div>' +
+        '<div class="progress-stats">' +
+        (jobData.current_loss != null ? '<span>Loss: <strong>' + jobData.current_loss.toFixed(4) + '</strong></span>' : '') +
+        '<span>Elapsed: <strong>' + elapsed + '</strong></span>' +
+        '</div></div>';
+    }
+
+    html += '<div class="training-detail-grid">' +
+      '<div class="training-config-card">' +
+      '<h3>Configuration</h3>' +
+      '<table class="config-table">' +
+      '<tr><td>Model</td><td class="mono">' + this.esc(cfg.base_model || '') + '</td></tr>' +
+      '<tr><td>Method</td><td>' + (cfg.method || 'lora').toUpperCase() + '</td></tr>' +
+      '<tr><td>Dataset</td><td class="mono">' + this.esc(cfg.dataset_path || '') + '</td></tr>' +
+      '<tr><td>Epochs</td><td>' + (cfg.num_epochs || '?') + '</td></tr>' +
+      '<tr><td>Batch Size</td><td>' + (cfg.batch_size || '?') + '</td></tr>' +
+      '<tr><td>Learning Rate</td><td>' + (cfg.learning_rate || '?') + '</td></tr>' +
+      '<tr><td>Max Seq Length</td><td>' + (cfg.max_seq_length || '?') + '</td></tr>' +
+      (cfg.method === 'lora' ? '<tr><td>LoRA Rank</td><td>' + (cfg.lora_rank || '?') + '</td></tr><tr><td>LoRA Alpha</td><td>' + (cfg.lora_alpha || '?') + '</td></tr>' : '') +
+      '<tr><td>Job ID</td><td class="mono">' + this.esc(jobData.job_id) + '</td></tr>' +
+      '<tr><td>Started</td><td>' + started + '</td></tr>' +
+      '<tr><td>Ended</td><td>' + ended + '</td></tr>' +
+      '<tr><td>Duration</td><td>' + elapsed + '</td></tr>' +
+      '</table>' +
+      (isActive ? '<div style="margin-top:16px"><button class="btn-danger" id="training-cancel-job-btn">Cancel Job</button></div>' : '') +
+      (canMerge || canResume ? '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">' +
+        (canMerge ? '<button class="btn-nvidia" id="training-merge-btn">Merge Adapter &rarr; Full Model</button>' : '') +
+        (canResume ? '<button class="btn-ghost" id="training-resume-btn">Resume from Checkpoint</button>' : '') +
+        '</div>' : '') +
+      '</div>' +
+      '<div class="training-right-col">' +
+      (this.state.trainingLossData.length > 1 ?
+        '<div class="training-chart-card"><h3>Training Loss</h3><div class="loss-chart-container"><canvas id="loss-chart" width="460" height="200"></canvas></div></div>' : '') +
+      (outputFiles.length > 0 ? '<div class="training-config-card"><h3>Artifacts</h3><table class="config-table">' +
+        outputFiles.map(function (f) {
+          return '<tr><td><a class="chat-link" href="' + AINode.esc(f.download_url) + '" download>' + AINode.esc(f.name) + '</a></td><td class="mono">' + f.size_mb + ' MB</td></tr>';
+        }).join('') +
+        '</table></div>' : '') +
+      '<div class="training-log-card"><h3>Logs <span class="log-line-count">' + (logsData?.total_lines || 0) + ' lines</span></h3>' +
+      '<div class="training-log-viewer" id="training-log-viewer">' +
+      (logs.length > 0 ? logs.map(function (l) { return '<div class="log-line">' + AINode.esc(l) + '</div>'; }).join('') : '<div class="log-empty">No logs yet</div>') +
+      '</div></div>' +
+      '</div></div></div>';
+
+    container.innerHTML = html;
+
+    var self = this;
+    var bb = document.getElementById('training-back-btn');
+    if (bb) bb.addEventListener('click', function () {
+      self.state.trainingView = 'list';
+      self.state.trainingDetailId = null;
+      self.state.trainingLossData = [];
+      self.renderTraining();
+    });
+
+    var cjb = document.getElementById('training-cancel-job-btn');
+    if (cjb) cjb.addEventListener('click', async function () {
+      if (!confirm('Cancel this training job?')) return;
+      var resp = await AINodeAuth.fetch('/api/training/jobs/' + jobId, { method: 'DELETE' });
+      if (resp.ok) self.renderTraining();
+      else {
+        var err = await resp.json().catch(function () { return {}; });
+        self.toast(err.error || 'Failed to cancel job', 'error');
+      }
+    });
+
+    var mb = document.getElementById('training-merge-btn');
+    if (mb) mb.addEventListener('click', async function () {
+      if (!confirm('Merge this adapter into a full model? This can take several minutes.')) return;
+      mb.disabled = true;
+      var resp = await AINodeAuth.fetch('/api/training/jobs/' + jobId + '/merge', { method: 'POST' });
+      var result = await resp.json().catch(function () { return {}; });
+      if (resp.ok) {
+        self.toast('Merge started - output: ' + result.output_dir, 'success');
+        self.state.trainingDetailId = result.merge_job_id;
+        self.state.trainingLossData = [];
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      } else {
+        mb.disabled = false;
+        self.toast(result.error || 'Failed to start merge', 'error');
+      }
+    });
+
+    var rb = document.getElementById('training-resume-btn');
+    if (rb) rb.addEventListener('click', async function () {
+      if (!confirm('Resume training from the latest checkpoint?')) return;
+      rb.disabled = true;
+      var resp = await AINodeAuth.fetch('/api/training/jobs/' + jobId + '/resume', { method: 'POST' });
+      var result = await resp.json().catch(function () { return {}; });
+      if (resp.ok) {
+        self.toast('Resumed from checkpoint ' + result.checkpoint, 'success');
+        self.state.trainingDetailId = result.resume_job_id;
+        self.state.trainingLossData = [];
+        self.renderTrainingSidebar();
+        self.renderTraining();
+      } else {
+        rb.disabled = false;
+        self.toast(result.error || 'Failed to resume job', 'error');
+      }
+    });
+
+    var lv = document.getElementById('training-log-viewer');
+    if (lv) lv.scrollTop = lv.scrollHeight;
+
+    if (this.state.trainingLossData.length > 1) this.drawLossChart();
+  },
+
+  // ========================================================================
+  //  TRAINING  -  LOSS CHART
+  // ========================================================================
+
+  drawLossChart() {
+    var canvas = document.getElementById('loss-chart');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    var w = rect.width, h = rect.height;
+    var pad = { top: 12, right: 16, bottom: 28, left: 48 };
+    var plotW = w - pad.left - pad.right;
+    var plotH = h - pad.top - pad.bottom;
+    var data = this.state.trainingLossData;
+    if (data.length < 2) return;
+
+    var losses = data.map(function (d) { return d.loss; });
+    var maxLoss = Math.max.apply(null, losses) * 1.05;
+    var minLoss = Math.min.apply(null, losses) * 0.95;
+    var maxProg = Math.max.apply(null, data.map(function (d) { return d.progress; }).concat([1]));
+
+    var toX = function (prog) { return pad.left + (prog / maxProg) * plotW; };
+    var toY = function (loss) { return pad.top + ((maxLoss - loss) / (maxLoss - minLoss || 1)) * plotH; };
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Grid lines
+    ctx.strokeStyle = 'rgba(45,55,72,0.5)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i <= 4; i++) {
+      var y = pad.top + (plotH / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y);
+      ctx.lineTo(w - pad.right, y);
+      ctx.stroke();
+      var val = maxLoss - ((maxLoss - minLoss) / 4) * i;
+      ctx.fillStyle = '#64748b';
+      ctx.font = '10px Inter,sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(val.toFixed(3), pad.left - 6, y + 3);
+    }
+
+    // X-axis labels
+    ctx.fillStyle = '#64748b';
+    ctx.font = '10px Inter,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('0%', pad.left, h - 6);
+    ctx.fillText(maxProg.toFixed(0) + '%', w - pad.right, h - 6);
+
+    // Loss line (green for command center theme)
+    ctx.strokeStyle = '#76b900';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    data.forEach(function (d, i) {
+      var x = toX(d.progress), y2 = toY(d.loss);
+      if (i === 0) ctx.moveTo(x, y2); else ctx.lineTo(x, y2);
+    });
+    ctx.stroke();
+
+    // Fill gradient
+    var gradient = ctx.createLinearGradient(0, pad.top, 0, h - pad.bottom);
+    gradient.addColorStop(0, 'rgba(118,185,0,0.15)');
+    gradient.addColorStop(1, 'rgba(118,185,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    data.forEach(function (d, i) {
+      var x = toX(d.progress), y2 = toY(d.loss);
+      if (i === 0) ctx.moveTo(x, y2); else ctx.lineTo(x, y2);
+    });
+    ctx.lineTo(toX(data[data.length - 1].progress), h - pad.bottom);
+    ctx.lineTo(toX(data[0].progress), h - pad.bottom);
+    ctx.closePath();
+    ctx.fill();
+
+    // Endpoint dot
+    var last = data[data.length - 1];
+    ctx.fillStyle = '#76b900';
+    ctx.beginPath();
+    ctx.arc(toX(last.progress), toY(last.loss), 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#0a0e17';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  },
+
+  // ========================================================================
+  //  UTILITIES
+  // ========================================================================
+
+  esc(str) {
+    var div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  },
+
+  formatUptime(seconds) {
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+    return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
+  },
+
+  formatMarkdown(text) {
+    if (!text) return '';
+    var self = this;
+    var placeholders = [];
+    var codeBlockIndex = 0;
+
+    // 1. Extract fenced code blocks first (so inner content isn't re-parsed)
+    var html = text.replace(/```(\w*)\n?([\s\S]*?)```/g, function (match, lang, code) {
+      var language = (lang || 'plaintext').toLowerCase();
+      var escapedCode = self.esc(code.replace(/\n$/, ''));
+      var id = 'code-' + Date.now() + '-' + (codeBlockIndex++);
+      var block =
+        '<div class="code-block-wrapper">' +
+          '<div class="code-block-header">' +
+            '<span class="code-block-lang">' + self.esc(language) + '</span>' +
+            '<button class="code-copy-btn" data-code-id="' + id + '" title="Copy code">' +
+              '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">' +
+                '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
+                '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>' +
+              '</svg>' +
+              '<span>Copy</span>' +
+            '</button>' +
+          '</div>' +
+          '<pre class="code-block"><code id="' + id + '" class="language-' + self.esc(language) + '">' + escapedCode + '</code></pre>' +
+        '</div>';
+      placeholders.push(block);
+      return '\u0001CB' + (placeholders.length - 1) + '\u0001';
+    });
+
+    // 2. Extract inline code
+    html = html.replace(/`([^`\n]+)`/g, function (m, code) {
+      placeholders.push('<code class="inline-code">' + self.esc(code) + '</code>');
+      return '\u0001IC' + (placeholders.length - 1) + '\u0001';
+    });
+
+    // 3. Escape remaining HTML
+    html = self.esc(html);
+
+    // 4. Markdown inline formatting
+    html = html
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/~~(.+?)~~/g, '<del>$1</del>');
+
+    // 5. Auto-link URLs
+    html = html.replace(
+      /(https?:\/\/[^\s<]+[^\s<.,;:?!\)])/g,
+      '<a href="$1" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>'
+    );
+
+    // 6. Markdown-style links [text](url)
+    html = html.replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>'
+    );
+
+    // 7. Headers (#, ##, ###)
+    html = html
+      .replace(/^### (.+)$/gm, '<h4 class="chat-h">$1</h4>')
+      .replace(/^## (.+)$/gm, '<h3 class="chat-h">$1</h3>')
+      .replace(/^# (.+)$/gm, '<h2 class="chat-h">$1</h2>');
+
+    // 8. Lists
+    html = html.replace(/^(\s*)[-*] (.+)$/gm, '$1• $2');
+
+    // 9. Newlines to <br> (but not inside code blocks which are already placeholders)
+    html = html.replace(/\n/g, '<br>');
+
+    // 10. Restore code blocks / inline code
+    html = html.replace(/\u0001CB(\d+)\u0001/g, function (_, idx) {
+      return placeholders[parseInt(idx)];
+    });
+    html = html.replace(/\u0001IC(\d+)\u0001/g, function (_, idx) {
+      return placeholders[parseInt(idx)];
+    });
+
+    return html;
+  },
+
+  // ========================================================================
+  //  CONFIG VIEW
+  // ========================================================================
+
+  renderConfig() {
+    var nav = document.getElementById('config-nav');
+    var self = this;
+    if (nav && !nav.dataset.bound) {
+      nav.dataset.bound = '1';
+      nav.querySelectorAll('.config-nav-item').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          self.state.configSection = btn.dataset.section;
+          nav.querySelectorAll('.config-nav-item').forEach(function (b) {
+            b.classList.toggle('active', b.dataset.section === self.state.configSection);
+          });
+          self.renderConfigSection();
+        });
+      });
+    }
+    // Keep sidebar active in sync
+    if (nav) {
+      nav.querySelectorAll('.config-nav-item').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.section === self.state.configSection);
+      });
+    }
+    this.renderConfigSection();
+  },
+
+  renderConfigSection() {
+    switch (this.state.configSection) {
+      case 'credentials': return this.renderConfigCredentials();
+      case 'account':     return this.renderConfigAccount();
+      case 'users':       return this.renderConfigUsers();
+      case 'api':         return this.renderConfigApiAccess();
+      case 'cluster':     return this.renderConfigCluster();
+      case 'node':        return this.renderConfigNode();
+      case 'storage':     return this.renderConfigStorage();
+      case 'training':    return this.renderConfigTrainingDefaults();
+      case 'network':     return this.renderConfigNetwork();
+      case 'about':       return this.renderConfigAbout();
+    }
+  },
+
+  _configMount() {
+    return document.getElementById('config-content');
+  },
+
+  async _fetchConfigBundle() {
+    var self = this;
+    var results = await Promise.all([
+      this.fetchJSON('/api/secrets'),
+      this.fetchJSON('/api/cluster/info'),
+      this.fetchJSON('/api/config'),
+    ]);
+    self.state.configData.secrets = results[0];
+    self.state.configData.cluster = results[1];
+    self.state.configData.config = results[2];
+  },
+
+  // ----- Credentials --------------------------------------------------------
+  async renderConfigCredentials() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading credentials…</div>';
+    var data = await this.fetchJSON('/api/secrets');
+    this.state.configData.secrets = data;
+    if (!data) {
+      mount.innerHTML = '<div class="config-empty">Unable to load secrets.</div>';
+      return;
+    }
+    var self = this;
+    var known = data.known || {};
+    var custom = data.custom || {};
+    var html = '';
+    html += '<h2 class="config-section-title">Credentials</h2>';
+    html += '<p class="config-section-desc">Store API tokens used by AINode to download gated models, log training metrics, and access hosted services. Values are stored locally at <code>~/.ainode/secrets.json</code> with mode 0600 and never transmitted to AINode servers.</p>';
+
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Known credentials</h3>';
+    html += '<p class="config-card-desc">Recognized services with built-in integrations.</p>';
+    Object.keys(known).forEach(function (k) {
+      html += self._renderSecretRow(known[k]);
+    });
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Custom secrets</h3>';
+    html += '<p class="config-card-desc">Arbitrary named values, e.g. for training scripts or third-party integrations.</p>';
+    if (Object.keys(custom).length === 0) {
+      html += '<div class="config-empty">No custom secrets yet.</div>';
+    } else {
+      Object.keys(custom).forEach(function (name) {
+        var s = custom[name];
+        html += '<div class="config-secret-row">';
+        html += '  <div class="config-secret-main">';
+        html += '    <div class="config-secret-label-row">';
+        html += '      <span class="config-secret-name">' + self.esc(name) + '</span>';
+        html += s.is_set ? '      <span class="config-secret-mask">' + self.esc(s.masked) + '</span>' : '      <span class="config-secret-unset">not set</span>';
+        html += '    </div>';
+        html += '  </div>';
+        html += '  <span></span>';
+        html += '  <button class="config-icon-btn danger" data-custom-delete="' + self.esc(name) + '">Delete</button>';
+        html += '</div>';
+      });
+    }
+    html += '<div class="config-add-custom">';
+    html += '  <input class="form-input" id="cfg-custom-name" placeholder="name (alphanumeric)">';
+    html += '  <input class="form-input" id="cfg-custom-value" type="password" placeholder="value">';
+    html += '  <button class="config-btn" id="cfg-custom-add">+ Add</button>';
+    html += '</div>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    // Wire save buttons for each known secret
+    Object.keys(known).forEach(function (k) {
+      self._wireSecretRow(k);
+    });
+
+    mount.querySelectorAll('[data-custom-delete]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var name = btn.dataset.customDelete;
+        if (!confirm('Delete custom secret "' + name + '"?')) return;
+        await AINodeAuth.fetch('/api/secrets/custom/' + encodeURIComponent(name), { method: 'DELETE' });
+        self.toast('Deleted ' + name, 'info');
+        self.renderConfigCredentials();
+      });
+    });
+
+    var addBtn = document.getElementById('cfg-custom-add');
+    if (addBtn) {
+      addBtn.addEventListener('click', async function () {
+        var nameEl = document.getElementById('cfg-custom-name');
+        var valEl = document.getElementById('cfg-custom-value');
+        var name = (nameEl.value || '').trim();
+        var value = valEl.value || '';
+        if (!name || !value) { self.toast('Name and value required', 'error'); return; }
+        var resp = await AINodeAuth.fetch('/api/secrets/custom/' + encodeURIComponent(name), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: value }),
+        });
+        var body = await resp.json().catch(function () { return {}; });
+        if (!resp.ok) {
+          self.toast((body.error && body.error.message) || 'Failed to add secret', 'error');
+          return;
+        }
+        self.toast('Added ' + name, 'success');
+        self.renderConfigCredentials();
+      });
+    }
+  },
+
+  _renderSecretRow(entry) {
+    var self = this;
+    var k = entry.key;
+    var html = '<div class="config-secret-row" data-secret-row="' + self.esc(k) + '">';
+    html += '  <div class="config-secret-main">';
+    html += '    <div class="config-secret-label-row">';
+    html += '      <span class="config-secret-name">' + self.esc(entry.label) + '</span>';
+    html += entry.is_set
+      ? '      <span class="config-secret-mask">' + self.esc(entry.masked) + '</span>'
+      : '      <span class="config-secret-unset">not set</span>';
+    html += '    </div>';
+    html += '    <div class="config-secret-desc">' + self.esc(entry.description || '') +
+            (entry.docs_url ? ' <a href="' + self.esc(entry.docs_url) + '" target="_blank" rel="noopener" style="color:var(--nvidia-green)">Docs ↗</a>' : '') +
+            '</div>';
+    html += '    <div class="config-secret-input-row" id="cfg-sec-input-' + self.esc(k) + '" style="' + (entry.is_set ? 'display:none' : '') + '">';
+    html += '      <input class="form-input" type="password" id="cfg-sec-val-' + self.esc(k) + '" placeholder="' + self.esc(entry.prefix_hint ? entry.prefix_hint + '…' : 'paste token here') + '">';
+    html += '      <button class="config-eye-btn" data-eye="' + self.esc(k) + '" type="button">Show</button>';
+    html += '      <button class="config-btn" data-save-secret="' + self.esc(k) + '">Save</button>';
+    html += '    </div>';
+    html += '    <div class="config-test-result" id="cfg-sec-result-' + self.esc(k) + '" style="display:none"></div>';
+    html += '  </div>';
+    if (entry.is_set) {
+      html += '  <button class="config-btn secondary" data-replace-secret="' + self.esc(k) + '">Replace</button>';
+      html += '  <button class="config-btn danger" data-delete-secret="' + self.esc(k) + '">Delete</button>';
+    } else {
+      html += '  <span></span><span></span>';
+    }
+    if (entry.testable) {
+      html += '<div style="grid-column: 1 / -1; margin-top: 6px; text-align: right;"><button class="config-btn secondary" data-test-secret="' + self.esc(k) + '"' + (entry.is_set ? '' : ' disabled') + '>Test connection</button></div>';
+    }
+    html += '</div>';
+    return html;
+  },
+
+  _wireSecretRow(key) {
+    var self = this;
+    var mount = this._configMount();
+    if (!mount) return;
+    var row = mount.querySelector('[data-secret-row="' + key + '"]');
+    if (!row) return;
+
+    var eye = row.querySelector('[data-eye="' + key + '"]');
+    if (eye) eye.addEventListener('click', function () {
+      var inp = document.getElementById('cfg-sec-val-' + key);
+      if (!inp) return;
+      var shown = inp.type === 'text';
+      inp.type = shown ? 'password' : 'text';
+      eye.textContent = shown ? 'Show' : 'Hide';
+    });
+
+    var save = row.querySelector('[data-save-secret="' + key + '"]');
+    if (save) save.addEventListener('click', async function () {
+      var inp = document.getElementById('cfg-sec-val-' + key);
+      var val = inp ? inp.value : '';
+      if (!val) { self.toast('Value is required', 'error'); return; }
+      var resp = await AINodeAuth.fetch('/api/secrets/' + encodeURIComponent(key), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: val }),
+      });
+      var body = await resp.json().catch(function () { return {}; });
+      if (!resp.ok) {
+        self.toast((body.error && body.error.message) || 'Save failed', 'error');
+        return;
+      }
+      if (inp) inp.value = '';
+      self.toast('Saved', 'success');
+      self.renderConfigCredentials();
+    });
+
+    var replace = row.querySelector('[data-replace-secret="' + key + '"]');
+    if (replace) replace.addEventListener('click', function () {
+      var wrap = document.getElementById('cfg-sec-input-' + key);
+      if (wrap) wrap.style.display = '';
+      replace.style.display = 'none';
+    });
+
+    var del = row.querySelector('[data-delete-secret="' + key + '"]');
+    if (del) del.addEventListener('click', async function () {
+      if (!confirm('Delete ' + key + '?')) return;
+      await AINodeAuth.fetch('/api/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
+      self.toast('Deleted', 'info');
+      self.renderConfigCredentials();
+    });
+
+    var test = row.querySelector('[data-test-secret="' + key + '"]');
+    if (test) test.addEventListener('click', async function () {
+      var result = document.getElementById('cfg-sec-result-' + key);
+      if (result) { result.style.display = ''; result.className = 'config-test-result'; result.textContent = 'Testing…'; }
+      var resp = await AINodeAuth.fetch('/api/secrets/' + encodeURIComponent(key) + '/test');
+      var body = await resp.json().catch(function () { return {}; });
+      if (!result) return;
+      if (body.ok) {
+        result.className = 'config-test-result ok';
+        result.textContent = 'OK - authenticated as ' + (body.identity || 'user');
+      } else {
+        result.className = 'config-test-result err';
+        result.textContent = 'Failed: ' + (body.message || 'unknown error');
+      }
+    });
+  },
+
+  // ----- Account ------------------------------------------------------------
+  // Who you are on this node, your password, and the browsers signed in as you.
+  // Everything here is about a PERSON; keys for programs stay in API access.
+
+  /** A server timestamp as local text. Never invents one: absent reads absent. */
+  _authWhen(value) {
+    if (value === null || value === undefined || value === '') return 'unknown';
+    var when = null;
+    if (typeof value === 'number') {
+      // Seconds or milliseconds; a node writes seconds, so scale the small ones.
+      when = new Date(value < 1e12 ? value * 1000 : value);
+    } else {
+      when = new Date(String(value));
+    }
+    if (isNaN(when.getTime())) return String(value);
+    return when.toLocaleString();
+  },
+
+  /** A response body, or null when there is no JSON in it. */
+  async _authBody(resp) {
+    try { return await resp.json(); } catch (e) { return null; }
+  },
+
+  /** The server's own message for a refusal, or the fallback. */
+  _authMessage(body, fallback) {
+    if (body && body.error && body.error.message) return String(body.error.message);
+    if (body && body.message) return String(body.message);
+    return fallback;
+  },
+
+  async renderConfigAccount() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var self = this;
+    mount.innerHTML = '<div class="config-empty">Loading your account…</div>';
+    await AINodeAuth.loadMe();
+    this.renderUserChip();
+    var me = AINodeAuth.me || {};
+    var user = AINodeAuth.user();
+
+    var html = '';
+    html += '<h2 class="config-section-title">Account</h2>';
+    html += '<p class="config-section-desc">You sign in once and stay signed in until you sign out. A program is different: it sends an API key, and those live in API access.</p>';
+
+    if (!user) {
+      // No session: say which of the two reasons it is, and what to do next.
+      html += '<div class="config-card">';
+      html += '<h3 class="config-card-title">You are not signed in</h3>';
+      if (!AINodeAuth.me) {
+        html += '<p class="config-card-desc">This node is running a release without accounts, so there is nobody to sign in as. Update it to sign in with a name and password (the version is in Config &gt; About).</p>';
+      } else if (!me.auth_enabled) {
+        html += '<p class="config-card-desc">This node is open, so nobody signs in and there are no accounts. Turn sign-in on in API access, then create the first account on the node: <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code></p>';
+      } else if (AINodeAuth.hasKey()) {
+        html += '<p class="config-card-desc">This browser is driving the node with a stored API key, which belongs to a program rather than a person, so there is no account to show. Forget the key in API access and reload to sign in with a name and password.</p>';
+      } else {
+        html += '<p class="config-card-desc">Reload this page to sign in.</p>';
+      }
+      html += '<button class="config-btn secondary" id="account-open-api">Open API access</button>';
+      html += '</div>';
+      mount.innerHTML = html;
+      var open = document.getElementById('account-open-api');
+      if (open) open.addEventListener('click', function () { self.openApiAccess(); });
+      return;
+    }
+
+    // -- who you are ---------------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">You</h3>';
+    html += '<div class="auth-row">';
+    html += '  <div class="auth-row-main">';
+    html += '    <div class="auth-row-name">' + this.esc(user.name) + '';
+    html += '      <span class="auth-badge auth-badge-' + (user.role === 'admin' ? 'admin' : 'member') + '">' + this.esc(user.role || 'member') + '</span>';
+    html += '    </div>';
+    html += '    <div class="auth-row-meta">' + (user.role === 'admin'
+      ? 'An admin manages accounts and keys, and can turn sign-in on and off.'
+      : 'A member signs in and uses the dashboard. Account and key management need an admin.') + '</div>';
+    html += '  </div>';
+    html += '  <div class="auth-row-actions"><button class="config-btn secondary" id="account-signout">Sign out</button></div>';
+    html += '</div>';
+    html += '</div>';
+
+    // -- change password -----------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Change password</h3>';
+    html += '<p class="config-card-desc">Your current password proves it is you. The new one takes effect at once: this browser stays signed in, and every other browser signed in as you is signed out.</p>';
+    html += '<form class="auth-form" id="account-password-form" autocomplete="off">';
+    html += '  <label class="form-label" for="account-pw-current">Current password</label>';
+    html += '  <input class="form-input" id="account-pw-current" type="password" autocomplete="current-password">';
+    html += '  <label class="form-label" for="account-pw-new">New password</label>';
+    html += '  <input class="form-input" id="account-pw-new" type="password" autocomplete="new-password">';
+    html += '  <label class="form-label" for="account-pw-confirm">New password again</label>';
+    html += '  <input class="form-input" id="account-pw-confirm" type="password" autocomplete="new-password">';
+    html += '  <button class="config-btn" type="submit" id="account-pw-save">Change password</button>';
+    html += '</form>';
+    html += '<div class="config-test-result" id="account-pw-result" style="display:none"></div>';
+    html += '</div>';
+
+    // -- your sessions -------------------------------------------------------
+    var currentId = (user.session && user.session.id) ? String(user.session.id) : '';
+    var resp = await AINodeAuth.fetch('/api/auth/sessions');
+    var body = await this._authBody(resp);
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Your sessions</h3>';
+    if (resp.status === 404) {
+      html += '<div class="config-empty">This node is running a release that does not list sessions. Update it to manage them here.</div>';
+    } else if (!resp.ok) {
+      html += '<div class="config-empty">' + this.esc(this._authMessage(body,
+        'This node did not list your sessions (HTTP ' + resp.status + ').')) + '</div>';
+    } else {
+      var sessions = Array.isArray(body) ? body : ((body && body.sessions) || []);
+      this.state.authSessions = sessions;
+      if (!sessions.length) {
+        html += '<div class="config-empty">No sessions listed.</div>';
+      } else {
+        html += '<p class="config-card-desc">One row per browser signed in as you. Revoke one and it signs out on its next request.</p>';
+        sessions.forEach(function (s) {
+          var mine = currentId && String(s.id) === currentId;
+          html += '<div class="auth-row">';
+          html += '  <div class="auth-row-main">';
+          html += '    <div class="auth-row-name">Session ' + self.esc(s.id);
+          if (mine) html += ' <span class="auth-badge auth-badge-current">this browser</span>';
+          html += '    </div>';
+          html += '    <div class="auth-row-meta">Signed in ' + self.esc(self._authWhen(s.created_at))
+                + ' · last seen ' + self.esc(self._authWhen(s.last_seen))
+                + (s.agent ? ' · ' + self.esc(String(s.agent).slice(0, 80)) : '')
+                + '</div>';
+          html += '  </div>';
+          html += '  <div class="auth-row-actions"><button class="config-btn danger" data-revoke-session="'
+                + self.esc(s.id) + '"' + (mine ? ' data-session-current="1"' : '') + '>Revoke</button></div>';
+          html += '</div>';
+        });
+      }
+    }
+    html += '</div>';
+
+    // -- the pointer to keys -------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">API keys for your programs</h3>';
+    html += '<p class="config-card-desc">A script, the desktop app or another node sends <code>Authorization: Bearer &lt;key&gt;</code> instead of signing in. Create and revoke those in API access.</p>';
+    html += '<button class="config-btn secondary" id="account-open-api">Open API access</button>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    var signout = document.getElementById('account-signout');
+    if (signout) signout.addEventListener('click', function () { self.signOut(); });
+    var openApi = document.getElementById('account-open-api');
+    if (openApi) openApi.addEventListener('click', function () { self.openApiAccess(); });
+
+    var form = document.getElementById('account-password-form');
+    if (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        self.accountChangePassword();
+      });
+    }
+    mount.querySelectorAll('[data-revoke-session]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self.accountRevokeSession(btn.dataset.revokeSession, btn.dataset.sessionCurrent === '1');
+      });
+    });
+  },
+
+  async accountChangePassword() {
+    var self = this;
+    var cur = document.getElementById('account-pw-current');
+    var next = document.getElementById('account-pw-new');
+    var again = document.getElementById('account-pw-confirm');
+    var result = document.getElementById('account-pw-result');
+    var show = function (ok, message) {
+      if (!result) { self.toast(message, ok ? 'success' : 'error'); return; }
+      result.style.display = '';
+      result.className = 'config-test-result ' + (ok ? 'ok' : 'err');
+      result.textContent = message;
+    };
+    var current = cur ? cur.value : '';
+    var wanted = next ? next.value : '';
+    var confirmed = again ? again.value : '';
+    if (!current || !wanted) { show(false, 'Fill in your current password and the new one.'); return; }
+    if (wanted !== confirmed) { show(false, 'The two new passwords are different. Type the new one again.'); return; }
+    var btn = document.getElementById('account-pw-save');
+    if (btn) { btn.disabled = true; btn.textContent = 'Changing...'; }
+    var resp = await AINodeAuth.fetch('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current: current, new: wanted }),
+    });
+    var body = await this._authBody(resp);
+    if (btn) { btn.disabled = false; btn.textContent = 'Change password'; }
+    if (!resp.ok) {
+      show(false, resp.status === 403
+        ? this._authMessage(body, 'That is not your current password.')
+        : this._authMessage(body, 'This node did not change your password (HTTP ' + resp.status + ').'));
+      return;
+    }
+    if (cur) cur.value = '';
+    if (next) next.value = '';
+    if (again) again.value = '';
+    // The node mints a fresh session for this browser and revokes the account's
+    // other ones, so the sessions list under this card is stale the moment the
+    // change lands. Re-read who we are, redraw, then say what happened on the
+    // line the redraw just rebuilt.
+    await AINodeAuth.loadMe();
+    await this.renderConfigAccount();
+    var after = document.getElementById('account-pw-result');
+    var done = 'Password changed. You stay signed in here, and your other browsers are signed out.';
+    if (!after) { this.toast(done, 'success'); return; }
+    after.style.display = '';
+    after.className = 'config-test-result ok';
+    after.textContent = done;
+  },
+
+  async accountRevokeSession(sessionId, isCurrent) {
+    if (!sessionId) return;
+    if (isCurrent && !confirm('Revoke this session?\n\nIt is the one this browser is using, so you will be signed out.')) return;
+    if (!isCurrent && !confirm('Revoke session ' + sessionId + '?\n\nThat browser signs out on its next request.')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/sessions/' + encodeURIComponent(sessionId), { method: 'DELETE' });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      this.toast(this._authMessage(body, 'Could not revoke session ' + sessionId + '.'), 'error');
+      return;
+    }
+    if (isCurrent) {
+      AINodeAuth.me = null;
+      this.renderUserChip();
+      this.requireSignIn('You signed this browser out.');
+      return;
+    }
+    this.toast('Session ' + sessionId + ' revoked.', 'success');
+    this.renderConfigAccount();
+  },
+
+  // ----- Users --------------------------------------------------------------
+  // Accounts on this node. Admin only: the server decides, and this panel
+  // renders the answer it gives rather than guessing from a role it read once.
+
+  async renderConfigUsers() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var self = this;
+    mount.innerHTML = '<div class="config-empty">Loading accounts…</div>';
+    var resp = await AINodeAuth.fetch('/api/auth/users');
+    var body = await this._authBody(resp);
+
+    var html = '';
+    html += '<h2 class="config-section-title">Users</h2>';
+    html += '<p class="config-section-desc">Accounts that can sign in to this node. An admin manages accounts, API keys and the sign-in switch; a member signs in and uses the dashboard. Passwords are stored hashed in <code>~/.ainode/auth.json</code> and can also be managed on the node with <code>ainode auth user</code>.</p>';
+
+    if (resp.status === 403) {
+      html += '<div class="config-card"><div class="config-empty">Only an admin can manage accounts on this node. Ask an admin to add or change one.</div></div>';
+      mount.innerHTML = html;
+      return;
+    }
+    if (resp.status === 404) {
+      html += '<div class="config-card"><div class="config-empty">This node is running a release without accounts. Update it to sign in with a name and password (the version is in Config &gt; About).</div></div>';
+      mount.innerHTML = html;
+      return;
+    }
+    if (!resp.ok) {
+      html += '<div class="config-card"><div class="config-empty">' + this.esc(this._authMessage(body,
+        'This node did not list accounts (HTTP ' + resp.status + ').')) + '</div></div>';
+      mount.innerHTML = html;
+      return;
+    }
+
+    var users = Array.isArray(body) ? body : ((body && body.users) || []);
+    this.state.authUsers = users;
+    var me = AINodeAuth.user();
+    // The node counts its own admins; fall back to counting the rows when it
+    // does not, rather than printing a number nobody stated.
+    var admins = (body && typeof body.admin_count === 'number')
+      ? body.admin_count
+      : users.filter(function (u) { return u.role === 'admin' && !u.disabled; }).length;
+
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Accounts</h3>';
+    if (!users.length) {
+      html += '<div class="config-empty">No accounts yet. Add one below, or run <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code> on the node.</div>';
+    } else {
+      users.forEach(function (u) {
+        var isMe = me && me.name === u.name;
+        html += '<div class="auth-row" data-user-row="' + self.esc(u.name) + '">';
+        html += '  <div class="auth-row-main">';
+        html += '    <div class="auth-row-name">' + self.esc(u.name);
+        html += '      <span class="auth-badge auth-badge-' + (u.role === 'admin' ? 'admin' : 'member') + '">' + self.esc(u.role || 'member') + '</span>';
+        if (u.disabled) html += ' <span class="auth-badge auth-badge-off">disabled</span>';
+        if (isMe) html += ' <span class="auth-badge auth-badge-current">you</span>';
+        html += '    </div>';
+        var signedIn = '';
+        if (typeof u.sessions === 'number') {
+          signedIn = ' · ' + (u.sessions === 0 ? 'not signed in anywhere'
+            : u.sessions + (u.sessions === 1 ? ' browser signed in' : ' browsers signed in'));
+        }
+        html += '    <div class="auth-row-meta">Added ' + self.esc(self._authWhen(u.created_at)) + self.esc(signedIn) + '</div>';
+        html += '    <div class="auth-inline-form" id="user-pw-' + self.esc(u.name) + '" style="display:none">';
+        html += '      <input class="form-input" type="password" data-new-password="' + self.esc(u.name) + '" placeholder="New password for ' + self.esc(u.name) + '" autocomplete="new-password">';
+        html += '      <button class="config-btn" data-save-password="' + self.esc(u.name) + '">Set password</button>';
+        html += '    </div>';
+        html += '  </div>';
+        html += '  <div class="auth-row-actions">';
+        html += '    <button class="config-btn secondary" data-reset-password="' + self.esc(u.name) + '">Reset password</button>';
+        html += u.disabled
+          ? '    <button class="config-btn secondary" data-enable-user="' + self.esc(u.name) + '">Enable</button>'
+          : '    <button class="config-btn secondary" data-disable-user="' + self.esc(u.name) + '">Disable</button>';
+        html += '    <button class="config-btn danger" data-remove-user="' + self.esc(u.name) + '">Remove</button>';
+        html += '  </div>';
+        html += '</div>';
+      });
+      if (admins <= 1) {
+        html += '<p class="config-card-desc">This node has one admin. It refuses to remove or disable the only admin, so nobody can lock everybody out.</p>';
+      }
+    }
+    html += '</div>';
+
+    // -- add an account ------------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Add an account</h3>';
+    html += '<p class="config-card-desc">The person signs in with this name and password, and can change the password from their own Account page.</p>';
+    html += '<form class="auth-form auth-form-add" id="user-add-form" autocomplete="off">';
+    html += '  <input class="form-input" id="user-add-name" placeholder="Name" autocapitalize="none" spellcheck="false">';
+    html += '  <input class="form-input" id="user-add-password" type="password" placeholder="Password" autocomplete="new-password">';
+    html += '  <select class="form-select" id="user-add-role">';
+    html += '    <option value="member">member</option>';
+    html += '    <option value="admin">admin</option>';
+    html += '  </select>';
+    html += '  <button class="config-btn" type="submit" id="user-add-btn">+ Add</button>';
+    html += '</form>';
+    html += '<div class="config-test-result" id="user-add-result" style="display:none"></div>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    var form = document.getElementById('user-add-form');
+    if (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        self.usersAdd();
+      });
+    }
+    mount.querySelectorAll('[data-reset-password]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var row = document.getElementById('user-pw-' + btn.dataset.resetPassword);
+        if (!row) return;
+        var open = row.style.display !== 'none';
+        row.style.display = open ? 'none' : '';
+        if (!open) {
+          var input = row.querySelector('[data-new-password]');
+          if (input) input.focus();
+        }
+      });
+    });
+    mount.querySelectorAll('[data-save-password]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        // By element, not by a selector built from a name: a name is the user's
+        // text and has no business inside a CSS selector.
+        var name = btn.dataset.savePassword;
+        var row = document.getElementById('user-pw-' + name);
+        var input = row ? row.querySelector('[data-new-password]') : null;
+        self.usersSetPassword(name, input ? input.value : '');
+      });
+    });
+    mount.querySelectorAll('[data-disable-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.usersSetEnabled(btn.dataset.disableUser, false); });
+    });
+    mount.querySelectorAll('[data-enable-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.usersSetEnabled(btn.dataset.enableUser, true); });
+    });
+    mount.querySelectorAll('[data-remove-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.usersRemove(btn.dataset.removeUser); });
+    });
+  },
+
+  async usersAdd() {
+    var self = this;
+    var nameEl = document.getElementById('user-add-name');
+    var passEl = document.getElementById('user-add-password');
+    var roleEl = document.getElementById('user-add-role');
+    var result = document.getElementById('user-add-result');
+    var show = function (ok, message) {
+      if (!result) { self.toast(message, ok ? 'success' : 'error'); return; }
+      result.style.display = '';
+      result.className = 'config-test-result ' + (ok ? 'ok' : 'err');
+      result.textContent = message;
+    };
+    var name = (nameEl && nameEl.value || '').trim();
+    var password = passEl ? passEl.value : '';
+    var role = (roleEl && roleEl.value) || 'member';
+    if (!name || !password) { show(false, 'Enter a name and a password.'); return; }
+    var btn = document.getElementById('user-add-btn');
+    if (btn) btn.disabled = true;
+    var resp = await AINodeAuth.fetch('/api/auth/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, password: password, role: role }),
+    });
+    var body = await this._authBody(resp);
+    if (btn) btn.disabled = false;
+    if (!resp.ok) {
+      show(false, this._authMessage(body, 'Could not add ' + name + ' (HTTP ' + resp.status + ').'));
+      return;
+    }
+    this.toast('Added ' + name + ' as ' + role + '. Tell them to sign in and change the password.', 'success');
+    this.renderConfigUsers();
+  },
+
+  async usersSetPassword(name, password) {
+    if (!name) return;
+    if (!password) { this.toast('Type the new password first.', 'error'); return; }
+    var resp = await AINodeAuth.fetch('/api/auth/users/' + encodeURIComponent(name) + '/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: password }),
+    });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      this.toast(this._authMessage(body, 'Could not set a password for ' + name + '.'), 'error');
+      return;
+    }
+    this.toast('Password set for ' + name + '. Tell them what it is, and to change it.', 'success');
+    this.renderConfigUsers();
+  },
+
+  async usersSetEnabled(name, enabled) {
+    if (!name) return;
+    if (!enabled && !confirm('Disable ' + name + '?\n\nTheir sessions end and they cannot sign in until you enable them again.')) return;
+    var path = '/api/auth/users/' + encodeURIComponent(name) + (enabled ? '/enable' : '/disable');
+    var resp = await AINodeAuth.fetch(path, { method: 'POST' });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      this.toast(this._authMessage(body,
+        'Could not ' + (enabled ? 'enable ' : 'disable ') + name + '.'), 'error');
+      return;
+    }
+    this.toast(name + (enabled ? ' can sign in again.' : ' is disabled.'), 'success');
+    this.renderConfigUsers();
+  },
+
+  async usersRemove(name) {
+    if (!name) return;
+    if (!confirm('Remove ' + name + '?\n\nTheir sessions end at once. API keys are separate and are not touched.')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/users/' + encodeURIComponent(name), { method: 'DELETE' });
+    if (!resp.ok) {
+      var body = await this._authBody(resp);
+      // A 409 is the node refusing to remove its last admin. Show its own words.
+      this.toast(this._authMessage(body, 'Could not remove ' + name + '.'), 'error');
+      return;
+    }
+    this.toast(name + ' removed.', 'success');
+    var me = AINodeAuth.user();
+    if (me && me.name === name) {
+      AINodeAuth.me = null;
+      this.renderUserChip();
+      this.requireSignIn('You removed your own account.');
+      return;
+    }
+    this.renderConfigUsers();
+  },
+
+  // ----- API access ---------------------------------------------------------
+  // Keys for programs, and the switch that closes this port. People sign in at
+  // the front door (static/js/signin.js): the one hand-pasted key left here is
+  // for a browser driving a node it has no account on. A 401 with a stored key
+  // lands here (#167); a 401 with no credential lands on the front door (#261).
+
+  async refreshAuthStatus() {
+    // /api/auth/status answers with no key on purpose, so this stays truthful
+    // even while every other panel is 401ing.
+    var st = await this.fetchJSON('/api/auth/status');
+    if (st) this.state.authStatus = st;
+    this.renderAuthChip();
+    return st;
+  },
+
+  /**
+   * The chip, written from the user's side: who they are, or what this port is.
+   * The node's own wording for the port lives in apiStateText(), which is what
+   * the API access panel shows.
+   */
+  authChipText() {
+    var st = this.state.authStatus;
+    var user = AINodeAuth.user();
+    if (user) return 'Signed in as ' + user.name;
+    if (!st) return 'API access';
+    if (!st.enabled) return 'Open, no key required';
+    return AINodeAuth.hasKey() ? 'Using an API key' : 'Sign-in required';
+  },
+
+  /**
+   * How this port is protected, in the node's words: it must read the same as
+   * /api/status's auth.label (api/server.py::auth_status_fields), because the
+   * installer summary and the API answer quote it too. One fact, one wording.
+   */
+  apiStateText() {
+    var st = this.state.authStatus;
+    if (!st) return 'API access';
+    if (st.enabled) return 'API key required';
+    return st.key_count ? 'API open, key set but not required' : 'API open, no key set';
+  },
+
+  renderAuthChip() {
+    var chip = document.getElementById('api-access-chip');
+    var label = document.getElementById('api-chip-label');
+    if (!chip || !label) return;
+    var st = this.state.authStatus || {};
+    label.textContent = this.authChipText();
+    var state = 'open';
+    if (st.enabled) state = (AINodeAuth.user() || AINodeAuth.hasKey()) ? 'keyed' : 'locked';
+    chip.dataset.state = state;
+    chip.title = st.enabled
+      ? 'This node requires a sign-in, or an API key for a program. Click to manage keys.'
+      : 'Anyone who can reach this port can load models and change config. Click to require a sign-in.';
+    this.renderUserChip();
+  },
+
+  /** The name in the header, and the way out. Hidden when nobody is signed in. */
+  renderUserChip() {
+    var wrap = document.getElementById('user-chip');
+    var name = document.getElementById('user-chip-name');
+    if (!wrap || !name) return;
+    var user = AINodeAuth.user();
+    if (!user) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+    name.textContent = user.name;
+    wrap.dataset.role = user.role || 'member';
+    name.title = 'Account: your name, password and sessions'
+      + (user.role ? ' (' + user.role + ')' : '');
+  },
+
+  /** Land on one Config section, sidebar in step with it. */
+  openConfigSection(section) {
+    this.state.configSection = section;
+    if (this.state.currentView !== 'config') {
+      this.navigate('config');
+    }
+    var nav = document.getElementById('config-nav');
+    if (nav) {
+      nav.querySelectorAll('.config-nav-item').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.section === section);
+      });
+    }
+    this.renderConfigSection();
+  },
+
+  openApiAccess() {
+    this.openConfigSection('api');
+  },
+
+  /**
+   * Put the front door back up, with the reason on it. Stops every poll first:
+   * a page behind the sign-in screen must not be firing requests that 401.
+   */
+  async requireSignIn(reason) {
+    if (AINodeSignIn.isUp()) return;
+    this.stopPolling();
+    var self = this;
+    var me = await AINodeAuth.loadMe();
+    if (!AINodeAuth.needsSignIn(me)) {
+      // The credential is good after all (a node that is open, or a browser
+      // holding a key): carry on instead of demanding a password for nothing.
+      this.start();
+      return;
+    }
+    AINodeSignIn.show({
+      state: AINodeAuth.bootDecision(me).state,
+      reason: reason || '',
+      onSignedIn: function () { self.start(); },
+    });
+  },
+
+  onUnauthorized(info) {
+    // A blank dashboard is the bug, and there are two credentials to be refused
+    // on. A person whose session ended goes back to the front door with the
+    // reason on it; a browser sending a key this node rejects goes to the panel
+    // that holds the key box, because that is where a key is fixed. A release
+    // with no front door (/api/auth/me unanswered) keeps the old behaviour.
+    this.state.authBlocked = info || { hadKey: AINodeAuth.hasKey() };
+    var hadKey = !!(info && info.hadKey);
+    if (!hadKey && AINodeAuth.me) {
+      this.requireSignIn(info && info.hadSession
+        ? 'This node ended your session. Sign in again.'
+        : 'This node requires a sign-in.');
+      return;
+    }
+    this.toast(hadKey
+      ? 'This node rejected the stored API key. Paste a current one.'
+      : 'This node requires an API key.', 'error');
+    this.refreshAuthStatus();
+    this.openApiAccess();
+  },
+
+  /**
+   * Sign out: end the session, then show the front door again. The stored API
+   * key is left alone on purpose. It belongs to a program, and Config > API
+   * access has the button that forgets it.
+   */
+  async signOut() {
+    await AINodeAuth.signOut();
+    this.state.authBlocked = null;
+    this.state.authSessions = null;
+    this.state.authUsers = null;
+    this.stopPolling();
+    var self = this;
+    var me = await AINodeAuth.loadMe();
+    this.renderUserChip();
+    if (!AINodeAuth.needsSignIn(me)) {
+      // A key in this browser still opens every route, so claiming to be signed
+      // out behind a sign-in screen would be a lie. Say what is still true.
+      this.start();
+      this.toast(AINodeAuth.hasKey()
+        ? 'Signed out. This browser still sends a stored API key, so the dashboard keeps working. Forget it in Config > API access.'
+        : 'Signed out. This node is open, so the dashboard keeps working.', 'info');
+      this.refreshAuthStatus();
+      return;
+    }
+    AINodeSignIn.show({
+      state: AINodeAuth.bootDecision(me).state,
+      reason: '',
+      onSignedIn: function () { self.start(); },
+    });
+  },
+
+  // The TLS sentence in the API access panel, from /api/status's tls block
+  // (api/server.py::tls_status_fields). Three states, because "I could not read
+  // it" is not the same answer as "there is none": a browser with no key gets a
+  // 401 from /api/status while this panel is exactly where it is sent.
+  tlsAccessNote(tls) {
+    if (!tls) {
+      return 'TLS state unknown from this browser: /api/status needs the key. Paste one above to see whether this node serves HTTPS.';
+    }
+    if (!tls.enabled) {
+      return 'There is no TLS on these ports: a key travels in plain text over the network. Run <code>ainode tls enable</code> on the node (or <code>ainode tls enable --tailscale</code> for a certificate a Mac will trust), or put AINode behind a reverse proxy that terminates TLS.';
+    }
+    var note = 'HTTPS is on, on port <code>' + this.esc(String(tls.port)) + '</code>. HTTP stays on this port for fleet clients, so a key still travels in plain text unless the caller uses the HTTPS one.';
+    if (tls.cert_expires) {
+      note += ' Certificate: ' + (tls.self_signed ? 'self-signed' : 'CA-issued')
+        + ', expires ' + this.esc(String(tls.cert_expires));
+      if (tls.cert_days_left !== null && tls.cert_days_left !== undefined) {
+        note += ' (' + this.esc(String(tls.cert_days_left)) + ' days left)';
+      }
+      note += '.';
+    } else if (tls.label) {
+      note += ' ' + this.esc(String(tls.label)) + '.';
+    }
+    return note;
+  },
+
+  async renderConfigApiAccess() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var self = this;
+    var st = await this.refreshAuthStatus() || this.state.authStatus || {};
+    // Read TLS off /api/status rather than assuming it: null means this browser
+    // could not read it (no key), which tlsAccessNote reports as such.
+    var statusNow = await this.fetchJSON('/api/status') || this.state.status || null;
+    var tlsState = (statusNow && statusNow.tls) ? statusNow.tls : null;
+    var keys = null;
+    if (!st.enabled || st.authenticated) {
+      keys = await this.fetchJSON('/api/auth/keys');
+    }
+    var stored = AINodeAuth.getKey();
+    var me = AINodeAuth.me || {};
+    var signedIn = AINodeAuth.user();
+    var html = '';
+    html += '<h2 class="config-section-title">API access</h2>';
+    // The exempt set is auth/middleware.py::SKIP_PATHS plus SKIP_PREFIXES, spelled
+    // out in full: this sentence listed three of the six, so an operator reading it
+    // could not tell what an unauthenticated caller can still reach.
+    // tests/test_fleet_auth.py checks every path in SKIP_PATHS appears here, and
+    // tests/test_auth_usable.py checks the two front-door paths by name.
+    html += '<p class="config-section-desc">Who may call this node. A person signs in on the dashboard and stays signed in; a program sends a key. AINode serves the dashboard, the OpenAI-compatible API and every management route on the same ports, so with sign-in on, every <code>/api</code> and <code>/v1</code> route needs either that session or <code>Authorization: Bearer &lt;key&gt;</code>. What still answers without either: <code>/</code> and <code>/static/*</code> (the shell that asks who you are), <code>/api/health</code> (a liveness probe has no credential), <code>/api/auth/status</code> (so this page can say a key is wanted), <code>/api/auth/me</code> and <code>/api/auth/login</code> (the sign-in screen itself), <code>/api/cluster/endpoint</code> (names, addresses and ports, so a stranded client can find another node) and <code>/api/cluster/join</code> (a joining node holds a one-time token instead). Peers need no key of their own: a node-to-node call carries a key derived from <code>cluster_secret</code>.</p>';
+
+    if (this.state.authBlocked) {
+      html += '<div class="config-card config-card-alert">';
+      html += '<h3 class="config-card-title">This node refused the last request</h3>';
+      html += '<p class="config-card-desc">' + (this.state.authBlocked.hadKey
+        ? 'The key stored in this browser is not one of this node\'s keys. Paste a current one below, or create a new key from a session that is authenticated.'
+        : 'This node wants a sign-in or a key, and this browser sent neither. Reload to sign in, or paste a key below.') + '</p>';
+      html += '</div>';
+    }
+
+    // -- state ---------------------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Status</h3>';
+    html += '<div class="api-access-state" data-state="' + (st.enabled ? ((st.authenticated || signedIn) ? 'keyed' : 'locked') : 'open') + '">';
+    html += '<strong>' + this.esc(this.apiStateText()) + '</strong>';
+    html += '<span class="api-access-who">' + this.esc(this.authChipText()) + '</span>';
+    html += '</div>';
+    if (!st.enabled) {
+      html += '<p class="config-card-desc">Anyone who can reach this port can load and delete models, change config, start training and restart the cluster. That is fine on a private network and it is the default; turn it on before this node is reachable from anywhere else.</p>';
+      html += '<p class="config-card-desc">Turning it on asks every browser for a name and password, and every program for a key. Create the first account on the node: <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code></p>';
+      html += '<button class="config-btn" id="auth-enable">Require a sign-in</button>';
+    } else {
+      html += '<p class="config-card-desc">Passwords and keys are stored hashed in <code>~/.ainode/auth.json</code>. A signed-in person rides an HttpOnly <code>ainode_session</code> cookie, which never reaches the page; a browser using a key keeps it in <code>localStorage</code> under <code>' + this.esc(AINodeAuth.STORAGE_KEY) + '</code>, never in the page or a URL.</p>';
+      if (me.auth_enabled && me.has_users === false) {
+        html += '<p class="config-card-desc">No accounts exist yet, so nobody can sign in and every caller needs a key. Create the first account on the node: <code>' + this.esc(AINodeAuth.userAddCommand()) + '</code></p>';
+      }
+      // The switch that opens the port is shown only to a caller this node has
+      // actually authenticated. An unauthenticated browser pressing it got a 401
+      // and a panel that looked broken (#262).
+      if (st.authenticated || signedIn) {
+        html += '<button class="config-btn secondary" id="auth-disable">Stop requiring a key</button>';
+      } else {
+        html += '<p class="config-card-desc">Sign in, or paste a key below, to turn this back off.</p>';
+      }
+    }
+    html += '</div>';
+
+    // -- the key this browser sends -----------------------------------------
+    // Collapsed, and deliberately last in the reading order of this card: a
+    // person signs in at the front door and never types a key. This is for a
+    // browser driving a node it has no account on (a fleet node, a kiosk, the
+    // desktop app's embedded view), which is a real case and stays working.
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Key in this browser</h3>';
+    html += '<p class="config-card-desc">' + (stored
+      ? 'This browser is sending <code>' + this.esc(AINodeAuth.maskKey(stored)) + '</code> with every request.'
+      : 'Nothing stored, which is the normal case: you signed in instead.') + '</p>';
+    var openKeyBox = !!(stored || (this.state.authBlocked && this.state.authBlocked.hadKey)
+      || (st.enabled && !signedIn));
+    html += '<details class="config-details"' + (openKeyBox ? ' open' : '') + '>';
+    html += '  <summary>Use a key in this browser instead</summary>';
+    html += '  <p class="config-card-desc">For a browser with no account on this node. The key is sent as a Bearer token on every request from this browser, exactly as a program would.</p>';
+    html += '  <div class="config-secret-input-row">';
+    html += '    <input type="password" class="form-input" id="auth-key-input" placeholder="Paste an API key" autocomplete="off">';
+    html += '    <button class="config-btn" id="auth-key-save">Save</button>';
+    if (stored) html += '    <button class="config-btn secondary" id="auth-key-clear">Forget the stored key</button>';
+    html += '  </div>';
+    html += '</details>';
+    html += '</div>';
+
+    // -- keys on the node ----------------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Keys on this node</h3>';
+    if (keys === null) {
+      html += '<div class="config-empty">Sign in, or paste a working key above, to list and manage keys.</div>';
+    } else {
+      var rows = (keys.keys || []);
+      if (!rows.length) {
+        html += '<div class="config-empty">No keys yet.</div>';
+      } else {
+        rows.forEach(function (k) {
+          html += '<div class="config-secret-row">';
+          html += '  <div class="config-secret-main"><div class="config-secret-label-row">';
+          html += '    <span class="config-secret-name">Key ' + self.esc(k.id) + '</span>';
+          html += '    <span class="config-secret-unset">stored hashed</span>';
+          html += '  </div></div>';
+          html += '  <button class="config-btn danger" data-revoke="' + self.esc(k.id) + '">Revoke</button>';
+          html += '  <span></span>';
+          html += '</div>';
+        });
+      }
+      html += '<button class="config-btn secondary" id="auth-key-new">+ Create a key</button>';
+    }
+    html += '<div id="auth-new-key"></div>';
+    html += '</div>';
+
+    // -- what a key does NOT cover ------------------------------------------
+    html += '<div class="config-card">';
+    html += '<h3 class="config-card-title">Also worth knowing</h3>';
+    html += '<p class="config-card-desc"><code>trust_remote_code</code> makes the engine run Python from the model repository. Request overrides require an admin or operator with authentication enabled, or a loopback connection when authentication is off. Catalog recipes can declare it for ordinary model launches.</p>';
+    // TLS is a real state now, so this line reads it instead of stating a fact
+    // that stopped being true. /api/status needs the key when auth is on, so a
+    // browser that cannot read it says so rather than guessing either way.
+    html += '<p class="config-card-desc">' + this.tlsAccessNote(tlsState) + '</p>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    // -- behaviour -----------------------------------------------------------
+    var enableBtn = document.getElementById('auth-enable');
+    if (enableBtn) {
+      enableBtn.addEventListener('click', function () { self.authEnable(); });
+    }
+    var disableBtn = document.getElementById('auth-disable');
+    if (disableBtn) {
+      disableBtn.addEventListener('click', function () { self.authDisable(); });
+    }
+    var saveBtn = document.getElementById('auth-key-save');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', function () {
+        var input = document.getElementById('auth-key-input');
+        var value = (input && input.value || '').trim();
+        if (!value) { self.toast('Paste a key first.', 'error'); return; }
+        AINodeAuth.setKey(value);
+        self.state.authBlocked = null;
+        self.toast('Key saved in this browser.', 'success');
+        self.refresh();
+        self.renderConfigApiAccess();
+      });
+    }
+    var clearBtn = document.getElementById('auth-key-clear');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function () {
+        AINodeAuth.clearKey();
+        self.toast('Key forgotten in this browser.', 'info');
+        self.renderConfigApiAccess();
+      });
+    }
+    var newBtn = document.getElementById('auth-key-new');
+    if (newBtn) {
+      newBtn.addEventListener('click', function () { self.authCreateKey(); });
+    }
+    mount.querySelectorAll('[data-revoke]').forEach(function (btn) {
+      btn.addEventListener('click', function () { self.authRevokeKey(btn.dataset.revoke); });
+    });
+  },
+
+  /** A key is shown once: it exists hashed on the node and nowhere else. */
+  _showNewKey(keyId, apiKey, note) {
+    var slot = document.getElementById('auth-new-key');
+    if (!slot) return;
+    var html = '<div class="config-card config-card-alert">';
+    html += '<h3 class="config-card-title">Copy this key now</h3>';
+    html += '<p class="config-card-desc">It is stored hashed on the node and cannot be shown again.' + (note ? ' ' + this.esc(note) : '') + '</p>';
+    html += '<div class="api-key-reveal"><code id="auth-new-key-value">' + this.esc(apiKey) + '</code>';
+    html += '<button class="config-btn secondary" id="auth-new-key-copy">Copy</button></div>';
+    html += '<p class="config-card-desc">Key ID <code>' + this.esc(keyId || '') + '</code></p>';
+    html += '</div>';
+    slot.innerHTML = html;
+    var copy = document.getElementById('auth-new-key-copy');
+    var self = this;
+    if (copy) {
+      copy.addEventListener('click', function () {
+        try {
+          navigator.clipboard.writeText(apiKey);
+          self.toast('Key copied.', 'success');
+        } catch (e) {
+          self.toast('Copy failed, select the key by hand.', 'error');
+        }
+      });
+    }
+  },
+
+  async authEnable() {
+    var resp = await AINodeAuth.fetch('/api/auth/enable', { method: 'POST' });
+    var data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok || !data) {
+      this.toast('Could not enable auth.', 'error');
+      return;
+    }
+    // A signed-in person keeps their session across the switch, so a key does not
+    // need to be stored in their browser and quietly is not: the key this call
+    // minted is for their programs. A browser with no session is a different
+    // story, and storing it is what stops it locking itself out.
+    var keepsSession = !!AINodeAuth.user();
+    if (data.api_key && !keepsSession) {
+      AINodeAuth.setKey(data.api_key);
+      this.state.authBlocked = null;
+      this.toast('Sign-in required from now on. This browser is using the new key.', 'success');
+    } else if (data.api_key) {
+      this.state.authBlocked = null;
+      this.toast('Sign-in required from now on. You stay signed in here.', 'success');
+    } else {
+      this.toast(data.message || 'Sign-in required from now on, using the keys this node already has.', 'info');
+    }
+    await AINodeAuth.loadMe();
+    await this.refreshAuthStatus();
+    await this.renderConfigApiAccess();
+    if (data.api_key) {
+      this._showNewKey(data.key_id, data.api_key, keepsSession
+        ? 'This key is for your programs. You stay signed in here on your session.'
+        : 'Saved in this browser already.');
+    }
+    this.refresh();
+  },
+
+  async authDisable() {
+    if (!confirm('Stop requiring a sign-in?\n\nEvery /api and /v1 route on this node answers anyone who can reach the port, with no name and no key.')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/disable', { method: 'POST' });
+    if (!resp.ok) { this.toast('Could not disable auth.', 'error'); return; }
+    this.state.authBlocked = null;
+    this.toast('Auth off. This port is open.', 'info');
+    await this.refreshAuthStatus();
+    await this.renderConfigApiAccess();
+    this.refresh();
+  },
+
+  async authCreateKey() {
+    var resp = await AINodeAuth.fetch('/api/auth/keys', { method: 'POST' });
+    var data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok || !data || !data.api_key) {
+      this.toast('Could not create a key.', 'error');
+      return;
+    }
+    await this.renderConfigApiAccess();
+    this._showNewKey(data.key_id, data.api_key, '');
+  },
+
+  async authRevokeKey(keyId) {
+    if (!keyId) return;
+    var mine = AINodeAuth.getKey();
+    if (!confirm('Revoke key ' + keyId + '?')) return;
+    var resp = await AINodeAuth.fetch('/api/auth/keys/' + encodeURIComponent(keyId), { method: 'DELETE' });
+    if (!resp.ok) { this.toast('Could not revoke ' + keyId + '.', 'error'); return; }
+    this.toast('Key ' + keyId + ' revoked.', 'success');
+    // A browser holding the key it just revoked would 401 on its next poll with
+    // nothing said, so ask the node whether this key still works and forget it
+    // here if it does not.
+    if (mine) {
+      var still = await this.fetchJSON('/api/auth/status');
+      if (still && still.enabled && still.authenticated === false) AINodeAuth.clearKey();
+    }
+    await this.refreshAuthStatus();
+    await this.renderConfigApiAccess();
+  },
+
+  // ----- Cluster ------------------------------------------------------------
+  async renderConfigCluster() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading cluster info…</div>';
+    var data = await this.fetchJSON('/api/cluster/info');
+    this.state.configData.cluster = data;
+    if (!data) {
+      mount.innerHTML = '<div class="config-empty">Unable to load cluster info.</div>';
+      return;
+    }
+    var self = this;
+    var role = data.my_role || 'worker';
+    var configured = data.configured_role || 'auto';
+    var masterId = data.master_node_id;
+    var iAmMaster = role === 'master';
+    var members = data.members || [];
+    var peers = members.filter(function (m) { return m.node_id !== data.my_node_id; });
+
+    var badgeTitle, badgeSub, badgeIcon, badgeCls;
+    if (iAmMaster) {
+      badgeIcon = '⚡';
+      badgeTitle = 'MASTER - You are the cluster head';
+      badgeSub = peers.length > 0 ? 'Serving ' + peers.length + ' worker(s)'
+                                   : (configured === 'auto' ? 'Waiting for peers (auto-elected)' : 'Standalone');
+      badgeCls = 'master';
+    } else {
+      badgeIcon = '🔗';
+      var masterNode = members.find(function (m) { return m.node_id === masterId; });
+      badgeTitle = 'WORKER';
+      badgeSub = masterNode
+        ? 'Connected to master: ' + masterNode.node_name + ' (' + (data.master_address || masterNode.node_id) + ')'
+        : 'No master detected yet';
+      badgeCls = 'worker';
+    }
+
+    var html = '';
+    html += '<h2 class="config-section-title">Cluster</h2>';
+    html += '<p class="config-section-desc">Nodes on the same network with a matching <code>cluster_id</code> form a cluster. Master is elected automatically, or you can pin a role explicitly.</p>';
+
+    html += '<div class="config-role-badge ' + badgeCls + '">';
+    html += '  <div class="config-role-badge-icon">' + badgeIcon + '</div>';
+    html += '  <div class="config-role-badge-text">';
+    html += '    <div class="config-role-badge-title">' + self.esc(badgeTitle) + '</div>';
+    html += '    <div class="config-role-badge-subtitle">' + self.esc(badgeSub) + '</div>';
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Role</h3>';
+    html += '  <p class="config-card-desc">Auto = elected dynamically · Master = always cluster head · Worker = never becomes master.</p>';
+    html += '  <div class="config-role-pills pill-group">';
+    ['auto', 'master', 'worker'].forEach(function (r) {
+      html += '<button class="pill' + (configured === r ? ' active' : '') + '" data-set-role="' + r + '">' + r.toUpperCase() + '</button>';
+    });
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Cluster ID</h3>';
+    html += '  <p class="config-card-desc">Only nodes sharing this identifier will see each other.</p>';
+    html += '  <div class="config-secret-input-row">';
+    html += '    <input class="form-input" id="cfg-cluster-id" value="' + self.esc(data.cluster_id || 'default') + '">';
+    html += '    <button class="config-btn" id="cfg-cluster-id-save">Save</button>';
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Members</h3>';
+    html += '  <p class="config-card-desc">Nodes currently visible in this cluster.</p>';
+    if (members.length === 0) {
+      html += '<div class="config-empty">No members yet.</div>';
+    } else {
+      html += '<div class="config-member-table">';
+      html += '<div class="config-member-row header"><span>Node</span><span>Address</span><span>Role</span><span>Status</span><span>Last seen</span></div>';
+      members.forEach(function (m) {
+        var when = m.last_seen ? new Date(m.last_seen * 1000).toLocaleTimeString() : '-';
+        html += '<div class="config-member-row">';
+        html += '  <span><strong>' + self.esc(m.node_name || m.node_id) + '</strong><div style="color:var(--text-muted);font-size:11px" class="mono">' + self.esc(m.node_id) + '</div></span>';
+        html += '  <span class="mono">' + self.esc(m.node_name) + ':' + self.esc(String(m.web_port)) + '</span>';
+        html += '  <span><span class="config-member-role-tag ' + m.effective_role + '">' + m.effective_role + '</span></span>';
+        html += '  <span>' + self.esc(m.status) + '</span>';
+        html += '  <span class="mono" style="color:var(--text-muted)">' + when + '</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">How election works</h3>';
+    html += '  <p class="config-card-desc">If any node is explicitly configured as <code>master</code>, the lowest-ID such node wins. Otherwise the lowest node_id among <code>auto</code> nodes becomes master. <code>worker</code> nodes are never elected. Election is re-run every 5s as heartbeats arrive; changing your role takes effect on the next broadcast (≤5s) without a restart.</p>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    // The "Join a cluster" card lives in static/js/join.js, not here.
+    if (window.AINodeJoin) window.AINodeJoin.mount(mount, { onJoined: function () { self.renderConfigCluster(); } });
+
+    mount.querySelectorAll('[data-set-role]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var role = btn.dataset.setRole;
+        var resp = await AINodeAuth.fetch('/api/cluster/role', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: role }),
+        });
+        if (!resp.ok) { self.toast('Role change failed', 'error'); return; }
+        self.toast('Role → ' + role.toUpperCase(), 'success');
+        setTimeout(function () { self.renderConfigCluster(); }, 500);
+      });
+    });
+
+    var idBtn = document.getElementById('cfg-cluster-id-save');
+    if (idBtn) idBtn.addEventListener('click', async function () {
+      var val = document.getElementById('cfg-cluster-id').value.trim() || 'default';
+      var resp = await AINodeAuth.fetch('/api/cluster/id', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cluster_id: val }),
+      });
+      var body = await resp.json().catch(function () { return {}; });
+      if (!resp.ok) { self.toast((body.error && body.error.message) || 'Save failed', 'error'); return; }
+      self.toast('Cluster ID saved', 'success');
+      setTimeout(function () { self.renderConfigCluster(); }, 500);
+    });
+  },
+
+  // ----- Node Identity ------------------------------------------------------
+  async renderConfigNode() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var html = '';
+    html += '<h2 class="config-section-title">Node Identity</h2>';
+    html += '<p class="config-section-desc">Human-readable name and owner contact for this node.</p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += this._field('Node name', 'node_name', cfg.node_name || '');
+    html += this._field('Node ID (read-only)', 'node_id', cfg.node_id || '', { readonly: true, mono: true });
+    html += this._field('Email', 'email', cfg.email || '', { type: 'email' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-node-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-node-save').addEventListener('click', function () {
+      self._patchConfig({
+        node_name: document.getElementById('cfg-f-node_name').value,
+        email: document.getElementById('cfg-f-email').value,
+      });
+    });
+  },
+
+  // ----- Storage ------------------------------------------------------------
+  async renderConfigStorage() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var html = '';
+    html += '<h2 class="config-section-title">Storage</h2>';
+    html += '<p class="config-section-desc">Where AINode keeps downloaded models, datasets, and training artifacts. Leave blank to use defaults under <code>~/.ainode/</code>.</p>';
+    html += '<div class="config-card"><div class="config-form-grid single">';
+    html += this._field('Models directory', 'models_dir', cfg.models_dir || '', { hint: 'vLLM/HF model weights' });
+    html += this._field('Datasets directory', 'datasets_dir', cfg.datasets_dir || '', { hint: 'Training / eval datasets' });
+    html += this._field('Training output directory', 'training_dir', cfg.training_dir || '', { hint: 'Checkpoints and logs' });
+    html += this._field('HuggingFace cache', 'hf_cache_dir', cfg.hf_cache_dir || '', { hint: 'Defaults to $HF_HOME / ~/.cache/huggingface' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-storage-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-storage-save').addEventListener('click', function () {
+      self._patchConfig({
+        models_dir: document.getElementById('cfg-f-models_dir').value,
+        datasets_dir: document.getElementById('cfg-f-datasets_dir').value,
+        training_dir: document.getElementById('cfg-f-training_dir').value,
+        hf_cache_dir: document.getElementById('cfg-f-hf_cache_dir').value,
+      });
+    });
+  },
+
+  // ----- Training Defaults --------------------------------------------------
+  async renderConfigTrainingDefaults() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var method = cfg.training_default_method || 'lora';
+    var html = '';
+    html += '<h2 class="config-section-title">Training Defaults</h2>';
+    html += '<p class="config-section-desc">Default values prefilled when starting a new fine-tuning run.</p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += '<div><label class="config-field-label">Default method</label>';
+    html += '<select class="form-select" id="cfg-f-training_default_method">';
+    ['lora', 'qlora', 'full'].forEach(function (m) {
+      html += '<option value="' + m + '"' + (method === m ? ' selected' : '') + '>' + m.toUpperCase() + '</option>';
+    });
+    html += '</select></div>';
+    html += this._field('Default epochs', 'training_default_epochs', cfg.training_default_epochs, { type: 'number' });
+    html += this._field('Default batch size', 'training_default_batch_size', cfg.training_default_batch_size, { type: 'number' });
+    html += this._field('Default learning rate', 'training_default_learning_rate', cfg.training_default_learning_rate, { type: 'number', step: '0.00001' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-training-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-training-save').addEventListener('click', function () {
+      self._patchConfig({
+        training_default_method: document.getElementById('cfg-f-training_default_method').value,
+        training_default_epochs: parseInt(document.getElementById('cfg-f-training_default_epochs').value, 10),
+        training_default_batch_size: parseInt(document.getElementById('cfg-f-training_default_batch_size').value, 10),
+        training_default_learning_rate: parseFloat(document.getElementById('cfg-f-training_default_learning_rate').value),
+      });
+    });
+  },
+
+  // ----- Network ------------------------------------------------------------
+  async renderConfigNetwork() {
+    var mount = this._configMount();
+    if (!mount) return;
+    mount.innerHTML = '<div class="config-empty">Loading…</div>';
+    var cfg = await this.fetchJSON('/api/config');
+    this.state.configData.config = cfg;
+    if (!cfg) { mount.innerHTML = '<div class="config-empty">Unable to load config.</div>'; return; }
+    var self = this;
+    var host = cfg.host || '0.0.0.0';
+    var html = '';
+    html += '<h2 class="config-section-title">Network</h2>';
+    html += '<p class="config-section-desc">Port and binding configuration. <strong>Changes to ports require an AINode restart to take effect.</strong></p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += this._field('API port (vLLM)', 'api_port', cfg.api_port, { type: 'number' });
+    html += this._field('Web port (UI + proxy)', 'web_port', cfg.web_port, { type: 'number' });
+    html += this._field('Discovery port (UDP)', 'discovery_port', cfg.discovery_port, { type: 'number' });
+    html += '<div><label class="config-field-label">Bind host</label>';
+    html += '<select class="form-select" id="cfg-f-host">';
+    [['0.0.0.0', 'All interfaces (0.0.0.0)'], ['127.0.0.1', 'Localhost only (127.0.0.1)']].forEach(function (pair) {
+      html += '<option value="' + pair[0] + '"' + (host === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>';
+    });
+    html += '</select></div>';
+    html += this._field('CORS origins', 'cors_origins', cfg.cors_origins || '', { hint: 'Comma-separated list of allowed origins' });
+    html += '</div>';
+    html += '<div class="config-actions"><button class="config-btn" id="cfg-net-save">Save</button></div>';
+    html += '</div>';
+    mount.innerHTML = html;
+    document.getElementById('cfg-net-save').addEventListener('click', function () {
+      self._patchConfig({
+        api_port: parseInt(document.getElementById('cfg-f-api_port').value, 10),
+        web_port: parseInt(document.getElementById('cfg-f-web_port').value, 10),
+        discovery_port: parseInt(document.getElementById('cfg-f-discovery_port').value, 10),
+        host: document.getElementById('cfg-f-host').value,
+        cors_origins: document.getElementById('cfg-f-cors_origins').value,
+      }, { restartHint: true });
+    });
+  },
+
+  // ----- About --------------------------------------------------------------
+  async renderConfigAbout() {
+    var mount = this._configMount();
+    if (!mount) return;
+    var status = await this.fetchJSON('/api/status');
+    var gpu = status && status.gpu;
+    var html = '';
+    html += '<h2 class="config-section-title">About</h2>';
+    html += '<p class="config-section-desc">AINode, a local AI platform. Made in Texas.</p>';
+    html += '<div class="config-card"><div class="config-form-grid">';
+    html += '<div><div class="config-field-label">AINode version</div><div>' + this.esc((status && status.version) || 'n/a') + '</div></div>';
+    html += '<div><div class="config-field-label">Node ID</div><div class="mono" style="font-family:var(--font-mono);font-size:12px">' + this.esc((status && status.node_id) || 'n/a') + '</div></div>';
+    html += '<div><div class="config-field-label">Current model</div><div>' + this.esc((status && status.model) || 'none') + '</div></div>';
+    html += '<div><div class="config-field-label">GPU</div><div>' + this.esc(gpu ? (gpu.name + (gpu.memory_total_mb ? ' · ' + Math.round(gpu.memory_total_mb / 1024) + ' GB' : '')) : 'CPU only') + '</div></div>';
+    html += '<div><div class="config-field-label">Cluster role</div><div>' + this.esc((status && status.cluster_role) || 'n/a') + '</div></div>';
+    html += '<div><div class="config-field-label">Master node</div><div class="mono">' + this.esc((status && status.master_node_id) || '-') + '</div></div>';
+    html += '</div></div>';
+    html += '<div class="config-card">';
+    html += '  <h3 class="config-card-title">Links</h3>';
+    html += '  <p><a href="https://ainode.dev" target="_blank" rel="noopener" style="color:var(--nvidia-green)">ainode.dev</a> · ';
+    html += '  <a href="https://github.com/getainode/ainode" target="_blank" rel="noopener" style="color:var(--nvidia-green)">GitHub</a> · ';
+    html += '  <a href="https://docs.ainode.dev" target="_blank" rel="noopener" style="color:var(--nvidia-green)">Docs</a></p>';
+    html += '  <p class="config-card-desc" style="margin-top:10px">Licensed under Apache 2.0. Made in Texas.</p>';
+    html += '</div>';
+    mount.innerHTML = html;
+  },
+
+  // ----- Helpers ------------------------------------------------------------
+  _field(label, key, value, opts) {
+    opts = opts || {};
+    var type = opts.type || 'text';
+    var readonly = opts.readonly ? ' readonly' : '';
+    var step = opts.step ? ' step="' + opts.step + '"' : '';
+    var mono = opts.mono ? ' style="font-family:var(--font-mono);font-size:12px"' : '';
+    var val = value === null || value === undefined ? '' : String(value);
+    var html = '<div>';
+    html += '  <label class="config-field-label" for="cfg-f-' + key + '">' + this.esc(label) + '</label>';
+    html += '  <input class="form-input" id="cfg-f-' + key + '" type="' + type + '"' + step + readonly + mono + ' value="' + this.esc(val).replace(/"/g, '&quot;') + '">';
+    if (opts.hint) html += '<div class="config-field-hint">' + this.esc(opts.hint) + '</div>';
+    html += '</div>';
+    return html;
+  },
+
+  async _patchConfig(patch, opts) {
+    opts = opts || {};
+    // Strip NaN / empty numeric
+    Object.keys(patch).forEach(function (k) {
+      var v = patch[k];
+      if (typeof v === 'number' && Number.isNaN(v)) delete patch[k];
+      if (v === '') patch[k] = null;
+    });
+    var resp = await AINodeAuth.fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    var body = await resp.json().catch(function () { return {}; });
+    if (!resp.ok) {
+      this.toast((body.error && body.error.message) || 'Save failed', 'error');
+      return;
+    }
+    var outcome = configSaveOutcome(body, opts.restartHint);
+    this.toast(outcome.message, outcome.type);
+  },
+
+  // ========================================================================
+  //  SERVER VIEW (LM Studio-style console)
+  // ========================================================================
+
+  _serverState: {
+    logsSince: 0,
+    logsPoll: null,
+    autoScroll: true,
+    selectedModelId: null,
+    lastStatus: null,
+    endpoints: null,
+    endpointTab: 'openai',
+    logs: [],
+  },
+
+  async renderServer() {
+    var mount = document.getElementById('server-content');
+    if (!mount) return;
+    var self = this;
+
+    // Fetch status + endpoints in parallel (endpoints cached)
+    var status = await this.fetchJSON('/api/server/status');
+    this._serverState.lastStatus = status;
+    if (!this._serverState.endpoints) {
+      this._serverState.endpoints = await this.fetchJSON('/api/server/endpoints');
+    }
+    // Raw catalog (size_gb / local_size_gb / architecture) for MODEL INFO  -  the
+    // loaded-model object lacks size, and this.state.catalog (live-catalog view)
+    // isn't loaded here and remaps the fields.
+    if (!this._serverState.modelsCatalog) {
+      var _md = await this.fetchJSON('/api/models');
+      this._serverState.modelsCatalog = (_md && _md.models) || [];
+    }
+
+    var s = status || { status: 'stopped', reachable_at: [], loaded_models: [] };
+    var primaryUrl = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '-';
+
+    var html = '';
+
+    // --- Top status bar ---
+    // The dot reads the API's own verdict. It used to be the literal class
+    // `running` next to the word "Running", true by tautology, so it stayed green
+    // with every engine dead (#206). Stop and mcp.json were toast-only stubs and
+    // are gone until something implements them.
+    var serverState = s.status || 'idle';
+    var stateLabel = serverState === 'running' ? 'Running'
+      : serverState === 'loading' ? 'Loading' : 'Idle';
+    html += '<div class="server-status-bar">';
+    html += '  <div class="server-status-left">';
+    html += '    <span class="server-status-indicator"><span class="server-status-dot ' +
+            this.esc(serverState) + '"></span> ' + stateLabel + '</span>';
+    html += '    <button class="btn-ghost server-btn-sm" id="server-settings-btn">Server Settings</button>';
+    html += '  </div>';
+    html += '  <div class="server-status-center">';
+    html += '    <span class="server-reachable-label">Reachable at:</span>';
+    html += '    <span class="server-reachable-url mono" id="server-reachable-url">' + this.esc(primaryUrl) + '</span>';
+    html += '    <button class="server-copy-btn" data-copy="' + this.esc(primaryUrl) + '" title="Copy">⧉</button>';
+    html += '    <span class="server-cluster-summary mono" id="server-cluster-summary" style="margin-left:16px;color:#76B900"></span>';
+    html += '  </div>';
+    html += '  <div class="server-status-right">';
+    html += '    <button class="btn-nvidia server-btn-sm" id="server-load-model">+ Load Model</button>';
+    html += '  </div>';
+    html += '</div>';
+
+    // --- Loaded Models ---
+    html += '<section class="server-section">';
+    html += '  <div class="server-section-header">';
+    html += '    <h3 class="server-section-title">Loaded Models</h3>';
+    html += '    <span class="server-section-meta">' + ((s.loaded_models || []).length) + ' loaded · ' + this.esc(this.formatUptime(Math.floor(s.uptime_seconds || 0))) + ' uptime</span>';
+    html += '  </div>';
+    if (!s.loaded_models || s.loaded_models.length === 0) {
+      html += '  <div class="server-empty">No models loaded - click <strong>+ Load Model</strong> to start one</div>';
+    } else {
+      html += '  <div class="server-loaded-list" id="server-loaded-list">';
+      s.loaded_models.forEach(function (m, idx) {
+        html += self._renderLoadedCard(m, idx);
+      });
+      html += '  </div>';
+    }
+    html += '</section>';
+
+    // --- Supported Endpoints ---
+    html += '<section class="server-section">';
+    html += '  <div class="server-section-header">';
+    html += '    <h3 class="server-section-title">Supported endpoints</h3>';
+    html += '    <span class="badge-new">NEW REST API v1</span>';
+    html += '  </div>';
+    html += '  <div class="server-tab-pills" id="server-endpoint-tabs">';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'openai' ? ' active' : '') + '" data-tab="openai">OpenAI-compatible</button>';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'lmstudio' ? ' active' : '') + '" data-tab="lmstudio">LM Studio API</button>';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'anthropic' ? ' active' : '') + '" data-tab="anthropic">Anthropic-compatible</button>';
+    html += '    <button class="server-tab-pill' + (this._serverState.endpointTab === 'ainode' ? ' active' : '') + '" data-tab="ainode">AINode</button>';
+    html += '  </div>';
+    html += '  <div class="server-endpoints-list" id="server-endpoints-list">';
+    html += this._renderEndpointRows(primaryUrl);
+    html += '  </div>';
+    html += '</section>';
+
+    // --- Developer Logs ---
+    html += '<section class="server-section">';
+    html += '  <div class="server-section-header">';
+    html += '    <h3 class="server-section-title">Developer Logs</h3>';
+    html += '    <div class="server-log-controls">';
+    html += '      <label class="server-log-toggle"><input type="checkbox" id="server-log-autoscroll"' + (this._serverState.autoScroll ? ' checked' : '') + '> auto-scroll</label>';
+    html += '      <button class="btn-ghost server-btn-sm" id="server-log-clear">Clear</button>';
+    html += '    </div>';
+    html += '  </div>';
+    html += '  <div class="server-log-panel" id="server-log-panel">';
+    html += this._renderLogEntries(this._serverState.logs);
+    html += '  </div>';
+    html += '</section>';
+
+    mount.innerHTML = html;
+
+    this._bindServerEvents();
+    this._renderServerRightPanel(this._serverState.selectedModelId);
+  },
+
+  _renderLoadedCard(m, idx) {
+    var id = m.id || 'unknown';
+    var nodeHost = m.node_hostname || m.node_id || 'local';
+    // Stacked instances live on ports 8001+  -  show the port so two models on
+    // one node are distinguishable (F2). Primary instances omit it.
+    var portStr = (m.port && m.port !== 8000) ? ' · :' + m.port : '';
+    var type = m.type || 'llm';
+    var isEmbed = type === 'embed';
+    var isSpeech = type === 'speech';
+    var ready = m.ready !== false;
+    // Remote instances (loaded on a peer) can't be ejected from here  -  the eject
+    // endpoint only targets this node's local InstanceManager (F2).
+    var ejectable = m.ejectable !== false;
+    var sizeStr = m.size_bytes > 0 ? this.formatBytes(m.size_bytes) : '-';
+    var parallel = m.parallel || 1;
+    var selected = (this._serverState.selectedModelId === id) ? ' selected' : '';
+    var typeTagStyle = isEmbed
+      ? ' style="color:var(--cyan);border-color:var(--cyan)"'
+      : '';
+    var dimsMeta = isEmbed && m.dimensions
+      ? '  <span class="server-meta">· ' + m.dimensions + 'd</span>'
+      : '';
+    // "Open in Chat" is only offered for an instance that serves chat. An
+    // embedding row gets its vectors panel; a speech row gets neither, and its
+    // copy-curl button (below, keyed on `type`) hands over the audio call.
+    var primaryIconBtn = isEmbed
+      ? '  <button class="server-icon-btn" data-action="show-info" data-model="' + this.esc(id) + '" title="Embedding info">ℹ</button>'
+      : isSpeech
+        ? ''
+        : '  <button class="server-icon-btn" data-action="open-chat" data-model="' + this.esc(id) + '" title="Open in Chat">🔍</button>';
+    var statusBadge = ready
+      ? '<span class="server-badge ready">READY</span>'
+      : '<span class="server-badge">STARTING</span>';
+    var ejectBtn = ejectable
+      ? '  <button class="server-eject-btn" data-action="eject" data-model="' + this.esc(id) + '">Eject</button>'
+      : '';
+    return '<div class="server-loaded-card' + selected + '" data-model-id="' + this.esc(id) + '" data-idx="' + idx + '">' +
+      '<div class="server-loaded-left">' +
+      '  ' + statusBadge +
+      '  <span class="server-node-pill">' + this.esc(nodeHost + portStr) + '</span>' +
+      '  <span class="server-type-tag"' + typeTagStyle + '>' + this.esc(type) + '</span>' +
+      '  <span class="server-model-id mono" data-copy="' + this.esc(id) + '" title="Click to copy">' + this.esc(id) + '</span>' +
+      '</div>' +
+      '<div class="server-loaded-right">' +
+      '  <span class="server-meta">' + this.esc(sizeStr) + '</span>' +
+      '  <span class="server-meta">· ' + parallel + 'x</span>' +
+      dimsMeta +
+      '  <button class="server-icon-btn" data-action="preview" title="Preview">👁</button>' +
+      primaryIconBtn +
+      '  <button class="server-icon-btn" data-action="copy-curl" data-model="' + this.esc(id) + '" data-type="' + this.esc(type) + '" title="Copy curl">⎘</button>' +
+      ejectBtn +
+      '</div>' +
+      '</div>';
+  },
+
+  _renderEndpointRows(baseUrl) {
+    var self = this;
+    var tab = this._serverState.endpointTab;
+    var catalog = this._serverState.endpoints || {};
+    var rows = catalog[tab] || [];
+    if (!rows.length) return '<div class="server-empty">No endpoints</div>';
+    return rows.map(function (ep) {
+      var planned = ep.status === 'planned';
+      var methodClass = 'server-method-' + ep.method.toLowerCase();
+      var dim = planned ? ' planned' : '';
+      return '<div class="server-endpoint-row' + dim + '">' +
+        '<span class="server-method-badge ' + methodClass + '">' + self.esc(ep.method) + '</span>' +
+        '<span class="server-endpoint-path mono">' + self.esc(ep.path) + '</span>' +
+        '<span class="server-endpoint-desc">' + self.esc(ep.description || '') + '</span>' +
+        (planned ? '<span class="server-endpoint-planned">planned</span>' : '') +
+        '<button class="server-copy-btn" data-copy="curl -X ' + self.esc(ep.method) + ' ' + self.esc(baseUrl) + self.esc(ep.path) + '" title="Copy curl">⧉</button>' +
+        '</div>';
+    }).join('');
+  },
+
+  _renderLogEntries(entries) {
+    var self = this;
+    if (!entries || entries.length === 0) {
+      return '<div class="server-log-empty">Waiting for API requests…</div>';
+    }
+    return entries.map(function (e) {
+      var ts = new Date((e.timestamp || 0) * 1000);
+      var tsStr = ts.toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
+      var levelCls = 'log-' + (e.level || 'INFO').toLowerCase();
+      var modelStr = e.model ? ' [' + self.esc(e.model) + ']' : '';
+      var sizeStr = e.content_length ? ' ' + self.formatBytes(e.content_length) : '';
+      return '<div class="server-log-entry ' + levelCls + '">' +
+        '<span class="log-ts mono">' + tsStr + '</span> ' +
+        '<span class="log-level">[' + self.esc(e.level || 'INFO') + ']</span>' +
+        modelStr +
+        ' <span class="log-method mono">' + self.esc(e.method) + '</span> ' +
+        '<span class="log-path mono">' + self.esc(e.path) + '</span> ' +
+        '<span class="log-status mono">' + (e.status || 0) + '</span> ' +
+        '<span class="log-dur mono">' + (e.duration_ms || 0) + 'ms</span>' +
+        '<span class="log-size mono">' + sizeStr + '</span>' +
+        '</div>';
+    }).join('');
+  },
+
+  _bindServerEvents() {
+    var self = this;
+    var root = document.getElementById('server-content');
+    if (!root) return;
+
+    // Copy buttons
+    root.querySelectorAll('[data-copy]').forEach(function (el) {
+      el.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var text = el.dataset.copy || '';
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(function () {
+          self.toast('Copied to clipboard', 'success');
+        }).catch(function () { self.toast('Copy failed', 'error'); });
+      });
+    });
+
+    // Endpoint tab pills
+    root.querySelectorAll('.server-tab-pill').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        self._serverState.endpointTab = btn.dataset.tab;
+        var s = self._serverState.lastStatus || {};
+        var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || '';
+        var list = document.getElementById('server-endpoints-list');
+        if (list) list.innerHTML = self._renderEndpointRows(primary);
+        root.querySelectorAll('.server-tab-pill').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.tab === self._serverState.endpointTab);
+        });
+        // Rebind copy buttons in newly rendered rows
+        self._bindServerEvents();
+      });
+    });
+
+    // Loaded card click → select + update right panel
+    root.querySelectorAll('.server-loaded-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        var id = card.dataset.modelId;
+        self._serverState.selectedModelId = id;
+        root.querySelectorAll('.server-loaded-card').forEach(function (c) { c.classList.remove('selected'); });
+        card.classList.add('selected');
+        self._renderServerRightPanel(id);
+      });
+    });
+
+    // Loaded card actions
+    root.querySelectorAll('.server-loaded-card [data-action]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var action = btn.dataset.action;
+        var model = btn.dataset.model;
+        if (action === 'eject') self._serverEjectModel(model);
+        else if (action === 'open-chat') {
+          self.navigate('chat');
+          self.selectChatInstance({ model: model });
+        }
+        else if (action === 'show-info') self._serverShowEmbedInfo(model);
+        else if (action === 'copy-curl') self._serverShowCurl(model, btn.dataset.type || 'llm');
+      });
+    });
+
+    // Top-bar buttons
+    var settingsBtn = document.getElementById('server-settings-btn');
+    if (settingsBtn) settingsBtn.addEventListener('click', function () { self.navigate('config'); });
+    var loadBtn = document.getElementById('server-load-model');
+    if (loadBtn) loadBtn.addEventListener('click', function () { self._openLoadModelModal(); });
+
+    // Logs
+    var clearBtn = document.getElementById('server-log-clear');
+    if (clearBtn) clearBtn.addEventListener('click', function () { self._serverClearLogs(); });
+    var autoScroll = document.getElementById('server-log-autoscroll');
+    if (autoScroll) autoScroll.addEventListener('change', function () { self._serverState.autoScroll = autoScroll.checked; });
+  },
+
+  async _serverEjectModel(modelId) {
+    if (!modelId) return;
+    if (!confirm('Eject model ' + modelId + '?')) return;
+    try {
+      var resp = await AINodeAuth.fetch('/api/server/models/' + encodeURIComponent(modelId) + '/eject', { method: 'POST' });
+      var body = await resp.json().catch(function () { return {}; });
+      if (resp.ok) this.toast(body.message || 'Model ejected', 'success');
+      else this.toast(body.message || 'Eject not available', 'info');
+      this.renderServer();
+    } catch (err) {
+      this.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  _serverShowCurl(modelId, modelType) {
+    var s = this._serverState.lastStatus || {};
+    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || 'http://localhost:3000';
+    var curl;
+    if (modelType === 'embed') {
+      curl = 'curl ' + primary + '/v1/embeddings \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        '  -d \'{"model":"' + modelId + '","input":"The quick brown fox"}\'';
+    } else if (modelType === 'speech') {
+      // multipart, not JSON: the model id is a form field beside the file, which
+      // is what the fleet router reads to pick the node.
+      curl = 'curl ' + primary + '/v1/audio/transcriptions \\\n' +
+        '  -F model=' + modelId + ' \\\n' +
+        '  -F file=@sample.wav';
+    } else {
+      curl = 'curl ' + primary + '/v1/chat/completions \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        '  -d \'{"model":"' + modelId + '","messages":[{"role":"user","content":"Hello!"}]}\'';
+    }
+    navigator.clipboard.writeText(curl).then(function () {
+      AINode.toast('curl example copied', 'success');
+    }).catch(function () { AINode.toast('Copy failed', 'error'); });
+  },
+
+  _serverShowEmbedInfo(modelId) {
+    var s = this._serverState.lastStatus || {};
+    var models = s.loaded_models || [];
+    var m = models.find(function (x) { return x.id === modelId; }) || { id: modelId };
+    var primary = (s.reachable_at && s.reachable_at.length > 1) ? s.reachable_at[1] : (s.reachable_at && s.reachable_at[0]) || 'http://localhost:3000';
+    var self = this;
+
+    var existing = document.getElementById('embed-info-modal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'embed-info-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal" style="max-width:560px">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon" style="color:var(--cyan);border-color:var(--cyan)">ℹ</div>' +
+            '<div class="md-title">Embedding Model</div>' +
+          '</div>' +
+          '<button class="md-close">×</button>' +
+        '</div>' +
+        '<div class="md-description">' +
+          '<div style="margin-bottom:8px" class="mono">' + self.esc(m.id) + '</div>' +
+          '<div style="color:var(--text-muted);font-size:13px;margin-bottom:12px">' +
+          'Embedding models turn text into vectors. They are an API surface for external apps ' +
+          '(RAG, semantic search, clustering) - not used directly by the chat UI.' +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:13px">' +
+            '<div style="color:var(--text-muted)">Dimensions</div><div>' + (m.dimensions || '-') + '</div>' +
+            '<div style="color:var(--text-muted)">Max seq length</div><div>' + (m.max_seq_length || '-') + '</div>' +
+            '<div style="color:var(--text-muted)">Endpoint</div><div class="mono">' + self.esc(primary) + '/v1/embeddings</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="md-footer">' +
+          '<button class="btn-sm" id="embed-info-close" style="background:transparent;color:var(--text-secondary);border:1px solid var(--border-hover)">Close</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.querySelector('#embed-info-close').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  },
+
+  _openLoadModelModal() {
+    var self = this;
+    var existing = document.getElementById('load-model-modal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'load-model-modal';
+    modal.className = 'model-detail-modal-overlay';
+    modal.innerHTML =
+      '<div class="model-detail-modal" style="max-width:720px">' +
+        '<div class="md-header">' +
+          '<div class="md-header-left">' +
+            '<div class="md-icon">+</div>' +
+            '<div class="md-title">Load Model</div>' +
+          '</div>' +
+          '<button class="md-close">×</button>' +
+        '</div>' +
+        '<div class="md-description" style="padding-bottom:0">' +
+          '<div class="server-tab-pills" id="load-model-tabs">' +
+            '<button class="server-tab-pill active" data-tab="llms">LLMs</button>' +
+            '<button class="server-tab-pill" data-tab="embeddings">Embeddings</button>' +
+          '</div>' +
+          '<div id="load-model-body" style="margin-top:12px;max-height:420px;overflow:auto"></div>' +
+        '</div>' +
+        '<div class="md-footer">' +
+          '<button class="btn-sm" id="load-model-close" style="background:transparent;color:var(--text-secondary);border:1px solid var(--border-hover)">Close</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    var close = function () { modal.remove(); };
+    modal.querySelector('.md-close').addEventListener('click', close);
+    modal.querySelector('#load-model-close').addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+    var currentTab = 'llms';
+    var render = function () { self._renderLoadModelTab(modal, currentTab); };
+    modal.querySelectorAll('#load-model-tabs .server-tab-pill').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        currentTab = btn.dataset.tab;
+        modal.querySelectorAll('#load-model-tabs .server-tab-pill').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.tab === currentTab);
+        });
+        render();
+      });
+    });
+    render();
+  },
+
+  async _renderLoadModelTab(modal, tab) {
+    var self = this;
+    var body = modal.querySelector('#load-model-body');
+    if (!body) return;
+    body.innerHTML = '<div class="server-empty">Loading…</div>';
+
+    if (tab === 'llms') {
+      try {
+        var data = await this.fetchJSON('/api/models');
+        var models = (data && data.models) || [];
+        var downloaded = models.filter(function (m) { return m.downloaded; });
+        if (!downloaded.length) {
+          body.innerHTML = '<div class="server-empty">No LLMs downloaded yet. Use the Downloads view to get one.</div>';
+          return;
+        }
+        var html = '<div class="server-loaded-list">';
+        downloaded.forEach(function (m) {
+          var id = m.hf_repo || m.id || m.name || 'unknown';
+          html += '<div class="server-loaded-card">' +
+            '<div class="server-loaded-left">' +
+            '  <span class="server-type-tag">llm</span>' +
+            '  <span class="server-model-id mono">' + self.esc(id) + '</span>' +
+            '</div>' +
+            '<div class="server-loaded-right">' +
+            '  <button class="btn-nvidia server-btn-sm" data-action="llm-load" data-model="' + self.esc(id) + '">Load</button>' +
+            '</div>' +
+            '</div>';
+        });
+        html += '</div>';
+        body.innerHTML = html;
+        body.querySelectorAll('[data-action="llm-load"]').forEach(function (btn) {
+          btn.addEventListener('click', async function () {
+            var mid = btn.dataset.model;
+            btn.disabled = true;
+            btn.textContent = 'Loading…';
+            try {
+              var resp = await AINodeAuth.fetch('/api/models/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: mid }),
+              });
+              var payload = await resp.json().catch(function () { return {}; });
+              if (resp.ok && !payload.error) {
+                self.toast('Loaded ' + mid, 'success');
+                self.renderServer();
+              } else {
+                self.toast((payload.error && payload.error.message) || payload.error || 'Load failed', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Load';
+              }
+            } catch (err) {
+              self.toast('Load failed: ' + err.message, 'error');
+              btn.disabled = false;
+              btn.textContent = 'Load';
+            }
+          });
+        });
+      } catch (err) {
+        body.innerHTML = '<div class="server-empty">Failed to load models: ' + self.esc(err.message) + '</div>';
+      }
+      return;
+    }
+
+    // Embeddings tab
+    try {
+      var edata = await this.fetchJSON('/api/embeddings/models');
+      var emodels = (edata && edata.models) || [];
+      if (!emodels.length) {
+        body.innerHTML = '<div class="server-empty">No embedding models in the catalog.</div>';
+        return;
+      }
+      var ehtml = '<div class="server-loaded-list">';
+      emodels.forEach(function (m) {
+        var loaded = !!m.loaded;
+        ehtml += '<div class="server-loaded-card">' +
+          '<div class="server-loaded-left" style="flex-direction:column;align-items:flex-start;gap:4px">' +
+          '  <div>' +
+          '    <span class="server-type-tag" style="color:var(--cyan);border-color:var(--cyan)">embed</span> ' +
+          '    <span class="server-model-id mono">' + self.esc(m.id) + '</span>' +
+          '  </div>' +
+          '  <div style="font-size:12px;color:var(--text-muted)">' +
+          (m.dimensions || '?') + 'd · ' + (m.max_seq_length || '?') + ' ctx · ' + (m.size_mb || '?') + ' MB' +
+          '  </div>' +
+          '  <div style="font-size:12px;color:var(--text-muted);max-width:480px">' + self.esc(m.description || '') + '</div>' +
+          '</div>' +
+          '<div class="server-loaded-right">' +
+          (loaded
+            ? '  <span class="server-badge ready">LOADED</span>'
+            : '  <button class="btn-nvidia server-btn-sm" data-action="embed-load" data-model="' + self.esc(m.id) + '">Load</button>'
+          ) +
+          '</div>' +
+          '</div>';
+      });
+      ehtml += '</div>';
+      body.innerHTML = ehtml;
+      body.querySelectorAll('[data-action="embed-load"]').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          var id = btn.dataset.model;
+          btn.disabled = true;
+          btn.textContent = 'Loading…';
+          try {
+            var resp = await AINodeAuth.fetch('/api/embeddings/models/' + encodeURIComponent(id) + '/load', { method: 'POST' });
+            var payload = await resp.json().catch(function () { return {}; });
+            if (resp.ok) {
+              self.toast('Loaded ' + id, 'success');
+              self._renderLoadModelTab(modal, 'embeddings');
+              self.renderServer();
+            } else {
+              self.toast((payload.error && payload.error.message) || 'Load failed', 'error');
+              btn.disabled = false;
+              btn.textContent = 'Load';
+            }
+          } catch (err) {
+            self.toast('Load failed: ' + err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = 'Load';
+          }
+        });
+      });
+    } catch (err) {
+      body.innerHTML = '<div class="server-empty">Failed to load embeddings: ' + self.esc(err.message) + '</div>';
+    }
+  },
+
+  async _serverClearLogs() {
+    try {
+      await AINodeAuth.fetch('/api/server/logs', { method: 'DELETE' });
+      this._serverState.logs = [];
+      this._serverState.logsSince = 0;
+      var panel = document.getElementById('server-log-panel');
+      if (panel) panel.innerHTML = this._renderLogEntries([]);
+      this.toast('Logs cleared', 'success');
+    } catch (err) {
+      this.toast('Failed to clear logs', 'error');
+    }
+  },
+
+  startServerLogPolling() {
+    var self = this;
+    if (this._serverState.logsPoll) return;
+    this._serverState.logsPoll = setInterval(function () { self._pollServerLogs(); }, 2000);
+    this._pollServerLogs();
+  },
+
+  stopServerLogPolling() {
+    if (this._serverState.logsPoll) {
+      clearInterval(this._serverState.logsPoll);
+      this._serverState.logsPoll = null;
+    }
+  },
+
+  async _pollServerLogs() {
+    var since = this._serverState.logsSince || 0;
+    var data = await this.fetchJSON('/api/server/logs?since=' + since);
+    if (!data || !data.entries) return;
+    if (data.entries.length > 0) {
+      this._serverState.logs = this._serverState.logs.concat(data.entries).slice(-500);
+      this._serverState.logsSince = data.entries[data.entries.length - 1].timestamp || data.now;
+      var panel = document.getElementById('server-log-panel');
+      if (panel) {
+        panel.innerHTML = this._renderLogEntries(this._serverState.logs);
+        if (this._serverState.autoScroll) panel.scrollTop = panel.scrollHeight;
+      }
+    } else if (!this._serverState.logsSince) {
+      this._serverState.logsSince = data.now || Date.now() / 1000;
+    }
+  },
+
+  _renderServerRightPanel(modelId) {
+    var mount = document.getElementById('right-panel-server');
+    if (!mount) return;
+    var s = this._serverState.lastStatus || {};
+    var models = s.loaded_models || [];
+    var model = null;
+    if (modelId) model = models.find(function (m) { return m.id === modelId; });
+    if (!model && models.length > 0) {
+      model = models[0];
+      this._serverState.selectedModelId = model.id;
+    }
+    if (!model) {
+      mount.innerHTML = '<div class="panel-section"><h3 class="panel-title">MODEL INFO</h3>' +
+        '<div class="server-empty" style="margin:12px 16px">No model selected</div></div>';
+      return;
+    }
+    var self = this;
+    var primary = (s.reachable_at && (s.reachable_at[1] || s.reachable_at[0])) || '-';
+    // Pull derivable fields from the catalog (size/arch/quant)  -  the served
+    // model object lacks them. Real arch (e.g. LlamaForCausalLM) needs the
+    // per-model config.json (owned follow-up); family is a truthful stand-in.
+    var _cat = (this._serverState.modelsCatalog || []).find(function (c) { return (c.hf_repo || c.id) === model.id; }) || {};
+    var arch = model.architecture || _cat.architecture || _cat.family || AINode._modelFamily(model.id) || '-';
+    var fileName = (model.id || '').split('/').pop();
+    var _catSize = _cat.local_size_gb || _cat.size_gb;
+    var sizeStr = model.size_bytes > 0 ? this.formatBytes(model.size_bytes)
+      : (_catSize ? Math.round(_catSize) + ' GB' : '-');
+
+    var html = '';
+    html += '<div class="panel-section">';
+    html += '  <h3 class="panel-title">MODEL INFO</h3>';
+    html += '  <div class="server-info-host">';
+    html += '    <span class="label">Hosted on</span>';
+    html += '    <span class="mono">' + this.esc(model.node_hostname || '') + '</span>';
+    html += '    <button class="server-copy-btn" data-copy="' + this.esc(model.node_hostname || '') + '">⧉</button>';
+    html += '  </div>';
+    // One tab, and everything on it is a read. The Load and Inference tabs that
+    // used to sit here were disabled inputs hardcoded to 4096 / -1 / 0.7 / 0.95 /
+    // 40: not this engine's max_model_len, not sampling defaults anything sends,
+    // and "GPU layers" is a llama.cpp idea vLLM has no equivalent for (#206).
+    html += '  <div id="server-info-body">';
+    html += this._renderServerInfoTab(model, arch, fileName, sizeStr);
+    html += '  </div>';
+    html += '</div>';
+
+    html += '<div class="panel-section">';
+    html += '  <h3 class="panel-title">API USAGE</h3>';
+    html += '  <div class="server-info-section">';
+    html += '    <div class="server-info-row"><span class="label">Model ID</span><span class="mono val">' + this.esc(model.id) + '</span><button class="server-copy-btn" data-copy="' + this.esc(model.id) + '">⧉</button></div>';
+    html += '    <div class="server-info-row"><span class="label">Reachable at</span><span class="mono val">' + this.esc(primary) + '</span><button class="server-copy-btn" data-copy="' + this.esc(primary) + '">⧉</button></div>';
+    html += '  </div>';
+    html += '</div>';
+
+    mount.innerHTML = html;
+
+    mount.querySelectorAll('[data-copy]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var text = el.dataset.copy || '';
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(function () { self.toast('Copied', 'success'); });
+      });
+    });
+  },
+
+  _modelQuant(id) {
+    var m = (id || '').toUpperCase().match(/NVFP4|MXFP4|AWQ|GPTQ|FP8|INT4|INT8/);
+    return m ? m[0] : '';
+  },
+
+  _modelFamily(id) {
+    var n = (id || '').split('/').pop().toLowerCase();
+    if (n.indexOf('llama') >= 0) return 'Llama';
+    if (n.indexOf('qwen') >= 0) return 'Qwen';
+    if (n.indexOf('glm') >= 0) return 'GLM';
+    if (n.indexOf('mixtral') >= 0 || n.indexOf('mistral') >= 0) return 'Mistral';
+    if (n.indexOf('deepseek') >= 0) return 'DeepSeek';
+    if (n.indexOf('phi') >= 0) return 'Phi';
+    if (n.indexOf('gemma') >= 0) return 'Gemma';
+    return '';
+  },
+
+  // Every row here is a read off the instance or the catalog.
+  _renderServerInfoTab(model, arch, fileName, sizeStr) {
+    var caps = (model.capabilities || []).map(function (c) { return '<span class="server-cap-badge">' + AINode.esc(c) + '</span>'; }).join('');
+    return '<div class="server-info-section">' +
+      '<div class="server-info-row"><span class="label">Model</span><span class="mono val">' + AINode.esc(model.id) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">File</span><span class="mono val">' + AINode.esc(fileName) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Format</span><span class="val">' + AINode.esc(model.format || 'SafeTensors') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Quantization</span><span class="val">' + AINode.esc(model.quantization || AINode._modelQuant(model.id) || 'none') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Arch</span><span class="val">' + AINode.esc(arch) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Capabilities</span><span class="val">' + (caps || '-') + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Domain</span><span class="val">' + AINode.esc(model.type || 'llm') + '</span></div>' +
+      // The launch width off the instance record (tensor_parallel_size), which is
+      // the one real number the removed Load tab had.
+      '<div class="server-info-row"><span class="label">Parallel</span><span class="val">' + (model.parallel || 1) + '</span></div>' +
+      '<div class="server-info-row"><span class="label">Size on disk</span><span class="val">' + AINode.esc(sizeStr) + '</span></div>' +
+      '</div>';
+  },
+};
+
+// ========================================================================
+//  BOOT
+// ========================================================================
+
+document.addEventListener('DOMContentLoaded', function () { AINode.init(); });

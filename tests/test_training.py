@@ -1,0 +1,1222 @@
+"""Tests for ainode.training  -  config validation, job lifecycle, manager queue, API routes."""
+
+import json
+import sys
+from pathlib import Path
+import pytest
+import pytest_asyncio
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+import ainode.training.engine as engine
+from ainode.training.engine import (
+    TrainingConfig,
+    TrainingJob,
+    TrainingManager,
+    JobStatus,
+    build_merge_command,
+)
+from ainode.training.api_routes import setup_training_routes
+
+
+@pytest.fixture
+def no_local_images(monkeypatch):
+    """Pretend no candidate job image is installed so local Docker image state cannot change
+    the expected argv."""
+    monkeypatch.setattr(engine, "_image_present", lambda image: False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_jobs_dir(tmp_path, monkeypatch):
+    """Redirect both JOBS_DIR and AINODE_HOME into a temporary home so constructing TrainingJob
+    cannot leave directories in the developer profile and output validation uses the
+    same root."""
+    monkeypatch.setattr(engine, "AINODE_HOME", tmp_path)
+    monkeypatch.setattr(engine, "JOBS_DIR", tmp_path / "training" / "jobs")
+
+
+# =============================================================================
+# TrainingConfig validation
+# =============================================================================
+
+
+class TestTrainingConfig:
+    def test_valid_config(self):
+        config = TrainingConfig(
+            base_model="meta-llama/Llama-3.2-3B-Instruct",
+            dataset_path="user/my-dataset",
+        )
+        assert config.validate() == []
+
+    def test_missing_base_model(self):
+        config = TrainingConfig(base_model="", dataset_path="user/my-dataset")
+        errors = config.validate()
+        assert any("base_model" in e for e in errors)
+
+    def test_missing_dataset_path(self):
+        config = TrainingConfig(base_model="some-model", dataset_path="")
+        errors = config.validate()
+        assert any("dataset_path" in e for e in errors)
+
+    def test_invalid_method(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", method="bogus"
+        )
+        errors = config.validate()
+        assert any("method" in e for e in errors)
+
+    def test_qlora_method_valid(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", method="qlora"
+        )
+        assert config.validate() == []
+
+    def test_invalid_num_epochs(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", num_epochs=0
+        )
+        errors = config.validate()
+        assert any("num_epochs" in e for e in errors)
+
+    def test_invalid_batch_size(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", batch_size=-1
+        )
+        errors = config.validate()
+        assert any("batch_size" in e for e in errors)
+
+    def test_invalid_learning_rate(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", learning_rate=0
+        )
+        errors = config.validate()
+        assert any("learning_rate" in e for e in errors)
+
+    def test_invalid_lora_rank(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", lora_rank=0
+        )
+        errors = config.validate()
+        assert any("lora_rank" in e for e in errors)
+
+    def test_invalid_lora_alpha(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", lora_alpha=0
+        )
+        errors = config.validate()
+        assert any("lora_alpha" in e for e in errors)
+
+    def test_invalid_max_seq_length(self):
+        config = TrainingConfig(
+            base_model="model", dataset_path="user/dataset", max_seq_length=0
+        )
+        errors = config.validate()
+        assert any("max_seq_length" in e for e in errors)
+
+    def test_multiple_errors(self):
+        config = TrainingConfig(
+            base_model="",
+            dataset_path="",
+            method="bad",
+            num_epochs=0,
+        )
+        errors = config.validate()
+        assert len(errors) >= 3
+
+    def test_defaults(self):
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        assert config.method == "lora"
+        assert config.num_epochs == 3
+        assert config.batch_size == 4
+        assert config.learning_rate == 2e-4
+        assert config.lora_rank == 16
+        assert config.lora_alpha == 32
+        assert config.max_seq_length == 2048
+
+    def test_to_dict(self):
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        d = config.to_dict()
+        assert d["base_model"] == "m"
+        assert d["dataset_path"] == "user/d"
+        assert isinstance(d, dict)
+
+    def test_from_dict(self):
+        data = {
+            "base_model": "model-x",
+            "dataset_path": "/data/file.json",
+            "method": "full",
+            "num_epochs": 5,
+            "extra_field": "ignored",
+        }
+        config = TrainingConfig.from_dict(data)
+        assert config.base_model == "model-x"
+        assert config.method == "full"
+        assert config.num_epochs == 5
+
+    def test_from_dict_defaults(self):
+        config = TrainingConfig.from_dict({
+            "base_model": "m",
+            "dataset_path": "/d",
+        })
+        assert config.lora_rank == 16
+
+
+# =============================================================================
+# TrainingJob lifecycle
+# =============================================================================
+
+
+class TestTrainingJob:
+    def test_initial_state(self):
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        assert job.status == JobStatus.PENDING
+        assert job.progress == 0.0
+        assert job.current_epoch == 0
+        assert job.current_loss is None
+        assert job.start_time is None
+        assert job.end_time is None
+        assert len(job.job_id) == 12
+
+    def test_custom_job_id(self):
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config, job_id="custom123")
+        assert job.job_id == "custom123"
+
+    def test_get_status(self):
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        status = job.get_status()
+        assert status["job_id"] == job.job_id
+        assert status["status"] == "pending"
+        assert status["progress"] == 0.0
+        assert status["config"]["base_model"] == "m"
+
+    def test_output_dir_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        assert "output" in job.config.output_dir
+        assert job.job_id in job.config.output_dir
+
+    def test_output_dir_custom(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(
+            base_model="m", dataset_path="user/d", output_dir="/custom/out"
+        )
+        job = TrainingJob(config)
+        assert job.config.output_dir == "/custom/out"
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_job(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        assert job.status == JobStatus.PENDING
+        await job.stop()
+        assert job.status == JobStatus.CANCELLED
+        assert job.end_time is not None
+
+    def test_parse_progress(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        line = 'AINODE_PROGRESS:{"epoch":2,"loss":0.45,"progress":66.7}'
+        job._parse_progress(line)
+        assert job.current_epoch == 2
+        assert job.current_loss == 0.45
+        assert job.progress == 66.7
+
+    def test_parse_progress_invalid_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        job._parse_progress("AINODE_PROGRESS:{invalid}")
+        assert job.current_epoch == 0  # Unchanged
+
+    def test_parse_progress_no_marker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = TrainingJob(config)
+        job._parse_progress("some random log line")
+        assert job.current_epoch == 0  # Unchanged
+
+
+# =============================================================================
+# TrainingManager queue operations
+# =============================================================================
+
+
+class TestTrainingManager:
+    def _make_config(self, model="m", dataset="user/d"):
+        return TrainingConfig(base_model=model, dataset_path=dataset)
+
+    def test_submit_job(self):
+        mgr = TrainingManager()
+        job = mgr.submit_job(self._make_config())
+        assert job.status == JobStatus.PENDING
+        assert mgr.get_job(job.job_id) is job
+
+    def test_submit_invalid_config(self):
+        mgr = TrainingManager()
+        config = TrainingConfig(base_model="", dataset_path="")
+        with pytest.raises(ValueError, match="Invalid training config"):
+            mgr.submit_job(config)
+
+    def test_list_jobs(self):
+        mgr = TrainingManager()
+        mgr.submit_job(self._make_config())
+        mgr.submit_job(self._make_config(model="model-2"))
+        jobs = mgr.list_jobs()
+        assert len(jobs) == 2
+        assert all(j["status"] == "pending" for j in jobs)
+
+    def test_list_jobs_empty(self):
+        mgr = TrainingManager()
+        assert mgr.list_jobs() == []
+
+    def test_get_job_not_found(self):
+        mgr = TrainingManager()
+        assert mgr.get_job("nonexistent") is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_job(self):
+        mgr = TrainingManager()
+        job = mgr.submit_job(self._make_config())
+        result = await mgr.cancel_job(job.job_id)
+        assert result is True
+        assert job.status == JobStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent_job(self):
+        mgr = TrainingManager()
+        result = await mgr.cancel_job("nope")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_already_cancelled(self):
+        mgr = TrainingManager()
+        job = mgr.submit_job(self._make_config())
+        await mgr.cancel_job(job.job_id)
+        result = await mgr.cancel_job(job.job_id)
+        assert result is False
+
+    def test_queue_size(self):
+        mgr = TrainingManager()
+        mgr.submit_job(self._make_config())
+        mgr.submit_job(self._make_config())
+        assert mgr.queue_size == 2
+
+    @pytest.mark.asyncio
+    async def test_queue_size_after_cancel(self):
+        mgr = TrainingManager()
+        j1 = mgr.submit_job(self._make_config())
+        mgr.submit_job(self._make_config())
+        await mgr.cancel_job(j1.job_id)
+        assert mgr.queue_size == 1
+
+    def test_active_job_none(self):
+        mgr = TrainingManager()
+        assert mgr.active_job is None
+
+    def test_stats_empty(self):
+        mgr = TrainingManager()
+        s = mgr.stats()
+        assert s["total"] == 0 and s["running"] == 0
+
+    def test_estimate_returns_expected_keys(self):
+        mgr = TrainingManager()
+        cfg = TrainingConfig(base_model="x/Llama-3.1-8B", dataset_path="user/d")
+        est = mgr.estimate(cfg, sample_count=500)
+        for key in ("params_b", "memory_gb_per_node", "samples_per_sec", "estimated_seconds"):
+            assert key in est
+
+    def test_estimate_distributed_scales(self):
+        mgr = TrainingManager()
+        c1 = TrainingConfig(base_model="m", dataset_path="user/d", distributed=False)
+        c2 = TrainingConfig(base_model="m", dataset_path="user/d", distributed=True, num_nodes=4)
+        s1 = mgr.estimate(c1)["samples_per_sec"]
+        s2 = mgr.estimate(c2)["samples_per_sec"]
+        assert s2 > s1
+
+    def test_dataset_id_resolution(self, tmp_path, monkeypatch):
+        """TrainingManager should resolve dataset_id to an absolute path via DatasetManager."""
+        from ainode.datasets.manager import DatasetManager
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        ds_mgr = DatasetManager(root=tmp_path / "ds")
+        ds = ds_mgr.add_upload("x.jsonl", b'{"text":"a"}\n', name="x")
+        mgr = TrainingManager(dataset_manager=ds_mgr)
+        config = TrainingConfig(
+            base_model="m",
+            dataset_path="placeholder",  # will be overwritten
+            dataset_id=ds.id,
+        )
+        job = mgr.submit_job(config)
+        assert job.config.dataset_path == ds.path
+        assert job.config.dataset_id == ds.id
+
+    def test_submit_preserves_order(self):
+        mgr = TrainingManager()
+        j1 = mgr.submit_job(self._make_config(model="first"))
+        j2 = mgr.submit_job(self._make_config(model="second"))
+        assert mgr._queue == [j1.job_id, j2.job_id]
+
+
+# =============================================================================
+# Progress parsing edge cases
+# =============================================================================
+
+
+class TestProgressParsing:
+    """Test _parse_progress with various line formats."""
+
+    def _make_job(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        return TrainingJob(config)
+
+    def test_progress_with_timestamp_prefix(self, tmp_path, monkeypatch):
+        """The _log() method prepends [HH:MM:SS] -- progress lines in logs have this."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = '[12:34:56] AINODE_PROGRESS:{"epoch":1,"loss":0.32,"progress":50.0}'
+        job._parse_progress(line)
+        assert job.current_epoch == 1
+        assert job.current_loss == 0.32
+        assert job.progress == 50.0
+
+    def test_progress_partial_fields(self, tmp_path, monkeypatch):
+        """Only some fields present in payload."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = 'AINODE_PROGRESS:{"loss":1.23}'
+        job._parse_progress(line)
+        assert job.current_loss == 1.23
+        assert job.current_epoch == 0  # unchanged
+        assert job.progress == 0.0  # unchanged
+
+    def test_progress_step_field(self, tmp_path, monkeypatch):
+        """Step field from actual trainer callback should not break anything."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = 'AINODE_PROGRESS:{"epoch":2,"loss":0.1,"progress":80.0,"step":150}'
+        job._parse_progress(line)
+        assert job.current_epoch == 2
+        assert job.progress == 80.0
+
+    def test_progress_complete(self, tmp_path, monkeypatch):
+        """Final progress line at 100%."""
+        job = self._make_job(tmp_path, monkeypatch)
+        line = 'AINODE_PROGRESS:{"epoch":3,"loss":0,"progress":100.0}'
+        job._parse_progress(line)
+        assert job.progress == 100.0
+
+
+# =============================================================================
+# Integration: submit -> manager lifecycle
+# =============================================================================
+
+
+class TestManagerIntegration:
+    """Integration tests for the full submit -> queue -> state lifecycle."""
+
+    def test_submit_and_verify_state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        mgr = TrainingManager()
+        config = TrainingConfig(
+            base_model="meta-llama/Llama-3.2-3B-Instruct",
+            dataset_path="user/alpaca.jsonl",
+            method="lora",
+            num_epochs=2,
+            batch_size=8,
+        )
+        job = mgr.submit_job(config)
+
+        # Job is pending and in the queue
+        assert job.status == JobStatus.PENDING
+        assert mgr.queue_size == 1
+        assert mgr.get_job(job.job_id) is job
+
+        # Status dict has all expected fields
+        status = job.get_status()
+        assert status["job_id"] == job.job_id
+        assert status["status"] == "pending"
+        assert status["config"]["base_model"] == "meta-llama/Llama-3.2-3B-Instruct"
+        assert status["config"]["num_epochs"] == 2
+        assert status["config"]["batch_size"] == 8
+
+    @pytest.mark.asyncio
+    async def test_submit_cancel_verify(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        mgr = TrainingManager()
+        config = TrainingConfig(base_model="m", dataset_path="user/d")
+        job = mgr.submit_job(config)
+
+        cancelled = await mgr.cancel_job(job.job_id)
+        assert cancelled is True
+        assert job.status == JobStatus.CANCELLED
+        assert mgr.queue_size == 0
+
+        # List should still contain the job
+        jobs = mgr.list_jobs()
+        assert len(jobs) == 1
+        assert jobs[0]["status"] == "cancelled"
+
+    def test_submit_multiple_and_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        mgr = TrainingManager()
+        j1 = mgr.submit_job(TrainingConfig(base_model="a", dataset_path="user/d1"))
+        j2 = mgr.submit_job(TrainingConfig(base_model="b", dataset_path="user/d2"))
+        j3 = mgr.submit_job(TrainingConfig(base_model="c", dataset_path="user/d3"))
+
+        jobs = mgr.list_jobs()
+        assert len(jobs) == 3
+        ids = {j["job_id"] for j in jobs}
+        assert ids == {j1.job_id, j2.job_id, j3.job_id}
+
+
+# =============================================================================
+# API route tests (aiohttp test client)
+# =============================================================================
+
+
+@pytest.fixture
+def training_app():
+    """Create a minimal aiohttp app with training routes.
+
+    Job dirs land under the tmp AINODE_HOME of the autouse ``isolate_jobs_dir``
+    fixture, never under the developer's real one.
+    """
+    app = web.Application()
+    manager = TrainingManager()
+    setup_training_routes(app, manager)
+    return app
+
+
+@pytest_asyncio.fixture
+async def training_client(training_app):
+    async with TestClient(TestServer(training_app)) as c:
+        yield c
+
+
+class TestTrainingAPI:
+
+    @pytest.mark.asyncio
+    async def test_list_jobs_empty(self, training_client):
+        resp = await training_client.get("/api/training/jobs")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data == {"jobs": []}
+
+    @pytest.mark.asyncio
+    async def test_submit_job(self, training_client):
+        payload = {
+            "base_model": "meta-llama/Llama-3.2-3B-Instruct",
+            "dataset_path": "user/my-dataset.jsonl",
+            "method": "lora",
+            "num_epochs": 2,
+        }
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json=payload,
+        )
+        assert resp.status == 201
+        data = await resp.json()
+        assert "job_id" in data
+        assert data["config"]["base_model"] == "meta-llama/Llama-3.2-3B-Instruct"
+        assert data["config"]["num_epochs"] == 2
+
+    @pytest.mark.asyncio
+    async def test_submit_invalid_config(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "", "dataset_path": ""},
+        )
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_submit_invalid_json(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_get_job(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["job_id"] == job_id
+
+    @pytest.mark.asyncio
+    async def test_get_job_not_found(self, training_client):
+        resp = await training_client.get("/api/training/jobs/nonexistent")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_cancel_job(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.delete(f"/api/training/jobs/{job_id}")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent(self, training_client):
+        resp = await training_client.delete("/api/training/jobs/nope")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_get_logs(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}/logs")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "logs" in data
+        assert isinstance(data["logs"], list)
+        assert "total_lines" in data
+
+    @pytest.mark.asyncio
+    async def test_get_logs_with_tail(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}/logs?tail=5")
+        assert resp.status == 200
+        data = await resp.json()
+        assert isinstance(data["logs"], list)
+
+    @pytest.mark.asyncio
+    async def test_get_logs_not_found(self, training_client):
+        resp = await training_client.get("/api/training/jobs/nope/logs")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_list_after_submit(self, training_client):
+        await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "a", "dataset_path": "user/d"},
+        )
+        await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "b", "dataset_path": "user/d"},
+        )
+        resp = await training_client.get("/api/training/jobs")
+        data = await resp.json()
+        assert len(data["jobs"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_templates_endpoint(self, training_client):
+        resp = await training_client.get("/api/training/templates")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "templates" in data
+        assert isinstance(data["templates"], list)
+        assert len(data["templates"]) >= 1
+        assert all("id" in t and "name" in t for t in data["templates"])
+
+    @pytest.mark.asyncio
+    async def test_stats_endpoint_empty(self, training_client):
+        resp = await training_client.get("/api/training/stats")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["total"] == 0
+        assert data["running"] == 0
+        assert data["total_gpu_hours"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_estimate_endpoint(self, training_client):
+        resp = await training_client.post(
+            "/api/training/estimate",
+            json={
+                "base_model": "meta-llama/Llama-3.1-8B-Instruct",
+                "dataset_path": "ignored",
+                "method": "lora",
+                "num_epochs": 1,
+                "batch_size": 4,
+                "max_seq_length": 2048,
+                "sample_count": 1000,
+            },
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["params_b"] >= 1.0
+        assert data["memory_gb_per_node"] > 0
+        assert data["samples_per_sec"] > 0
+
+    @pytest.mark.asyncio
+    async def test_estimate_invalid(self, training_client):
+        resp = await training_client.post(
+            "/api/training/estimate", data=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_cancel_already_cancelled(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        await training_client.delete(f"/api/training/jobs/{job_id}")
+        resp = await training_client.delete(f"/api/training/jobs/{job_id}")
+        assert resp.status == 409
+
+
+class TestArtifactEndpoints:
+    """Tests for /api/training/jobs/{job_id}/output endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_output_not_found_for_unknown_job(self, training_client):
+        resp = await training_client.get("/api/training/jobs/nonexistent/output")
+        assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_output_empty_before_completion(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp = await training_client.get(f"/api/training/jobs/{job_id}/output")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["files"] == []
+        assert data["job_id"] == job_id
+
+    @pytest.mark.asyncio
+    async def test_output_lists_files_when_dir_exists(self, training_client, tmp_path):
+        """If output_dir exists and has files, they appear in the listing."""
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+
+        # Simulate completed artifacts
+        resp2 = await training_client.get(f"/api/training/jobs/{job_id}")
+        output_dir_str = (await resp2.json())["config"]["output_dir"]
+        output_dir = Path(output_dir_str)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "adapter_model.safetensors").write_bytes(b"x" * 1024)
+        (output_dir / "config.json").write_text('{"model_type": "qwen2"}')
+
+        resp3 = await training_client.get(f"/api/training/jobs/{job_id}/output")
+        assert resp3.status == 200
+        data = await resp3.json()
+        names = [f["name"] for f in data["files"]]
+        assert "adapter_model.safetensors" in names
+        assert "config.json" in names
+        assert data["total_files"] == 2
+
+    @pytest.mark.asyncio
+    async def test_download_artifact_path_traversal_blocked(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        job_id = (await resp.json())["job_id"]
+        resp2 = await training_client.get(
+            f"/api/training/jobs/{job_id}/output/../../etc/passwd"
+        )
+        # Should 404 (path traversal stripped by router) or 400
+        assert resp2.status in (400, 404)
+
+
+class TestMergeEndpoint:
+    """Tests for /api/training/jobs/{job_id}/merge."""
+
+    @pytest.mark.asyncio
+    async def test_merge_completed_lora_job_starts(self, training_client, training_app):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "method": "lora"},
+        )
+        job_id = (await resp.json())["job_id"]
+
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(job_id)
+        job.status = JobStatus.COMPLETED
+        output_dir = Path(job.config.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "adapter_model.safetensors").write_bytes(b"x" * 16)
+
+        resp2 = await training_client.post(f"/api/training/jobs/{job_id}/merge")
+        assert resp2.status == 202
+        data = await resp2.json()
+        assert "merge_job_id" in data
+        assert data["source_job_id"] == job_id
+
+    @pytest.mark.asyncio
+    async def test_merge_rejects_non_completed_job(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "method": "lora"},
+        )
+        job_id = (await resp.json())["job_id"]
+
+        resp2 = await training_client.post(f"/api/training/jobs/{job_id}/merge")
+        assert resp2.status == 409
+
+    @pytest.mark.asyncio
+    async def test_merge_cancel_registers_container_and_sticks(
+        self, training_client, training_app, monkeypatch
+    ):
+        """Container-mode merge: cancel must register the ainode-merge container
+        (so stop() can docker-kill it) and the CANCELLED status must survive the
+        container later exiting  -  _do_merge must not overwrite it with COMPLETED."""
+        import asyncio
+
+        # Submit + complete the source LoRA job in host mode first (setting
+        # AINODE_IN_CONTAINER up front would make its auto-start build a container
+        # command and blow up on the missing AINODE_HOST_HOME guard).
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "method": "lora"},
+        )
+        job_id = (await resp.json())["job_id"]
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(job_id)
+        job.status = JobStatus.COMPLETED
+        out = Path(job.config.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "adapter_model.safetensors").write_bytes(b"x" * 16)
+
+        # Now flip into container mode for the merge itself. Stub the merge
+        # container to a short-lived local process that exits 0  -  exercises the
+        # success-path overwrite guard.
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setattr(
+            "ainode.training.engine.build_merge_command",
+            lambda *a, **k: ["sh", "-c", "sleep 0.3"],
+        )
+        # docker stop/rm during cancel → no-op (no daemon under test).
+        monkeypatch.setattr("ainode.training.engine.subprocess.run", lambda *a, **k: None)
+        # The merge path preflights the train image; there is no daemon under test.
+        monkeypatch.setattr(
+            "ainode.training.engine._assert_image_present", lambda image: None
+        )
+
+        resp2 = await training_client.post(f"/api/training/jobs/{job_id}/merge")
+        merge_job_id = (await resp2.json())["merge_job_id"]
+        merge_job = manager.get_job(merge_job_id)
+        assert merge_job._container_name_override == f"ainode-merge-{merge_job_id}"
+
+        # Let _do_merge flip the job to RUNNING, then cancel mid-flight.
+        await asyncio.sleep(0.05)
+        resp3 = await training_client.delete(f"/api/training/jobs/{merge_job_id}")
+        assert resp3.status == 200
+        assert merge_job.status == JobStatus.CANCELLED
+
+        # Let the stubbed container exit and _do_merge run to completion; the
+        # CANCELLED status must NOT be clobbered back to COMPLETED/FAILED.
+        await asyncio.sleep(0.5)
+        assert merge_job.status == JobStatus.CANCELLED
+
+
+class TestHFTokenPropagation:
+    """Tests for HF token flow from NodeConfig into a training job.
+
+    The job the manager holds carries the real token (the launch needs it); the
+    API response only ever says whether there is one. Auth is off by default, so
+    GET /api/training/jobs must not hand out a token to whoever asks.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operator", [False, True])
+    async def test_hf_token_injected_from_node_config(self, training_app, operator):
+        """Only an authorized operator can inject the node's token."""
+        from types import SimpleNamespace
+        @web.middleware
+        async def caller(request, handler):
+            request._cache["remote"] = "198.51.100.9"
+            request["authenticated"] = operator
+            return await handler(request)
+        training_app.middlewares.append(caller)
+        training_app["auth_config"] = SimpleNamespace(enabled=operator)
+        # Inject a fake token into the app config
+        training_app["config"] = type("C", (), {"hf_token": "hf_test123"})()
+        async with TestClient(TestServer(training_app)) as client:
+            resp = await client.post(
+                "/api/training/jobs",
+                json={"base_model": "m", "dataset_path": "user/d"},
+            )
+            assert resp.status == 201
+            job_id = (await resp.json())["job_id"]
+        manager: TrainingManager = training_app["training_manager"]
+        assert manager.get_job(job_id).config.hf_token == ("hf_test123" if operator else None)
+        assert manager.get_job(job_id).config._node_hf_token_authorized is operator
+
+    @pytest.mark.asyncio
+    async def test_request_token_takes_precedence(self, training_client, training_app):
+        """Explicit token in request body wins over NodeConfig token."""
+        training_client.app["config"] = type("C", (), {"hf_token": "hf_config_token"})()
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "hf_token": "hf_explicit"},
+        )
+        assert resp.status == 201
+        job_id = (await resp.json())["job_id"]
+        manager: TrainingManager = training_app["training_manager"]
+        assert manager.get_job(job_id).config.hf_token == "hf_explicit"
+
+    @pytest.mark.asyncio
+    async def test_job_status_masks_the_token(self, training_client):
+        """The key stays, so a caller can see the job HAS a token; the value goes."""
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "hf_token": "hf_secret_value"},
+        )
+        job_id = (await resp.json())["job_id"]
+        for payload in ((await resp.json()),
+                        (await (await training_client.get(
+                            f"/api/training/jobs/{job_id}")).json())):
+            assert payload["config"]["hf_token"] == "***"
+        listing = await (await training_client.get("/api/training/jobs")).json()
+        assert all(j["config"]["hf_token"] != "hf_secret_value" for j in listing["jobs"])
+
+    @pytest.mark.asyncio
+    async def test_job_status_without_a_token_stays_null(self, training_client):
+        resp = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert (await resp.json())["config"]["hf_token"] is None
+
+
+# =============================================================================
+# Container-spawn command building (slim-image gap: no torch/peft in-process)
+# =============================================================================
+
+
+class TestContainerTrainingCommand:
+    """_build_command must spawn a GPU container when running in-container."""
+
+    def _job(self, tmp_path, monkeypatch, **cfg):
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", dataset_path="user/d", **cfg)
+        return TrainingJob(config)
+
+    def test_host_venv_path_unchanged(self, tmp_path, monkeypatch):
+        """No AINODE_IN_CONTAINER → the original in-process python path is used."""
+        monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+        job = self._job(tmp_path, monkeypatch)
+        cmd = job._build_command(job._job_dir / "config.json")
+        assert cmd[0] == sys.executable
+        assert "ainode.training._run_training" in cmd
+        assert "docker" not in cmd
+
+    def test_in_container_lora_docker_shape(self, tmp_path, monkeypatch, no_local_images):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        job = self._job(tmp_path, monkeypatch, method="lora")
+        cmd = job._build_command(job._job_dir / "config.json")
+
+        assert cmd[:3] == ["docker", "run", "--rm"]
+        # Nothing present locally, so the argv carries the preferred candidate.
+        assert engine.job_image_candidates("lora")[0] in cmd
+        assert "--gpus" in cmd and "all" in cmd
+        assert "--ipc=host" in cmd
+
+        # Model store + job dir mounted RW (no :ro suffix); datasets RO.
+        mounts = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-v"]
+        assert any(m.endswith(":/ainode-models") for m in mounts)
+        assert any(m.endswith(":/job") for m in mounts)
+        assert any(m.endswith(":/ainode-datasets:ro") for m in mounts)
+
+        # AINODE_HOME passed for the runner's config fallback.
+        assert "AINODE_HOME=/job" in cmd
+
+        # pip-shim installs peft (not bitsandbytes for plain lora); runner invoked.
+        shell = cmd[-1]
+        assert "pip install" in shell and "peft" in shell
+        assert "bitsandbytes" not in shell
+        assert "/job/_run_training.py" in shell
+        assert "/job/config.container.json" in shell
+
+        # Runner copied into the job dir; container-view config written + remapped.
+        assert (job._job_dir / "_run_training.py").exists()
+        ccfg = json.loads((job._job_dir / "config.container.json").read_text())
+        assert ccfg["output_dir"] == "/job/output"
+
+    def test_in_container_qlora_adds_bitsandbytes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        job = self._job(tmp_path, monkeypatch, method="qlora")
+        cmd = job._build_command(job._job_dir / "config.json")
+        shell = cmd[-1]
+        assert "peft" in shell and "bitsandbytes" in shell
+
+    def test_train_image_override(self, tmp_path, monkeypatch, no_local_images):
+        """AINODE_TRAIN_IMAGE wins over the release tag and the local one."""
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setenv("AINODE_TRAIN_IMAGE", "custom/train:tag")
+        job = self._job(tmp_path, monkeypatch, method="lora")
+        cmd = job._build_command(job._job_dir / "config.json")
+        assert "custom/train:tag" in cmd
+
+    def test_in_container_requires_host_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+        job = self._job(tmp_path, monkeypatch, method="lora")
+        with pytest.raises(RuntimeError, match="AINODE_HOST_HOME"):
+            job._build_command(job._job_dir / "config.json")
+
+    def test_in_container_ddp_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        job = self._job(tmp_path, monkeypatch, method="lora", distributed=True, num_nodes=2)
+        with pytest.raises(RuntimeError, match="Distributed training"):
+            job._build_command(job._job_dir / "config.json")
+
+    def test_quantize_path_unchanged_in_container(self, tmp_path, monkeypatch):
+        """Quantize keeps its own container command (run_quant.py), not the train path."""
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        config = TrainingConfig(base_model="m", method="quantize", scheme="awq")
+        job = TrainingJob(config)
+        cmd = job._build_command(job._job_dir / "config.json")
+        assert "/opt/ainode/run_quant.py" in cmd
+        assert "/job/_run_training.py" not in " ".join(cmd)
+
+    def test_relative_dataset_remapped_when_present(self, tmp_path, monkeypatch):
+        """A bare relative dataset_path (what the wizard placeholder suggests) is
+        remapped onto the /ainode-datasets mount when the file exists  -  otherwise
+        the container's AINODE_HOME=/job resolver looks in the wrong place."""
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.AINODE_HOME", tmp_path)
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        (tmp_path / "datasets").mkdir()
+        (tmp_path / "datasets" / "alpaca.jsonl").write_text("{}\n")
+        job = TrainingJob(TrainingConfig(base_model="m", dataset_path="alpaca.jsonl", method="lora"))
+        job._build_container_command()
+        ccfg = json.loads((job._job_dir / "config.container.json").read_text())
+        assert ccfg["dataset_path"] == "/ainode-datasets/alpaca.jsonl"
+
+    def test_relative_dataset_hf_repo_id_passthrough(self, tmp_path, monkeypatch):
+        """A relative string with no matching local file is a HF hub repo id and
+        must pass through untouched to load_dataset()."""
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.AINODE_HOME", tmp_path)
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        (tmp_path / "datasets").mkdir()
+        job = TrainingJob(TrainingConfig(base_model="m", dataset_path="tatsu-lab/alpaca", method="lora"))
+        job._build_container_command()
+        ccfg = json.loads((job._job_dir / "config.container.json").read_text())
+        assert ccfg["dataset_path"] == "tatsu-lab/alpaca"
+
+    def test_container_name_derivation(self, tmp_path, monkeypatch):
+        """stop() must be able to name the GPU container it has to docker-kill."""
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        # In-container lora → ainode-train-<id>
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        jt = TrainingJob(TrainingConfig(base_model="m", dataset_path="user/d", method="lora"))
+        assert jt._container_name() == f"ainode-train-{jt.job_id}"
+        # Quantize always runs in a container, regardless of AINODE_IN_CONTAINER
+        monkeypatch.delenv("AINODE_IN_CONTAINER", raising=False)
+        jq = TrainingJob(TrainingConfig(base_model="m", method="quantize", scheme="awq"))
+        assert jq._container_name() == f"ainode-quant-{jq.job_id}"
+        # Host-venv lora → no container, nothing to kill
+        jh = TrainingJob(TrainingConfig(base_model="m", dataset_path="user/d", method="lora"))
+        assert jh._container_name() is None
+        # Explicit override wins (merge jobs)
+        jh._container_name_override = "ainode-merge-abc"
+        assert jh._container_name() == "ainode-merge-abc"
+
+    @pytest.mark.asyncio
+    async def test_stop_kills_named_container(self, tmp_path, monkeypatch):
+        """Cancelling a RUNNING container-spawn job must docker-remove the GPU
+        container  -  a SIGKILL to the local `docker run` client is not relayed."""
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        job = TrainingJob(TrainingConfig(base_model="m", dataset_path="user/d", method="lora"))
+        job.status = JobStatus.RUNNING
+        job.start_time = 1.0
+        calls = []
+        monkeypatch.setattr(
+            "ainode.training.engine.subprocess.run",
+            lambda args, **kw: calls.append(args),
+        )
+        await job.stop()
+        assert job.status == JobStatus.CANCELLED
+        name = f"ainode-train-{job.job_id}"
+        assert ["docker", "stop", name] in calls
+        assert ["docker", "rm", "-f", name] in calls
+
+
+class TestMergeContainerCommand:
+    """build_merge_command spawns a GPU container mirroring the training pattern."""
+
+    def test_merge_docker_shape(self, tmp_path, monkeypatch, no_local_images):
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        merge_job = TrainingJob(TrainingConfig(base_model="m", dataset_path="__merge__"))
+        adapter_dir = tmp_path / "training" / "src" / "output"
+        adapter_dir.mkdir(parents=True)
+        merged_dir = tmp_path / "training" / "src" / "merged"
+
+        cmd = build_merge_command(merge_job, "base/model", adapter_dir, merged_dir, "hf_tok")
+
+        assert cmd[:3] == ["docker", "run", "--rm"]
+        assert engine.job_image_candidates("lora")[0] in cmd
+        mounts = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-v"]
+        assert any(m.endswith(":/adapter:ro") for m in mounts)
+        assert any(m.endswith(":/out") for m in mounts)
+        assert any(m.endswith(":/ainode-models") for m in mounts)
+
+        shell = cmd[-1]
+        assert "pip install" in shell and "peft" in shell
+        assert "/job/_run_merge.py" in shell
+
+        # Runner copied + merge config written with remapped container paths.
+        assert (merge_job._job_dir / "_run_merge.py").exists()
+        mcfg = json.loads((merge_job._job_dir / "merge_config.json").read_text())
+        assert mcfg["adapter_dir"] == "/adapter"
+        assert mcfg["output_dir"] == "/out"
+        assert mcfg["base_model"] == "base/model"
+
+    def test_merge_requires_host_home(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AINODE_HOST_HOME", raising=False)
+        monkeypatch.setattr("ainode.training.engine.JOBS_DIR", tmp_path / "jobs")
+        merge_job = TrainingJob(TrainingConfig(base_model="m", dataset_path="__merge__"))
+        with pytest.raises(RuntimeError, match="AINODE_HOST_HOME"):
+            build_merge_command(merge_job, "base/model", tmp_path / "a", tmp_path / "b")
+
+
+# =============================================================================
+# A job the engine refuses to launch
+# =============================================================================
+
+
+class TestUnlaunchableJob:
+    """A submit the engine cannot honour used to answer 500 and leave a phantom
+    RUNNING job that blocked the queue forever (reproduced with a DDP submit in
+    container-spawn mode). It must answer 400, mark the job failed, and leave the
+    queue able to run the next job.
+    """
+
+    @pytest.fixture
+    def refusing_engine(self, monkeypatch):
+        """Make _build_command raise, the way container-mode DDP does."""
+        def boom(self, config_path):
+            raise RuntimeError("Distributed training (DDP / multi-node) is not supported")
+
+        monkeypatch.setattr(TrainingJob, "_build_command", boom)
+
+    @pytest.mark.asyncio
+    async def test_submit_answers_400_and_never_marks_running(
+        self, training_client, training_app, refusing_engine
+    ):
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d", "distributed": True,
+                  "num_nodes": 2},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "not supported" in body["error"]
+
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(body["job_id"])
+        assert job.status == JobStatus.FAILED
+        assert job.start_time is None
+        assert job._process is None
+
+    @pytest.mark.asyncio
+    async def test_failed_start_does_not_wedge_the_queue(
+        self, training_client, training_app, monkeypatch
+    ):
+        manager: TrainingManager = training_app["training_manager"]
+
+        def boom(self, config_path):
+            raise RuntimeError("no launch path for this job")
+
+        monkeypatch.setattr(TrainingJob, "_build_command", boom)
+        resp = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert resp.status == 400
+        assert manager._active_job_id is None
+        assert manager.queue_size == 0
+
+        # The next job must be startable: nothing is holding the slot.
+        monkeypatch.setattr(TrainingJob, "_build_command",
+                            lambda self, config_path: [sys.executable, "-c", "pass"])
+        resp2 = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d2"},
+        )
+        assert resp2.status == 201
+        second = manager.get_job((await resp2.json())["job_id"])
+        assert second.status == JobStatus.RUNNING
+        assert manager._active_job_id == second.job_id
+        await manager.cancel_job(second.job_id)
+
+    @pytest.mark.asyncio
+    async def test_a_missing_train_image_is_a_400_not_a_docker_125(
+        self, training_client, training_app, monkeypatch
+    ):
+        monkeypatch.setenv("AINODE_IN_CONTAINER", "1")
+        monkeypatch.setenv("AINODE_HOST_HOME", "/host")
+        monkeypatch.setenv("AINODE_NO_WHEEL_FETCH", "1")
+        monkeypatch.setattr(engine, "_image_present", lambda image: False)
+        resp = await training_client.post(
+            "/api/training/jobs", json={"base_model": "m", "dataset_path": "user/d"},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        # The message names every candidate, because which one to fix depends on
+        # the node: pull the release tag, build the local one, or set the override.
+        error = body["error"]
+        assert "No training image is present" in error
+        for candidate in engine.job_image_candidates("lora"):
+            assert candidate in error
+        assert "AINODE_TRAIN_IMAGE" in error
+        job = training_app["training_manager"].get_job(body["job_id"])
+        assert job.status == JobStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_the_logged_command_is_scrubbed(
+        self, training_client, training_app, monkeypatch
+    ):
+        """The job log is served by GET /api/training/jobs/{id}/logs."""
+        monkeypatch.setattr(
+            TrainingJob, "_build_command",
+            lambda self, config_path: [
+                sys.executable, "-c", "pass", "-e", "HF_TOKEN=hf_secret_value",
+            ],
+        )
+        resp = await training_client.post(
+            "/api/training/jobs",
+            json={"base_model": "m", "dataset_path": "user/d",
+                  "hf_token": "hf_secret_value"},
+        )
+        job_id = (await resp.json())["job_id"]
+        manager: TrainingManager = training_app["training_manager"]
+        job = manager.get_job(job_id)
+
+        logged = "\n".join(job.logs)
+        assert "hf_secret_value" not in logged
+        assert "HF_TOKEN=***" in logged
+        # And it is not in the config on disk either.
+        assert "hf_secret_value" not in (job._job_dir / "config.json").read_text()
+        await manager.cancel_job(job_id)

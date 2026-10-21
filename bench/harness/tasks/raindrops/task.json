@@ -1,0 +1,22 @@
+{
+ "slug": "raindrops",
+ "language": "python",
+ "entry": "raindrops.py",
+ "instructions": "instructions.md",
+ "tests": [
+  "tests/raindrops_test.py"
+ ],
+ "test_command": [
+  "python",
+  "-m",
+  "pytest",
+  "-q",
+  "raindrops_test.py"
+ ],
+ "source": {
+  "repo": "https://github.com/exercism/python",
+  "commit": "1f6aab8667bf653b10cc3799f94352fcdb749db6",
+  "path": "exercises/practice/raindrops",
+  "license": "MIT"
+ }
+}

@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Models (don't commit multi-GB model weight files)
+# Ignore the data directory but keep the Python package
+models/
+!ainode/models/
+*.bin
+*.safetensors
+*.gguf
+
+# Local operational artifacts stay out of git. Tracked verification
+# records (ops/runbooks/*-verification.md) are the one exception.
+# Note: git cannot re-include files whose parent directory is excluded,
+# so we exclude ops/* (contents) rather than ops/ (dir) and re-include
+# the runbooks dir, then exclude its contents, then re-include the
+# naming-convention whitelist.
+ops/*
+!ops/runbooks/
+ops/runbooks/*
+!ops/runbooks/*-verification.md
+
+# Node (for web UI)
+node_modules/
+
+# Agent tooling scratch dirs  -  local session state, never product code.
+# Ignore local state so bulk staging cannot publish embedded repositories.
+.claude/*
+!.claude/settings.json
+!.claude/helpers/
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/graft/
+.cursor/
+.omx/
+
+# graft's local graph cache  -  regenerable, not committed (run `graft build`).
+/graft/
+
+# The decision bench's question sets: item text fetched by `ainode-bench decide
+# download` and verified against the committed manifests' state hashes. Never committed,
+# because upstream does not republish item text either and the upstream licences are not
+# ours to relicense (bench/decide/sets/README.md).
+bench/decide/cache/

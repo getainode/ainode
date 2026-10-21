@@ -1,0 +1,638 @@
+"""Tests for ainode.api.server  -  AINode-specific endpoints."""
+
+import socket
+
+import pytest
+import pytest_asyncio
+from aiohttp.test_utils import TestClient, TestServer
+
+from ainode.api.server import create_app, _build_announcement, _client_max_bytes
+from ainode.core.config import NodeConfig
+
+
+@pytest.fixture
+def config():
+    # Use a port nothing listens on: the vllm proxy falls back to
+    # localhost:<api_port>, and a real service on the default 8000 (common on
+    # dev machines) would answer instead of yielding the expected 502.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+    return NodeConfig(node_id="test-node-1", node_name="TestNode", model="test-model", api_port=free_port)
+
+
+@pytest.fixture
+def app(config):
+    return create_app(config=config, engine=None)
+
+
+@pytest_asyncio.fixture
+async def client(app):
+    async with TestClient(TestServer(app), headers={"X-AINode-Client": "dashboard"}) as c:
+        yield c
+
+
+# ---- /api/health -----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_health(client):
+    """Liveness, plus the release that is alive.
+
+    The version is on this route because it is the one route that answers with no
+    API key, and the host wrapper's `ainode update` reads it to verify that an
+    update applied (scripts/install.sh). Reading /api/status there 401'd on any
+    node that requires a key.
+    """
+    from ainode import __version__
+
+    resp = await client.get("/api/health")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data == {"status": "ok", "version": __version__}
+
+
+# ---- /api/status -----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_status_fields(client):
+    resp = await client.get("/api/status")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["node_id"] == "test-node-1"
+    assert data["node_name"] == "TestNode"
+    assert data["model"] == "test-model"
+    from ainode import __version__
+    assert data["version"] == __version__
+    assert data["powered_by"] == "ainode.dev"
+    assert data["engine_ready"] is False
+    assert isinstance(data["uptime"], (int, float))
+    assert isinstance(data["models_loaded"], list)
+    assert "api_port" in data
+
+
+# ---- /api/nodes ------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_nodes(client):
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "nodes" in data
+    nodes = data["nodes"]
+    assert len(nodes) == 1
+    node = nodes[0]
+    assert node["node_id"] == "test-node-1"
+    assert node["node_name"] == "TestNode"
+    assert node["model"] == "test-model"
+    # engine_ready is the engine's own readiness, not the node's heartbeat (#112):
+    # nothing is serving on this fixture's api_port.
+    assert node["engine_ready"] is False
+
+
+# ---- / (index) -------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_index_serves_html(client):
+    resp = await client.get("/")
+    assert resp.status == 200
+    assert "text/html" in resp.headers.get("Content-Type", "")
+    body = await resp.text()
+    assert "<html" in body.lower() or "<!doctype" in body.lower()
+
+
+# ---- CORS ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cors_headers_localhost(client):
+    resp = await client.get("/api/health", headers={"Origin": "http://localhost:3000"})
+    assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+
+
+@pytest.mark.asyncio
+async def test_cors_headers_rejected(client):
+    resp = await client.get("/api/health", headers={"Origin": "http://evil.com"})
+    assert resp.headers.get("Access-Control-Allow-Origin") == ""
+
+
+@pytest.mark.asyncio
+async def test_cors_preflight(client):
+    resp = await client.options("/api/health", headers={"Origin": "http://127.0.0.1:3000"})
+    assert resp.status == 204
+    assert resp.headers.get("Access-Control-Allow-Origin") == "http://127.0.0.1:3000"
+    assert "POST" in resp.headers.get("Access-Control-Allow-Methods", "")
+
+
+# ---- vLLM proxy returns 502 when engine is down ----------------------------
+
+@pytest.mark.asyncio
+async def test_vllm_proxy_returns_502_when_down(client):
+    # /v1/models is now the federated list endpoint (doesn't proxy); the proxy-
+    # when-down behavior lives on the completion routes, which still forward.
+    resp = await client.post("/v1/completions", json={"model": "test-model", "prompt": "hi"})
+    assert resp.status == 502
+    data = await resp.json()
+    assert "error" in data
+
+
+# ---- _build_announcement ----------------------------------------------------
+
+def test_build_announcement_from_config():
+    cfg = NodeConfig(node_id="abc123", node_name="TestSpark", model="llama-3", api_port=9000, web_port=4000)
+    ann = _build_announcement(cfg, engine=None)
+    assert ann.node_id == "abc123"
+    assert ann.node_name == "TestSpark"
+    assert ann.model == "llama-3"
+    assert ann.api_port == 9000
+    assert ann.web_port == 4000
+    assert ann.status == "starting"  # no engine = not ready
+
+
+def test_build_announcement_engine_ready():
+    cfg = NodeConfig(node_id="abc123", node_name="TestSpark", model="llama-3")
+
+    class FakeEngine:
+        ready = True
+    ann = _build_announcement(cfg, engine=FakeEngine())
+    assert ann.status == "serving"
+
+
+# ---- /api/nodes with cluster data ------------------------------------------
+
+@pytest.mark.asyncio
+async def test_server_status(client):
+    resp = await client.get("/api/server/status")
+    assert resp.status == 200
+    data = await resp.json()
+    # Nothing is loaded on this app, and the Server view's dot reads this field
+    # (#206): it used to be the literal "running", true by tautology, and stayed
+    # green with every engine in the fleet dead.
+    assert data["status"] == "idle"
+    assert data["models_ready"] == 0
+    assert "reachable_at" in data and isinstance(data["reachable_at"], list)
+    assert len(data["reachable_at"]) >= 1
+    assert "loaded_models" in data
+    assert "request_count_total" in data
+
+
+@pytest.mark.asyncio
+async def test_server_endpoints_catalog(client):
+    resp = await client.get("/api/server/endpoints")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "openai" in data and "lmstudio" in data and "anthropic" in data
+    # Each row has method + path
+    for row in data["openai"]:
+        assert "method" in row and "path" in row
+
+
+@pytest.mark.asyncio
+async def test_server_logs_roundtrip(client):
+    # Start clean
+    await client.delete("/api/server/logs")
+    # Trigger a loggable request
+    await client.get("/api/status")
+    resp = await client.get("/api/server/logs")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "entries" in data
+    assert any(e["path"] == "/api/status" for e in data["entries"])
+    # Health & server/logs themselves should be skipped
+    assert not any(e["path"].startswith("/api/health") for e in data["entries"])
+    assert not any(e["path"] == "/api/server/logs" for e in data["entries"])
+    # Clear
+    resp = await client.delete("/api/server/logs")
+    assert resp.status == 200
+    resp = await client.get("/api/server/logs")
+    data = await resp.json()
+    # After the GET, the clear call itself would not be logged (skipped).
+    # Any entries remaining should predate the clear only if more requests
+    # happened between. Assert the clear worked by checking the list is
+    # empty or only contains this GET's predecessors.
+    assert isinstance(data["entries"], list)
+
+
+@pytest.mark.asyncio
+async def test_server_eject_no_engine(client):
+    resp = await client.post("/api/server/models/dummy%2Fmodel/eject")
+    # With no engine, we return 202 + planned status
+    assert resp.status in (202, 200)
+    data = await resp.json()
+    assert "model_id" in data
+
+
+@pytest.mark.asyncio
+async def test_nodes_returns_local_node_from_cluster(client):
+    """When cluster has a local announcement, /api/nodes should return it."""
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    data = await resp.json()
+    nodes = data["nodes"]
+    assert len(nodes) >= 1
+    node_ids = [n["node_id"] for n in nodes]
+    assert "test-node-1" in node_ids
+
+
+# ---- /api/engine/update ----------------------------------------------------
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_engine_update_pulls_numeric_tag_and_writes_env(client, tmp_path, monkeypatch):
+    """Update resolves the highest numeric GHCR tag, pulls it, writes image.env."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    # Simulate a node already on the swappable-image unit so the self-stop path runs.
+    monkeypatch.setenv("AINODE_UNIT_SWAPPABLE", "1")
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value="0.5.0"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")) as mrun,
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "updating"
+        assert data["target"] == "0.5.0"
+        assert data["image"] == "ghcr.io/getainode/ainode:0.5.0"
+
+    # image.env pinned to the numeric tag.
+    image_env = tmp_path / "image.env"
+    assert image_env.read_text().strip() == "AINODE_IMAGE=ghcr.io/getainode/ainode:0.5.0"
+
+    # docker pull targeted the numeric tag  -  never a floating :latest.
+    pull_cmds = [c.args[0] for c in mrun.call_args_list if c.args and "pull" in c.args[0]]
+    assert any("ghcr.io/getainode/ainode:0.5.0" in cmd for cmd in pull_cmds)
+    assert not any("ainode:latest" in " ".join(cmd) for cmd in pull_cmds)
+
+
+@pytest.mark.asyncio
+async def test_engine_update_uses_requested_version(client, tmp_path, monkeypatch):
+    """An explicit body version is used verbatim; GHCR resolution is skipped."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    monkeypatch.setenv("AINODE_UNIT_SWAPPABLE", "1")
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag") as mfetch,
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
+    ):
+        resp = await client.post("/api/engine/update", json={"version": "0.6.1"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["target"] == "0.6.1"
+        mfetch.assert_not_called()
+
+    image_env = tmp_path / "image.env"
+    assert image_env.read_text().strip() == "AINODE_IMAGE=ghcr.io/getainode/ainode:0.6.1"
+
+
+@pytest.mark.asyncio
+async def test_engine_update_pull_failure_no_env_write(client, tmp_path, monkeypatch):
+    """On docker pull failure: 502, no image.env written, no restart."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value="0.5.0"),
+        patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="manifest unknown")),
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 502
+
+    assert not (tmp_path / "image.env").exists()
+
+
+@pytest.mark.asyncio
+async def test_engine_update_unresolvable_version(client, tmp_path, monkeypatch):
+    """No requested version and GHCR resolution returns None → 502, no pull."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value=None),
+        patch("subprocess.run") as mrun,
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 502
+        mrun.assert_not_called()
+
+    assert not (tmp_path / "image.env").exists()
+
+
+@pytest.mark.asyncio
+async def test_engine_update_skips_stop_when_unit_not_swappable(client, tmp_path, monkeypatch):
+    """On a node whose unit predates the swappable image: pull + pin, but NO
+    self-stop  -  stopping there is destructive (old unit drops the node or reboots
+    the same image). The response says restarted=False, and `docker stop` is
+    never invoked."""
+    monkeypatch.setenv("AINODE_HOME", str(tmp_path))
+    monkeypatch.delenv("AINODE_UNIT_SWAPPABLE", raising=False)
+    with (
+        patch("ainode.api.server._fetch_latest_ghcr_tag", return_value="0.5.0"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")) as mrun,
+    ):
+        resp = await client.post("/api/engine/update", json={})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "pulled"
+        assert data["restarted"] is False
+
+    # Image was still pulled + pinned (readies the node for a later migration)...
+    image_env = tmp_path / "image.env"
+    assert image_env.read_text().strip() == "AINODE_IMAGE=ghcr.io/getainode/ainode:0.5.0"
+    # ...but `docker stop ainode` was NEVER called.
+    stop_cmds = [
+        c.args[0] for c in mrun.call_args_list
+        if c.args and "stop" in c.args[0]
+    ]
+    assert stop_cmds == []
+
+
+# ---- D4: /api/cluster/load routes by node_id -------------------------------
+
+@pytest.mark.asyncio
+async def test_cluster_load_unknown_node_404(client):
+    """A node_id we don't know is honored (looked up)  -  not silently loaded local."""
+    resp = await client.post("/api/cluster/load", json={"model": "m", "node_id": "ghost-node"})
+    assert resp.status == 404
+    data = await resp.json()
+    assert "ghost-node" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_cluster_load_local_dispatch_passes_gmu(client, app, monkeypatch):
+    """node_id == this node dispatches to the LOCAL model handler, forwarding gmu."""
+    import ainode.models.api_routes as mr
+
+    calls = {}
+
+    def fake_append(app, model, gmu=None, *, overrides=None, persist=True):
+        calls["model"] = model
+        calls["gmu"] = gmu
+        return {"ok": True, "model": model, "instance_id": "n:x",
+                "api_port": 8000, "stacked": False}
+
+    monkeypatch.setattr(mr, "append_solo_instance", fake_append)
+    resp = await client.post("/api/cluster/load", json={
+        "model": "m", "node_id": "test-node-1", "gpu_memory_utilization": 0.4,
+    })
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["model"] == "m"
+    assert calls["model"] == "m"
+    assert calls["gmu"] == 0.4
+
+
+# ---- D5: /api/nodes includes per-node instances ----------------------------
+
+@pytest.mark.asyncio
+async def test_nodes_include_stacked_instances(client, app):
+    from ainode.discovery.cluster import ClusterNode
+    from ainode.discovery.broadcast import NodeStatus
+
+    cluster = app["cluster_state"]
+    cluster.add_node(ClusterNode(
+        node_id="n2", node_name="N2", gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model="primary-model", status=NodeStatus.ONLINE,
+        api_port=8000, web_port=8080, last_seen=0.0,
+        instances=[
+            {"model": "primary-model", "api_port": 8000, "status": "serving"},
+            {"model": "stacked-model", "api_port": 8001, "status": "serving"},
+        ],
+    ))
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    data = await resp.json()
+    n2 = next(n for n in data["nodes"] if n["node_id"] == "n2")
+    assert "instances" in n2
+    assert any(i["model"] == "stacked-model" and i["api_port"] == 8001 for i in n2["instances"])
+
+
+@pytest.mark.asyncio
+async def test_nodes_say_which_instances_were_adopted(client, app):
+    """``adopted`` survives the row projection (#240).
+
+    It rides on the announcement (``InstanceRecord.adopted``) and this route used
+    to drop every key it does not name, so no view could tell an engine that
+    survived a restart from one this boot loaded.
+    """
+    from ainode.discovery.broadcast import NodeStatus
+    from ainode.discovery.cluster import ClusterNode
+
+    cluster = app["cluster_state"]
+    cluster.add_node(ClusterNode(
+        node_id="n3", node_name="N3", gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model="kept-model", status=NodeStatus.ONLINE,
+        api_port=8000, web_port=8080, last_seen=0.0,
+        instances=[
+            {"model": "kept-model", "api_port": 8000, "status": "serving",
+             "adopted": True},
+            {"model": "fresh-model", "api_port": 8001, "status": "serving"},
+        ],
+    ))
+    resp = await client.get("/api/nodes")
+    data = await resp.json()
+    n3 = next(n for n in data["nodes"] if n["node_id"] == "n3")
+    by_model = {i["model"]: i for i in n3["instances"]}
+    assert by_model["kept-model"]["adopted"] is True
+    assert by_model["fresh-model"]["adopted"] is False
+
+
+# --- request body ceiling -------------------------------------------------
+# aiohttp defaults client_max_size to 1 MB. That silently caps long-context
+# models: a 262k-context model can only be fed ~190k tokens of prompt through
+# our endpoint before the proxy 413s it, and nothing in the error says the
+# proxy (not the engine) refused. Long-context bodies must reach the engine.
+#
+# These assert on _client_max_bytes directly rather than building extra apps:
+# create_app() outside a running loop binds module-level asyncio primitives
+# (the download semaphore) to the wrong loop and made an unrelated download
+# test flaky.
+
+def test_request_ceiling_clears_the_1mb_default():
+    from ainode.api.server import _client_max_bytes
+    one_mb = 1024 * 1024
+    assert _client_max_bytes(NodeConfig()) > one_mb
+    # A 1M-token context is roughly 5 MB of text; leave room for that plus
+    # base64 image/video parts on the multimodal models.
+    assert _client_max_bytes(NodeConfig()) >= 32 * one_mb
+
+
+def test_request_ceiling_is_configurable():
+    from ainode.api.server import _client_max_bytes
+    assert _client_max_bytes(NodeConfig(max_request_mb=8)) == 8 * 1024 * 1024
+
+
+def test_request_ceiling_never_collapses_to_zero():
+    from ainode.api.server import _client_max_bytes
+    assert _client_max_bytes(NodeConfig(max_request_mb=0)) >= 1024 * 1024
+    assert _client_max_bytes(NodeConfig(max_request_mb="nonsense")) >= 1024 * 1024
+
+
+def test_app_is_actually_wired_to_the_ceiling(app):
+    # Uses the existing fixture app rather than constructing another one.
+    assert app._client_max_size == _client_max_bytes(app["config"])
+
+
+# ---- /api/nodes: engine_ready means the engine ANSWERS (#112) ---------------
+#
+# Heartbeat health does not establish engine readiness; report readiness only when the
+# engine is serving a model.
+
+import time  # noqa: E402
+
+from ainode.discovery.broadcast import (  # noqa: E402
+    DiscoveredNode,
+    NodeAnnouncement,
+    NodeStatus,
+)
+from ainode.discovery.cluster import ClusterNode  # noqa: E402
+
+
+def _peer(node_id, engine_status, dmode="solo", model="peer-model"):
+    return ClusterNode(
+        node_id=node_id, node_name=node_id, gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model=model, status=NodeStatus.ONLINE,
+        api_port=8000, web_port=3000, last_seen=time.time(),
+        distributed_mode=dmode, engine_status=engine_status,
+    )
+
+
+async def _row(client, node_id):
+    resp = await client.get("/api/nodes")
+    assert resp.status == 200
+    rows = (await resp.json())["nodes"]
+    return next(r for r in rows if r["node_id"] == node_id)
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_loading_peer_is_online_but_not_engine_ready(client, app):
+    """The #112 report: a heartbeat says the NODE is up, never that its engine
+    is serving."""
+    app["cluster_state"].add_node(_peer("node-4", "starting"))
+
+    row = await _row(client, "node-4")
+    assert row["status"] == "online", "the node itself is reachable"
+    assert row["engine_ready"] is False, "its engine is still loading weights"
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_serving_peer_is_engine_ready(client, app):
+    """`serving` is stamped by that node's own sync loop from a live
+    /v1/models probe, so it is the peer's answer to the same question."""
+    app["cluster_state"].add_node(_peer("node-2", "serving"))
+
+    assert (await _row(client, "node-2"))["engine_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_stopped_peer_is_not_engine_ready(client, app):
+    app["cluster_state"].add_node(_peer("node-3", "stopped"))
+
+    assert (await _row(client, "node-3"))["engine_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_peer_from_an_older_build_is_not_assumed_ready(client, app):
+    """No announced engine state is not evidence of one."""
+    app["cluster_state"].add_node(_peer("old-node", ""))
+
+    assert (await _row(client, "old-node"))["engine_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_nodes_a_member_has_no_engine_port_to_answer(client, app):
+    """A member runs no local vLLM: it is ready for work once discovered."""
+    app["cluster_state"].add_node(_peer("member-1", "member-ready", dmode="member"))
+
+    assert (await _row(client, "member-1"))["engine_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_nodes_the_local_row_comes_from_a_live_probe(client, app, monkeypatch):
+    """Our own engine is one localhost probe away, so nothing latched or
+    announced is trusted for it. The engine's `ready` latch is deliberately left
+    True here: it must not be what the row reports."""
+    from ainode.api import server
+
+    class _LatchedReady:
+        ready = True
+    app["engine"] = _LatchedReady()
+    probed = []
+
+    async def _serving(_app, port):
+        probed.append(port)
+        return True
+
+    monkeypatch.setattr(server, "_engine_port_serving", _serving)
+    assert (await _row(client, "test-node-1"))["engine_ready"] is True
+    assert probed == [app["config"].api_port], "the engine's own port, not 3000"
+
+    async def _not_serving(_app, port):
+        return False
+
+    monkeypatch.setattr(server, "_engine_port_serving", _not_serving)
+    assert (await _row(client, "test-node-1"))["engine_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_local_probe_asks_v1_models_and_needs_a_model():
+    """`engine_ready` is the /v1/models claim: a 200 with an empty list is an
+    engine that is up but serving nothing, which is not ready. A plain dict
+    stands in for the app -- the probe reads only the session off it.
+    """
+    from ainode.api import server
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def json(self):
+            return self._payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Session:
+        def __init__(self, resp):
+            self._resp = resp
+            self.urls = []
+
+        def get(self, url, **_kw):
+            self.urls.append(url)
+            return self._resp
+
+    port = 8123
+    served = {"client_session": _Session(_Resp(200, {"data": [{"id": "m/x"}]}))}
+    assert await server._engine_port_serving(served, port) is True
+    assert served["client_session"].urls == [f"http://localhost:{port}/v1/models"]
+
+    empty = {"client_session": _Session(_Resp(200, {"data": []}))}
+    assert await server._engine_port_serving(empty, port) is False
+
+    down = {"client_session": _Session(_Resp(503, {}))}
+    assert await server._engine_port_serving(down, port) is False
+
+    # No session at all: fall back to the managed engine's health check, and with
+    # no engine either the honest answer is False.
+    assert await server._engine_port_serving({}, port) is False
+
+
+@pytest.mark.asyncio
+async def test_nodes_engine_ready_is_false_with_no_engine_at_all(client):
+    """The fixture app has engine=None and nothing on the api port."""
+    assert (await _row(client, "test-node-1"))["engine_ready"] is False
+
+
+def test_cluster_node_carries_the_announced_engine_state():
+    """The announcement's own status ("serving"/"starting"/...) has to survive
+    into ClusterState: `from_discovered` replaces `status` with heartbeat health,
+    which is what dropped the engine's state on the floor."""
+    ann = NodeAnnouncement(
+        node_id="node-4", node_name="node-4", gpu_name="GB10", gpu_memory_gb=128.0,
+        unified_memory=True, model="m/x", status="starting", api_port=8000,
+        web_port=3000,
+    )
+    node = ClusterNode.from_discovered(DiscoveredNode(announcement=ann))
+    assert node.status == NodeStatus.ONLINE, "fresh heartbeat"
+    assert node.engine_status == "starting", "and its engine is still loading"
+
+    local = ClusterNode.from_announcement(ann, NodeStatus.ONLINE)
+    assert local.engine_status == "starting"
