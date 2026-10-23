@@ -1214,22 +1214,46 @@ const AINode = {
 
     // Distributed instance (authoritative from /api/cluster/resources)  -
     // when the head broadcasts one, render it before anything else and
-    // skip adding its model as a "single" duplicate.
+    // skip adding that exact head/port again as a solo or stacked duplicate.
     var cr = this.state.clusterResources;
-    var distModel = null;
+    var distIdentity = null;
     if (cr && cr.distributed_instance && cr.distributed_instance.model) {
       var di = cr.distributed_instance;
-      distModel = di.model;
+      // Resources may describe a remote head or a stacked SOLO engine. Match
+      // its identity before reading readiness, port or primary load progress.
+      var headId = di.head_node_id || (s && s.node_id) || '';
+      var head = (this.state.nodes || []).filter(function (n) {
+        return n.node_id === headId;
+      })[0];
+      var matches = ((head && head.instances) || []).filter(function (inst) {
+        if (inst.model !== di.model) return false;
+        // A legacy model-shaped ID can be shared across ports. Every
+        // supplied identity field must agree before borrowing this status.
+        if (di.api_port != null && inst.api_port !== di.api_port) return false;
+        if (di.instance_id && inst.instance_id) return inst.instance_id === di.instance_id;
+        // Older resources omit both instance_id and api_port. A unique
+        // model on the named head still identifies one engine; never pick
+        // the first of multiple copies.
+        return true;
+      });
+      var own = matches.length === 1 ? matches[0] : di;
+      var port = own.api_port || di.api_port || null;
+      var primary = head && head.model === di.model && port === head.api_port;
+      var localPrimary = s && s.node_id === headId && s.model === di.model && port === s.api_port;
+      var ownStatus = own.status || di.status;
+      var ready = ownStatus ? ownStatus === 'serving'
+        : (primary ? !!head.engine_ready : !!(localPrimary && live));
+      distIdentity = { model: di.model, node_id: headId, api_port: port };
       instances.push({
         model: di.model,
         strategy: 'distributed',
-        // Which payload times this one: the head is us.
-        loadKey: 'local',
-        node_id: di.head_node_id || (s && s.node_id) || '',
-        api_port: di.api_port || null,
+        // A node's phase times only its primary, never an unrelated stack.
+        loadKey: primary ? 'node:' + headId : (localPrimary ? 'local' : ''),
+        node_id: headId,
+        api_port: port,
         tp_size: di.tensor_parallel_size,
         nodes: di.member_names || [di.head_node_name || di.head_node_id].concat(di.peer_node_ids || di.peer_ips || []),
-        status: live ? 'READY' : 'STARTING',
+        status: ready ? 'READY' : (ownStatus === 'failed' ? 'FAILED' : 'STARTING'),
         // A single-node serve is SOLO even when the head advertises a
         // distributed_instance (it's configured with peers)  -  only badge
         // DISTRIBUTED when there's real cross-node tensor parallelism.
@@ -1240,6 +1264,10 @@ const AINode = {
     // Fleet-wide: one card per node serving a solo model, across ALL nodes
     // (not just local)  -  sourced from cluster /api/nodes so the panel matches
     // the federated /v1/models the chat dropdown uses. Skip the distributed one.
+    var isDistributedCard = function (model, node, port) {
+      return distIdentity && model === distIdentity.model && node === distIdentity.node_id &&
+        port === distIdentity.api_port;
+    };
     var seen = {};
     (this.state.nodes || []).forEach(function (n) {
       // Show the friendly node name rather than the raw node-id hex.
@@ -1247,7 +1275,7 @@ const AINode = {
       // fall back to hostname, then the id, when the name is unknown (F1).
       var host = n.node_name || n.hostname || n.node_id;
       var modelName = n.model;
-      if (modelName && !(distModel && modelName === distModel)) {
+      if (modelName && !isDistributedCard(modelName, n.node_id, n.api_port)) {
         var key = modelName + '@' + (n.node_id || n.hostname);
         if (!seen[key]) {
           seen[key] = true;
@@ -1271,7 +1299,7 @@ const AINode = {
       // before D5. Render a card per stacked instance (model, port, status).
       (n.instances || []).forEach(function (inst) {
         var im = inst.model;
-        if (!im || (distModel && im === distModel)) return;
+        if (!im || isDistributedCard(im, n.node_id, inst.api_port)) return;
         // Skip the primary (already shown above): same model on the node's main port.
         if (im === n.model && (inst.api_port == null || inst.api_port === n.api_port)) return;
         var skey = im + '@' + (n.node_id || n.hostname) + ':' + (inst.api_port || '');
@@ -1280,9 +1308,8 @@ const AINode = {
         instances.push({
           model: im,
           strategy: 'stacked',
-          // Node-level timing: the node publishes one load phase, for whichever
-          // engine it is bringing up.
-          loadKey: 'node:' + (n.node_id || ''),
+          // The node phase times its primary, not this stacked instance.
+          loadKey: '',
           node_id: n.node_id || '',
           api_port: inst.api_port || null,
           nodes: [host + (inst.api_port ? ':' + inst.api_port : '')],
@@ -1292,7 +1319,7 @@ const AINode = {
           // a still-loading or dead stacked model read READY the moment the
           // primary was up. inst.status is the per-instance truth (the head
           // only advertises live instances, flipped to `serving`).
-          status: inst.status === 'serving' ? 'READY' : 'STARTING',
+          status: inst.status === 'serving' ? 'READY' : (inst.status === 'failed' ? 'FAILED' : 'STARTING'),
           badge: 'STACKED' + (inst.api_port ? ' · :' + inst.api_port : ''),
         });
       });
@@ -1328,9 +1355,10 @@ const AINode = {
       var nodeList = inst.nodes.map(function (n) { return self.esc(n); }).join(', ');
       var badgeClass = inst.strategy === 'distributed' ? 'distributed' : 'single';
       // Show elapsed against expected time so a long phase does not look stalled.
-      var prog = (inst.status === 'READY') ? null : self.chipProgress(inst.loadKey, now);
+      var prog = (inst.status !== 'STARTING') ? null : self.chipProgress(inst.loadKey, now);
       var statusHtml = (inst.status === 'READY')
         ? '<span class="instance-status ready">READY</span>'
+        : inst.status === 'FAILED' ? '<span class="instance-status stopped">FAILED</span>'
         : self.loadTextHtml(inst.loadKey, prog, 'chip',
             'instance-status starting' + (prog.loading ? ' loading-live' : ''));
       var barHtml = prog ? self.loadBarHtml(inst.loadKey, prog, 'instance-progress') : '';

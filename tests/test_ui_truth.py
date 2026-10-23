@@ -746,3 +746,98 @@ def test_a_full_localstorage_is_caught_and_reported(tmp_path):
     assert out["full_save"] is False             # it failed, and said so
     assert "full" in out["warned"]
     assert out["remaining"] == 1                 # the oldest was evicted, not the current
+
+
+_INSTANCE_CASE = r"""
+const h = require(process.argv[3]);
+const A = h.AINode;
+// The stub DOM does not serialize textContent into innerHTML. Inputs here
+// are project-authored plain strings, so expose them for markup assertions.
+A.esc = (value) => String(value);
+const container = h.el();
+document.getElementById = () => container;
+const speech = 'openai/whisper-large-v3-turbo';
+const engine = (model, port, status) => ({
+  instance_id: 'node-b:' + port, model, api_port: port, status, adopted: true,
+});
+A.state.status = {node_id: 'node-a', model: null, engine_ready: false, load_phase: 'idle'};
+const head = {node_id: 'node-b', node_name: 'worker-b', model: '',
+  api_port: 8000, engine_ready: false, load_phase: 'idle', instances: [
+    engine('example/chat', 8000, 'serving'),
+    engine('example/failed', 8001, 'failed'),
+    engine(speech, 8002, 'serving'),
+  ]};
+A.state.nodes = [head, {node_id: 'node-c', node_name: 'worker-c', model: speech,
+  api_port: 8000, engine_ready: true, instances: []}];
+// The resources response on older servers omits api_port. Resolve it from
+// the head's instance list, rather than treating a model id as an identity.
+const di = {head_node_id: 'node-b', model: speech,
+  status: 'serving', tensor_parallel_size: 1, member_names: ['worker-b']};
+A.state.clusterResources = {distributed_instance: di};
+function cards() {
+  A.renderInstances();
+  return container.innerHTML.split('<div class="instance-card"').slice(1);
+}
+const serving = cards();
+// A second copy makes model-only matching ambiguous; pin this card's port.
+head.instances.push(engine(speech, 8003, 'starting'));
+di.api_port = 8002;
+head.instances[2].status = 'starting';
+// Neither a ready local engine nor the remote primary may bless this stack.
+A.state.status.engine_ready = true;
+A.state.status.model = 'example/local'; A.state.status.api_port = 8000;
+head.model = 'example/chat'; head.engine_ready = true; head.load_phase = 'ready';
+const starting = cards();
+head.instances[2].status = 'failed';
+const failed = cards();
+// Legacy model-shaped IDs may be shared by copies. An explicit port wins.
+head.instances[2].status = 'serving';
+di.instance_id = 'node-b:' + speech;
+head.instances[2].instance_id = di.instance_id;
+head.instances[3].instance_id = di.instance_id;
+di.api_port = 8003;
+const portWins = cards();
+// Without either identity field, two copies must not resolve to the first.
+delete di.instance_id; delete di.api_port; di.status = 'starting';
+const ambiguous = cards();
+di.api_port = 8002;
+// A matching primary may use its own measured loading phase and clock.
+head.instances[2].status = 'starting';
+head.model = speech; head.api_port = 8002; head.engine_ready = false;
+head.load_phase = 'loading_weights'; head.load_started_at = 1;
+head.load_elapsed_seconds = 30; head.expected_ready_minutes = 2;
+const loading = cards();
+console.log(JSON.stringify({serving, starting, failed, loading, portWins, ambiguous}));
+"""
+
+
+@pytest.mark.parametrize('identity', ['', "instance_id: 'node-b:8002', ", 'api_port: 8002, '])
+def test_instance_cards_use_their_own_head_port_and_readiness(tmp_path, identity):
+    case = _INSTANCE_CASE.replace('const di = {head_node_id:',
+                                  'const di = {' + identity + 'head_node_id:')
+    out = _run_node(case, tmp_path)
+    card = out['serving'][0]
+    assert 'SOLO · TP=1' in card
+    assert '>READY</span>' in card
+    assert 'data-node-id="node-b"' in card
+    assert 'data-api-port="8002"' in card
+    assert 'instance-progress' not in card
+    # Same-model replicas and a starting copy on another port survive dedup.
+    assert len(out['serving']) == 4
+    assert len(out['starting']) == 5
+    assert 'data-api-port="8003"' in out['starting'][3]
+    assert '>READY</span>' not in out['starting'][3]
+    assert '>FAILED</span>' in out['serving'][2]
+    assert 'instance-progress' not in out['serving'][2]
+    assert '>READY</span>' not in out['starting'][0]
+    assert 'STARTING' in out['starting'][0]
+    assert '>FAILED</span>' in out['failed'][0]
+    assert 'instance-progress' not in out['failed'][0]
+    assert 'data-api-port="8003"' in out['portWins'][0]
+    assert '>READY</span>' not in out['portWins'][0]
+    assert 'data-api-port=""' in out['ambiguous'][0]
+    assert '>READY</span>' not in out['ambiguous'][0]
+    assert len(out['ambiguous']) == 6
+    assert 'loading weights' in out['loading'][0]
+    assert '0:30 of about 2 min' in out['loading'][0]
+    assert 'data-load-key="node:node-b"' in out['loading'][0]
