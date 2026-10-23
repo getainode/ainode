@@ -1227,11 +1227,14 @@ const AINode = {
       })[0];
       var matches = ((head && head.instances) || []).filter(function (inst) {
         if (inst.model !== di.model) return false;
+        // A legacy model-shaped ID can be shared across ports. Every
+        // supplied identity field must agree before borrowing this status.
+        if (di.api_port != null && inst.api_port !== di.api_port) return false;
         if (di.instance_id && inst.instance_id) return inst.instance_id === di.instance_id;
         // Older resources omit both instance_id and api_port. A unique
         // model on the named head still identifies one engine; never pick
         // the first of multiple copies.
-        return di.api_port == null || inst.api_port === di.api_port;
+        return true;
       });
       var own = matches.length === 1 ? matches[0] : di;
       var port = own.api_port || di.api_port || null;

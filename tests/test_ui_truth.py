@@ -790,13 +790,24 @@ head.model = 'example/chat'; head.engine_ready = true; head.load_phase = 'ready'
 const starting = cards();
 head.instances[2].status = 'failed';
 const failed = cards();
+// Legacy model-shaped IDs may be shared by copies. An explicit port wins.
+head.instances[2].status = 'serving';
+di.instance_id = 'node-b:' + speech;
+head.instances[2].instance_id = di.instance_id;
+head.instances[3].instance_id = di.instance_id;
+di.api_port = 8003;
+const portWins = cards();
+// Without either identity field, two copies must not resolve to the first.
+delete di.instance_id; delete di.api_port; di.status = 'starting';
+const ambiguous = cards();
+di.api_port = 8002;
 // A matching primary may use its own measured loading phase and clock.
 head.instances[2].status = 'starting';
 head.model = speech; head.api_port = 8002; head.engine_ready = false;
 head.load_phase = 'loading_weights'; head.load_started_at = 1;
 head.load_elapsed_seconds = 30; head.expected_ready_minutes = 2;
 const loading = cards();
-console.log(JSON.stringify({serving, starting, failed, loading}));
+console.log(JSON.stringify({serving, starting, failed, loading, portWins, ambiguous}));
 """
 
 
@@ -822,6 +833,11 @@ def test_instance_cards_use_their_own_head_port_and_readiness(tmp_path, identity
     assert 'STARTING' in out['starting'][0]
     assert '>FAILED</span>' in out['failed'][0]
     assert 'instance-progress' not in out['failed'][0]
+    assert 'data-api-port="8003"' in out['portWins'][0]
+    assert '>READY</span>' not in out['portWins'][0]
+    assert 'data-api-port=""' in out['ambiguous'][0]
+    assert '>READY</span>' not in out['ambiguous'][0]
+    assert len(out['ambiguous']) == 6
     assert 'loading weights' in out['loading'][0]
     assert '0:30 of about 2 min' in out['loading'][0]
     assert 'data-load-key="node:node-b"' in out['loading'][0]
