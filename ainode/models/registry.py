@@ -166,6 +166,15 @@ class ModelInfo:
     kv_cache_dtype: str = ""
     max_model_len: int = 0
     trust_remote_code: bool = False
+    # Other HF repos the recipe reads from the model store beside the target
+    # (a speculative draft model named by its MODELS_MOUNT path in the flags).
+    # A distributed launch refuses without them and ships them to peers.
+    companion_models: list = None
+    # GB10 page-cache reset around a distributed launch (NodeConfig has the
+    # full story). page_cache_ceiling_gib > 0 also runs a watcher on the head
+    # while the model loads.
+    drop_page_cache_before_launch: bool = False
+    page_cache_ceiling_gib: int = 0
 
     def __post_init__(self):
         if self.capabilities is None:
@@ -176,6 +185,8 @@ class ModelInfo:
             self.extra_env = {}
         if self.extra_volumes is None:
             self.extra_volumes = []
+        if self.companion_models is None:
+            self.companion_models = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -271,6 +282,20 @@ FALLBACK_CATALOG: dict[str, ModelInfo] = {
 # launch. Inside the mounted HF cache on purpose: it is the one directory AINode
 # already mounts on every node, so nothing here depends on a host path.
 _DSPARK_JIT_ROOT = f"{HF_CACHE_MOUNT}/.vllm-jit"
+
+# GLM-5.3-Flash on two GB10s (the "glm-5.3-flash-nvfp4-dflash2" entry). The image
+# is built by scripts/Dockerfile.glm53-flash from the recipe's own image; the tag
+# names the recipe commit so a rebuild from another commit cannot pass for it.
+GLM53_FLASH_IMAGE = "glm53-flash-ainode:nvfp4-fp4-dcp2-ab1102a"
+# Where that Dockerfile puts the chat template and the KV calibration file.
+_GLM53_FLASH_ASSETS = "/opt/glm53-ainode"
+# The BF16 DFlash2 drafter. It is read from the model store, which every rank
+# mounts at the same path (NvidiaBackend.MODELS_MOUNT), so the speculative config
+# names one path that resolves on every node.
+GLM53_FLASH_DRAFT_REPO = "incoai/GLM-5.3-Flash-DFlash2"
+GLM53_FLASH_DRAFT_PATH = "/ainode-models/" + GLM53_FLASH_DRAFT_REPO.replace("/", "--")
+# Its own kernel-cache root, so its JIT output never mixes with DeepSeek's.
+_GLM53_JIT_ROOT = f"{HF_CACHE_MOUNT}/.vllm-jit-glm53"
 
 CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
     # --- Recipe-carrying models (need a newer engine + model-specific flags) ---
@@ -761,6 +786,145 @@ CURATED_CLUSTER_MODELS: dict[str, ModelInfo] = {
             "NCCL_IB_GID_INDEX": "3",
             "NCCL_CROSS_NIC": "0",
             "NCCL_IB_ROCE_VERSION_NUM": "2",
+        },
+    ),
+    "glm-5.3-flash-nvfp4-dflash2": ModelInfo(
+        id="glm-5.3-flash-nvfp4-dflash2",
+        name="GLM-5.3-Flash (NVFP4, DFlash2)",
+        hf_repo="coolbho3k/GLM-5.3-Flash-NVFP4-Optimized",
+        size_gb=187.7,
+        description=(
+            "GLM-5.3-Flash MoE in NVFP4 with DFlash2 speculative decoding and a "
+            "1M-token context, served across TWO GB10 nodes (TP=2, decode context "
+            "parallel 2). This is the community two-Spark recipe "
+            "(coolbho3k/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark at ab1102a, "
+            "profile nvfp4-fp4-dcp2: calibrated native-FP4 MLA KV, Marlin MoE, "
+            "adaptive decode-first scheduler) moved into AINode's own launch "
+            "path. Needs three things on BOTH nodes before LAUNCH: the engine "
+            "image below, built from scripts/Dockerfile.glm53-flash (the recipe's "
+            "image plus its five runtime files baked in, so nothing is mounted "
+            "from a host path); this checkpoint; and the BF16 DFlash2 drafter "
+            "incoai/GLM-5.3-Flash-DFlash2 in the model store, which the "
+            "speculative config reads at its /ainode-models path. The head ships "
+            "both checkpoints to a peer that lacks them. The page cache is dropped "
+            "on every rank before its engine starts and kept under 8 GiB on the "
+            "head while the weights load: without that a rank stalled for 14 "
+            "minutes on one shard. Not yet launched through AINode; the same "
+            "container set ran outside it on 2026-11-11 with 3,020,897 KV tokens "
+            "and was ready 34 minutes after start."
+        ),
+        quantization="NVFP4", min_memory_gb=200, family="glm", params_b=0.0,
+        arch="moe",
+        proven_tp=2, verified=False, recommended=False, curated=True,
+        context_length=1048576, license="MIT",
+        format="safetensors",
+        capabilities=["tool_use", "reasoning", "code"],
+        # One vllm serve container per node, vLLM's own multi-node executor.
+        distributed_executor="mp",
+        engine_image=GLM53_FLASH_IMAGE,
+        kv_cache_dtype="fp8_e4m3",
+        max_model_len=1048576,
+        trust_remote_code=True,
+        recommended_gmu=0.87,
+        companion_models=[GLM53_FLASH_DRAFT_REPO],
+        drop_page_cache_before_launch=True,
+        page_cache_ceiling_gib=8,
+        # The recipe's launch-glm53-vllm-tp2-dflash2.sh flags, minus what the
+        # backend emits itself (host/port, TP, the mp rendezvous, kv-cache dtype,
+        # max-model-len, gpu-memory-utilization, trust-remote-code). The served
+        # name stays the repo id, as for every model AINode routes by id.
+        extra_vllm_args=[
+            "--decode-context-parallel-size", "2",
+            "--max-num-seqs", "6",
+            "--block-size", "2304",
+            "--moe-backend", "marlin",
+            "--speculative-config",
+            '{"method":"dflash","model":"' + GLM53_FLASH_DRAFT_PATH + '",'
+            '"num_speculative_tokens":7,"draft_tensor_parallel_size":2,'
+            '"draft_sample_method":"probabilistic"}',
+            "--enforce-eager",
+            "--max-num-batched-tokens", "8192",
+            "--scheduler-cls",
+            "glm_decode_first_scheduler.AdaptiveDecodeFirstScheduler",
+            "--prefill-schedule-interval", "4",
+            "--long-prefill-token-threshold", "512",
+            "--tool-call-parser", "glm47",
+            "--enable-auto-tool-choice",
+            "--reasoning-parser", "glm45",
+            "--default-chat-template-kwargs",
+            '{"enable_thinking":true,"reasoning_effort":"max"}',
+            "--chat-template", f"{_GLM53_FLASH_ASSETS}/chat_template_mm.jinja",
+        ],
+        # The recipe's container env. The per-node NCCL interface, HCA list and
+        # host IP are absent on purpose: AINode derives those (_build_nccl_env).
+        # The recipe mounted a whole JIT cache at /root/.cache; here every cache
+        # root sits inside the HF cache mount so it persists per node and the head
+        # can seed a peer's, the same as the DeepSeek recipe.
+        extra_env={
+            "HF_HOME": HF_CACHE_MOUNT,
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "XDG_CACHE_HOME": f"{_GLM53_JIT_ROOT}/xdg",
+            "VLLM_CACHE_ROOT": _GLM53_JIT_ROOT,
+            "FLASHINFER_WORKSPACE_BASE": f"{_GLM53_JIT_ROOT}/flashinfer",
+            "TORCHINDUCTOR_CACHE_DIR": f"{_GLM53_JIT_ROOT}/torchinductor",
+            "TRITON_CACHE_DIR": f"{_GLM53_JIT_ROOT}/triton",
+            "TORCH_EXTENSIONS_DIR": f"{_GLM53_JIT_ROOT}/torch_extensions",
+            "VLLM_ENGINE_READY_TIMEOUT_S": "3600",
+            "CUDA_LAUNCH_BLOCKING": "0",
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "TORCH_CUDA_ARCH_LIST": "12.1a",
+            "FLASHINFER_CUDA_ARCH_LIST": "12.1a",
+            "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+            "NCCL_NET": "IB",
+            "NCCL_IB_DISABLE": "0",
+            "NCCL_IB_GID_INDEX": "3",
+            "NCCL_IB_ROCE_VERSION_NUM": "2",
+            "NCCL_IB_ADDR_FAMILY": "AF_INET",
+            "NCCL_NVLS_ENABLE": "0",
+            "NCCL_CROSS_NIC": "0",
+            "NCCL_IB_MERGE_NICS": "0",
+            "NCCL_CUMEM_ENABLE": "0",
+            "NCCL_IGNORE_CPU_AFFINITY": "1",
+            "NCCL_DEBUG": "WARN",
+            "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+            # Adaptive decode-first scheduler (its module and profile are in the
+            # image at the paths the recipe mounted them on).
+            "GLM_ADAPTIVE_PREFILL_CONFIG": "/etc/glm53/adaptive-scheduler/adaptive.json",
+            "GLM_ADAPTIVE_PREFILL_RELOAD_SECONDS": "1",
+            # Calibrated native-FP4 MLA KV scales (USE_CALIBRATED_NVFP4_MLA=1).
+            "VLLM_NVFP4_MLA_SCALES_FILE":
+                f"{_GLM53_FLASH_ASSETS}/calibration/nvfp4-gscale-v1.json",
+            "VLLM_NVFP4_MLA_SCALES_STRICT": "1",
+            # Profile nvfp4-fp4-dcp2 values for the image's own switches.
+            "EXL3_FUSED_MOE": "1",
+            "EXL3_MOE_ROW_TILE": "0",
+            "EXL3_FAT_KERNEL": "1",
+            "EXL3_FAT_GROUPED": "0",
+            "EXL3_FUSED_FAT_ACTIVATION": "0",
+            "EXL3_FAT_PIPELINE": "off",
+            "EXL3_FAT_PIPELINE_CONTROL": "",
+            "EXL3_FAT_ACTIVATION_CONTROL": "",
+            "EXL3_TEMP_ROWS_FUSED": "128",
+            "EXL3_FAT_SCRATCH_ROWS": "8192",
+            "GLM53_EXL3_MOE_FAST": "0",
+            "GLM53_EXL3_MOE_STREAM_WEIGHTS": "0",
+            "GLM53_ADAPTIVE_K": "off",
+            "GLM53_ADAPTIVE_K_SET": "2,4,7",
+            "GLM53_ADAPTIVE_K_ALPHA": "0.25",
+            "GLM53_ADAPTIVE_K_MARGIN": "1.0",
+            "GLM53_ADAPTIVE_K_MIN_STEPS": "4",
+            "GLM53_ADAPTIVE_K_SATURATE": "max",
+            "GLM53_ADAPTIVE_K_HIST": "200",
+            "GLM53_DENSE_FP8": "off",
+            "GLM53_SPINWAIT_MS": "stock",
+            "MAX_NUM_BATCHED_TOKENS": "8192",
+            "VLLM_COMPACT_SPEC_REPLAY": "1",
+            "VLLM_B12X_USE_CUDA_GRAPH": "0",
+            "VLLM_B12X_CUDA_GRAPH_MAX_TOKENS": "64",
+            "VLLM_DFLASH_ONLY_CUDAGRAPH": "0",
+            "VLLM_DFLASH_CUDAGRAPH_BATCHES": "1,2,3,4,5,6",
+            "VLLM_USE_B12X_FP8_GEMM": "0",
         },
     ),
     "qwen3.8-flash-next-nvfp4": ModelInfo(

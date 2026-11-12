@@ -8,7 +8,9 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+- GLM-5.3-Flash (NVFP4, DFlash2) is in the catalog as a two-GB10 launch, the community two-Spark recipe moved into AINode's own launch path. It needs its engine image built on both nodes first (`scripts/build-glm53-flash-image.sh`).
+- A catalog recipe can name companion models (a speculative draft model). A distributed launch refuses when the head lacks one and ships each to a peer that lacks it.
+- A catalog recipe can ask for the page cache to be dropped on every rank before its engine starts, with a watcher on the head while the weights load. Only the recipe's own pinned image runs the privileged helper.
 
 ---
 

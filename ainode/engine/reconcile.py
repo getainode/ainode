@@ -1134,7 +1134,9 @@ def _config_overrides(config) -> dict:
     keys = ("engine_image", "extra_vllm_args", "extra_env", "extra_volumes",
             "kv_cache_dtype", "kv_cache_dtype_explicit", "max_model_len",
             "trust_remote_code", "quantization", "served_model_name",
-            "gpu_memory_utilization", "distributed_executor")
+            "gpu_memory_utilization", "distributed_executor",
+            "companion_models", "drop_page_cache_before_launch",
+            "page_cache_ceiling_gib")
     out: dict = {}
     for key in keys:
         value = getattr(config, key, None)
