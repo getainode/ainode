@@ -95,6 +95,27 @@ the same `_build_vllm_serve_args`, the same peer container names and the same
     `--master-port` or `--headless` itself suppresses ours, same rule as every
     other serve flag.
 
+## Recipe companions and the page-cache reset (mp shape)
+
+- **`companion_models`** names other HF repos a recipe reads from the model
+  store, by their `MODELS_MOUNT/<org--name>` path in its flags (a speculative
+  draft model). `_check_companions_on_head` refuses the launch, before any peer
+  is touched, unless the target AND every companion are flat dirs in this node's
+  store; `_ensure_peer_has_model` ships each companion beside the target. A
+  recipe that names a companion must serve the store copy, never the repo id.
+- **`drop_page_cache_before_launch`** drops the page cache on each rank right
+  before that rank's container starts (on a peer, AFTER its weights land, since
+  the copy is what fills the cache), and `page_cache_ceiling_gib > 0` runs a
+  detached `--rm` watcher on the head for `PAGE_CACHE_WATCH_SECONDS`; `stop()`
+  removes it. A failed drop warns and the launch goes on.
+- **The privileged helper runs ONLY the image the model's catalog recipe pins**
+  (`_page_cache_helper_image`). A caller may override `engine_image`; that image
+  must never run with `--privileged`, so an override skips the drop. The command
+  text lives in `nvidia.py` (`PAGE_CACHE_DROP_CMD`, `page_cache_watch_script`,
+  integers only); a recipe can switch it on and set a ceiling, never supply it.
+- These three keys are recipe-only: `parse_launch_overrides` does not accept
+  them from a request body.
+
 An engine image that is not a `vllm/vllm-openai` image may need `PATH`, the CUDA
 paths and `HF_HOME` set through `extra_env`: HF defaults its cache to `$HOME`,
 which is not where AINode mounts it. Point a recipe's writable caches inside the

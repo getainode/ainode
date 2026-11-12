@@ -582,8 +582,10 @@ def catalog_recipe(model: str) -> dict:
     one-click load instead of a hand-rolled container. Returns {} for anything
     not curated. Keys: ``engine_image``, ``extra_vllm_args``, ``extra_env``,
     ``extra_volumes``, ``distributed_executor``, ``kv_cache_dtype``,
-    ``max_model_len``, ``trust_remote_code``, ``gpu_memory_utilization``:
-    each present only when the entry actually states it.
+    ``max_model_len``, ``trust_remote_code``, ``gpu_memory_utilization``,
+    ``companion_models``, ``drop_page_cache_before_launch``,
+    ``page_cache_ceiling_gib``: each present only when the entry actually
+    states it. The last three are read by the distributed launch only.
 
     A CATALOG ID WINS OVER AN HF REPO, in two passes rather than one. Two entries
     may share a checkpoint and pin different recipes for different hardware
@@ -631,6 +633,13 @@ def catalog_recipe(model: str) -> dict:
                 recipe["trust_remote_code"] = True
             if getattr(info, "recommended_gmu", 0):
                 recipe["gpu_memory_utilization"] = info.recommended_gmu
+            if getattr(info, "companion_models", None):
+                recipe["companion_models"] = list(info.companion_models)
+            if getattr(info, "drop_page_cache_before_launch", False):
+                recipe["drop_page_cache_before_launch"] = True
+                ceiling = int(getattr(info, "page_cache_ceiling_gib", 0) or 0)
+                if ceiling > 0:
+                    recipe["page_cache_ceiling_gib"] = ceiling
             return recipe
     return {}
 
@@ -660,7 +669,8 @@ def catalog_size_gb(model: str):
 RECIPE_CONFIG_KEYS = ("engine_image", "extra_vllm_args", "extra_env",
                       "extra_volumes", "distributed_executor", "kv_cache_dtype",
                       "kv_cache_dtype_explicit", "max_model_len",
-                      "trust_remote_code")
+                      "trust_remote_code", "companion_models",
+                      "drop_page_cache_before_launch", "page_cache_ceiling_gib")
 
 
 def parse_launch_overrides(body: dict, *, distributed: bool = False,

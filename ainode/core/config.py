@@ -172,6 +172,20 @@ class NodeConfig:
     # Defaults to "mp" (see DEFAULT_DISTRIBUTED_EXECUTOR): "ray" was the default
     # through 0.5.26 and no shipped image can run it (#172).
     distributed_executor: str = DEFAULT_DISTRIBUTED_EXECUTOR  # "mp" | "ray"
+    # Other HF repos a recipe needs beside the target, each read from this
+    # node's model store as the flat ``org--name`` dir (a speculative draft
+    # model, for instance, which the recipe's flags name by its MODELS_MOUNT
+    # path). A distributed launch refuses when the head lacks one and ships each
+    # to a peer that lacks it, exactly like the target. Recipe-only.
+    companion_models: List[str] = field(default_factory=list)
+    # GB10 unified memory: a full page cache can stall weight loading for many
+    # minutes (GLM-5.3-Flash sat 14 minutes on one shard). When set, a
+    # distributed launch drops the page cache on every rank right before that
+    # rank's container starts, and the head runs a watcher that keeps dropping
+    # it while the model loads whenever Cached exceeds page_cache_ceiling_gib
+    # (0 = drop once, no watcher). Recipe-only.
+    drop_page_cache_before_launch: bool = False
+    page_cache_ceiling_gib: int = 0
     # Max inbound request body for the API server, in MB. aiohttp defaults to
     # 1 MB, which silently caps a 262k-context model at roughly 190k tokens of
     # prompt: the proxy 413s the request before the engine ever sees it, and the

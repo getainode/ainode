@@ -85,6 +85,7 @@ NVIDIA_VLLM_IMAGE = os.environ.get("NVIDIA_VLLM_IMAGE") or "scitrera/dgx-spark-v
 ENGINE_IMAGE_DOCKERFILES = {
     "ghcr.io/getainode/ainode-whisper": "scripts/Dockerfile.whisper",
     "ainode-whisper": "scripts/Dockerfile.whisper",
+    "glm53-flash-ainode": "scripts/Dockerfile.glm53-flash",
 }
 
 
@@ -195,6 +196,47 @@ INFINIBAND_SYSFS = "/sys/class/infiniband"
 MP_SHM_SIZE = "64g"
 MP_ULIMIT_MEMLOCK = "memlock=-1"
 MP_ULIMIT_STACK = "stack=67108864"
+
+# Page-cache reset for recipes that set ``drop_page_cache_before_launch``
+# (GB10 unified memory: a full page cache stalled a GLM-5.3-Flash rank for 14
+# minutes mid-load). It runs in a throwaway container from the engine image,
+# privileged because /proc/sys is read-only in an ordinary container, with no
+# network. The command text lives HERE and only here: a recipe can switch it
+# on and set a ceiling, never supply the command.
+PAGE_CACHE_DROP_CMD = (
+    "sync; echo 3 > /proc/sys/vm/drop_caches; "
+    "echo 1 > /proc/sys/vm/compact_memory || true"
+)
+# The watcher's lifetime: long enough to cover a 1M-context MoE weight load
+# (the recipe it comes from runs its flusher for 25 minutes), then it exits and
+# ``--rm`` removes it.
+PAGE_CACHE_WATCH_SECONDS = 1500
+PAGE_CACHE_WATCH_INTERVAL_SECONDS = 5
+PAGE_CACHE_WATCHER_PREFIX = "ainode-page-cache-watch"
+
+
+def page_cache_watch_script(ceiling_gib: int,
+                            seconds: int = PAGE_CACHE_WATCH_SECONDS,
+                            interval: int = PAGE_CACHE_WATCH_INTERVAL_SECONDS) -> str:
+    """POSIX sh loop: drop the page cache whenever ``Cached`` exceeds the ceiling.
+
+    Only integers are interpolated, so nothing a recipe states can reach the
+    shell as text. Reads /proc/meminfo with sed, which every engine image ships.
+    """
+    limit_kb = int(ceiling_gib) * 1024 * 1024
+    return (
+        f"end=$(( $(date +%s) + {int(seconds)} )); "
+        "while [ \"$(date +%s)\" -lt \"$end\" ]; do "
+        "c=$(sed -n 's/^Cached:[[:space:]]*\\([0-9]*\\) kB$/\\1/p' /proc/meminfo); "
+        f"if [ \"${{c:-0}}\" -gt {limit_kb} ]; then "
+        "sync; echo 3 > /proc/sys/vm/drop_caches; fi; "
+        f"sleep {int(interval)}; done"
+    )
+
+
+def _flat_slug(repo: str) -> str:
+    """``org/name`` as the flat ``org--name`` dir AINode's downloader writes."""
+    return (repo or "").strip().replace("/", "--")
 
 
 class NvidiaBackendError(RuntimeError):
@@ -564,6 +606,8 @@ class NvidiaBackend(EngineBackend):
         if self.config.distributed_mode == "head":
             for peer_ip in self.config.peer_ips:
                 self._ssh_stop_peer_container(peer_ip)
+            if self._drops_page_cache():
+                self._stop_page_cache_watcher()
 
         self._ready = False
         self._load_phase = "idle"
@@ -1603,6 +1647,7 @@ class NvidiaBackend(EngineBackend):
             logger.error("Engine image %s unavailable on the head; not launching %s",
                          image, self.config.model)
             return False
+        self._check_companions_on_head()
 
         for rank, peer_ip in enumerate(self.config.peer_ips, start=1):
             self._ssh_launch_mp_worker(
@@ -1611,6 +1656,10 @@ class NvidiaBackend(EngineBackend):
 
         head_name = self._head_container_name()
         self._docker_stop_and_rm_best_effort(head_name)
+        helper = self._page_cache_helper_image() if self._drops_page_cache() else None
+        if helper:
+            self._drop_page_cache_local(helper)
+            self._start_page_cache_watcher(helper)
         cmd = self._build_mp_docker_cmd(
             container_name=head_name,
             node_rank=0,
@@ -1995,6 +2044,11 @@ Follow detached container logs so bind waiting can observe progress and avoid st
         # own kernels, and a peer compiling from scratch while the head waits in
         # a collective is what killed the Flash-Next pair (#134).
         self._ensure_peer_has_jit_cache(peer_ip, peer_hf_cache)
+        # After the weights land: copying 190 GB is exactly what fills the
+        # peer's page cache, so a drop before the copy would be undone by it.
+        helper = self._page_cache_helper_image() if self._drops_page_cache() else None
+        if helper:
+            self._drop_page_cache_on_peer(peer_ip, helper)
         worker_name = self._worker_container_name(peer_ip)
         docker_cmd = self._build_mp_docker_cmd(
             container_name=worker_name,
@@ -2088,6 +2142,177 @@ Follow detached container logs so bind waiting can observe progress and avoid st
         )
         return "python3 -c " + shlex.quote(script)
 
+    # ------------------------------------------------------------------
+    # Recipe companions (a draft model) and the GB10 page-cache reset
+    # ------------------------------------------------------------------
+
+    def _companion_models(self) -> List[str]:
+        """The recipe's companion repos, de-duplicated, never None."""
+        out: List[str] = []
+        for repo in (getattr(self.config, "companion_models", None) or []):
+            repo = str(repo).strip()
+            if repo and repo not in out:
+                out.append(repo)
+        return out
+
+    def _check_companions_on_head(self) -> None:
+        """Refuse a launch whose recipe names companions this node does not have.
+
+        A recipe with companions points its flags at ``MODELS_MOUNT/<slug>``
+        paths, so the target AND every companion must sit in this node's model
+        store as flat ``org--name`` dirs (what a download through AINode
+        writes). Without that, the head would launch, a peer would get no copy,
+        and the engine would die deep in startup naming a path nobody chose.
+        """
+        companions = self._companion_models()
+        if not companions:
+            return
+        missing: List[str] = []
+        if not self._servable_local_model_dir():
+            missing.append(self.config.model or "")
+        root = Path(self.config.models_dir)
+        for repo in companions:
+            slug = _flat_slug(repo)
+            d = root / slug
+            try:
+                ok = bool(slug) and d.is_dir() and any(d.iterdir())
+            except OSError:
+                ok = False
+            if not ok:
+                missing.append(repo)
+        if missing:
+            where = ", ".join(f"{Path(self.config.models_dir) / _flat_slug(m)}"
+                              for m in missing)
+            self._launch_error = (
+                f"{self.config.model} needs these models in this node's model store "
+                f"before it can launch: {', '.join(missing)}. Download each through "
+                f"AINode (Models, Download) or place its files at: {where}. The "
+                f"launch did not start, and no peer was touched."
+            )
+            raise NvidiaBackendError(self._launch_error)
+
+    def _drops_page_cache(self) -> bool:
+        return bool(getattr(self.config, "drop_page_cache_before_launch", False))
+
+    def _page_cache_helper_image(self) -> Optional[str]:
+        """The image the privileged drop and watcher may run, or None.
+
+        Only the image the model's own catalog recipe pins. A caller with
+        launch authority may override ``engine_image``, and that override must
+        never be what runs with ``--privileged``: that would turn an engine
+        override into a root shell on every rank. With an overridden image the
+        drop is skipped with a warning and the launch goes on.
+        """
+        from ainode.models.registry import CURATED_CLUSTER_MODELS
+
+        image = (self._engine_image() or "").strip()
+        model = (self.config.model or "").strip()
+        pinned = {info.engine_image for info in CURATED_CLUSTER_MODELS.values()
+                  if model in (info.id, info.hf_repo)
+                  and info.drop_page_cache_before_launch and info.engine_image}
+        if image and image in pinned:
+            return image
+        logger.warning(
+            "Page-cache drop skipped for %s: engine image %r is not the one its "
+            "catalog recipe pins, and only that image may run privileged",
+            model, image)
+        return None
+
+    def _page_cache_ceiling_gib(self) -> int:
+        try:
+            return max(0, int(getattr(self.config, "page_cache_ceiling_gib", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _page_cache_drop_cmd(self, image: str) -> List[str]:
+        """``docker run`` argv for one page-cache drop on whichever host runs it."""
+        return [
+            "docker", "run", "--rm", "--privileged", "--network", "none",
+            "--entrypoint", "sh", image, "-c", PAGE_CACHE_DROP_CMD,
+        ]
+
+    def _page_cache_watcher_name(self) -> str:
+        return f"{PAGE_CACHE_WATCHER_PREFIX}{self._name_suffix()}"
+
+    def _page_cache_watcher_cmd(self, image: str) -> List[str]:
+        return [
+            "docker", "run", "-d", "--rm", "--privileged", "--network", "none",
+            "--name", self._page_cache_watcher_name(),
+            "--entrypoint", "sh", image, "-c",
+            page_cache_watch_script(self._page_cache_ceiling_gib()),
+        ]
+
+    def _drop_page_cache_local(self, image: str) -> bool:
+        """Drop this host's page cache. A failure warns; it never stops a launch.
+
+        A full cache costs load time, not correctness, so refusing the model
+        over it would trade minutes for the whole launch.
+        """
+        try:
+            result = subprocess.run(self._page_cache_drop_cmd(image),
+                                    capture_output=True, text=True, timeout=300)
+        except Exception as exc:
+            logger.warning("Page-cache drop on the head failed (%s); launching anyway", exc)
+            return False
+        if result.returncode != 0:
+            logger.warning("Page-cache drop on the head failed (rc=%s): %s; launching anyway",
+                           result.returncode, (result.stderr or "").strip()[-300:])
+            return False
+        logger.info("Dropped the page cache on the head before launch")
+        return True
+
+    def _drop_page_cache_on_peer(self, peer_ip: str, image: str) -> bool:
+        """Same drop on a peer, over the SSH path the peer launch already uses."""
+        ssh_cmd = [
+            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=10", f"{self.config.ssh_user}@{peer_ip}",
+            " ".join(shlex.quote(p) for p in self._page_cache_drop_cmd(image)),
+        ]
+        try:
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=300)
+        except Exception as exc:
+            logger.warning("Page-cache drop on %s failed (%s); launching anyway", peer_ip, exc)
+            return False
+        if result.returncode != 0:
+            logger.warning("Page-cache drop on %s failed (rc=%s): %s; launching anyway",
+                           peer_ip, result.returncode, (result.stderr or "").strip()[-300:])
+            return False
+        logger.info("Dropped the page cache on %s before launch", peer_ip)
+        return True
+
+    def _start_page_cache_watcher(self, image: str) -> bool:
+        """Keep the head's page cache under the ceiling while the model loads.
+
+        Detached and ``--rm``: it exits on its own after
+        PAGE_CACHE_WATCH_SECONDS, and ``stop()`` removes it early. Off when the
+        recipe states no ceiling.
+        """
+        if self._page_cache_ceiling_gib() <= 0:
+            return False
+        name = self._page_cache_watcher_name()
+        try:
+            subprocess.run(["docker", "rm", "-f", name],
+                           capture_output=True, text=True, timeout=30)
+            result = subprocess.run(self._page_cache_watcher_cmd(image),
+                                    capture_output=True, text=True, timeout=60)
+        except Exception as exc:
+            logger.warning("Could not start the page-cache watcher (%s)", exc)
+            return False
+        if result.returncode != 0:
+            logger.warning("Could not start the page-cache watcher (rc=%s): %s",
+                           result.returncode, (result.stderr or "").strip()[-300:])
+            return False
+        logger.info("Page-cache watcher %s running (ceiling %d GiB, %d s)",
+                    name, self._page_cache_ceiling_gib(), PAGE_CACHE_WATCH_SECONDS)
+        return True
+
+    def _stop_page_cache_watcher(self) -> None:
+        try:
+            subprocess.run(["docker", "rm", "-f", self._page_cache_watcher_name()],
+                           capture_output=True, text=True, timeout=30)
+        except Exception:  # pragma: no cover - best-effort teardown
+            logger.exception("removing the page-cache watcher failed")
+
     def _ensure_peer_has_model(self, peer_ip: str, peer_hf_cache: str,
                                peer_models_dir: str = "") -> None:
         """Distribute the model weights to a peer over the fabric if it's missing.
@@ -2119,6 +2344,15 @@ Follow detached container logs so bind waiting can observe progress and avoid st
                 head_parent=str(Path(self.config.models_dir)),
                 peer_parent=peer_models_dir.rstrip("/"),
             )
+            # A recipe's companions (a speculative draft model) are named by
+            # their MODELS_MOUNT path in its flags, so every rank needs them in
+            # the same store as the target.
+            for companion in self._companion_models():
+                self._distribute_dir_to_peer(
+                    peer_ip=peer_ip, name=_flat_slug(companion),
+                    head_parent=str(Path(self.config.models_dir)),
+                    peer_parent=peer_models_dir.rstrip("/"),
+                )
             return
         model_dir = "models--" + model.replace("/", "--")
         head_hub = str(Path(self._head_hf_cache()) / "hub")

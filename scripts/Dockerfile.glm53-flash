@@ -1,0 +1,33 @@
+# Engine image for GLM-5.3-Flash on two GB10 nodes (catalog entry
+# "glm-5.3-flash-nvfp4-dflash2"). It is the community recipe's own image with the
+# five runtime files its launcher bind-mounted from a host checkout baked in, so
+# AINode launches it like any other engine image: no host path, no sidecar.
+#
+#   recipe   github.com/coolbho3k/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark @ ab1102a
+#   profile  nvfp4-fp4-dcp2 (NVFP4 weights, calibrated native-FP4 MLA KV, BF16
+#            DFlash2 drafter, TP2 + DCP2, 1M context)
+#   base     glm53-v14:nvfp4-gscale-tooling, the tag `./serve-profile.sh build
+#            nvfp4-fp4-dcp2` produces from that checkout. It is a local build;
+#            no registry has it.
+#
+# Do not build this by hand: scripts/build-glm53-flash-image.sh checks the recipe
+# commit and every file hash first, builds with the RECIPE checkout as the
+# context, and copies the result to the peer node.
+#
+# The paths are the ones the recipe mounted the files on, except the chat
+# template and the calibration file, which the catalog entry names under
+# /opt/glm53-ainode. ENTRYPOINT stays the base image's ["vllm", "serve"].
+ARG BASE=glm53-v14:nvfp4-gscale-tooling
+FROM ${BASE}
+COPY docker/sparse_attn_indexer_kpool_sm121.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer_kpool.py
+COPY docker/glm_decode_first_scheduler.py \
+     /usr/local/lib/python3.12/dist-packages/glm_decode_first_scheduler.py
+COPY scheduler_profiles/adaptive.json /etc/glm53/adaptive-scheduler/adaptive.json
+COPY chat_template_mm.jinja /opt/glm53-ainode/chat_template_mm.jinja
+COPY kv_calibration/results/nvfp4-gscale-v1.json \
+     /opt/glm53-ainode/calibration/nvfp4-gscale-v1.json
+RUN python3 -c "import json; json.load(open('/etc/glm53/adaptive-scheduler/adaptive.json')); json.load(open('/opt/glm53-ainode/calibration/nvfp4-gscale-v1.json'))" \
+    && python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/glm_decode_first_scheduler.py').read())"
+LABEL dev.ainode.recipe="coolbho3k/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark@ab1102a8fd2c8a7102bdbfcda0f1402e37504073" \
+      dev.ainode.profile="nvfp4-fp4-dcp2"
