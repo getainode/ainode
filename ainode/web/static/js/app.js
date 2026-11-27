@@ -52,6 +52,7 @@ const AINode = {
     abortController: null,
     currentView: 'dashboard',
     modelsFilter: 'catalog',
+    catalogTab: 'catalog',
     modelsSearch: '',
     modelsSort: 'recommended',
     configSection: 'credentials',
@@ -127,6 +128,7 @@ const AINode = {
     // averages survive a page reload.
     this.rebuildChatStatsFromHistory();
     this.bindNav();
+    this.bindCatalogTabs();
     this.bindChat();
     this.bindLaunchForm();
     this.initTopology();
@@ -421,6 +423,7 @@ const AINode = {
     });
     var target = document.getElementById('view-' + view);
     if (target) target.style.display = '';
+    if (view === 'downloads' && prevView !== 'downloads') this.refreshDownloadedInventory(true);
     // Context-switch left panel: training shows training sidebar, else chat sidebar.
     this.updateLeftPanelContext(view);
     // Context-switch right panel: server view swaps to Model Info
@@ -481,6 +484,9 @@ const AINode = {
   },
 
   async refresh() {
+    if (this.state.currentView === 'downloads' && this.state.catalogTab === 'downloaded') {
+      this.refreshDownloadedInventory();
+    }
     // /api/sharding/status used to be polled here as well. Its one reader was the
     // INSTANCES branch on active_sharding, a field the server never assigned, so
     // this was a request every three seconds for a value nothing looked at (#210).
@@ -524,6 +530,10 @@ const AINode = {
         this.renderDashboard();
         break;
       case 'downloads':
+        if (this.state.catalogTab === 'downloaded') {
+          this.renderDownloadedInventory();
+          break;
+        }
         // Don't rebuild the downloads view during periodic refresh  -  just update the queue
         // in place. Only do a full render when the user lands on the view.
         if (this._downloadsViewInitialized) {
@@ -3178,6 +3188,9 @@ const AINode = {
           self.stopDownloadPolling(hfRepo);
           self.toast('Downloaded: ' + hfRepo, 'success');
           self.state.catalog = null;  // refresh catalog next time
+          if (self.state.currentView === 'downloads' && self.state.catalogTab === 'downloaded') {
+            self.refreshDownloadedInventory();
+          }
           // Keep in queue 8s so user sees completion, then remove
           dl.status = 'completed';
           dl.progress = 100;
@@ -3991,7 +4004,113 @@ const AINode = {
     return vllmOk && info.known && !info.tooLarge;
   },
 
+  bindCatalogTabs() {
+    var self = this;
+    var tabs = Array.from(document.querySelectorAll('.catalog-tabs [role="tab"]'));
+    tabs.forEach(function (tab, index) {
+      tab.addEventListener('click', function () { self.selectCatalogTab(tab.id); });
+      tab.addEventListener('keydown', function (event) {
+        var next = { Home: 0, End: tabs.length - 1,
+          ArrowLeft: (index + tabs.length - 1) % tabs.length,
+          ArrowRight: (index + 1) % tabs.length }[event.key];
+        if (next === undefined) return;
+        event.preventDefault();
+        tabs[next].focus();
+        self.selectCatalogTab(tabs[next].id);
+      });
+    });
+  },
+
+  selectCatalogTab(tabId) {
+    var selected = tabId === 'downloaded-tab' ? 'downloaded' : 'catalog';
+    if (this.state.catalogTab === selected) return;
+    this.state.catalogTab = selected;
+    document.querySelectorAll('.catalog-tabs [role="tab"]').forEach(function (tab) {
+      var active = tab.id === tabId;
+      tab.setAttribute('aria-selected', String(active));
+      tab.classList.toggle('active', active);
+      tab.tabIndex = active ? 0 : -1;
+      document.getElementById(tab.getAttribute('aria-controls')).hidden = !active;
+    });
+    if (selected === 'downloaded') {
+      this.refreshDownloadedInventory(true);
+    } else {
+      this._downloadsViewInitialized = true;
+      this.renderDownloads();
+    }
+  },
+
+  async refreshDownloadedInventory(opening) {
+    if (opening) {
+      this.state.downloadedInventory = undefined;
+      this.renderDownloadedInventory();
+    }
+    if (this._downloadedInventoryPending) return;
+    this._downloadedInventoryPending = true;
+    try {
+      var inventory = await this.fetchJSON('/api/models/downloaded/fleet');
+      var wasChecking = this.state.downloadedInventory === undefined;
+      this.state.downloadedInventory = inventory;
+      if (wasChecking || !this._userBusy()) this.renderDownloadedInventory();
+    } finally {
+      this._downloadedInventoryPending = false;
+    }
+  },
+
+  renderDownloadedInventory() {
+    if (this.state.currentView !== 'downloads' || this.state.catalogTab !== 'downloaded') return;
+    var panel = document.getElementById('downloaded-inventory');
+    if (!panel) return;
+    var inventory = this.state.downloadedInventory;
+    var self = this;
+    var nodes = inventory && Array.isArray(inventory.nodes) ? inventory.nodes : [];
+    var checked = nodes.filter(function (node) { return node.status === 'ok'; }).length;
+    var notice = '';
+    if (inventory === undefined) {
+      notice = 'Checking model inventory…';
+    } else if (!checked) {
+      notice = 'Model inventory is unavailable.';
+    } else if (checked < nodes.length) {
+      notice = 'Inventory is incomplete. Some nodes could not be checked.';
+    }
+    var modelLabels = { incomplete: 'Incomplete files', downloading: 'Downloading',
+      missing: 'Files missing', failed: 'Download failed' };
+    var html = (notice ? '<p role="status" class="downloaded-inventory-notice">' + notice + '</p>' : '') +
+      nodes.map(function (node) {
+        var name = node.node_name || node.node_id;
+        if (nodes.filter(function (other) { return other.node_name === name; }).length > 1) {
+          name += ' (' + node.node_id + ')';
+        }
+        var body;
+        if (node.status !== 'ok') {
+          body = '<div class="downloads-empty">' + (node.status === 'stale'
+            ? 'Inventory unavailable · node data is stale' : 'Inventory unavailable') + '</div>';
+        } else if (!node.models.length) {
+          body = '<div class="downloads-empty">No downloaded models on this node.</div>';
+        } else {
+          body = '<div class="downloads-grid">' + node.models.map(function (model) {
+            var label = model.status === 'available'
+              ? (model.loaded === true ? 'Loaded' : model.loaded === false ? 'Unloaded' : 'Load state unknown')
+              : modelLabels[model.status] || 'Unknown';
+            var details = [model.layout, model.file, model.revision && 'Revision ' + model.revision]
+              .filter(Boolean).map(function (part) { return self.esc(part); }).join(' &middot; ');
+            return '<div class="download-card"><div class="download-card-main"><div class="download-card-info">' +
+              '<div class="download-card-header"><span class="download-card-name">' + self.esc(model.id) + '</span>' +
+              '<span class="model-badge' + (model.loaded === true ? ' loaded' : '') + '">' + label + '</span></div>' +
+              '<div class="download-card-desc">' + details + '</div></div></div></div>';
+          }).join('') + '</div>';
+        }
+        return '<section class="downloads-section"><h3 class="downloads-section-title">' +
+          self.esc(name) + '</h3>' + body + '</section>';
+      }).join('');
+    if (panel._renderedInventory !== html) {
+      panel.innerHTML = html;
+      panel._renderedInventory = html;
+    }
+  },
+
   renderDownloads() {
+    if (this.state.catalogTab === 'downloaded') return;
     var container = document.getElementById('downloads-content');
     if (!container) return;
     var s = this.state.status;

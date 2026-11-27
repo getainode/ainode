@@ -133,9 +133,16 @@
       <div id="view-downloads" class="view" style="display:none">
         <div class="view-header">
           <h2>Models</h2>
-          <p>Installed models on your cluster, plus Hugging Face downloads</p>
+          <p>Browse the catalog and see what is stored on each node</p>
         </div>
-        <div id="downloads-content"></div>
+        <div class="server-tab-pills catalog-tabs" role="tablist" aria-label="Models">
+          <button type="button" id="catalog-tab" class="server-tab-pill active" role="tab"
+                  aria-controls="downloads-content" aria-selected="true">Catalog</button>
+          <button type="button" id="downloaded-tab" class="server-tab-pill" role="tab"
+                  aria-controls="downloaded-inventory" aria-selected="false" tabindex="-1">Downloaded</button>
+        </div>
+        <div id="downloads-content" role="tabpanel" aria-labelledby="catalog-tab"></div>
+        <div id="downloaded-inventory" role="tabpanel" aria-labelledby="downloaded-tab" tabindex="0" hidden></div>
       </div>
       <!-- Server view -->
       <div id="view-server" class="view" style="display:none">

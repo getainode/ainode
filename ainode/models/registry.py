@@ -50,6 +50,11 @@ def _download_max_workers() -> int:
 from ainode.core.config import AINODE_HOME, HF_CACHE_MOUNT, MODELS_DIR  # noqa: E402
 
 
+def model_store_roots(models_dir: Path) -> list[Path]:
+    """The flat store and its two supported nested Hugging Face cache layouts."""
+    return [models_dir, models_dir / "hub", models_dir / "hf-cache" / "hub"]
+
+
 def find_model_dir(models_dir, hf_repo: str) -> Optional[Path]:
     """Return the on-disk dir holding ``hf_repo``, across every layout we support.
 
@@ -66,9 +71,7 @@ def find_model_dir(models_dir, hf_repo: str) -> Optional[Path]:
     hf_slug = "models--" + hf_repo.replace("/", "--")
     candidates = [
         models_dir / hf_repo.replace("/", "--"),  # org--name
-        models_dir / hf_slug,
-        models_dir / "hub" / hf_slug,
-        models_dir / "hf-cache" / "hub" / hf_slug,
+        *(root / hf_slug for root in model_store_roots(models_dir)),
     ]
     for candidate in candidates:
         try:
@@ -1602,7 +1605,7 @@ _quantization_cache: dict[str, tuple[float, tuple[Optional[str], Optional[str]]]
 def _hf_cache_roots(models_dir: Optional[Path] = None) -> list[Path]:
     """Every directory a model's weights can be under on this node."""
     base = Path(models_dir) if models_dir else MODELS_DIR
-    roots = [base, base / "hub", base / "hf-cache" / "hub"]
+    roots = model_store_roots(base)
     env_home = os.environ.get("HF_HOME")
     if env_home:
         roots.append(Path(env_home) / "hub")
@@ -1922,7 +1925,7 @@ class ModelManager:
 
         # Also scan nested HF cache layouts: models_dir/hub and the out-of-band
         # models_dir/hf-cache/hub (HF_HOME=models/hf-cache downloads land here).
-        for hub in (self.models_dir / "hub", self.models_dir / "hf-cache" / "hub"):
+        for hub in model_store_roots(self.models_dir)[1:]:
             if hub.is_dir():
                 for child in sorted(hub.iterdir()):
                     if child.is_dir() and child.name.startswith("models--"):
