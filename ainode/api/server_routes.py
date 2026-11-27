@@ -206,13 +206,16 @@ async def _reachable_urls(host: str, port: int) -> list[str]:
 async def _probe_loaded_models(
     session: Optional[aiohttp.ClientSession],
     api_port: int,
+    *,
+    headers: Optional[dict] = None,
 ) -> list[str]:
     """Query local vLLM /v1/models to list currently-loaded model IDs."""
     if session is None:
         return []
     try:
         url = f"http://localhost:{api_port}/v1/models"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+        async with session.get(url, headers=headers, allow_redirects=False,
+                               timeout=aiohttp.ClientTimeout(total=2)) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return [m.get("id", "") for m in data.get("data", []) if m.get("id")]

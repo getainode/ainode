@@ -26,6 +26,11 @@ from ainode.engine.reconcile import (
     replay_distributed_if_needed,
 )
 from ainode.models import fit as model_fit
+from ainode.models.inventory_routes import (
+    NODE_INVENTORY_VERSION,
+    handle_fleet_inventory,
+    handle_node_inventory,
+)
 from ainode.models.registry import ModelManager
 
 logger = logging.getLogger(__name__)
@@ -246,6 +251,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
 
     app["model_manager"] = manager
     app["download_jobs"] = {}
+    app["model_inventory_scan"] = {}
 
     app.router.add_post("/api/models/load", handle_model_load)
     app.router.add_post("/api/models/unload", handle_model_unload)
@@ -264,6 +270,7 @@ def register_model_routes(app: web.Application, manager: Optional[ModelManager] 
     # Installed list, the launch dropdown and the on-disk cards would all go
     # quietly empty (#209). Same care as /api/models/card|caps in api/server.py.
     app.router.add_get("/api/models/downloaded", handle_list_downloaded)
+    app.router.add_get("/api/models/downloaded/fleet", handle_fleet_inventory)
     app.router.add_get("/api/models/{model_id}", handle_get_model)
     app.router.add_post("/api/models/download-repo", handle_download_repo)
     app.router.add_post("/api/models/download-cancel", handle_cancel_download)
@@ -2466,7 +2473,8 @@ async def handle_download_model(request: web.Request) -> web.Response:
 
     job_id = str(uuid.uuid4())
     jobs: dict = request.app["download_jobs"]
-    jobs[job_id] = {"model_id": model_id, "status": "downloading", "error": None, "finished_at": None}
+    jobs[job_id] = {"model_id": model_id, "hf_repo": entry.get("hf_repo"),
+                    "status": "downloading", "error": None, "finished_at": None}
 
     _cleanup_old_jobs(jobs)
 
@@ -2521,6 +2529,8 @@ async def handle_download_repo(request: web.Request) -> web.Response:
 
 async def handle_list_downloaded(request: web.Request) -> web.Response:
     """GET /api/models/downloaded  -  list all models present on disk."""
+    if request.query.get("inventory") == str(NODE_INVENTORY_VERSION):
+        return await handle_node_inventory(request)
     manager: ModelManager = request.app["model_manager"]
     try:
         models = manager.list_downloaded()
